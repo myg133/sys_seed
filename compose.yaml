@@ -1,0 +1,74 @@
+# 本地开发环境：PostgreSQL + Redis
+#
+# 镜像必须写显式前缀：docker.io 直连超时，daocloud 镜像实测 0.12s 可达。
+# 详见 docs/dev-environment.md。
+name: base-platform
+
+services:
+  postgres:
+    image: docker.m.daocloud.io/library/postgres:17-alpine
+    container_name: base-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: base
+      POSTGRES_PASSWORD: base
+      POSTGRES_DB: base_dev
+    # 低内存参数：容器常驻内存上限 256M
+    command:
+      - postgres
+      - -c
+      - shared_buffers=64MB
+      - -c
+      - effective_cache_size=128MB
+      - -c
+      - work_mem=4MB
+      - -c
+      - maintenance_work_mem=16MB
+      - -c
+      - max_connections=50
+      - -c
+      - wal_buffers=4MB
+      - -c
+      - min_wal_size=80MB
+      - -c
+      - max_wal_size=512MB
+      - -c
+      - log_min_duration_statement=200
+    mem_limit: 256m
+    ports:
+      - '127.0.0.1:5432:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./deploy/seed:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U base -d base_dev']
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  redis:
+    image: docker.m.daocloud.io/library/redis:7-alpine
+    container_name: base-redis
+    restart: unless-stopped
+    # 关闭持久化：本地开发不需要 RDB/AOF，省磁盘与内存
+    command:
+      - redis-server
+      - --maxmemory
+      - 64mb
+      - --maxmemory-policy
+      - allkeys-lru
+      - --save
+      - ''
+      - --appendonly
+      - 'no'
+    mem_limit: 96m
+    ports:
+      - '127.0.0.1:6379:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+volumes:
+  pgdata:
