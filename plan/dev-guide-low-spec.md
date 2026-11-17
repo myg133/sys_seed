@@ -151,8 +151,8 @@ npm 侧本机已有 `registry=https://registry.npmmirror.com`，无需改动。
 | `cargo nextest` | `cargo test -- --test-threads=2` |
 | `cargo sqlx prepare` | 开发期让 PG 常驻，直接用编译期校验；`SQLX_OFFLINE=true` 留给 CI |
 | `sccache` | Cargo 自带 incremental 已够（单机场景 sccache 收益小） |
-| 系统 lld | rustc 自带 `rust-lld`，无需装包（见 §2.1） |
-| mold | 可选，`sudo pacman -S mold`，比 rust-lld 更省内存 |
+| 系统 lld | **不可用** —— rust-lld 直连找不到系统库（见 §2.1） |
+| mold | 可选，`sudo pacman -S mold`（pacman extra 有 3.0.0-4），比 lld 更省内存；默认用 GNU ld 已够 |
 
 ---
 
@@ -167,13 +167,9 @@ npm 侧本机已有 `registry=https://registry.npmmirror.com`，无需改动。
 # 不要开满 8 核：并行度换不来速度，但峰值内存线性上涨
 jobs = 3
 
-[target.x86_64-unknown-linux-gnu]
-# 用 rustc 自带的 rust-lld，不需要装系统 lld 包
-# 链接器内存比 GNU ld 低 30-50%，速度也更快
-linker = "rust-lld"
-rustflags = ["-C", "link-self-contained=+linker"]
-
-# 若装了 mold，改用下面这行（更省内存）：
+# 链接器：默认用系统 cc 驱动 GNU ld。
+# 已实测本机 GNU ld 冷构建峰值 994 MB，已在 2.5G 预算内，**当前无需改动**。
+# 若日后装上 mold（sudo pacman -S mold），改用下面这行可再降内存且更快：
 # rustflags = ["-C", "link-arg=-fuse-ld=mold"]
 ```
 
@@ -197,6 +193,21 @@ lto = "thin"          # 不要 "fat"，内存翻倍
 codegen-units = 16
 strip = "debuginfo"
 ```
+
+> **链接器方案的实测结论（2026-11-18 修正）**
+>
+> 早先指南推荐 `linker = "rust-lld"` + `link-self-contained=+linker`，**实测是错的**：
+>
+> 1. `-C link-self-contained=+linker` 在 stable rustc 1.98 上是 **unstable**，
+>    cargo 直接报错退出：`only -C link-self-contained values y/yes/on/n/no/off/-linker are stable`
+> 2. 改用 stable 值 `-linker` 后，`rust-lld` 仍无法定位系统库：
+>    `unable to find library -lc / -lm / -ldl`（rust-lld 按自身路径推导 sysroot，
+>    找不到 `/usr/lib/gcc/x86_64-pc-linux-gnu/16/libgcc_s.so`）
+> 3. 本机**未安装** `ld.lld` / `mold`（`/usr/bin/` 下只有 `ld.bfd` / `ld.gold` / `ld.so`）
+>
+> 结论：**默认走系统 GNU ld 即可** —— 实测冷构建峰值 994 MB，远低于 2.5G 阈值，
+> 链接期内存主要靠 `profile.dev` 的调试信息策略压下来，而不是换链接器。
+> 想再降就 `sudo pacman -S mold`（pacman extra 仓库有 `mold 3.0.0-4`），再加 `-fuse-ld=mold`。
 
 ### 2.2 日常命令
 
