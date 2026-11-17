@@ -1,0 +1,15 @@
+[build]
+# 不要开满 8 核：并行度换不来速度，但峰值内存线性上涨
+jobs = 3
+
+[target.x86_64-unknown-linux-gnu]
+# 链接器说明（偏离项，详见 docs/dev-environment.md 与 feature-meta/verification-report.md）：
+# 1. stable rustc 1.98 只接受 link-self-contained=y/yes/on/n/no/off/-linker，
+#    `+linker` 是 unstable 写法，cargo 会直接报错退出。
+# 2. rustc 直连 rust-lld 时，lld 按自身所在路径推导 sysroot，找不到本机
+#    /usr/lib/gcc/x86_64-pc-linux-gnu/<ver>/libgcc_s.so，链接必然失败。
+# 因此这里保留系统 cc 驱动，链接期内存改由 profile.dev 的调试信息策略控制。
+
+[alias]
+# cargo xtask <子命令>：工程任务运行器
+xtask = "run --package xtask --"
