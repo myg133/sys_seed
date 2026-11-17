@@ -3,6 +3,7 @@
 //! 本期只提供目录规范校验（AC-S-001）。其余子命令在后续 Sprint 按需补齐。
 
 pub mod cli;
+pub mod deps;
 pub mod modules;
 
 use std::path::{Path, PathBuf};
