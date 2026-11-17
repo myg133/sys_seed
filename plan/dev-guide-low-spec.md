@@ -221,17 +221,39 @@ cargo build --tests                  # 只在要跑测试时 build
 **为什么 `cargo check` 是主力**：跳过代码生成和链接，在这台机器上比 `cargo build` **快 40-50%，内存低 60%**。
 日常改一行代码跑 `cargo check`，攒够一批改动再 `cargo build --tests`。
 
-### 2.3 时间预期（诚实估计，含冷编译）
+### 2.3 时间预期（**实测校正**，2026-11-18）
 
-| 操作 | 首次（含依赖编译） | 增量（改一行） |
+REQ-002 骨架的实测数据（`cargo clean` 后冷编译，RSS 采样）：
+
+| 操作 | 冷（清空 target/） | 增量（改一行） |
 |---|---|---|
-| `cargo check` | 6 - 12 分钟 | **20 - 60 秒** |
-| `cargo build` | 14 - 25 分钟 | 1 - 3 分钟（链接是瓶颈） |
-| `cargo test`（全部） | 20 - 35 分钟 | 2 - 5 分钟 |
+| `cargo check --workspace --all-targets` | **17 秒 / 峰值 1071 MB** | **0.2 - 0.6 秒** |
+| `cargo test --workspace`（含链接） | **16 秒 / 峰值 994 MB** | **< 3 秒** |
 
-**依赖量是第一个杠杆**：Sprint 1 的依赖集要刻意保持最小（axum + tokio + serde + tracing + clap 约 250 crates），
-把重量级的（sqlx、reqwest、aws-sdk/opendal、jsonwebtoken、samael）推到后续 Sprint。
-冷编译 250 crates vs 450 crates，差距是 8 分钟起步。
+**为什么这么快**：依赖集被刻意压到最小。
+
+| | crate 数 | 说明 |
+|---|---|---|
+| Sprint 1 骨架（实测） | **88 个唯一 crate** | axum / tokio / serde / serde_json / tracing / tracing-subscriber / clap / thiserror / anyhow / uuid / time |
+| 含 sqlx + reqwest 后 | 约 170 - 210 个 | 后续 Sprint 再引入 |
+| 含 aws-sdk / opendal / saml 全套 | 300+ | 推迟到真正需要时 |
+
+> 早先估计「250 crates / 冷编译 6-12 分钟」是按全套依赖算的，**实际最小集只要 88 个 crate**，
+> 冷编译 17 秒。**最小依赖集带来的收益远超预期** —— 这是低配机上最有效的一条策略。
+
+**注意**：上面的冷编译是**注册表缓存已热**的情况（`~/.cargo/registry` 已 877MB）。
+在全新机器上首次拉取 + 编译这 88 个 crate，按 rsproxy 的速度估算需 **3-8 分钟**（含下载）。
+CI 上同理。
+
+**磁盘代价**：
+
+| 项 | 实测 |
+|---|---|
+| `~/.cargo/registry`（依赖源码缓存） | 877 MB |
+| `target/`（构建产物） | 349 MB |
+| `node_modules/` | 137 MB |
+| Playwright chromium 缓存（仓库外） | 620 MB |
+| **合计** | **约 2 GB** |
 
 ---
 
@@ -389,13 +411,13 @@ pnpm test:e2e -- --grep "登录|权限"
 
 | 占用项 | 预估 | 控制手段 |
 |---|---|---|
-| podman 镜像（postgres + redis） | ~150M | 固定两个镜像，不加其他 |
+| podman 镜像（postgres + redis） | **实测 300M + 15M** | 固定两个镜像，不加其他 |
 | podman 卷（PG 数据） | < 500M | `podman system prune` 可回收 |
-| `target/`（Rust 产物） | 3 - 8G | `debug = "line-tables-only"` + `split-debuginfo = "unpacked"` 显著缩小 |
-| `node_modules/` | 500M - 1G | pnpm 硬链接共享，勿用 npm |
-| Vite / Storybook 缓存 | 200M - 500M | 可随时删 |
-| Playwright 浏览器 | ~500M | 只装 chromium，不装全套 |
-| **合计** | **< 12G** | 预算上限 20G |
+| `~/.cargo/registry`（依赖源码） | **实测 877M** | 全局共享，不会随需求线性增长 |
+| `target/`（Rust 产物） | **实测 349M** | `debug = "line-tables-only"` + `split-debuginfo = "unpacked"` 已压到很低 |
+| `node_modules/` | **实测 137M** | pnpm 硬链接共享，勿用 npm |
+| Playwright chromium（仓库外） | **实测 620M** | 只装 chromium，不装全套 |
+| **REQ-002 全量实测合计** | **约 2 GB** | 预算上限 20G，余量充足 |
 
 **规矩**：
 
