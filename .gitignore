@@ -1,3 +1,29 @@
+# Rust
+target/
+*.rlib
+
+# Node / pnpm
+node_modules/
+dist/
+.svelte-kit/
+.vite/
+coverage/
+
+# Playwright
+playwright-report/
+test-results/
+
+# 平台工作区元数据
+.aw/
+
+# 日志与本地中间产物
+*.log
 .local/
 
-# 各项目在此补充业务相关忽略规则
+# sqlx 离线缓存（.sqlx）必须入库：CI 依赖 SQLX_OFFLINE=true 编译，
+# 因此这里显式不忽略 .sqlx 目录。
+
+# 编辑器与系统文件
+.DS_Store
+.idea/
+.vscode/

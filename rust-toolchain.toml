@@ -1,0 +1,6 @@
+[toolchain]
+# 版本锁定：AC-S-002 要求新克隆仓库无需手工安装 Rust 即可构建。
+# 组件固定为 clippy + rustfmt，CI 的 lint job 直接复用本文件。
+channel = "1.98.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

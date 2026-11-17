@@ -1,0 +1,20 @@
+[build]
+# 不要开满 8 核：并行度换不来速度，但峰值内存线性上涨
+jobs = 3
+
+[target.x86_64-unknown-linux-gnu]
+# 链接器：stable rustc 1.98 默认已用 LLD，无需显式配置。
+#
+# 实测（rustc 1.98.1）：
+#   - target spec 的 linker-flavor = gnu-lld-cc
+#   - rustc --print link-args 含 "-fuse-ld=lld" 与 "-B <rustup>/.../gcc-ld"
+#   - 默认构建时链接器自报 "LLD 22.1.8"；强制 -fuse-ld=bfd 才变成 "GNU ld 2.47"
+#
+# ⚠️ 不要在这里加 linker = "rust-lld" 或 link-self-contained：
+#   直连 rust-lld 会绕过 gcc 驱动，lld 按自身路径推导 sysroot，
+#   在 Arch 上找不到系统库（-lc / -lgcc_s），链接必然失败。
+#   详见 docs/dev-environment.md §2.1。
+
+[alias]
+# cargo xtask <子命令>：工程任务运行器
+xtask = "run --package xtask --"

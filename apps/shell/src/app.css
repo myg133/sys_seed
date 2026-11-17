@@ -1,0 +1,25 @@
+:root {
+  color-scheme: light;
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    sans-serif;
+}
+
+body {
+  margin: 0;
+  padding: 2rem;
+}
+
+.base-tone--primary {
+  color: #1677ff;
+}
+
+.base-tone--danger {
+  color: #d4380d;
+}
+
+.muted {
+  color: #8c8c8c;
+}
