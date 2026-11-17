@@ -1,0 +1,42 @@
+{
+  "entry": "./dist/index.js",
+  "exports": [
+    {
+      "declaration": "export type Tone = 'default' | 'primary' | 'danger'",
+      "description": "基础 UI 占位包。",
+      "kind": "type",
+      "name": "Tone"
+    },
+    {
+      "declaration": "export const TONES: readonly Tone[] = ['default', 'primary', 'danger']",
+      "description": "全部可选色调。",
+      "kind": "const",
+      "name": "TONES"
+    },
+    {
+      "declaration": "export function toneClass(tone: Tone): string {",
+      "description": "色调对应的样式类名。",
+      "kind": "function",
+      "name": "toneClass"
+    },
+    {
+      "declaration": "export interface RadiusTokens {",
+      "description": "圆角 token，单位 px。",
+      "kind": "interface",
+      "name": "RadiusTokens"
+    },
+    {
+      "declaration": "export function defaultRadius(): RadiusTokens {",
+      "description": "默认圆角 token。",
+      "kind": "function",
+      "name": "defaultRadius"
+    }
+  ],
+  "generated_by": "cargo xtask capabilities",
+  "package": "@base/ui",
+  "source": "packages/ui/src/index.ts",
+  "usage": {
+    "example": "import { defaultRadius, toneClass } from '@base/ui';\n\nconst className = toneClass('primary'); // 'base-tone base-tone--primary'\nconst radius = defaultRadius().medium; // 4"
+  },
+  "version": "0.1.0"
+}

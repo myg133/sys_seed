@@ -1,10 +1,19 @@
 //! 底座工程任务运行器。
 //!
-//! 本期只提供目录规范校验（AC-S-001）。其余子命令在后续 Sprint 按需补齐。
+//! | 子命令 | 作用 |
+//! |--------|------|
+//! | `check-modules` | 校验 `modules/<name>/` 目录规范 |
+//! | `check-deps` | 校验依赖方向：平台 crate 不得反向依赖业务模块 |
+//! | `capabilities` | 生成 / 校验能力索引（`capabilities/`） |
+//! | `create-module` | 生成业务模块骨架（开箱即过契约检查） |
 
+pub mod capabilities;
+pub mod catalog;
 pub mod cli;
 pub mod deps;
 pub mod modules;
+pub mod rustscan;
+pub mod scaffold;
 
 use std::path::{Path, PathBuf};
 

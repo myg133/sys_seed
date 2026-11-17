@@ -1,0 +1,30 @@
+{
+  "entry": "./dist/index.js",
+  "exports": [
+    {
+      "declaration": "export interface ApiClientOptions {",
+      "description": "SDK 占位包。",
+      "kind": "interface",
+      "name": "ApiClientOptions"
+    },
+    {
+      "declaration": "export interface ApiClient {",
+      "description": "API 客户端。",
+      "kind": "interface",
+      "name": "ApiClient"
+    },
+    {
+      "declaration": "export function createApiClient(options: ApiClientOptions): ApiClient {",
+      "description": "构造 API 客户端。",
+      "kind": "function",
+      "name": "createApiClient"
+    }
+  ],
+  "generated_by": "cargo xtask capabilities",
+  "package": "@base/sdk",
+  "source": "packages/sdk/src/index.ts",
+  "usage": {
+    "example": "import { createApiClient } from '@base/sdk';\n\nconst client = createApiClient({ baseUrl: 'https://api.base.example' });\nclient.url('/api/order/invoice'); // 'https://api.base.example/api/order/invoice'"
+  },
+  "version": "0.1.0"
+}

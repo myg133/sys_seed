@@ -1,0 +1,81 @@
+{
+  "already_provided": {
+    "audit_declaration": "Auditable + AuditEventSpec 提供审计事件声明面，平台据此自动埋点，勿自建审计表",
+    "auth_state": "@base/auth 的 isAuthenticated()/tenantId() 提供登录态形状，勿另造登录态模型",
+    "config": "ConfigScope/ConfigResolver/AppConfig + manifest 的 config 段提供配置分层（platform/tenant/space），勿自建配置读取",
+    "contract_suite": "#[platform_module_contract] 自动生成 C-1~C-4 四项契约测试，勿自写重复的契约检查",
+    "error_code_i18n": "@base/i18n 的 translate()/hasMessage() 提供错误码到文案映射，勿在后端拼中文句子",
+    "hooks_toggle": "@base/hooks 的 createToggle() 提供通用布尔开关状态容器，勿另造状态容器",
+    "list_query": "ListQuery/SortSpec/FilterSpec 已定义游标分页（limit 默认 20、上限 200）与过滤算子白名单，勿自造分页参数",
+    "manifest": "Manifest 解析与字段校验 + capabilities/schema/manifest.schema.json 已提供，勿手写 manifest 校验",
+    "module_registry": "register_platform_module! + discover()/discover_enabled() 做编译期模块注册，勿自建插件或动态加载",
+    "notification_sender": "NotificationSender + NotificationMessage/DeliveryResult 提供通知投递接缝，勿自建消息中心",
+    "repository": "Repository<T> 提供 find/list/insert/update/delete，业务模块实现它即可，勿另造 DAO 基类或数据访问框架",
+    "request_context": "RequestContext 携带租户/空间/追踪 ID；Repository 每个方法强制传 ctx，租户隔离是编译期保证，勿自建租户上下文",
+    "schema_field_meta": "@base/schema 的 FieldMeta/describeField()/findField() 提供字段元数据形状，勿另造元数据结构",
+    "sdk_client": "@base/sdk 的 createApiClient() 提供 baseUrl 规范化与 URL 拼接，勿另造 HTTP 基类",
+    "theme": "@base/theme 的 defaultTheme()/mergeTheme() 提供主题 token，勿另造主题变量",
+    "transaction_boundary": "TransactionalWrite + WriteBoundary 提供写边界声明，跨表写必须显式开平台事务（C-4 判定依据）",
+    "ui_token": "@base/ui 的 toneClass()/TONES/defaultRadius() 提供色调与圆角 token，勿另造样式变量",
+    "workflow_handler": "WorkflowHandler + TransitionEvent 提供工作流接入接缝，勿自建流程引擎"
+  },
+  "artifacts": {
+    "api.json": {
+      "status": "not-ready"
+    },
+    "extension-points.json": {
+      "traits": 5
+    },
+    "permissions.json": {
+      "total": 2
+    },
+    "schema/manifest.schema.json": {},
+    "schema/metadata.schema.json": {},
+    "sdk/auth.json": {
+      "exports": 4
+    },
+    "sdk/hooks.json": {
+      "exports": 2
+    },
+    "sdk/i18n.json": {
+      "exports": 3
+    },
+    "sdk/schema.json": {
+      "exports": 4
+    },
+    "sdk/sdk.json": {
+      "exports": 3
+    },
+    "sdk/theme.json": {
+      "exports": 3
+    },
+    "sdk/ui.json": {
+      "exports": 5
+    }
+  },
+  "entry_points": {
+    "contract_suite": "crates/platform-contracts/",
+    "extension_traits": "crates/platform-core/src/extension/",
+    "modules": "modules/",
+    "packages": "packages/",
+    "prompts": "prompts/",
+    "xtask": "crates/xtask/src/"
+  },
+  "generated_by": "cargo xtask capabilities",
+  "not_yet_provided": {
+    "audit_sink": "审计只到事件声明面，落库与查询待 REQ-014",
+    "db_access_layer": "平台没有 DB 访问层（sqlx 推迟到 REQ-006/007），模块仓储当前是内存实现",
+    "http_api_layer": "HTTP 接口层尚未就绪（REQ-011/012 补），capabilities/api.json 目前为空",
+    "notification_dispatch": "通知只到 trait，通道投递与模板待 REQ-015",
+    "permission_can": "前端 can() 与服务端鉴权中间件尚未落地（REQ-009 补），权限判定别自己写一套",
+    "ui_table_component": "@base/ui 尚无表格与分页组件，列表页要自己实现（REQ-012 补）",
+    "workflow_engine": "工作流只到 trait，流程定义与实例待 REQ-017"
+  },
+  "platform": {
+    "modules": [
+      "sandbox"
+    ],
+    "version": "0.1.0"
+  },
+  "source_fingerprint": "fnv1a64:4a8e42ceadc45329"
+}

@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "字段元数据的形状，来源：packages/schema/src/index.ts 的 FieldMeta / FieldType",
+  "properties": {
+    "key": {
+      "pattern": "^[a-z][a-zA-Z0-9]*$",
+      "type": "string"
+    },
+    "label": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "required": {
+      "default": false,
+      "type": "boolean"
+    },
+    "type": {
+      "enum": [
+        "text",
+        "number",
+        "boolean",
+        "date",
+        "reference"
+      ]
+    }
+  },
+  "required": [
+    "key",
+    "label",
+    "type"
+  ],
+  "title": "Base Platform Field Metadata",
+  "type": "object"
+}
