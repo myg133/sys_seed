@@ -19,9 +19,9 @@
 - **关联 AC**: AC-009
 - **前置条件**:
   - 租户 T1、T2 各有同名业务数据：订单号 `INV-001` 在 T1 属 `boss@example.com`，在 T2 属 `t2user@example.com`；两者字段与业务含义相同。
-  - 账号 `boss@example.com` 在 T1、T2 各有成员关系（跨租授权测试用）。
+  - 账号 `both@example.com` 在 T1 与 T2 **均有**成员关系（用于验证同一账号在两个租户下看到不同数据）。
 - **测试步骤**:
-  1. 以 `boss@example.com` 登录，请求 `GET /api/order/invoice?order_no=INV-001`，请求头分别带 `X-Tenant-Id: T1` 与 `X-Tenant-Id: T2`。
+  1. 以 `both@example.com` 登录，请求 `GET /api/order/invoice?order_no=INV-001`，请求头分别带 `X-Tenant-Id: T1` 与 `X-Tenant-Id: T2`。
   2. 记录两次响应的 `tenant_id` 与数据 owner。
   3. 打开 SQL 日志，核对两次请求对应的 SQL。
 - **预期结果**:
