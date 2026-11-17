@@ -1,0 +1,12 @@
+{
+  "agents": [
+    {
+      "id": "myg133-ba-1",
+      "registered_at": "2026-11-17T23:18:06+08:00",
+      "status": "active",
+      "role": "ba",
+      "host": "archlinux",
+      "updated_at": "2026-11-17T23:18:06+08:00"
+    }
+  ]
+}
