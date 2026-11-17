@@ -43,6 +43,22 @@ platform-contracts (依赖 platform-core)
 
 > 冻结的意思：Sprint 2 及以后的业务模块按这份签名实现。后续要改必须走扩展点版本号。
 
+> ### ⚠️ 扩展点版本注记（2026-11-18 BA 补，QA 提出）
+>
+> **本期起 5 个 trait 为 RPITIT 形态（`-> impl Future<Output = ..> + Send`），不可用于 trait object。**
+>
+> - 设计摘要原稿写的是 `#[async_trait]` 形态（dyn-compatible）。实现时发现：
+>   Rust 1.98 上字面 `async fn` 写在公开 trait 上会触发 `async_fn_in_trait` lint
+>   （`clippy -D warnings` 下失败）且无法保证 `Send`；而 `async-trait` 会引入第三方依赖。
+>   故改用 RPITIT 展开写法。**实现方仍写 `async fn`，调用点写法不变。**
+> - **代价**：`Box<dyn NotificationSender>` 不可用（实测 E0038: trait is not dyn compatible）。
+>   异构汇聚（多渠道通知收集、多工作流处理器收集）**延后到 REQ-015 / REQ-017 决策**，
+>   届时要么加对象安全包装，要么引入 `async-trait`。
+> - **给 Sprint 2 开发者的提醒**：不要按 `#[async_trait]` 的心智模型写代码
+>   （例如不要假设能 `Box<dyn Trait>`、不要假设 trait object 可用）。
+>
+> 契约后果同步记入 [api-conventions v1](../../contracts/api-conventions/v1.md) 的扩展点章节（见下方 §2.0）。
+
 ### 2.1 PlatformModule —— 模块注册
 
 ```rust
@@ -209,6 +225,18 @@ tenant_b  user_b@example.com  Order#2  "同名订单"   ← 唯一区别是租�
 - manifest 声明了但代码没用到 → **警告**（不失败，可能是预留）
 
 权限点编码遵守契约 C4：`module:resource:action`，全小写连字符。
+
+> ### C-2 的口径边界（2026-11-18 BA 定，QA 提出后澄清）
+>
+> **C-2 只验「权限点声明完整性」，不验「服务端是否真的执行了鉴权」。**
+>
+> 原因：当前扫描基于源码中的权限点字面量，只能回答「声明齐不齐」，
+> 回答不了「每个权限点是否真的在服务端被检查过」—— 后者需要运行时插桩或鉴权中间件，
+> 属 **REQ-009 RBAC** 的职责（那里才有真正的鉴权执行点与越权测试）。
+>
+> **已知局限**（不阻塞，写入技术债）：一个只在 `permission.rs` 里定义、manifest 里也登记、
+> 但服务端从不做鉴权判断的权限点，C-2 会全绿且无告警。
+> 等 REQ-009 落地鉴权中间件后，应补一条「已登记权限点必须有对应鉴权调用点」的检查。
 
 ### 4.4 C-4 事务边界
 

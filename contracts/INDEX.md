@@ -8,6 +8,7 @@
 | 契约 | owner | 当前版本 | status | consumers | 说明 |
 |------|-------|----------|--------|-----------|------|
 | [api-conventions](api-conventions/CURRENT) | myg133-ba-1 | v1 | ratified | REQ-002 ~ REQ-020 | 跨模块共享的接口约定：API 分组、路径形式、上下文请求头、权限点映射、越权码、错误体、分页、幂等、配置键、审计字段、命名规范 |
+| [extension-points](extension-points/CURRENT) | myg133-ba-1 | v1 | ratified | REQ-003 ~ REQ-020 | **业务模块与平台之间的接缝**：5 个扩展点 trait 签名、编译期注册、契约检查 C-1~C-4、manifest 结构。含 **dyn 兼容性限制**（RPITIT 形态，不可用于 trait object） |
 
 ## 消费方 pin 要求
 
