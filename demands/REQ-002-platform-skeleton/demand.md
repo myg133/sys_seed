@@ -26,6 +26,24 @@
 - CI 模板：lint / test / build / 依赖扫描 / 契约检查 五个 job
 - 本地环境：docker compose 一键起 PostgreSQL + Redis + 种子数据
 
+### 低配开发基线（硬性要求）
+
+开发机实测：8 线程 i7-8550U / 7.7G 内存 / 4.9G 可用 / 8G swap。
+底座**必须能在 4G 可用内存下完成日常开发**，不得假设开发者有 16G+ 的机器。
+
+- `.cargo/config.toml`：`build.jobs = 3`；链接器用 `rust-lld`（或 mold），链接期内存降 30-50%
+- `Cargo.toml` `[profile.dev]`：`debug = "line-tables-only"` + `split-debuginfo = "unpacked"`
+- `[profile.dev.package."*"]`：`opt-level = 0` + `debug = 0`（第三方依赖不优化，省编译时间）
+- `[profile.release]`：`lto = "thin"` + `strip = "debuginfo"`
+- 日常主力命令是 `cargo check`（比 build 快 40-50%、内存低 60%），不做 watch 式全量检查
+- Sprint 1 的依赖集刻意保持最小（≤250 crates），重量级依赖（sqlx / reqwest / aws-sdk / opendal）推到后续 Sprint
+- 前端开发用 MSW mock，不依赖 Rust 后端常驻
+- `svelte-check --watch` 与 Storybook 不设为常驻服务
+- 集成测试用本机 `base_test` 库，**不用 testcontainers**（避免每个测试环境起新容器）
+- 完整 E2E 只在验收时串行跑，不进本地日常循环
+
+详见 [低配开发指南](../../plan/dev-guide-low-spec.md)。
+
 ## 不在范围内
 
 - 业务功能实现（各子需求负责）
