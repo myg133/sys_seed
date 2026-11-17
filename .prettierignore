@@ -1,0 +1,8 @@
+target/
+node_modules/
+dist/
+coverage/
+.svelte-kit/
+pnpm-lock.yaml
+bun.lock
+*.md

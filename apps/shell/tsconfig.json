@@ -1,0 +1,23 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["svelte", "vite/client", "node"],
+    "paths": {
+      "@base/auth": ["../../packages/auth/src/index.ts"],
+      "@base/hooks": ["../../packages/hooks/src/index.ts"],
+      "@base/i18n": ["../../packages/i18n/src/index.ts"],
+      "@base/schema": ["../../packages/schema/src/index.ts"],
+      "@base/sdk": ["../../packages/sdk/src/index.ts"],
+      "@base/theme": ["../../packages/theme/src/index.ts"],
+      "@base/ui": ["../../packages/ui/src/index.ts"]
+    }
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.svelte",
+    "test/**/*.ts",
+    "vite.config.ts",
+    "svelte.config.js"
+  ]
+}
