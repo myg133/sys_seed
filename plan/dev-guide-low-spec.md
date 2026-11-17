@@ -194,19 +194,30 @@ codegen-units = 16
 strip = "debuginfo"
 ```
 
-> ### 链接器的真相（2026-11-18 经 QA 独立实测确认）
+> ### 链接器的真相（2026-11-18 经 QA 两轮独立实测确认）
 >
 > **结论：不需要任何链接器配置，默认就是最优解。**
 >
 > | 配置 | 结果 |
 > |---|---|
-> | **不配（默认）** | ✅ 使用 **LLD 22.1.8**（rustup 自带的 `ld.lld`，经 gcc 驱动调用），链接器进程峰值 **2 MB** |
+> | **不配（默认）** | ✅ 使用 **LLD 22.1.8**（rustup 自带的 `ld.lld`，经 gcc 驱动调用） |
 > | `linker = "rust-lld"` + `link-self-contained=+linker` | ❌ **cargo 直接报错退出**：`+` 是 unstable 写法，stable 只接受 `y/yes/on/n/no/off/-linker` |
 > | `linker = "rust-lld"` + `link-self-contained=-linker` | ❌ **链接失败**：绕过 gcc 驱动后找不到系统库 `unable to find library -lc / -lm / -ldl` |
-> | 强制 `-C link-arg=-fuse-ld=bfd`（GNU bfd） | ⚠️ 能过，但链接器进程峰值 **130 MB**（比 LLD 高 65 倍） |
+> | 强制 `-C link-arg=-fuse-ld=bfd`（GNU bfd） | ⚠️ 能过，但不必要 |
 >
 > **为什么默认就是 LLD**：rustc 的 `x86_64-unknown-linux-gnu` target spec 自带 lld，
-> 通过 gcc 驱动调用它 —— 既拿到 LLD 的低内存优势，又保留 gcc 的库搜索路径。
+> 通过 gcc 驱动调用它 —— 既拿到 LLD 的行为，又保留 gcc 的库搜索路径。
+>
+> **⚠️ 内存差异没有想象中大**（这一点被两轮测量反复修正，务必注意）：
+>
+> | 口径 | LLD | GNU bfd | 差异 |
+> |---|---|---|---|
+> | 真实仓库二进制（内核 `VmHWM` + `wait4 ru_maxrss` 互证，无采样缺口） | **132.0 MB** | **135.5 MB** | **2.6%** |
+> | 极小探针 crate（同一口径） | 71.5 MB | 30.0 MB | **方向相反** |
+>
+> - `ld.lld --version` 的**空载地板就是 32.8 MB**（libLLVM 固定占用），bfd 空载仅 7.6 MB
+> - 「LLD 省 8 倍内存」是**错的** —— 那是瞬时 `VmRSS` 采样与内核高水位口径混淆的结果
+> - **选 LLD 的真正理由是「stable rustc 的默认行为，零配置」，不是省内存**
 >
 > **可复现的验证方法**：
 > ```bash
