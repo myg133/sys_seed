@@ -40,6 +40,24 @@ tenant_b  user_b@example.com  demo-2  "同名记录"   ← 唯一区别是租户
 - 用 tenant_a 的 ctx 调 `list()` → 只返回 tenant_a 的记录
 - 用 tenant_a 的 ctx 调 `find(tenant_b 的 id)` → 返回 `None`
 
+## 排序与过滤字段白名单
+
+业务模块各自声明自己允许排序 / 过滤的字段，白名单写死在本模块里：
+
+| 用途 | 白名单 | 位置 |
+|------|--------|------|
+| 排序 | `id` / `title` / `revision` | `SORTABLE_FIELDS` |
+| 过滤 | `id` / `title` | `FILTERABLE_FIELDS` |
+
+**排序字段不在白名单里 → 直接报错**，不静默忽略：
+
+```text
+sort field unknown is not sortable
+```
+
+对应契约 C7「排序 … 未声明字段返回 400」。静默忽略会让调用方以为排序生效了，
+所以这里宁可报错 —— 业务模块照抄本范例时也要保持这个行为。
+
 ## 契约测试
 
 ```bash

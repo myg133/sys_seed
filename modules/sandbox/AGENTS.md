@@ -34,6 +34,8 @@ modules/sandbox/
    必须与 `PlatformModule` 的实现逐项一致。
 5. **单次写操作全有或全无**：`insert` / `update` / `delete` 要么完整生效，要么完全不变；
    主键重复的 `insert` 必须报错，不得覆盖既有数据。
+6. **排序字段必须先声明**：不在 `SORTABLE_FIELDS` 白名单里的排序字段直接报错，
+   不静默忽略（`api-conventions v1` C7）。
 
 ## 常见改动怎么做
 

@@ -86,7 +86,7 @@ impl Repository<DemoItem> for InMemoryRepository {
             .filter(|item| matches_filters(item, &query.filters))
             .cloned()
             .collect();
-        sort_rows(&mut rows, &query.sort);
+        sort_rows(&mut rows, &query.sort)?;
         rows.truncate(query.effective_limit() as usize);
         Ok(List::new(rows))
     }
@@ -141,11 +141,13 @@ fn tenant_of(ctx: &RequestContext) -> Result<&str> {
         .ok_or_else(|| anyhow!("the tenant is not bound in the request context"))
 }
 
-/// 按排序项排序；白名单外的字段被忽略。
-fn sort_rows(rows: &mut [DemoItem], sort: &[SortSpec]) {
+/// 按排序项排序；白名单外的字段直接报错（`api-conventions v1` C7）。
+///
+/// 排序字段必须先声明再使用 —— 静默忽略会让调用方以为排序生效了。
+fn sort_rows(rows: &mut [DemoItem], sort: &[SortSpec]) -> Result<()> {
     for spec in sort.iter().rev() {
         if !SORTABLE_FIELDS.contains(&spec.field.as_str()) {
-            continue;
+            return Err(anyhow!("sort field {} is not sortable", spec.field));
         }
         rows.sort_by(|left, right| {
             let ordering = match spec.field.as_str() {
@@ -161,6 +163,7 @@ fn sort_rows(rows: &mut [DemoItem], sort: &[SortSpec]) {
             }
         });
     }
+    Ok(())
 }
 
 /// 所有过滤条件都命中才算通过。
@@ -195,4 +198,72 @@ fn in_range(value: &str, values: &[String]) -> bool {
         return true;
     };
     value >= low.as_str() && value <= high.as_str()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use platform_core::extension::repository::SortSpec;
+    use std::future::Future;
+    use std::task::{Context, Poll, Waker};
+
+    /// 极简阻塞等待：把 future 跑完（本模块不引入异步运行时）。
+    fn block_on<F: Future>(future: F) -> F::Output {
+        let mut context = Context::from_waker(Waker::noop());
+        let mut future = std::pin::pin!(future);
+        loop {
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(output) => return output,
+                Poll::Pending => std::hint::spin_loop(),
+            }
+        }
+    }
+
+    /// 带租户的请求上下文。
+    fn context() -> RequestContext {
+        RequestContext::new().with_tenant("tenant-a")
+    }
+
+    /// 一条属于 `tenant-a` 的记录。
+    fn item(id: &str, title: &str) -> DemoItem {
+        DemoItem {
+            id: id.to_string(),
+            tenant_id: "tenant-a".to_string(),
+            title: title.to_string(),
+            revision: 0,
+        }
+    }
+
+    #[test]
+    fn list_rejects_a_sort_field_outside_the_whitelist() {
+        let repository = InMemoryRepository::new();
+        repository.load([item("demo-1", "B"), item("demo-2", "A")]);
+        let query = ListQuery {
+            sort: vec![SortSpec::asc("unknown")],
+            ..ListQuery::default()
+        };
+
+        let error = block_on(repository.list(&context(), &query))
+            .expect_err("白名单外的排序字段必须报错，不能静默忽略");
+        assert!(
+            error
+                .to_string()
+                .contains("sort field unknown is not sortable"),
+            "error = {error}"
+        );
+    }
+
+    #[test]
+    fn list_sorts_by_a_declared_field() {
+        let repository = InMemoryRepository::new();
+        repository.load([item("demo-1", "B"), item("demo-2", "A")]);
+        let query = ListQuery {
+            sort: vec![SortSpec::asc("title")],
+            ..ListQuery::default()
+        };
+
+        let list = block_on(repository.list(&context(), &query)).expect("白名单内的排序字段可用");
+        let ids: Vec<&str> = list.items.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, vec!["demo-2", "demo-1"]);
+    }
 }
