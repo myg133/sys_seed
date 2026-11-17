@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Base Platform Module Manifest",
+  "type": "object",
+  "required": ["id", "name", "version", "enabled", "permissions", "menus", "dependencies"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$" },
+    "name": { "type": "string", "minLength": 1 },
+    "version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "enabled": { "type": "boolean", "default": true },
+    "permissions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "name", "type"],
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9-]*:[a-z][a-z0-9-]*:[a-z][a-z0-9-]*$"
+          },
+          "name": { "type": "string" },
+          "type": { "enum": ["menu", "button", "field", "data"] }
+        }
+      }
+    },
+    "menus": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["label", "route"],
+        "additionalProperties": false,
+        "properties": {
+          "label": { "type": "string" },
+          "icon": { "type": "string" },
+          "route": { "type": "string", "pattern": "^/[a-z0-9/-]*$" },
+          "perm": { "type": "string" }
+        }
+      }
+    },
+    "dependencies": { "type": "array", "items": { "type": "string" } },
+    "config": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["type", "default"],
+        "properties": {
+          "type": { "enum": ["string", "number", "boolean", "array", "object"] },
+          "default": {},
+          "scope": { "enum": ["platform", "tenant", "space"], "default": "tenant" },
+          "label": { "type": "string" }
+        }
+      }
+    }
+  }
+}

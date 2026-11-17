@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/platform-core",
     "crates/platform-contracts",
+    "crates/platform-contracts-macros",
     "crates/xtask",
 ]
 
@@ -15,6 +16,8 @@ publish = false
 
 [workspace.dependencies]
 platform-core = { path = "crates/platform-core" }
+platform-contracts = { path = "crates/platform-contracts" }
+platform-contracts-macros = { path = "crates/platform-contracts-macros" }
 
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
@@ -27,6 +30,8 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 uuid = { version = "1", features = ["v4"] }
 time = { version = "0.3", features = ["formatting"] }
+# 编译期注册：本期唯一新增的第三方依赖（约 3KB，无额外传递依赖）
+inventory = "0.3"
 
 # 低配开发基线：见 docs/dev-environment.md 与 BA/plan/dev-guide-low-spec.md
 # 第三方依赖一律不优化、不带调试信息，省编译时间与磁盘。

@@ -17,6 +17,9 @@ tracing-subscriber.workspace = true
 thiserror.workspace = true
 uuid.workspace = true
 time.workspace = true
+anyhow.workspace = true
+# 编译期注册（本期唯一新增的第三方依赖）
+inventory.workspace = true
 
 [lib]
 name = "platform_core"

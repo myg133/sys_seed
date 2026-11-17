@@ -335,6 +335,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "inventory"
+version = "0.3.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6928282826c822ad91bf1c9a1cb90a30ba1c26770749929b4656cd6be829cd7c"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -456,14 +465,24 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 name = "platform-contracts"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "platform-contracts-macros",
+ "platform-core",
  "thiserror",
+ "tokio",
 ]
+
+[[package]]
+name = "platform-contracts-macros"
+version = "0.1.0"
 
 [[package]]
 name = "platform-core"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "axum",
+ "inventory",
  "serde",
  "serde_json",
  "thiserror",
@@ -949,6 +968,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "platform-core",
  "serde_json",
 ]
 
