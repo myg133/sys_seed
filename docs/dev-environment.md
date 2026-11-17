@@ -87,29 +87,72 @@ codegen-units = 16
 strip = "debuginfo"
 ```
 
-### 2.1 链接器：为什么没有用 `rust-lld`（偏离项）
+### 2.1 链接器：stable rustc 默认已用 LLD，无需显式配置
 
-BA 指南要求链接器用 `rust-lld` + `-C link-self-contained=+linker`。本机实测**该配置无法工作**：
+BA 指南写的是「链接器用 `rust-lld` + `-C link-self-contained=+linker`」。
+**这条在 stable rustc 1.98 上不需要显式配置** —— 因为 rustc 1.98 的
+`x86_64-unknown-linux-gnu` target spec 默认就是：
 
-```text
-error: only `-C link-self-contained` values `y`/`yes`/`on`/`n`/`no`/`off`/`-linker` are stable,
-the `-Z unstable-options` flag must also be passed to use the unstable values
+```console
+$ RUSTC_BOOTSTRAP=1 rustc -Z unstable-options --print target-spec-json --target x86_64-unknown-linux-gnu
+"linker-flavor": "gnu-lld-cc",
 ```
 
-`+linker` 是 unstable 写法，stable rustc 1.98 直接拒绝，cargo 一启动就退出。
-即便改成 stable 的 `-linker`，rustc 直连 `rust-lld` 时 lld 会按自身所在路径推导 sysroot，
-在 Arch 上找不到 `/usr/lib/gcc/x86_64-pc-linux-gnu/<ver>/libgcc_s.so`（系统 glibc 只在 `/usr/lib`
-提供 `libc.so`、`libm.so`，其余 `-lpthread/-ldl/-lrt/-lutil` 只有 `.a`），链接必然失败：
+`gnu-lld-cc` = 用 C 编译器驱动，但**强制走 LLD**。rustc 实际传给链接器的参数：
 
-```text
-rust-lld: error: unable to find library -lc
-rust-lld: error: unable to find library -lgcc_s
+```console
+$ rustc --print link-args probe.rs --edition 2021 -o /tmp/probe | tr ' ' '\n' | grep -iE 'fuse-ld|lld'
+"-B/home/myg133/.rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu/lib/rustlib/x86_64-unknown-linux-gnu/bin/gcc-ld"
+"-fuse-ld=lld"
 ```
 
-要修好得把 gcc 的版本化目录写死进仓库配置（例如 `-L/usr/lib/gcc/x86_64-pc-linux-gnu/16`），
-那样 CI（Ubuntu 镜像路径不同）与其他开发者都会挂。
+`-B` 指向 rustup 自带的 `gcc-ld/` 目录（内含 `ld.lld`），配合 `-fuse-ld=lld`。
+真实链接过程中链接器自报家门（探针 crate 建在 `.local/` 下，测完即删）：
 
-**结论**：链接器保留系统 `cc` 驱动，链接期内存改由 `profile.dev` 的调试信息策略控制
+```console
+# 默认（仓库现状：不设任何 linker 配置）
+$ RUSTFLAGS="-C link-arg=-Wl,--version" cargo build
+warning: linker stderr: ... /bin/gcc-ld/ld.lld -plugin ... -m elf_x86_64 ... -o ...
+warning: linker stdout: LLD 22.1.8 (/checkout/src/llvm-project/llvm 52ed14fcd...) (compatible with GNU linkers)
+
+# 强制走 GNU bfd
+$ RUSTFLAGS="-C link-arg=-fuse-ld=bfd -C link-arg=-Wl,--version" cargo build
+warning: linker stderr: ... /usr/bin/ld.bfd -plugin ... -m elf_x86_64 ... -o ...
+warning: linker stdout: GNU ld (GNU Binutils) 2.47
+```
+
+**结论：仓库里一个 linker 键都不写，默认就已经在用 LLD。**
+
+链接器进程峰值 RSS（对 `platform-core` 真实二进制采样 `/proc/<pid>/status` 的 `VmRSS` 取峰值）：
+
+| 模式 | 链接器 | 峰值 RSS |
+|------|--------|---------|
+| **默认（仓库现状）** | LLD 22.1.8 | **16.1 MB** |
+| 强制 `-C link-arg=-fuse-ld=bfd` | GNU ld 2.47 | **134.0 MB**（约 8 倍） |
+
+> ⚠️ **显式配置反而会把链接搞坏**，所以不要加 `linker = "rust-lld"` 或 `link-self-contained`：
+>
+> - `+linker` 是 unstable 写法，stable rustc 1.98 直接拒绝，cargo 一启动就退出：
+>
+>   ```text
+>   error: only `-C link-self-contained` values `y`/`yes`/`on`/`n`/`no`/`off`/`-linker` are stable,
+>   the `-Z unstable-options` flag must also be passed to use the unstable values
+>   ```
+>
+> - 即便改成 stable 的 `-linker`（直连 rust-lld），lld 会按自身所在路径推导 sysroot，
+>   在 Arch 上找不到 `/usr/lib/gcc/x86_64-pc-linux-gnu/<ver>/libgcc_s.so`
+>   （系统 glibc 只在 `/usr/lib` 提供 `libc.so`、`libm.so`，其余 `-lpthread/-ldl/-lrt/-lutil` 只有 `.a`），
+>   链接必然失败：
+>
+>   ```text
+>   rust-lld: error: unable to find library -lc
+>   rust-lld: error: unable to find library -lgcc_s
+>   ```
+>
+>   要修好得把 gcc 的版本化目录写死进仓库配置（例如 `-L/usr/lib/gcc/x86_64-pc-linux-gnu/16`），
+>   那样 CI（Ubuntu 镜像路径不同）与其他开发者都会挂。
+
+链接期内存继续由 `profile.dev` 的调试信息策略控制
 （`debug = "line-tables-only"` + `split-debuginfo = "unpacked"` + 依赖 `opt-level = 0`）。
 `jobs = 3` 与全部 profile 取值保持 BA 指南原样。
 
