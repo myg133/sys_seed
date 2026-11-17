@@ -6,5 +6,10 @@
   "owner": "myg133-ba-1",
   "base_branch": "develop",
   "created_at": "2026-11-18T01:35:44+08:00",
-  "demand_dir": "BA/demands/REQ-003-extension-framework"
+  "demand_dir": "BA/demands/REQ-003-extension-framework",
+  "contracts": {
+    "api-conventions": "v1"
+  },
+  "adrs": ["ADR-0001"],
+  "delivered_by": "myg133-dev-1"
 }
