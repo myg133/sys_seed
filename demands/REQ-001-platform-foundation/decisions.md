@@ -19,6 +19,8 @@
 | D13 | 2026-11-17 | 业务 API 路径定为 `/api/<module>/<resource>/<action>`，动作放末段而非资源子路径 | 权限点与 URL 段一一对应（`order:invoice:approve` ↔ `/api/order/invoice/approve`），路径即权限点，可审查性更好 | 否（已在契约 v1） | Planner 周检 |
 | D14 | 2026-11-17 | 越权响应码统一口径：资源类越权 404、动作类越权 403 | 404 不泄露资源存在性；403 表达「资源可见但操作被拒」。两类都不得在响应体暴露存在性细节 | 否（已在契约 v1） | Planner 周检 |
 | D15 | 2026-11-17 | 列表分页以**游标分页**为主，页码分页作为兼容形态 | 深翻页在变动数据集上会漏数据或重复，而管理系统列表普遍需要深翻 | 否（已在契约 v1） | Planner 周检 |
+| D16 | 2026-11-18 | REQ-002 的 **AC-S-008 收窄**：本期只验「前端链路不依赖 Rust 后端常驻」；MSW mock、列表页、表单页下推到 REQ-011 / REQ-012 | 原 AC 超范围 —— 要实现 mock 列表页/表单页等于提前做 REQ-012 的 `@base/schema` 渲染器与 REQ-011 的 MSW 设施。本期已用「77 次采样 Rust 进程数恒为 0」证明核心目的达成 | 是（验收标准变更） | Planner 周检 |
+| D17 | 2026-11-18 | 链接器方案定为**不做任何显式配置** —— rustc 1.98 的 x86_64-unknown-linux-gnu target spec 默认 `linker-flavor = gnu-lld-cc`，默认即用 rustup 自带 LLD 22.1.8 | QA 实测：默认链接器进程峰值 2MB，强制 GNU bfd 则 130MB。显式配 `linker = "rust-lld"` 会绕过 gcc 驱动导致找不到系统库；`link-self-contained=+linker` 在 stable 上直接报错。**正确解是别配** | 否 | Planner 周检 |
 
 ## 升级给用户的事项
 
