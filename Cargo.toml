@@ -5,6 +5,7 @@ members = [
     "crates/platform-contracts",
     "crates/platform-contracts-macros",
     "crates/xtask",
+    "modules/sandbox",
 ]
 
 [workspace.package]
