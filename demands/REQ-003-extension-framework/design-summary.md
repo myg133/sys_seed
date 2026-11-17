@@ -258,8 +258,8 @@ tenant_b  user_b@example.com  Order#2  "同名订单"   ← 唯一区别是租�
   "required": ["id", "name", "version", "enabled", "permissions", "menus", "dependencies"],
   "additionalProperties": false,
   "properties": {
-    "id":     { "type": "string", "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$" },
-    "name":   { "type": "string", "minLength": 1 },
+    "id":     { "type": "string", "pattern": "^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$" },
+    "name":   { "type": "string", "pattern": "\\S" },
     "version":{ "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
     "enabled":{ "type": "boolean", "default": true },
     "permissions": {
@@ -270,7 +270,7 @@ tenant_b  user_b@example.com  Order#2  "同名订单"   ← 唯一区别是租�
         "additionalProperties": false,
         "properties": {
           "code": { "type": "string", "pattern": "^[a-z][a-z0-9-]*:[a-z][a-z0-9-]*:[a-z][a-z0-9-]*$" },
-          "name": { "type": "string" },
+          "name": { "type": "string", "minLength": 1, "pattern": "\\S" },
           "type": { "enum": ["menu", "button", "field", "data"] }
         }
       }
@@ -289,7 +289,10 @@ tenant_b  user_b@example.com  Order#2  "同名订单"   ← 唯一区别是租�
         }
       }
     },
-    "dependencies": { "type": "array", "items": { "type": "string" } },
+    "dependencies": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$" }
+    },
     "config": {
       "type": "object",
       "additionalProperties": {
@@ -306,6 +309,22 @@ tenant_b  user_b@example.com  Order#2  "同名订单"   ← 唯一区别是租�
   }
 }
 ```
+
+> **2026-11-18 修正（QA 发现 schema 与平台实现判定不一致）**
+>
+> 上一版 schema 与实现有三处分歧（方向是「平台更严」，无安全洞，但 schema 是对外发布的，
+> 第三方拿它校验会与平台判定不一致）。现已**把 schema 收紧到与实现完全一致**：
+>
+> | 字段 | 改动 | 原因 |
+> |---|---|---|
+> | `properties.id.pattern` | `^[a-z][a-z0-9]*(-[a-z0-9]+)*$` → `^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$` | 原正则允许分段以数字开头（`a-1`、`sandbox-1demo`），实现不允许 |
+> | `properties.dependencies.items` | 补上同款 pattern | 原 schema 完全没有约束，实现却按 id 规则校验 |
+> | `properties.name` | 追加 `"pattern": "\\S"` | 只补 `minLength:1` 的话纯空白串仍与实现不一致 |
+> | `properties.permissions.items.properties.name` | 补 `minLength:1` + `pattern:"\\S"` | 同上 |
+>
+> **判定一致性由测试保证**：`schema_and_implementation_agree_on_module_id_samples`
+> 用**独立于平台实现的极简正则求值器**读 schema 的 pattern，与实现对同一批样本比对，
+> 避免「用实现验实现」的循环论证。
 
 ---
 
