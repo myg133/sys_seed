@@ -189,22 +189,33 @@ fn check_manifest(path: &Path) -> Option<String> {
 }
 
 /// 校验 `manifest.json` 是否符合 Schema（字段路径 + 原因）。
+///
+/// 结构级违规（缺必备字段、未知字段、字段类型错）在 serde 反序列化阶段就会失败，
+/// 这里必须把它们报出来 —— 否则 `manifest.json` = `{}` 这种整体不合规的 manifest
+/// 会因为「解析失败就跳过」而蒙混过关。
 fn check_manifest_schema(path: &Path) -> Vec<String> {
-    let Ok(manifest) = Manifest::from_path(path) else {
-        // JSON 本身不合法时，问题已由 `invalid_manifest` 记录。
+    let Ok(raw) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
-    manifest
-        .validate()
-        .into_iter()
-        .map(|issue| {
-            format!(
-                "manifest.json 不符合 Schema：{}：{}",
-                issue.field(),
-                issue.reason()
-            )
-        })
-        .collect()
+    // JSON 语法错误已由 `invalid_manifest` 记录，不重复报。
+    if serde_json::from_str::<serde_json::Value>(&raw).is_err() {
+        return Vec::new();
+    }
+    match Manifest::parse_str(&raw) {
+        Ok(manifest) => manifest
+            .validate()
+            .into_iter()
+            .map(|issue| {
+                format!(
+                    "manifest.json 不符合 Schema：{}：{}",
+                    issue.field(),
+                    issue.reason()
+                )
+            })
+            .collect(),
+        // serde 的报错自带字段路径与位置，如 "missing field `id` at line 1 column 2"。
+        Err(err) => vec![format!("manifest.json 不符合 Schema：{}", err.reason())],
+    }
 }
 
 /// 校验 `manifest.id` 是否与目录名一致。
@@ -393,6 +404,39 @@ mod tests {
             "issues = {:?}",
             status.manifest_issues
         );
+    }
+
+    #[test]
+    fn manifest_without_required_fields_is_reported() {
+        let temp = TempDir::new("empty-manifest");
+        let dir = make_module(temp.path(), "demo");
+        std::fs::write(dir.join("manifest.json"), "{}").expect("写入应成功");
+
+        let report = check_modules(temp.path());
+        assert!(!report.is_valid(), "空 manifest 必须判失败");
+        let status = &report.modules[0];
+        assert_eq!(status.manifest_issues.len(), 1, "issues = {status:?}");
+        let issue = &status.manifest_issues[0];
+        assert!(issue.contains("Schema"), "issue = {issue}");
+        assert!(issue.contains("missing field"), "issue = {issue}");
+        assert!(issue.contains("id"), "issue = {issue}");
+    }
+
+    #[test]
+    fn manifest_with_unknown_field_is_reported() {
+        let temp = TempDir::new("unknown-field");
+        let dir = make_module(temp.path(), "demo");
+        let raw = manifest_json("demo").replace("\"enabled\": true,", "\"enabled\": true, \"bogus\": 1,");
+        std::fs::write(dir.join("manifest.json"), raw).expect("写入应成功");
+
+        let report = check_modules(temp.path());
+        assert!(!report.is_valid(), "含未知字段的 manifest 必须判失败");
+        let status = &report.modules[0];
+        assert_eq!(status.manifest_issues.len(), 1, "issues = {status:?}");
+        let issue = &status.manifest_issues[0];
+        assert!(issue.contains("Schema"), "issue = {issue}");
+        assert!(issue.contains("unknown field"), "issue = {issue}");
+        assert!(issue.contains("bogus"), "issue = {issue}");
     }
 
     #[test]
