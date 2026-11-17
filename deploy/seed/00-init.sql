@@ -4,7 +4,10 @@
 -- 职责边界：只建库与种子登记表；业务表由各模块的迁移脚本负责。
 
 -- 集成测试库，与开发库 base_dev 完全隔离（不使用 testcontainers）
-CREATE DATABASE base_test OWNER base;
+-- CREATE DATABASE 不支持 IF NOT EXISTS，用 \gexec 做条件建库
+SELECT 'CREATE DATABASE base_test OWNER base'
+WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'base_test')
+\gexec
 
 -- 种子登记表：记录已应用的种子批次
 CREATE TABLE IF NOT EXISTS platform_seed_log (

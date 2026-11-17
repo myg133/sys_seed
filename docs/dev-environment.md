@@ -231,10 +231,13 @@ bun run test:integration   # 跑前后对比 podman ps 数量，数量不变才�
 ### 6.3 E2E 的跑法
 
 ```bash
-bun run test:e2e                       # 全部
-bun run test:e2e "登录|权限"            # 按标题过滤
-E2E_GREP="登录" bun run test:e2e
+bun run test:e2e                          # 全部
+E2E_GREP="登录|权限" bun run test:e2e      # 按标题过滤
+bun run test:e2e -- --grep "登录|权限"     # 同上：追加的 --grep 覆盖脚本默认值
 ```
+
+> 注意：不要用 `bun run test:e2e "登录"` 这种直接追加位置参数的形式 ——
+> 脚本自带 `--grep`，追加的位置参数会被 playwright 当成测试文件过滤器而报错。
 
 完整 E2E 回归**只在验收时跑一次**，跑之前先关掉 Storybook / svelte-check / Vite。
 

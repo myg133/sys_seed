@@ -10,8 +10,6 @@
   "contracts": {
     "api-conventions": "v1"
   },
-  "adrs": [
-    "ADR-0001"
-  ],
+  "adrs": ["ADR-0001"],
   "delivered_by": "myg133-dev-1"
 }
