@@ -57,19 +57,49 @@
 
 **为什么 podman 而不是 docker**：
 
-| | 内存 | 说明 |
+| | 预估内存 | 实测 |
 |---|---|---|
-| docker | dockerd 常驻 400-600M + PG 150M + Redis 15M ≈ **570M** | dockerd 必须常驻（本机 daemon 当前未运行） |
-| podman | 无 daemon，PG 150M + Redis 15M + conmon/runc 开销 ≈ **30M** ≈ **195M** | **省 ~375M** |
+| docker | dockerd 常驻 400-600M + PG 150M + Redis 15M ≈ **570M** | 未实测（本机 daemon 未运行） |
+| podman | 无 daemon，容器由用户态进程直接管理 | ✅ **实测 75MB**（PG 16.6M + Redis 8.8M + conmon/runc 开销约 50M） |
 
 rootless podman 每个容器就是一个受用户态进程管理的普通进程，没有常驻守护进程 ——
-这正好对上低配机最缺的那一项资源。
+这正好对上低配机最缺的那一项资源。**实测比预估还省 60%。**
+
+### 1.1.1 已验证可用的启动方式
 
 ```bash
 export XDG_RUNTIME_DIR=/run/user/$(id -u)   # rootless 必需，每次新终端都要设
+cd <repo-root>
 podman-compose -f compose.yaml up -d
-podman stats --no-stream                       # 看实际占用
-podman system prune -a                         # 清理，回收磁盘
+```
+
+**实测结果（2026-11-17）**：
+
+```
+base-postgres | Up | 0.0.0.0:5432->5432/tcp |  16.64 MB / 268.4 MB
+base-redis    | Up | 0.0.0.0:6379->6379/tcp |   8.79 MB / 100.7 MB
+```
+
+- PostgreSQL **17.12** 正常启动，`base_dev` 与 `base_test` 双库已建好
+- Redis `PING` 返回 `PONG`
+- podman 相关进程总占用 **75MB**
+- 宿主机内存：起栈前后 4.9G → 4.6G 可用（Dev 编译同时进行时仍有余量）
+
+**PG 低内存参数**（已生效）：
+
+```
+-c shared_buffers=64MB -c work_mem=4MB -c max_connections=30 -c synchronous_commit=off
+```
+
+> `synchronous_commit=off` 仅用于**开发环境**：断电可能丢最后几笔事务，但不会损坏数据一致性。
+> 生产环境（REQ-005）必须去掉这一项。
+
+### 1.1.2 连接串
+
+```bash
+DATABASE_URL=postgres://base:base@localhost:5432/base_dev
+DATABASE_URL_TEST=postgres://base:base@localhost:5432/base_test
+REDIS_URL=redis://localhost:6379
 ```
 
 ### 1.2 镜像加速（必做，否则直接超时）
