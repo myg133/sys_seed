@@ -3,7 +3,7 @@
 - **需求**: REQ-002 平台骨架与工程基线
 - **阶段**: Pre-merge
 - **验证者**: myg133-dev-1（Dev Agent，自验）
-- **分支 / commit**: feature/REQ-002 @ 待提交（见文末「提交记录」）
+- **分支 / commit**: feature/REQ-002 @ `7872145`（开发提交，5 个 commit：Rust 骨架 / 前端骨架 / 工程规范 / 修正与证据 / 锁文件同步）
 - **结论**: PASS-WITH-RISK（两条 AC 存在明确未验证项，其余全部实测通过）
 
 ## 追溯
@@ -113,14 +113,14 @@ $ df -h /home | tail -1
 /dev/nvme0n1p3  390G  247G  123G   67% /home
 
 $ du -sh target/
-334M    target/
+349M    target/
 ```
 
 | 占用项 | 实测 |
 |--------|------|
-| `target/`（冷编译 + 跑完全部测试后） | 334 MB |
-| `node_modules/`（pnpm 硬链接） | 105 MB |
-| Playwright 浏览器缓存（chromium only） | ~620 MB（`~/.cache/ms-playwright`，仓库外） |
+| `target/`（冷编译 + 跑完全部测试后） | 349 MB |
+| `node_modules/`（pnpm 硬链接） | 137 MB |
+| Playwright 浏览器缓存（chromium only，仓库外） | ~620 MB（`~/.cache/ms-playwright`） |
 | `/home` 剩余 | 123 GB（预算上限 20G，充裕） |
 
 `bun run disk:check` 已封装 `df -h /home` + `du -sh target/` + `podman system df`。
@@ -158,4 +158,12 @@ $ du -sh target/
 
 ## 提交记录
 
-- `git log --oneline develop..feature/REQ-002`
+```text
+7872145 [Dev] 同步 bun.lock (关联: REQ-002)
+ebf9094 [Dev] 修正 Playwright 版本与种子建库语句，补齐验证证据 (关联: REQ-002)
+45ad85a [Dev] 补齐工程规范与本地环境 (关联: REQ-002)
+ccee114 [Dev] 搭建前端 pnpm workspace 骨架 (关联: REQ-002)
+3d7237d [Dev] 搭建 Rust workspace 骨架 (关联: REQ-002)
+```
+
+改动规模：`88 files changed, 7270 insertions(+), 1 deletion(-)`（相对 `develop`）。
