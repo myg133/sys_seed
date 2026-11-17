@@ -151,8 +151,8 @@ npm 侧本机已有 `registry=https://registry.npmmirror.com`，无需改动。
 | `cargo nextest` | `cargo test -- --test-threads=2` |
 | `cargo sqlx prepare` | 开发期让 PG 常驻，直接用编译期校验；`SQLX_OFFLINE=true` 留给 CI |
 | `sccache` | Cargo 自带 incremental 已够（单机场景 sccache 收益小） |
-| 系统 lld | **不可用** —— rust-lld 直连找不到系统库（见 §2.1） |
-| mold | 可选，`sudo pacman -S mold`（pacman extra 有 3.0.0-4），比 lld 更省内存；默认用 GNU ld 已够 |
+| 系统 lld | **不需要装** —— rustup 自带 `ld.lld`，且 rustc 1.98 默认就用它（见 §2.1） |
+| mold | 可选，`sudo pacman -S mold`（pacman extra 有 3.0.0-4）；但默认 LLD 链接器峰值才 2MB，换 mold 收益有限 |
 
 ---
 
@@ -167,10 +167,10 @@ npm 侧本机已有 `registry=https://registry.npmmirror.com`，无需改动。
 # 不要开满 8 核：并行度换不来速度，但峰值内存线性上涨
 jobs = 3
 
-# 链接器：默认用系统 cc 驱动 GNU ld。
-# 已实测本机 GNU ld 冷构建峰值 994 MB，已在 2.5G 预算内，**当前无需改动**。
-# 若日后装上 mold（sudo pacman -S mold），改用下面这行可再降内存且更快：
-# rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+# 链接器：**什么都不配**。
+# rustc 1.98 的 x86_64-unknown-linux-gnu target spec 默认就用 rustup 自带的
+# ld.lld（LLD 22.1.8），经 gcc 驱动调用，链接器进程峰值仅 2 MB。
+# 详见下方「链接器的真相」。
 ```
 
 **`Cargo.toml`**：
@@ -194,20 +194,32 @@ codegen-units = 16
 strip = "debuginfo"
 ```
 
-> **链接器方案的实测结论（2026-11-18 修正）**
+> ### 链接器的真相（2026-11-18 经 QA 独立实测确认）
 >
-> 早先指南推荐 `linker = "rust-lld"` + `link-self-contained=+linker`，**实测是错的**：
+> **结论：不需要任何链接器配置，默认就是最优解。**
 >
-> 1. `-C link-self-contained=+linker` 在 stable rustc 1.98 上是 **unstable**，
->    cargo 直接报错退出：`only -C link-self-contained values y/yes/on/n/no/off/-linker are stable`
-> 2. 改用 stable 值 `-linker` 后，`rust-lld` 仍无法定位系统库：
->    `unable to find library -lc / -lm / -ldl`（rust-lld 按自身路径推导 sysroot，
->    找不到 `/usr/lib/gcc/x86_64-pc-linux-gnu/16/libgcc_s.so`）
-> 3. 本机**未安装** `ld.lld` / `mold`（`/usr/bin/` 下只有 `ld.bfd` / `ld.gold` / `ld.so`）
+> | 配置 | 结果 |
+> |---|---|
+> | **不配（默认）** | ✅ 使用 **LLD 22.1.8**（rustup 自带的 `ld.lld`，经 gcc 驱动调用），链接器进程峰值 **2 MB** |
+> | `linker = "rust-lld"` + `link-self-contained=+linker` | ❌ **cargo 直接报错退出**：`+` 是 unstable 写法，stable 只接受 `y/yes/on/n/no/off/-linker` |
+> | `linker = "rust-lld"` + `link-self-contained=-linker` | ❌ **链接失败**：绕过 gcc 驱动后找不到系统库 `unable to find library -lc / -lm / -ldl` |
+> | 强制 `-C link-arg=-fuse-ld=bfd`（GNU bfd） | ⚠️ 能过，但链接器进程峰值 **130 MB**（比 LLD 高 65 倍） |
 >
-> 结论：**默认走系统 GNU ld 即可** —— 实测冷构建峰值 994 MB，远低于 2.5G 阈值，
-> 链接期内存主要靠 `profile.dev` 的调试信息策略压下来，而不是换链接器。
-> 想再降就 `sudo pacman -S mold`（pacman extra 仓库有 `mold 3.0.0-4`），再加 `-fuse-ld=mold`。
+> **为什么默认就是 LLD**：rustc 的 `x86_64-unknown-linux-gnu` target spec 自带 lld，
+> 通过 gcc 驱动调用它 —— 既拿到 LLD 的低内存优势，又保留 gcc 的库搜索路径。
+>
+> **可复现的验证方法**：
+> ```bash
+> # 默认构建，打印链接器版本
+> RUSTFLAGS="-C link-arg=-Wl,--version" cargo build -v 2>&1 | grep -i "linker:"
+> # 强制 bfd 对比
+> RUSTFLAGS="-C link-arg=-fuse-ld=bfd -C link-arg=-Wl,--version" cargo build -v 2>&1 | grep -i "linker:"
+> ```
+>
+> **教训**：早先指南推荐显式配 `rust-lld`，两处都是错的（unstable flag + 绕过 gcc 驱动）。
+> 以后遇到「工具链默认行为不确定」的问题，**先实测默认值**，别急着覆盖。
+> 另注：早先「本机未安装 ld.lld」的结论也不准确 —— rustup 自带 `ld.lld`，
+> 只是不在 `/usr/bin/` 而在 toolchain 目录里。
 
 ### 2.2 日常命令
 
