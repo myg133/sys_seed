@@ -10,10 +10,11 @@
 //!
 //! | 字段 | 规则 |
 //! |------|------|
-//! | `id` | `^[a-z][a-z0-9]*(-[a-z0-9]+)*$` |
-//! | `name` | 非空 |
+//! | `id` | `^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$` |
+//! | `name` | 非空（去掉首尾空白后不得为空） |
 //! | `version` | `^\d+\.\d+\.\d+$` |
 //! | `permissions[].code` | `^[a-z][a-z0-9-]*:[a-z][a-z0-9-]*:[a-z][a-z0-9-]*$`（`api-conventions v1` C4） |
+//! | `permissions[].name` | 非空（去掉首尾空白后不得为空） |
 //! | `menus[].route` | `^/[a-z0-9/-]*$` |
 //! | `dependencies[]` | 与 `id` 同规则 |
 
@@ -216,7 +217,7 @@ impl Manifest {
         if !is_module_id(&self.id) {
             issues.push(field_error(
                 "id",
-                "must match ^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+                "must match ^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$",
             ));
         }
         if self.name.trim().is_empty() {
@@ -254,7 +255,7 @@ impl Manifest {
             if !is_module_id(dependency) {
                 issues.push(field_error(
                     &format!("dependencies[{index}]"),
-                    "must match ^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+                    "must match ^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$",
                 ));
             }
         }
@@ -278,8 +279,11 @@ fn field_error(field: &str, reason: &str) -> ManifestError {
     }
 }
 
-/// 模块 ID / 依赖 ID：`^[a-z][a-z0-9]*(-[a-z0-9]+)*$`。
-fn is_module_id(value: &str) -> bool {
+/// 模块 ID / 依赖 ID：`^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$`。
+///
+/// 与 `MANIFEST_JSON_SCHEMA` 里的 `id` / `dependencies[]` pattern **完全等价**
+/// （每一段的首字符必须是字母），两边不允许出现不同的判定。
+pub(crate) fn is_module_id(value: &str) -> bool {
     let mut segments = value.split('-');
     let Some(first) = segments.next() else {
         return false;
