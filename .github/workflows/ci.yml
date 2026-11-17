@@ -94,8 +94,7 @@ jobs:
         with:
           toolchain: 1.98.1
       - uses: rustsec/audit-check@v2
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+        # rustsec/audit-check@v2 不接受 token 输入；需要鉴权走 RUSTEC_AUDIT_TOKEN 环境变量
 
       - uses: pnpm/action-setup@v4
         with:
@@ -140,3 +139,26 @@ jobs:
         run: cargo test -p platform-contracts -- --test-threads=2
       - name: 校验 compose 文件
         run: docker compose -f compose.yaml config --quiet
+
+  # 6. E2E（Playwright）：前端链路不依赖 Rust 后端常驻
+  e2e:
+    name: e2e
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.19.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: '.node-version'
+          cache: pnpm
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+
+      - run: pnpm install --frozen-lockfile
+      # 低配机只装 chromium，不装全套浏览器
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: bun run test:e2e
