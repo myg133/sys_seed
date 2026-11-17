@@ -5,7 +5,7 @@
 - **基线**: `develop` @ `eacff21`（REQ-002 已合并）
 - **契约**: api-conventions v1（已 ratified，见 `BA/contracts/api-conventions/v1.md`）
 - **设计依据**: `BA/demands/REQ-003-extension-framework/design-summary.md`（trait 签名已冻结）
-- **更新时间**: 2026-11-18
+- **更新时间**: 2026-11-18（修复轮 2：承接 QA Pre-merge 的 PASS-WITH-RISK，修复中 1 / 中 2 / 低 5 / 低 6 / 提示 7）
 
 图例：**PASS** = 已实现且有自动化验证；**未验证** = 无自动化证据。
 
@@ -25,16 +25,19 @@
 | `inventory` 编译期注册与 `discover()` | `crates/platform-core/src/extension/registry.rs` | `extension::registry::tests::registered_modules_are_discovered`、`::disabled_modules_are_filtered_out` | **PASS** |
 | `platform-contracts` 套件：C-1 ~ C-4 四项检查 | `crates/platform-contracts/src/checks.rs` | `modules/sandbox/tests/contracts.rs` 生成的 4 个测试；另有破坏性验证（见 §4） | **PASS** |
 | 简化版 `#[platform_module_contract]` 宏 | `crates/platform-contracts-macros/src/lib.rs` | 由 `modules/sandbox/tests/contracts.rs` 实际调用并生成 4 个测试 | **PASS** |
-| manifest JSON Schema + 解析器 | `crates/platform-core/src/extension/manifest.rs`、`manifest_schema.rs`、`capabilities/schema/manifest.schema.json` | `extension::manifest::tests::*`（6 个）、`extension::manifest_schema::tests::*`（3 个） | **PASS** |
-| `xtask check-modules` 完整规则 | `crates/xtask/src/modules.rs` | `crates/xtask/src/modules.rs` 的 10 个单测 + 手工破坏验证（见 §4） | **PASS** |
-| 示例模块 `modules/sandbox/` | `modules/sandbox/**` | `cargo test -p sandbox`（4/4）、`cargo xtask check-modules` | **PASS** |
+| manifest JSON Schema + 解析器 | `crates/platform-core/src/extension/manifest.rs`、`manifest_schema.rs`、`capabilities/schema/manifest.schema.json` | `extension::manifest::tests::*`（6 个）、`extension::manifest_schema::tests::*`（5 个） | **PASS** |
+| **Schema 与平台实现的判定一致（修复轮 2）** | 同上（`id` / `dependencies[]` 的 pattern 与 `is_module_id` 等价；名称加 `minLength` + `\S`） | `manifest_schema::tests::schema_and_implementation_agree_on_module_id_samples`、`::schema_and_implementation_agree_on_permission_name_samples` | **PASS** |
+| `xtask check-modules` 完整规则 | `crates/xtask/src/modules.rs` | `crates/xtask/src/modules.rs` 的 12 个单测 + 手工破坏验证（见 §4） | **PASS** |
+| 示例模块 `modules/sandbox/` | `modules/sandbox/**` | `cargo test -p sandbox`（lib 2 + 契约 4）、`cargo xtask check-modules` | **PASS** |
+| **sandbox 排序白名单外字段报错（修复轮 2）** | `modules/sandbox/backend/src/repository.rs::sort_rows` | `repository::tests::list_rejects_a_sort_field_outside_the_whitelist`、`::list_sorts_by_a_declared_field` | **PASS** |
 
 ## 3. 设计摘要 §6 目录规范校验（5 项）
 
 | 校验项 | 实现位置 | 测试位置 | 结论 |
 |--------|----------|----------|------|
 | 必备文件齐全 | `crates/xtask/src/modules.rs::check_module` | `modules::tests::missing_entries_are_listed`（断言 5 项缺失）、手工破坏验证 | **PASS** |
-| `manifest.json` 符合 Schema | 同上（`check_manifest_schema`，复用 `platform_core::extension::Manifest`） | `modules::tests::manifest_schema_violations_are_reported_with_field_path` | **PASS** |
+| `manifest.json` 符合 Schema（字段级） | 同上（`check_manifest_schema`，复用 `platform_core::extension::Manifest`） | `modules::tests::manifest_schema_violations_are_reported_with_field_path` | **PASS** |
+| `manifest.json` 符合 Schema（**结构级**，修复轮 2 补齐） | 同上（解析失败时把 serde 错误作为一条 `manifest_issues` 报出） | `modules::tests::manifest_without_required_fields_is_reported`、`modules::tests::manifest_with_unknown_field_is_reported` | **PASS** |
 | `manifest.id` 与目录名一致 | 同上（`check_manifest_id`） | `modules::tests::manifest_id_must_match_the_directory_name` | **PASS** |
 | `backend/`、`frontend/`、`migrations/` 非空 | 同上（`empty_dirs`） | `modules::tests::empty_required_directories_are_reported` | **PASS** |
 | `AGENTS.md`、`README.md` 存在 | 同上（`missing_files`） | `modules::tests::missing_entries_are_listed` | **PASS** |
@@ -54,7 +57,9 @@
 
 | 检查 | 实现位置 | 测试位置 | 结论 |
 |------|----------|----------|------|
-| `platform-core` / `platform-contracts` 的依赖图不得出现业务模块路径 | `crates/xtask/src/deps.rs` | `deps::tests::the_real_workspace_has_no_reverse_dependency`（扫真实工作区） | **PASS** |
+| 平台 crate 的依赖图不得出现业务模块 | `crates/xtask/src/deps.rs`（修复轮 2 起读 `cargo metadata --no-deps` 的成员依赖图做可达性判定，不再文本扫描） | `deps::tests::the_real_workspace_has_no_reverse_dependency`（扫真实工作区） | **PASS** |
+| workspace 继承写法（`dep.workspace = true`）也能被拦住 | 同上 | `deps::tests::workspace_inherited_dependency_is_reported` + 手工绕过实验 | **PASS** |
+| 本期新增的平台 crate（`platform-contracts-macros`）受同一约束 | 同上（显式清单 + `crates/` 下的工作区成员） | `deps::tests::macros_crate_is_subject_to_the_direction_rule`、`deps::tests::platform_crate_outside_the_explicit_list_is_also_checked` | **PASS** |
 
 ## 6. 父需求承接的 AC（AC-031 ~ AC-034）
 
@@ -72,9 +77,10 @@
 
 | 要求 | 验证方式 | 结论 |
 |------|----------|------|
-| REQ-002 的 24 个原有测试不能破 | `cargo test --workspace -- --test-threads=2` → `platform-contracts` 3、`platform-core` 14、`xtask` 7 全部仍在且通过 | **PASS** |
+| REQ-002 的 24 个原有测试不能破 | `cargo test --workspace -- --test-threads=2` → `platform-contracts` 3、`platform-core` 14、`xtask` 7 全部仍在且通过（全量 **73/73**） | **PASS** |
 | 圈复杂度 ≤ 10 / 认知复杂度 ≤ 15 | 逐函数拆分（`checks.rs` 的每个检查拆成独立小函数，`repository.rs` 的排序/过滤拆成 `sort_rows` / `matches_filters` / `matches_filter` / `in_range`） | **PASS**（人工核查；本机无复杂度度量工具可用） |
 | 无 TODO / FIXME / 调试输出 | 对本轮新增文件全量 `grep` 扫描 | **PASS** |
 | 不引入 sqlx / reqwest / aws-sdk / opendal / jsonwebtoken | `Cargo.lock` 与各 `Cargo.toml` 核对 | **PASS** |
-| 本期只新增 `inventory` 一个第三方依赖 | `cargo tree` 核对（见验证报告 §3） | **PASS**（另有零第三方依赖的过程宏 crate） |
+| 本期只新增 `inventory` 一个第三方依赖 | `cargo tree` 核对（见验证报告 §3）；修复轮 2 给 `xtask` 加的 `serde` 已在 `Cargo.lock` 里，未引入新第三方包 | **PASS**（另有零第三方依赖的过程宏 crate） |
 | 不改 `platform-core` 既有内部（`config.rs` / `context.rs` / `error.rs`） | `git diff` 核对 | **PASS**（`lib.rs` 仅新增 `pub mod extension;` 与 1 行 re-export，`Cargo.toml` 仅新增 2 个依赖） |
+| 不改 `crates/platform-core/src/extension/` 下 5 个 trait 的签名 | `git diff` 核对（修复轮 2 只动了 `manifest.rs` / `manifest_schema.rs`，trait 定义文件零改动） | **PASS** |
