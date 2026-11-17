@@ -978,6 +978,7 @@ dependencies = [
  "anyhow",
  "clap",
  "platform-core",
+ "serde",
  "serde_json",
 ]
 

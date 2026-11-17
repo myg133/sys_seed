@@ -10,6 +10,8 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+# cargo metadata 的输出解析
+serde.workspace = true
 serde_json.workspace = true
 # manifest 的 Schema 校验复用平台核心的解析器，避免两套实现
 platform-core.workspace = true

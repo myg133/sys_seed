@@ -10,40 +10,214 @@
 //! 业务模块 modules/<name>/backend (依赖 platform-core + platform-contracts)
 //! ```
 //!
-//! 因此 `crates/platform-core` 与 `crates/platform-contracts` 的依赖图里
-//! **不得出现任何业务模块路径**（`modules/...`）。
+//! 因此平台 crate 的依赖图里**不得出现任何业务模块**（`modules/...`）。
+//!
+//! # 怎么查的
+//!
+//! 读 `cargo metadata --format-version 1 --no-deps` 的成员依赖图，
+//! 从每个平台 crate 出发做可达性遍历，碰到 `modules/` 下的包就是违规。
+//!
+//! **不是文本匹配**：workspace 继承写法（`dep.workspace = true`）把路径写在根
+//! `Cargo.toml` 的 `[workspace.dependencies]` 里，成员自己的 `Cargo.toml` 里根本没有
+//! `modules/` 字样，逐行扫字符串会漏掉这类绕过。
+//!
+//! # 平台 crate 怎么定的
+//!
+//! 两条来源取并集：
+//!
+//! - [`PLATFORM_CRATES`] 显式清单；
+//! - `crates/` 下的工作区成员 —— 新增平台 crate 不会因为忘了改清单而漏检。
 
-use std::path::Path;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
-/// 必须不依赖业务模块的平台 crate。
-pub const PLATFORM_CRATES: [&str; 2] = ["platform-core", "platform-contracts"];
+use anyhow::{Context, Result};
+use serde::Deserialize;
 
-/// 扫描平台 crate 的依赖清单，返回发现的业务模块依赖。
+/// 必须不依赖业务模块的平台 crate（显式清单）。
 ///
-/// 返回值每一项形如
-/// `crates/platform-core/Cargo.toml:12: platform-something = { path = "modules/xxx" }`。
-pub fn dependency_direction_violations(root: &Path) -> Vec<String> {
-    let mut violations = Vec::new();
-    for crate_name in PLATFORM_CRATES {
-        let manifest_path = root.join("crates").join(crate_name).join("Cargo.toml");
-        let Ok(raw) = std::fs::read_to_string(&manifest_path) else {
-            continue;
-        };
-        for (index, line) in raw.lines().enumerate() {
-            let trimmed = line.trim();
-            if !trimmed.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_') {
-                continue;
-            }
-            if !trimmed.contains("modules/") {
-                continue;
-            }
-            violations.push(format!(
-                "crates/{crate_name}/Cargo.toml:{} 依赖了业务模块路径：{trimmed}",
-                index + 1
-            ));
+/// 清单之外的平台 crate 由「`crates/` 下的工作区成员」这条规则兜底。
+pub const PLATFORM_CRATES: [&str; 3] = [
+    "platform-core",
+    "platform-contracts",
+    "platform-contracts-macros",
+];
+
+/// `cargo metadata` 的最小结构（只取用得到的字段）。
+#[derive(Debug, Deserialize)]
+struct Metadata {
+    /// 工作区根目录。
+    workspace_root: PathBuf,
+    /// 工作区成员。
+    packages: Vec<MetadataPackage>,
+}
+
+/// 工作区成员。
+#[derive(Debug, Deserialize)]
+struct MetadataPackage {
+    /// 包名。
+    name: String,
+    /// `Cargo.toml` 的绝对路径。
+    manifest_path: PathBuf,
+    /// 直接依赖。
+    #[serde(default)]
+    dependencies: Vec<MetadataDependency>,
+}
+
+/// 成员的一条直接依赖。
+#[derive(Debug, Clone, Deserialize)]
+struct MetadataDependency {
+    /// 依赖名。
+    name: String,
+    /// 路径依赖的绝对目录；非路径依赖为 `None`。
+    #[serde(default)]
+    path: Option<PathBuf>,
+}
+
+/// 工作区成员之间的依赖图。
+#[derive(Debug)]
+struct DependencyGraph {
+    /// 工作区根目录。
+    workspace_root: PathBuf,
+    /// 业务模块目录（`<workspace_root>/modules`）。
+    modules_dir: PathBuf,
+    /// 平台 crate 目录（`<workspace_root>/crates`）。
+    crates_dir: PathBuf,
+    /// 成员目录 → 成员名。
+    member_names: BTreeMap<PathBuf, String>,
+    /// 成员名 → 它的直接依赖。
+    edges: BTreeMap<String, Vec<MetadataDependency>>,
+}
+
+impl DependencyGraph {
+    /// 从 `cargo metadata` 的输出建图。
+    fn build(metadata: &Metadata) -> Self {
+        let member_names: BTreeMap<PathBuf, String> = metadata
+            .packages
+            .iter()
+            .filter_map(|package| {
+                package
+                    .manifest_path
+                    .parent()
+                    .map(|dir| (dir.to_path_buf(), package.name.clone()))
+            })
+            .collect();
+        let edges = metadata
+            .packages
+            .iter()
+            .map(|package| (package.name.clone(), package.dependencies.clone()))
+            .collect();
+        Self {
+            workspace_root: metadata.workspace_root.clone(),
+            modules_dir: metadata.workspace_root.join("modules"),
+            crates_dir: metadata.workspace_root.join("crates"),
+            member_names,
+            edges,
         }
     }
-    violations
+
+    /// 需要检查的平台 crate：显式清单 ∪ `crates/` 下的工作区成员。
+    fn platform_crates(&self) -> Vec<String> {
+        let mut seeds: BTreeSet<String> = PLATFORM_CRATES
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect();
+        for (dir, name) in &self.member_names {
+            if dir.starts_with(&self.crates_dir) {
+                seeds.insert(name.clone());
+            }
+        }
+        seeds.into_iter().collect()
+    }
+
+    /// 路径是否指向业务模块（位于 `modules/` 下）。
+    fn is_business_module(&self, path: &Path) -> bool {
+        path.starts_with(&self.modules_dir)
+    }
+
+    /// 从 `platform` 出发能到达的业务模块。
+    fn reverse_dependencies(&self, platform: &str) -> Vec<String> {
+        let mut violations = Vec::new();
+        let mut visited: BTreeSet<String> = BTreeSet::new();
+        let mut pending: Vec<(String, Vec<String>)> = vec![(platform.to_string(), vec![platform.to_string()])];
+
+        while let Some((current, chain)) = pending.pop() {
+            if !visited.insert(current.clone()) {
+                continue;
+            }
+            let Some(dependencies) = self.edges.get(&current) else {
+                continue;
+            };
+            for dependency in dependencies {
+                // 非路径依赖（registry / git）不可能指向工作区成员。
+                let Some(dependency_path) = dependency.path.as_ref() else {
+                    continue;
+                };
+                let label = self
+                    .member_names
+                    .get(dependency_path)
+                    .cloned()
+                    .unwrap_or_else(|| dependency.name.clone());
+                let mut next_chain = chain.clone();
+                next_chain.push(label);
+                if self.is_business_module(dependency_path) {
+                    violations.push(self.format_violation(&next_chain, dependency_path));
+                    continue;
+                }
+                if let Some(member) = self.member_names.get(dependency_path) {
+                    pending.push((member.clone(), next_chain));
+                }
+            }
+        }
+        violations
+    }
+
+    /// 违规说明：谁、通过哪条链、反向依赖了哪个业务模块。
+    fn format_violation(&self, chain: &[String], module_path: &Path) -> String {
+        let relative = module_path
+            .strip_prefix(&self.workspace_root)
+            .unwrap_or(module_path);
+        format!(
+            "平台 crate `{}` 反向依赖了业务模块 `{}`（路径：{}，依赖链：{}）",
+            chain.first().map(String::as_str).unwrap_or_default(),
+            chain.last().map(String::as_str).unwrap_or_default(),
+            relative.display(),
+            chain.join(" → ")
+        )
+    }
+}
+
+/// 扫描工作区的依赖图，返回平台 crate → 业务模块的反向依赖。
+///
+/// 读的是 `cargo metadata` 的成员依赖图，因此 workspace 继承写法
+/// （`dep.workspace = true`）与新增的平台 crate 一样能被看见。
+pub fn dependency_direction_violations(root: &Path) -> Result<Vec<String>> {
+    let metadata = load_metadata(root)?;
+    let graph = DependencyGraph::build(&metadata);
+    let mut violations = Vec::new();
+    for platform in graph.platform_crates() {
+        violations.extend(graph.reverse_dependencies(&platform));
+    }
+    Ok(violations)
+}
+
+/// 跑 `cargo metadata` 并解析出成员依赖图。
+fn load_metadata(root: &Path) -> Result<Metadata> {
+    let manifest_path = root.join("Cargo.toml");
+    let output = Command::new("cargo")
+        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .arg("--manifest-path")
+        .arg(&manifest_path)
+        .output()
+        .with_context(|| format!("运行 cargo metadata 失败（{}）", manifest_path.display()))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "cargo metadata 失败：{}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    serde_json::from_slice(&output.stdout).context("解析 cargo metadata 的输出失败")
 }
 
 #[cfg(test)]
@@ -77,42 +251,180 @@ mod tests {
         }
     }
 
-    fn write_manifest(root: &Path, crate_name: &str, body: &str) {
-        let dir = root.join("crates").join(crate_name);
-        std::fs::create_dir_all(&dir).expect("目录应可创建");
-        std::fs::write(dir.join("Cargo.toml"), body).expect("写入应成功");
+    /// 写一个最小 cargo 工作区。
+    ///
+    /// `members` 每项是 `(工作区成员目录, 包名, [dependencies] 片段)`；
+    /// `workspace_dependencies` 写进根 `Cargo.toml` 的 `[workspace.dependencies]`。
+    fn write_workspace(
+        root: &Path,
+        members: &[(&str, &str, &str)],
+        workspace_dependencies: &str,
+    ) {
+        let mut workspace_manifest = String::from("[workspace]\nresolver = \"2\"\nmembers = [");
+        for (dir, _, _) in members {
+            workspace_manifest.push_str(&format!("\"{dir}\", "));
+        }
+        workspace_manifest.push_str("]\n");
+        if !workspace_dependencies.is_empty() {
+            workspace_manifest.push_str("\n[workspace.dependencies]\n");
+            workspace_manifest.push_str(workspace_dependencies);
+        }
+        std::fs::write(root.join("Cargo.toml"), workspace_manifest).expect("写入应成功");
+
+        for (dir, name, dependencies) in members {
+            let package_dir = root.join(dir);
+            std::fs::create_dir_all(package_dir.join("src")).expect("目录应可创建");
+            std::fs::write(package_dir.join("src/lib.rs"), "").expect("写入应成功");
+            let manifest = format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\n{dependencies}"
+            );
+            std::fs::write(package_dir.join("Cargo.toml"), manifest).expect("写入应成功");
+        }
+    }
+
+    /// 跑依赖方向检查，失败信息直接进断言消息。
+    fn violations_of(root: &Path) -> Vec<String> {
+        dependency_direction_violations(root).expect("依赖图应可读")
     }
 
     #[test]
     fn business_module_dependencies_are_reported() {
         let temp = TempDir::new("violation");
-        write_manifest(
+        write_workspace(
             temp.path(),
-            "platform-core",
-            "[dependencies]\nsandbox = { path = \"modules/sandbox\" }\n",
+            &[
+                (
+                    "crates/platform-core",
+                    "platform-core",
+                    "sandbox = { path = \"../../modules/sandbox\" }\n",
+                ),
+                ("modules/sandbox", "sandbox", ""),
+            ],
+            "",
         );
 
-        let violations = dependency_direction_violations(temp.path());
-        assert_eq!(violations.len(), 1);
-        assert!(violations[0].contains("platform-core"));
-        assert!(violations[0].contains("modules/sandbox"));
+        let violations = violations_of(temp.path());
+        assert_eq!(violations.len(), 1, "violations = {violations:?}");
+        assert!(
+            violations[0].contains("platform-core"),
+            "violations = {violations:?}"
+        );
+        assert!(
+            violations[0].contains("modules/sandbox"),
+            "violations = {violations:?}"
+        );
     }
 
     #[test]
     fn platform_only_dependencies_are_allowed() {
         let temp = TempDir::new("clean");
-        write_manifest(
+        write_workspace(
             temp.path(),
-            "platform-core",
-            "[dependencies]\nplatform-contracts = { path = \"crates/platform-contracts\" }\n",
+            &[
+                (
+                    "crates/platform-core",
+                    "platform-core",
+                    "platform-contracts = { path = \"../platform-contracts\" }\n",
+                ),
+                ("crates/platform-contracts", "platform-contracts", ""),
+            ],
+            "",
         );
 
-        assert!(dependency_direction_violations(temp.path()).is_empty());
+        assert!(violations_of(temp.path()).is_empty());
+    }
+
+    #[test]
+    fn workspace_inherited_dependency_is_reported() {
+        // 路径写在根 Cargo.toml 的 [workspace.dependencies] 里，
+        // 成员自己的 Cargo.toml 只有 `sandbox.workspace = true` —— 文本扫描会漏掉。
+        let temp = TempDir::new("workspace-inherit");
+        write_workspace(
+            temp.path(),
+            &[
+                (
+                    "crates/platform-contracts",
+                    "platform-contracts",
+                    "sandbox.workspace = true\n",
+                ),
+                ("modules/sandbox", "sandbox", ""),
+            ],
+            "sandbox = { path = \"modules/sandbox\" }\n",
+        );
+
+        let violations = violations_of(temp.path());
+        assert_eq!(violations.len(), 1, "violations = {violations:?}");
+        assert!(
+            violations[0].contains("platform-contracts"),
+            "violations = {violations:?}"
+        );
+        assert!(
+            violations[0].contains("modules/sandbox"),
+            "violations = {violations:?}"
+        );
+    }
+
+    #[test]
+    fn macros_crate_is_subject_to_the_direction_rule() {
+        // platform-contracts-macros 是本期新增的平台 crate，历史上不在清单里。
+        let temp = TempDir::new("macros-crate");
+        write_workspace(
+            temp.path(),
+            &[
+                (
+                    "crates/platform-contracts-macros",
+                    "platform-contracts-macros",
+                    "sandbox = { path = \"../../modules/sandbox\" }\n",
+                ),
+                ("modules/sandbox", "sandbox", ""),
+            ],
+            "",
+        );
+
+        let violations = violations_of(temp.path());
+        assert_eq!(violations.len(), 1, "violations = {violations:?}");
+        assert!(
+            violations[0].contains("platform-contracts-macros"),
+            "violations = {violations:?}"
+        );
+        assert!(
+            violations[0].contains("modules/sandbox"),
+            "violations = {violations:?}"
+        );
+    }
+
+    #[test]
+    fn platform_crate_outside_the_explicit_list_is_also_checked() {
+        // `crates/` 下的工作区成员一律视为平台 crate：新增平台 crate 不会漏检。
+        let temp = TempDir::new("unlisted-crate");
+        write_workspace(
+            temp.path(),
+            &[
+                (
+                    "crates/platform-extras",
+                    "platform-extras",
+                    "sandbox = { path = \"../../modules/sandbox\" }\n",
+                ),
+                ("modules/sandbox", "sandbox", ""),
+            ],
+            "",
+        );
+
+        let violations = violations_of(temp.path());
+        assert_eq!(violations.len(), 1, "violations = {violations:?}");
+        assert!(
+            violations[0].contains("platform-extras"),
+            "violations = {violations:?}"
+        );
+        assert!(
+            violations[0].contains("modules/sandbox"),
+            "violations = {violations:?}"
+        );
     }
 
     #[test]
     fn the_real_workspace_has_no_reverse_dependency() {
-        let violations = dependency_direction_violations(&crate::workspace_root());
+        let violations = violations_of(&crate::workspace_root());
         assert!(
             violations.is_empty(),
             "平台 crate 不得依赖业务模块：{violations:?}"
