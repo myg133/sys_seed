@@ -322,7 +322,9 @@ fn skip_member(body: &str, cursor: usize) -> usize {
         match body.as_bytes()[index] {
             b';' => return index + 1,
             b'{' => {
-                return matching_brace(body, index).map(|end| end + 1).unwrap_or(body.len());
+                return matching_brace(body, index)
+                    .map(|end| end + 1)
+                    .unwrap_or(body.len());
             }
             _ => index += 1,
         }

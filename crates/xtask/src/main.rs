@@ -93,10 +93,7 @@ fn run_capabilities(args: &xtask::cli::CapabilitiesArgs) -> Result<ExitCode> {
     if args.check {
         let report = capabilities::check(root, &generated)?;
         if report.is_consistent() {
-            println!(
-                "能力索引校验通过：{} 个文件与源码一致",
-                generated.len()
-            );
+            println!("能力索引校验通过：{} 个文件与源码一致", generated.len());
             return Ok(ExitCode::SUCCESS);
         }
         eprintln!("能力索引校验失败：错误码 E_CAPABILITIES_OUTDATED");
@@ -134,7 +131,10 @@ fn run_create_module(args: &xtask::cli::CreateModuleArgs) -> Result<ExitCode> {
     }
     println!("下一步：");
     println!("  1. cargo xtask check-modules");
-    println!("  2. cargo test -p {} -- --test-threads=2", report.crate_name);
+    println!(
+        "  2. cargo test -p {} -- --test-threads=2",
+        report.crate_name
+    );
     println!("  3. cargo xtask capabilities");
     Ok(ExitCode::SUCCESS)
 }

@@ -12,7 +12,7 @@
 //!
 //! # 模板约定
 //!
-//! 模板里用 `<<name>>` 这样的占位符（**不是** `{}`），因为模板本身大量包含
+//! 模板里用 `{{name}}` 这样的占位符（**不是** `{}`），因为模板本身大量包含
 //! Rust 的 `format!` 占位符 —— 用 `{}` 会与 `format!` 的参数语法打架。
 
 use std::path::{Path, PathBuf};
@@ -50,7 +50,11 @@ struct ModuleSpec {
 }
 
 /// 生成一个业务模块骨架。
-pub fn create_module(root: &Path, name: &str, perm_prefix: Option<&str>) -> Result<CreateModuleReport> {
+pub fn create_module(
+    root: &Path,
+    name: &str,
+    perm_prefix: Option<&str>,
+) -> Result<CreateModuleReport> {
     if !is_module_name(name) {
         bail!(
             "模块名 `{name}` 不合法：必须是小写 kebab-case（`^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$`）"
@@ -77,6 +81,7 @@ pub fn create_module(root: &Path, name: &str, perm_prefix: Option<&str>) -> Resu
     };
 
     let files = render_files(&spec)?;
+    let mut written = Vec::new();
     for (relative, content) in &files {
         let path = module_dir.join(relative);
         if let Some(parent) = path.parent() {
@@ -85,13 +90,17 @@ pub fn create_module(root: &Path, name: &str, perm_prefix: Option<&str>) -> Resu
         }
         std::fs::write(&path, content)
             .with_context(|| format!("cannot write {}", path.display()))?;
+        written.push(path);
     }
 
     let registered = add_workspace_member(root, &format!("modules/{name}"))?;
 
     let mut notes = Vec::new();
+    notes.extend(format_rust_files(&written));
     if registered {
-        notes.push(format!("已把 `modules/{name}` 登记进根 Cargo.toml 的工作区成员"));
+        notes.push(format!(
+            "已把 `modules/{name}` 登记进根 Cargo.toml 的工作区成员"
+        ));
     }
     if prefix != name {
         notes.push(format!(
@@ -100,16 +109,46 @@ pub fn create_module(root: &Path, name: &str, perm_prefix: Option<&str>) -> Resu
         ));
     }
 
-    let written = files
-        .iter()
-        .map(|(relative, _)| module_dir.join(relative))
-        .collect();
     Ok(CreateModuleReport {
         module_dir,
         crate_name: spec.crate_name.clone(),
         files: written,
         notes,
     })
+}
+
+/// 生成后对 Rust 源文件跑 `rustfmt`。
+///
+/// 模板不可能预知最终标识符的长度，而 rustfmt 的折行决策与长度相关
+/// （同一个模板，短模块名一行放得下、长模块名放不下）——
+/// 因此格式化交给工具本身，生成结果必定是 rustfmt-clean 的。
+///
+/// `rustfmt` 是 `rust-toolchain.toml` 里**固定**的组件，缺失只提示不失败
+/// （工具链不完整时不该让整个脚手架不可用）。
+fn format_rust_files(files: &[PathBuf]) -> Vec<String> {
+    let mut notes = Vec::new();
+    for file in files {
+        if file.extension() != Some(std::ffi::OsStr::new("rs")) {
+            continue;
+        }
+        match std::process::Command::new("rustfmt")
+            .arg("--edition")
+            .arg("2024")
+            .arg(file)
+            .output()
+        {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => notes.push(format!(
+                "rustfmt 处理 {} 失败：{}；请手工执行 `cargo fmt --all`",
+                file.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            )),
+            Err(err) => notes.push(format!(
+                "无法运行 rustfmt（{err}）：请手工执行 `cargo fmt --all`"
+            )),
+        }
+    }
+    notes
 }
 
 /// 模块名是否合法（与平台的模块 id 规则一致）。
@@ -167,11 +206,11 @@ fn to_screaming_snake_case(value: &str) -> String {
     value.replace('-', "_").to_ascii_uppercase()
 }
 
-/// 把 `<<key>>` 占位符替换成实际值。
+/// 把 `{{key}}` 占位符替换成实际值。
 fn render(template: &str, vars: &[(&str, &str)]) -> String {
     let mut out = template.to_string();
     for (key, value) in vars {
-        out = out.replace(&format!("<<{key}>>"), value);
+        out = out.replace(&format!("{{{{{key}}}}}"), value);
     }
     out
 }
@@ -195,7 +234,7 @@ fn render_files(spec: &ModuleSpec) -> Result<Vec<(String, String)>> {
         ("backend/src/repository.rs", REPOSITORY_RS),
         ("backend/src/service.rs", SERVICE_RS),
         ("frontend/routes.ts", FRONTEND_ROUTES_TS),
-        ("frontend/pages/<<pascal>>Page.svelte", FRONTEND_PAGE_SVELTE),
+        ("frontend/pages/{{pascal}}Page.svelte", FRONTEND_PAGE_SVELTE),
         ("migrations/README.md", MIGRATIONS_README),
         ("tests/contracts.rs", CONTRACTS_RS),
         ("AGENTS.md", AGENTS_MD),
@@ -263,12 +302,12 @@ fn find_members_insert_at(lines: &[&str]) -> Option<usize> {
 const CARGO_TOML: &str = r#"# 业务模块的 crate 清单。
 #
 # 依赖方向恒为（平台代码永不反向依赖业务模块）：
-#   platform-core (定义 trait) ← platform-contracts ← modules/<<name>>/backend
+#   platform-core (定义 trait) ← platform-contracts ← modules/{{name}}/backend
 #
 # `platform-core` 是后端依赖，`platform-contracts` 只出现在 `[dev-dependencies]`。
 [package]
-name = "<<crate_name>>"
-description = "业务模块 <<name>>"
+name = "{{crate_name}}"
+description = "业务模块 {{name}}"
 # 业务模块版本独立于平台版本：manifest.json 必须与本版本一致（契约检查 C-1）
 version = "0.1.0"
 edition.workspace = true
@@ -278,7 +317,7 @@ publish.workspace = true
 
 [lib]
 # 业务模块的后端实现放在 backend/ 下
-name = "<<lib_name>>"
+name = "{{lib_name}}"
 path = "backend/src/mod.rs"
 
 [dependencies]
@@ -292,27 +331,27 @@ platform-contracts.workspace = true
 "#;
 
 const MANIFEST_JSON: &str = r#"{
-  "id": "<<name>>",
-  "name": "<<name>> 模块",
+  "id": "{{name}}",
+  "name": "{{name}} 模块",
   "version": "0.1.0",
   "enabled": true,
   "permissions": [
-    { "code": "<<perm_prefix>>:item:read", "name": "查看 <<name>> 记录", "type": "menu" },
-    { "code": "<<perm_prefix>>:item:write", "name": "编辑 <<name>> 记录", "type": "button" }
+    { "code": "{{perm_prefix}}:item:read", "name": "查看 {{name}} 记录", "type": "menu" },
+    { "code": "{{perm_prefix}}:item:write", "name": "编辑 {{name}} 记录", "type": "button" }
   ],
   "menus": [
-    { "label": "<<name>>", "icon": "flask", "route": "/<<name>>", "perm": "<<perm_prefix>>:item:read" }
+    { "label": "{{name}}", "icon": "flask", "route": "/{{name}}", "perm": "{{perm_prefix}}:item:read" }
   ],
   "dependencies": []
 }
 "#;
 
-const BACKEND_MOD_RS: &str = r#"//! <<name>> 模块入口：实现 [`PlatformModule`] 扩展点。
+const BACKEND_MOD_RS: &str = r#"//! {{name}} 模块入口：实现 [`PlatformModule`] 扩展点。
 //!
 //! # 依赖方向
 //!
 //! ```text
-//! platform-core (定义 trait) ← platform-contracts ← modules/<<name>>/backend
+//! platform-core (定义 trait) ← platform-contracts ← modules/{{name}}/backend
 //! ```
 //!
 //! - 后端只依赖 `platform-core`（扩展点 trait）；
@@ -327,14 +366,14 @@ pub mod service;
 use anyhow::Result;
 use platform_core::extension::platform_module::{ModuleContext, PlatformModule};
 
-/// <<name>> 模块实现。
+/// {{name}} 模块实现。
 #[derive(Debug, Clone, Copy, Default)]
-pub struct <<pascal>>Module;
+pub struct {{pascal}}Module;
 
-impl PlatformModule for <<pascal>>Module {
+impl PlatformModule for {{pascal}}Module {
     /// 必须与 `manifest.json` 的 `id` 一致（契约检查 C-1）。
     fn id(&self) -> &'static str {
-        "<<name>>"
+        "{{name}}"
     }
 
     /// 必须与 `manifest.json` 的 `version` 一致（契约检查 C-1）。
@@ -359,19 +398,19 @@ impl PlatformModule for <<pascal>>Module {
     }
 }
 
-/// <<name>> 模块实例（编译期注册用）。
-static <<screaming>>_MODULE: <<pascal>>Module = <<pascal>>Module;
+/// {{name}} 模块实例（编译期注册用）。
+static {{screaming}}_MODULE: {{pascal}}Module = {{pascal}}Module;
 
-platform_core::register_platform_module!(<<screaming>>_MODULE);
+platform_core::register_platform_module!({{screaming}}_MODULE);
 "#;
 
-const ENTITY_RS: &str = r#"//! <<name>> 模块实体。
+const ENTITY_RS: &str = r#"//! {{name}} 模块实体。
 //!
 //! 最小实体：一条记录只属于一个租户 —— 租户隔离（C-3）就是围绕它验证的。
 
-/// <<name>> 记录。
+/// {{name}} 记录。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct <<pascal>>Item {
+pub struct {{pascal}}Item {
     /// 主键。
     pub id: String,
     /// 归属租户。
@@ -383,22 +422,22 @@ pub struct <<pascal>>Item {
 }
 "#;
 
-const PERMISSION_RS: &str = r#"//! <<name>> 模块权限点。
+const PERMISSION_RS: &str = r#"//! {{name}} 模块权限点。
 //!
 //! 编码遵守 `api-conventions v1` C4：`module:resource:action`，全小写连字符分隔。
 //! 权限点必须同时出现在 `manifest.json` 的 `permissions` 里 —— 契约检查 C-2 负责核对。
 
 /// 查看权限点。
-pub const PERMISSION_ITEM_READ: &str = "<<perm_prefix>>:item:read";
+pub const PERMISSION_ITEM_READ: &str = "{{perm_prefix}}:item:read";
 
 /// 编辑权限点。
-pub const PERMISSION_ITEM_WRITE: &str = "<<perm_prefix>>:item:write";
+pub const PERMISSION_ITEM_WRITE: &str = "{{perm_prefix}}:item:write";
 
 /// 本模块用到的全部权限点。
 pub const PERMISSIONS: [&str; 2] = [PERMISSION_ITEM_READ, PERMISSION_ITEM_WRITE];
 "#;
 
-const REPOSITORY_RS: &str = r#"//! <<name>> 模块的数据访问实现（内存存储，**不引入 sqlx**）。
+const REPOSITORY_RS: &str = r#"//! {{name}} 模块的数据访问实现（内存存储，**不引入 sqlx**）。
 //!
 //! # 租户隔离怎么保证
 //!
@@ -420,7 +459,7 @@ use platform_core::extension::repository::{
     FilterOp, FilterSpec, List, ListQuery, Repository, SortSpec,
 };
 
-use crate::entity::<<pascal>>Item;
+use crate::entity::{{pascal}}Item;
 
 /// 允许排序的字段白名单。
 pub const SORTABLE_FIELDS: [&str; 3] = ["id", "title", "revision"];
@@ -431,7 +470,7 @@ pub const FILTERABLE_FIELDS: [&str; 2] = ["id", "title"];
 /// 内存仓储：按 `ctx` 里的租户严格过滤。
 #[derive(Debug, Default)]
 pub struct InMemoryRepository {
-    items: RwLock<BTreeMap<String, <<pascal>>Item>>,
+    items: RwLock<BTreeMap<String, {{pascal}}Item>>,
 }
 
 impl InMemoryRepository {
@@ -441,26 +480,26 @@ impl InMemoryRepository {
     }
 
     /// 灌入初始数据（演示与测试用）。
-    pub fn load(&self, items: impl IntoIterator<Item = <<pascal>>Item>) {
+    pub fn load(&self, items: impl IntoIterator<Item = {{pascal}}Item>) {
         let mut guard = self.write();
         for item in items {
             guard.insert(item.id.clone(), item);
         }
     }
 
-    fn read(&self) -> RwLockReadGuard<'_, BTreeMap<String, <<pascal>>Item>> {
+    fn read(&self) -> RwLockReadGuard<'_, BTreeMap<String, {{pascal}}Item>> {
         self.items.read().unwrap_or_else(|err| err.into_inner())
     }
 
-    fn write(&self) -> RwLockWriteGuard<'_, BTreeMap<String, <<pascal>>Item>> {
+    fn write(&self) -> RwLockWriteGuard<'_, BTreeMap<String, {{pascal}}Item>> {
         self.items.write().unwrap_or_else(|err| err.into_inner())
     }
 }
 
-impl Repository<<<pascal>>Item> for InMemoryRepository {
+impl Repository<{{pascal}}Item> for InMemoryRepository {
     type Id = String;
 
-    async fn find(&self, ctx: &RequestContext, id: &Self::Id) -> Result<Option<<<pascal>>Item>> {
+    async fn find(&self, ctx: &RequestContext, id: &Self::Id) -> Result<Option<{{pascal}}Item>> {
         let tenant = tenant_of(ctx)?;
         let items = self.read();
         Ok(items
@@ -469,10 +508,10 @@ impl Repository<<<pascal>>Item> for InMemoryRepository {
             .cloned())
     }
 
-    async fn list(&self, ctx: &RequestContext, query: &ListQuery) -> Result<List<<<pascal>>Item>> {
+    async fn list(&self, ctx: &RequestContext, query: &ListQuery) -> Result<List<{{pascal}}Item>> {
         let tenant = tenant_of(ctx)?;
         let items = self.read();
-        let mut rows: Vec<<pascal>>Item> = items
+        let mut rows: Vec<{{pascal}}Item> = items
             .values()
             .filter(|item| item.tenant_id == tenant)
             .filter(|item| matches_filters(item, &query.filters))
@@ -483,7 +522,7 @@ impl Repository<<<pascal>>Item> for InMemoryRepository {
         Ok(List::new(rows))
     }
 
-    async fn insert(&self, ctx: &RequestContext, item: &<<pascal>>Item) -> Result<<pascal>>Item> {
+    async fn insert(&self, ctx: &RequestContext, item: &{{pascal}}Item) -> Result<{{pascal}}Item> {
         let tenant = tenant_of(ctx)?;
         if item.tenant_id != tenant {
             return Err(anyhow!(
@@ -498,7 +537,7 @@ impl Repository<<<pascal>>Item> for InMemoryRepository {
         Ok(item.clone())
     }
 
-    async fn update(&self, ctx: &RequestContext, item: &<<pascal>>Item) -> Result<<pascal>>Item> {
+    async fn update(&self, ctx: &RequestContext, item: &{{pascal}}Item) -> Result<{{pascal}}Item> {
         let tenant = tenant_of(ctx)?;
         if item.tenant_id != tenant {
             return Err(anyhow!(
@@ -536,7 +575,7 @@ fn tenant_of(ctx: &RequestContext) -> Result<&str> {
 /// 按排序项排序；白名单外的字段直接报错（`api-conventions v1` C7）。
 ///
 /// 排序字段必须先声明再使用 —— 静默忽略会让调用方以为排序生效了。
-fn sort_rows(rows: &mut [<<pascal>>Item], sort: &[SortSpec]) -> Result<()> {
+fn sort_rows(rows: &mut [{{pascal}}Item], sort: &[SortSpec]) -> Result<()> {
     for spec in sort.iter().rev() {
         if !SORTABLE_FIELDS.contains(&spec.field.as_str()) {
             return Err(anyhow!("sort field {} is not sortable", spec.field));
@@ -559,12 +598,12 @@ fn sort_rows(rows: &mut [<<pascal>>Item], sort: &[SortSpec]) -> Result<()> {
 }
 
 /// 所有过滤条件都命中才算通过。
-fn matches_filters(item: &<<pascal>>Item, filters: &[FilterSpec]) -> bool {
+fn matches_filters(item: &{{pascal}}Item, filters: &[FilterSpec]) -> bool {
     filters.iter().all(|filter| matches_filter(item, filter))
 }
 
 /// 单个过滤条件；白名单外的字段被忽略。
-fn matches_filter(item: &<<pascal>>Item, filter: &FilterSpec) -> bool {
+fn matches_filter(item: &{{pascal}}Item, filter: &FilterSpec) -> bool {
     if !FILTERABLE_FIELDS.contains(&filter.field.as_str()) {
         return true;
     }
@@ -593,7 +632,7 @@ fn in_range(value: &str, values: &[String]) -> bool {
 }
 "#;
 
-const SERVICE_RS: &str = r#"//! <<name>> 模块的业务服务层。
+const SERVICE_RS: &str = r#"//! {{name}} 模块的业务服务层。
 //!
 //! 约定：业务模块里**只有** service 层可以调用 Repository；
 //! 租户过滤由 Repository 按 `ctx` 完成，service 不再自己拼 `tenant_id` 条件。
@@ -602,7 +641,7 @@ use anyhow::{Result, anyhow};
 use platform_core::context::RequestContext;
 use platform_core::extension::repository::{List, ListQuery, Repository};
 
-use crate::entity::<<pascal>>Item;
+use crate::entity::{{pascal}}Item;
 use crate::repository::InMemoryRepository;
 
 /// 列出当前租户的记录。
@@ -610,7 +649,7 @@ pub async fn list_items(
     repo: &InMemoryRepository,
     ctx: &RequestContext,
     query: &ListQuery,
-) -> Result<List<<<pascal>>Item>> {
+) -> Result<List<{{pascal}}Item>> {
     repo.list(ctx, query).await
 }
 
@@ -620,9 +659,9 @@ pub async fn create_item(
     ctx: &RequestContext,
     id: &str,
     title: &str,
-) -> Result<<pascal>>Item> {
+) -> Result<{{pascal}}Item> {
     let tenant = tenant_of(ctx)?;
-    let item = <<pascal>>Item {
+    let item = {{pascal}}Item {
         id: id.to_string(),
         tenant_id: tenant.to_string(),
         title: title.to_string(),
@@ -637,9 +676,9 @@ pub async fn rename_item(
     ctx: &RequestContext,
     id: &str,
     title: &str,
-) -> Result<<pascal>>Item> {
+) -> Result<{{pascal}}Item> {
     let tenant = tenant_of(ctx)?;
-    let item = <<pascal>>Item {
+    let item = {{pascal}}Item {
         id: id.to_string(),
         tenant_id: tenant.to_string(),
         title: title.to_string(),
@@ -661,14 +700,14 @@ fn tenant_of(ctx: &RequestContext) -> Result<&str> {
 "#;
 
 const FRONTEND_ROUTES_TS: &str = r#"/**
- * <<name>> 模块前端路由表。
+ * {{name}} 模块前端路由表。
  *
  * 路由路径遵守 `api-conventions v1` C2：全小写连字符分隔，动作放路径末段。
  * 每个路由绑定一个权限点（`api-conventions v1` C4），前端 `can()` 与后端鉴权读同一份注册表。
  */
 
 /** 一条模块路由。 */
-export interface <<pascal>>Route {
+export interface {{pascal}}Route {
   /** 路由路径。 */
   path: string;
   /** 菜单标题。 */
@@ -677,26 +716,26 @@ export interface <<pascal>>Route {
   permission: string;
 }
 
-/** <<name>> 模块的全部路由。 */
-export const <<lib_name>>Routes: <<pascal>>Route[] = [
-  { path: '/<<name>>', label: '<<name>>', permission: '<<perm_prefix>>:item:read' },
+/** {{name}} 模块的全部路由。 */
+export const {{lib_name}}Routes: {{pascal}}Route[] = [
+  { path: '/{{name}}', label: '{{name}}', permission: '{{perm_prefix}}:item:read' },
 ];
 
 /** 按路径查找路由。 */
-export function findRoute(path: string): <<pascal>>Route | undefined {
-  return <<lib_name>>Routes.find((route) => route.path === path);
+export function findRoute(path: string): {{pascal}}Route | undefined {
+  return {{lib_name}}Routes.find((route) => route.path === path);
 }
 "#;
 
 const FRONTEND_PAGE_SVELTE: &str = r#"<script lang="ts">
-  import { <<lib_name>>Routes } from '../routes';
+  import { {{lib_name}}Routes } from '../routes';
 
-  const routes = <<lib_name>>Routes;
+  const routes = {{lib_name}}Routes;
 </script>
 
-<section class="<<lib_name>>-module">
-  <h1><<name>> 模块</h1>
-  <p>这是 <<name>> 模块的最小前端页面，作为二次开发的起点。</p>
+<section class="{{lib_name}}-module">
+  <h1>{{name}} 模块</h1>
+  <p>这是 {{name}} 模块的最小前端页面，作为二次开发的起点。</p>
   <ul>
     {#each routes as route (route.path)}
       <li>
@@ -709,9 +748,9 @@ const FRONTEND_PAGE_SVELTE: &str = r#"<script lang="ts">
 </section>
 "#;
 
-const MIGRATIONS_README: &str = r#"# <<name>> 模块数据库迁移
+const MIGRATIONS_README: &str = r#"# {{name}} 模块数据库迁移
 
-<<name>> 模块用**内存存储**实现 `Repository`，没有真实数据表，因此本目录暂时没有迁移文件。
+{{name}} 模块用**内存存储**实现 `Repository`，没有真实数据表，因此本目录暂时没有迁移文件。
 
 本目录不能为空 —— `cargo xtask check-modules` 会校验 `backend/`、`frontend/`、`migrations/` 三个目录非空。
 
@@ -719,12 +758,12 @@ REQ-006 / REQ-007 的平台数据访问层落地后，业务模块的迁移文�
 命名与平台的迁移目录保持一致；届时本说明文件可以删除。
 "#;
 
-const CONTRACTS_RS: &str = r#"//! <<name>> 模块契约测试：C-1 ~ C-4 由 `#[platform_module_contract]` 宏自动生成。
+const CONTRACTS_RS: &str = r#"//! {{name}} 模块契约测试：C-1 ~ C-4 由 `#[platform_module_contract]` 宏自动生成。
 //!
 //! 跑法：
 //!
 //! ```bash
-//! cargo test -p <<crate_name>> -- --test-threads=2
+//! cargo test -p {{crate_name}} -- --test-threads=2
 //! ```
 //!
 //! C-2 的告警（manifest 声明了代码没用到的权限点）默认被测试框架捕获，
@@ -734,14 +773,14 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use platform_contracts::prelude::*;
-use <<lib_name>>::entity::<<pascal>>Item;
-use <<lib_name>>::repository::InMemoryRepository;
+use {{lib_name}}::entity::{{pascal}}Item;
+use {{lib_name}}::repository::InMemoryRepository;
 
 /// 契约夹具：两个租户、**同名**数据，唯一区别是租户。
-struct <<pascal>>Fixture;
+struct {{pascal}}Fixture;
 
-impl ContractFixture for <<pascal>>Fixture {
-    type Item = <<pascal>>Item;
+impl ContractFixture for {{pascal}}Fixture {
+    type Item = {{pascal}}Item;
     type Id = String;
     type Repository = InMemoryRepository;
 
@@ -753,35 +792,35 @@ impl ContractFixture for <<pascal>>Fixture {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("backend")
     }
 
-    fn seed(&self) -> Result<Vec<Seeded<<<pascal>>Item, String>>> {
+    fn seed(&self) -> Result<Vec<Seeded<{{pascal}}Item, String>>> {
         Ok(vec![
             seeded("tenant-a", "user_a@example.com", "item-1", "同名记录"),
             seeded("tenant-b", "user_b@example.com", "item-2", "同名记录"),
         ])
     }
 
-    fn repository(&self, seeds: Vec<Seeded<<<pascal>>Item, String>>) -> InMemoryRepository {
+    fn repository(&self, seeds: Vec<Seeded<{{pascal}}Item, String>>) -> InMemoryRepository {
         let repo = InMemoryRepository::new();
         repo.load(seeds.into_iter().map(|seed| seed.item));
         repo
     }
 
-    fn tenant_of<'a>(&self, item: &'a <<pascal>>Item) -> &'a str {
+    fn tenant_of<'a>(&self, item: &'a {{pascal}}Item) -> &'a str {
         &item.tenant_id
     }
 
-    fn fingerprint(&self, item: &<<pascal>>Item) -> String {
+    fn fingerprint(&self, item: &{{pascal}}Item) -> String {
         format!("{}|{}|{}", item.id, item.title, item.revision)
     }
 
     fn write_boundary(&self) -> WriteBoundary {
         // 单表存储：每次写操作本身就是一个事务。
-        WriteBoundary::new(["<<lib_name>>_item"], false)
+        WriteBoundary::new(["{{lib_name}}_item"], false)
     }
 
-    fn fresh_item(&self, tenant_id: &str, revision: u32) -> Result<(String, <<pascal>>Item)> {
+    fn fresh_item(&self, tenant_id: &str, revision: u32) -> Result<(String, {{pascal}}Item)> {
         let id = format!("item-{tenant_id}-new");
-        let item = <<pascal>>Item {
+        let item = {{pascal}}Item {
             id: id.clone(),
             tenant_id: tenant_id.to_string(),
             title: format!("写操作测试 {revision}"),
@@ -797,13 +836,13 @@ fn seeded(
     user_id: &str,
     id: &str,
     title: &str,
-) -> Seeded<<<pascal>>Item, String> {
+) -> Seeded<{{pascal}}Item, String> {
     Seeded {
         tenant_id: tenant_id.to_string(),
         space_id: None,
         user_id: user_id.to_string(),
         id: id.to_string(),
-        item: <<pascal>>Item {
+        item: {{pascal}}Item {
             id: id.to_string(),
             tenant_id: tenant_id.to_string(),
             title: title.to_string(),
@@ -813,42 +852,42 @@ fn seeded(
 }
 
 #[platform_module_contract]
-mod <<lib_name>>_contract {
+mod {{lib_name}}_contract {
     use super::*;
 
     /// 契约被测对象：模块实现 + 夹具。
-    fn contract_subject() -> ContractSubject<<pascal>>Fixture> {
+    fn contract_subject() -> ContractSubject<{{pascal}}Fixture> {
         ContractSubject {
-            module: Box::new(<<lib_name>>::<<pascal>>Module),
-            fixture: <<pascal>>Fixture,
+            module: Box::new({{lib_name}}::{{pascal}}Module),
+            fixture: {{pascal}}Fixture,
         }
     }
 }
 "#;
 
-const AGENTS_MD: &str = r#"# 模块：<<name>>
+const AGENTS_MD: &str = r#"# 模块：{{name}}
 
 ## 领域模型
 
-- `<<pascal>>Item`（`backend/src/entity.rs`）：`id` / `tenant_id` / `title` / `revision`
+- `{{pascal}}Item`（`backend/src/entity.rs`）：`id` / `tenant_id` / `title` / `revision`
   - 一条记录只属于一个租户，租户**只能**从 `ctx` 取
 
 ## 用到的平台扩展点
 
 - `PlatformModule`：模块注册（`id` / `version` / `dependencies` / `setup` / `enabled`），
   实现见 `backend/src/mod.rs`
-- `Repository<<<pascal>>Item>`：数据访问（`find` / `list` / `insert` / `update` / `delete`），
+- `Repository<{{pascal}}Item>`：数据访问（`find` / `list` / `insert` / `update` / `delete`），
   实现见 `backend/src/repository.rs`
 
 ## 本模块权限点
 
-- `<<perm_prefix>>:item:read`：查看记录（`backend/src/permission.rs` 的 `PERMISSION_ITEM_READ`）
-- `<<perm_prefix>>:item:write`：编辑记录（`backend/src/permission.rs` 的 `PERMISSION_ITEM_WRITE`）
+- `{{perm_prefix}}:item:read`：查看记录（`backend/src/permission.rs` 的 `PERMISSION_ITEM_READ`）
+- `{{perm_prefix}}:item:write`：编辑记录（`backend/src/permission.rs` 的 `PERMISSION_ITEM_WRITE`）
 
 ## 如何验证
 
 ```bash
-cargo test -p <<crate_name>> -- --test-threads=2   # 契约测试 C-1 ~ C-4
+cargo test -p {{crate_name}} -- --test-threads=2   # 契约测试 C-1 ~ C-4
 cargo xtask check-modules                           # 目录规范校验
 ```
 
@@ -865,9 +904,9 @@ cargo xtask check-modules                           # 目录规范校验
 5. **主键重复的 `insert` 必须报错**，不得覆盖既有数据（一次写操作全有或全无，C-4 会核对）。
 "#;
 
-const README_MD: &str = r#"# <<name>> 模块（<<crate_name>>）
+const README_MD: &str = r#"# {{name}} 模块（{{crate_name}}）
 
-业务模块 <<name>>。由 `cargo xtask create-module <<name>>` 生成，开箱即通过
+业务模块 {{name}}。由 `cargo xtask create-module {{name}}` 生成，开箱即通过
 `cargo xtask check-modules` 与契约检查 C-1 ~ C-4。
 
 ## 能力
@@ -875,7 +914,7 @@ const README_MD: &str = r#"# <<name>> 模块（<<crate_name>>）
 | 扩展点 | 实现位置 | 说明 |
 |--------|----------|------|
 | `PlatformModule` | `backend/src/mod.rs` | 模块注册与编译期登记 |
-| `Repository<<<pascal>>Item>` | `backend/src/repository.rs` | 内存存储；严格按 `ctx` 里的租户过滤 |
+| `Repository<{{pascal}}Item>` | `backend/src/repository.rs` | 内存存储；严格按 `ctx` 里的租户过滤 |
 
 ## 依赖
 
@@ -897,7 +936,7 @@ platform-contracts = { path = "../../crates/platform-contracts" }   # 契约测�
 ## 契约测试
 
 ```bash
-cargo test -p <<crate_name>> -- --test-threads=2
+cargo test -p {{crate_name}} -- --test-threads=2
 ```
 
 | 检查 | 判定 |
@@ -909,7 +948,7 @@ cargo test -p <<crate_name>> -- --test-threads=2
 
 ## 下一步
 
-1. 把 `<<pascal>>Item` 换成真实业务实体（字段、校验规则）。
+1. 把 `{{pascal}}Item` 换成真实业务实体（字段、校验规则）。
 2. 在 `manifest.json` 里补齐本模块的权限点与菜单。
 3. 实现前端页面（`frontend/pages/`），优先用 `@base/ui` 与 `@base/schema`，别自己写表格。
 4. 跑 `cargo xtask capabilities` 让能力索引包含本模块。
@@ -952,7 +991,10 @@ mod tests {
 
     #[test]
     fn placeholders_are_replaced_without_touching_rust_format_braces() {
-        let rendered = render("id = <<name>>; title = format!(\"{}\", x);", &[("name", "demo")]);
+        let rendered = render(
+            "id = {{name}}; title = format!(\"{}\", x);",
+            &[("name", "demo")],
+        );
         assert_eq!(rendered, "id = demo; title = format!(\"{}\", x);");
     }
 

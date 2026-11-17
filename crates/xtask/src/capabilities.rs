@@ -58,7 +58,10 @@ pub fn generate(root: &Path) -> Result<GeneratedFiles> {
         "schema/manifest.schema.json".into(),
         manifest_schema_json()?,
     );
-    files.insert("schema/metadata.schema.json".into(), metadata_schema_json(root)?);
+    files.insert(
+        "schema/metadata.schema.json".into(),
+        metadata_schema_json(root)?,
+    );
     for (name, content) in sdk_files(root)? {
         files.insert(name, content);
     }
@@ -155,7 +158,8 @@ pub fn write_files(root: &Path, files: &GeneratedFiles) -> Result<()> {
             std::fs::create_dir_all(parent)
                 .with_context(|| format!("cannot create {}", parent.display()))?;
         }
-        std::fs::write(&path, content).with_context(|| format!("cannot write {}", path.display()))?;
+        std::fs::write(&path, content)
+            .with_context(|| format!("cannot write {}", path.display()))?;
     }
     Ok(())
 }
@@ -174,15 +178,16 @@ fn permissions_json(root: &Path) -> Result<String> {
         }
         let raw = std::fs::read_to_string(&manifest_path)
             .with_context(|| format!("cannot read {}", manifest_path.display()))?;
-        let manifest = platform_core::extension::manifest::Manifest::parse_checked(&raw)
-            .map_err(|issues| {
+        let manifest = platform_core::extension::manifest::Manifest::parse_checked(&raw).map_err(
+            |issues| {
                 let detail = issues
                     .iter()
                     .map(|issue| format!("{}: {}", issue.field(), issue.reason()))
                     .collect::<Vec<_>>()
                     .join("; ");
                 anyhow::anyhow!("{} 不符合 Schema：{detail}", manifest_path.display())
-            })?;
+            },
+        )?;
 
         let permissions: Vec<Value> = manifest
             .permissions
@@ -264,10 +269,9 @@ fn member_value(member: &rustscan::MemberDecl) -> Value {
 /// `.prettierignore` 里，不参与 prettier 校验。
 /// 内容与常量**完全一致**（平台核心的测试按解析后的 JSON 比对）。
 fn manifest_schema_json() -> Result<String> {
-    let constant: Value = serde_json::from_str(
-        platform_core::extension::manifest_schema::MANIFEST_JSON_SCHEMA,
-    )
-    .context("平台内置的 manifest Schema 不是合法 JSON")?;
+    let constant: Value =
+        serde_json::from_str(platform_core::extension::manifest_schema::MANIFEST_JSON_SCHEMA)
+            .context("平台内置的 manifest Schema 不是合法 JSON")?;
     Ok(to_json(&constant))
 }
 
@@ -324,8 +328,8 @@ fn sdk_files(root: &Path) -> Result<Vec<(String, String)>> {
         }
         let raw = std::fs::read_to_string(&manifest_path)
             .with_context(|| format!("cannot read {}", manifest_path.display()))?;
-        let manifest: Value =
-            serde_json::from_str(&raw).with_context(|| format!("{} 不是合法 JSON", manifest_path.display()))?;
+        let manifest: Value = serde_json::from_str(&raw)
+            .with_context(|| format!("{} 不是合法 JSON", manifest_path.display()))?;
         let package_name = manifest["name"]
             .as_str()
             .with_context(|| format!("{} 缺少 name 字段", manifest_path.display()))?
@@ -528,7 +532,10 @@ fn ts_exports(source: &str) -> Vec<Value> {
                 in_block = false;
                 continue;
             }
-            let content = trimmed.trim_start_matches('*').trim_end_matches("*/").trim();
+            let content = trimmed
+                .trim_start_matches('*')
+                .trim_end_matches("*/")
+                .trim();
             if !content.is_empty() {
                 doc.push(content.to_string());
             }
@@ -656,13 +663,34 @@ mod tests {
 
     #[test]
     fn export_head_recognises_every_kind() {
-        assert_eq!(export_head("export function foo() {"), Some(("function", "foo".into())));
-        assert_eq!(export_head("export async function foo() {"), Some(("function", "foo".into())));
-        assert_eq!(export_head("export interface Foo {"), Some(("interface", "Foo".into())));
-        assert_eq!(export_head("export type Foo = string;"), Some(("type", "Foo".into())));
-        assert_eq!(export_head("export const FOO = 1;"), Some(("const", "FOO".into())));
-        assert_eq!(export_head("export class Foo {"), Some(("class", "Foo".into())));
-        assert_eq!(export_head("export enum Foo {"), Some(("enum", "Foo".into())));
+        assert_eq!(
+            export_head("export function foo() {"),
+            Some(("function", "foo".into()))
+        );
+        assert_eq!(
+            export_head("export async function foo() {"),
+            Some(("function", "foo".into()))
+        );
+        assert_eq!(
+            export_head("export interface Foo {"),
+            Some(("interface", "Foo".into()))
+        );
+        assert_eq!(
+            export_head("export type Foo = string;"),
+            Some(("type", "Foo".into()))
+        );
+        assert_eq!(
+            export_head("export const FOO = 1;"),
+            Some(("const", "FOO".into()))
+        );
+        assert_eq!(
+            export_head("export class Foo {"),
+            Some(("class", "Foo".into()))
+        );
+        assert_eq!(
+            export_head("export enum Foo {"),
+            Some(("enum", "Foo".into()))
+        );
         assert_eq!(export_head("const foo = 1;"), None);
     }
 
@@ -680,10 +708,9 @@ mod tests {
     fn manifest_schema_matches_the_platform_constant() {
         let generated = manifest_schema_json().expect("Schema 应能生成");
         let parsed: Value = serde_json::from_str(&generated).expect("Schema 必须是合法 JSON");
-        let constant: Value = serde_json::from_str(
-            platform_core::extension::manifest_schema::MANIFEST_JSON_SCHEMA,
-        )
-        .expect("内置 Schema 必须是合法 JSON");
+        let constant: Value =
+            serde_json::from_str(platform_core::extension::manifest_schema::MANIFEST_JSON_SCHEMA)
+                .expect("内置 Schema 必须是合法 JSON");
         assert_eq!(parsed, constant);
     }
 }

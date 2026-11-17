@@ -206,7 +206,11 @@ mod tests {
                 if !trimmed.starts_with("| `") {
                     return None;
                 }
-                let cells: Vec<&str> = trimmed.trim_matches('|').split('|').map(str::trim).collect();
+                let cells: Vec<&str> = trimmed
+                    .trim_matches('|')
+                    .split('|')
+                    .map(str::trim)
+                    .collect();
                 let key = cells.first()?.trim_matches('`');
                 let summary = cells.get(1)?;
                 Some((key.to_string(), summary.to_string()))
