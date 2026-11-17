@@ -1,14 +1,14 @@
 # 验证报告
 
 - **需求**: REQ-002 平台骨架与工程基线
-- **阶段**: Pre-merge（第 2 轮 —— QA 退回修复后重自验）
+- **阶段**: Pre-merge（第 3 轮 —— QA 复核轮 2 个低级问题微修后重自验）
 - **验证者**: myg133-dev-1（Dev Agent，自验）
-- **分支 / commit**: feature/REQ-002 @ `6968882`（本轮修复 4 个 commit：`a639df4` 链接器文档 / `3c891fe` 集成脚本 / `2040f86` 清依赖 / `6968882` CI；下面第 5 个 commit 只更新本报告与追溯矩阵）
-- **结论**: PASS（AC 7 条全部 PASS；上一轮 3 个中等 + 5 个低级问题已全部处理）
+- **分支 / commit**: feature/REQ-002 @ `cbb877c`（本轮之前的 5 个 commit：`a639df4` 链接器文档 / `3c891fe` 集成脚本 / `2040f86` 清依赖 / `6968882` CI / `cbb877c` 同步报告；本轮第 6 个 commit 为 2 个微修 + 报告同步）
+- **结论**: PASS（AC 7 条全部 PASS；QA 复核轮的 2 个低级问题已修完并复验）
 
-> 本轮为 **退回修复轮**，范围严格限定在 QA 报告（`feature-meta/qa-report.md`）列出的 8 条问题，
-> 不扩大 scope。AC-S-008 的验收范围已由 BA 收窄为「前端链路不依赖 Rust 后端常驻」，
-> 本轮据���验的 E2E 1/1 + Rust 进程采样 0 仍然成立，无需补做 MSW 与列表页。
+> 本轮为 **复核轮微修**，范围严格限定在 `feature-meta/qa-report-recheck.md` 列出的 2 个低级问题
+> （#1 链接器内存表口径不可复现 / #2 测试库重置闸门是黑名单），不扩大 scope、不改其它任何逻辑。
+> AC-S-008 的验收范围仍按 BA 收窄后的口径（「前端链路不依赖 Rust 后端常驻」），E2E 1/1 复跑仍然成立。
 
 ## 追溯
 
@@ -20,7 +20,7 @@
 | AC-S-007 | 同上 | 增量实测 | PASS |
 | AC-S-008 | `apps/shell/`、`packages/*`、`playwright.config.ts` | vitest 23 个 + Playwright 1 个（无 Rust 进程） | PASS（按 BA 收窄后的口径） |
 | AC-S-009 | `compose.yaml`、`deploy/seed/00-init.sql` | **本轮实跑**：rootless、双库连通、mem_limit、端口绑定、内存合计、**全新卷首启种子路径** | **PASS**（上一轮记为「部分验证」是误判，本轮已实跑补齐） |
-| AC-S-010 | `scripts/test-integration.sh` | **本轮实跑**：脚本含**测试库重置** + 容器数量比对；4 条分支路径逐条实跑 | **PASS**（上一轮的「未实现重置」已补） |
+| AC-S-010 | `scripts/test-integration.sh` | **本轮实跑**：脚本含**测试库重置**（**白名单闸门**：只有库名恰好 `base_test` 才允许重置，其它库名拒绝并 exit 2）+ 容器数量比对；6 条分支路径逐条实跑 | **PASS**（上一轮的「未实现重置」已补） |
 
 完整逐条对照见 `feature-meta/traceability.md`。
 
@@ -91,16 +91,55 @@ exit=101
 → 修复前该断言在 `set -e` 下**永远不会执行**（`cargo test` 一失败整段就退出）。
 → 验证用的临时用例与临时容器均已删除（`git status --short` 干净，容器只剩 `base-postgres` / `base-redis`）。
 
-### 测试库重置的 4 条分支路径（逐条实跑）
+### 测试库重置的白名单闸门（复核轮问题 #2，本轮实测）
+
+闸门已从**黑名单**（`case … *base_dev*`）改为**白名单**：从连接串里解析出库名，
+**只有库名恰好是 `base_test`** 才允许执行重置；其它任何库名一律**明确报错并非 0 退出**，
+不静默跳过（静默跳过会让「以为重置了其实没重置」的用例互相污染）。
+
+```text
+$ DATABASE_URL_TEST=postgres://base:base@127.0.0.1:5432/base_test ./scripts/test-integration.sh
+重置测试库：postgres://base:base@127.0.0.1:5432/base_test（库 base_test）
+DROP SCHEMA
+CREATE SCHEMA
+CREATE TABLE
+... cargo test --workspace --tests -- --test-threads=2 ... 24/24 通过 ...
+容器数量比对通过：2 → 2（未新建容器）
+exit=0
+# 核对：埋的标记表 reset_probe_marker 被清掉，基线表 platform_seed_log 被重建（3 列齐全）
+
+$ DATABASE_URL_TEST=postgres://base:base@127.0.0.1:5432/base_dev ./scripts/test-integration.sh
+错误：DATABASE_URL_TEST 指向开发库 base_dev，拒绝重置开发库（postgres://base:base@127.0.0.1:5432/base_dev）
+  安全闸为白名单：只有库名恰好是 base_test 才允许重置；请改 DATABASE_URL_TEST 或手动清库
+exit=2
+# 核对：base_dev 的 dev_probe_marker 与 platform_seed_log 原样保留（一条 SQL 都没执行）
+
+$ DATABASE_URL_TEST=postgres://base:base@127.0.0.1:5432/base_probe ./scripts/test-integration.sh
+错误：DATABASE_URL_TEST 指向的库 'base_probe' 不是测试库 base_test，拒绝重置（postgres://base:base@127.0.0.1:5432/base_probe）
+  安全闸为白名单：只有库名恰好是 base_test 才允许重置；请改 DATABASE_URL_TEST 或手动清库
+exit=2
+# 核对：base_probe 的 probe_marker 原样保留（public schema 未被重建）
+
+$ DATABASE_URL_TEST=postgres://base:base@127.0.0.1:5432/postgres ./scripts/test-integration.sh
+错误：DATABASE_URL_TEST 指向的库 'postgres' 不是测试库 base_test，拒绝重置（postgres://base:base@127.0.0.1:5432/postgres）
+exit=2
+```
 
 | 场景 | 实际输出 | exit |
 |------|----------|------|
 | 正常（DB 在跑） | `重置测试库：…（库 base_test）` → `DROP SCHEMA` / `CREATE SCHEMA` / `CREATE TABLE` | 0 |
-| `DATABASE_URL_TEST` 指向 `base_dev` | `错误：DATABASE_URL_TEST 指向 base_dev，拒绝重置开发库（…）` | **2**（硬拒绝，不执行任何 SQL） |
+| `DATABASE_URL_TEST` 指向 `base_dev` | `错误：DATABASE_URL_TEST 指向开发库 base_dev，拒绝重置开发库（…）` | **2**（硬拒绝，不执行任何 SQL） |
+| `DATABASE_URL_TEST` 指向 `base_probe`（临时库，**库确实存在**） | `错误：DATABASE_URL_TEST 指向的库 'base_probe' 不是测试库 base_test，拒绝重置（…）` | **2**（硬拒绝，不执行任何 SQL） |
+| `DATABASE_URL_TEST` 指向 `postgres`（维护库） | `错误：DATABASE_URL_TEST 指向的库 'postgres' 不是测试库 base_test，拒绝重置（…）` | **2**（硬拒绝，不执行任何 SQL） |
 | `DATABASE_URL_TEST` 指向非本机（如 `db.example.com`） | `跳过测试库重置：主机未安装 psql，且 DATABASE_URL_TEST 不指向本机 127.0.0.1:5432` + `需要集成测试时先执行 'bun run db:up'，或安装 psql 客户端` | 继续跑测试 |
 | 数据库容器未运行 | `跳过测试库重置：主机未安装 psql，且数据库容器未运行` + `本地开发不常开数据库；需要集成测试时先执行 'bun run db:up'` | 继续跑测试 |
 
-→ 跳过路径**不是静默失败**：有明确提示，且后续测试照常执行、退出码仍反映测试结果。
+→ 白名单拒绝路径**不是静默跳过**：明确报错 + `exit 2`，且 `cargo test` **不执行**（无 `test result:` 输出），
+被拒库的 schema 与数据逐字节未变。
+→ 剩余的「跳过」路径是**环境不可用**（DB 没起 / 连接串非本机），不是闸门放行问题：有明确提示，
+后续测试照常执行、退出码仍反映测试结果。
+→ 临时库 `base_probe` 与临时标记表 `dev_probe_marker` / `reset_probe_marker` 验完已清理，
+`pg_database` 回到 `base_dev / base_test / postgres / template0 / template1`。
 
 ### 链接器复核（本轮第一手实测，纠正上一轮的记账错误）
 
@@ -129,14 +168,24 @@ warning: linker stderr: ... /usr/bin/ld.bfd -plugin ... -m elf_x86_64 ... -o ...
 warning: linker stdout: GNU ld (GNU Binutils) 2.47
 ```
 
-链接器进程峰值 RSS（对 `platform-core` 真实二进制采样 `/proc/<pid>/status` 的 `VmRSS` 取峰值）：
+链接器进程峰值内存 —— **口径：内核 `VmHWM` 高水位 + `wait4` 的 `ru_maxrss` 双仪器互证**（无采样缺口），
+负载是 `platform-core` 真实仓库二进制（cargo 自己生成的 rustc 命令行原样重放）：
 
-| 模式 | 链接器 | 峰值 RSS |
+| 模式 | 链接器 | 峰值内存 |
 |------|--------|---------|
-| **默认（仓库现状）** | LLD 22.1.8 | **16.1 MB** |
-| 强制 `-C link-arg=-fuse-ld=bfd` | GNU ld 2.47 | **134.0 MB**（约 8 倍） |
+| **默认（仓库现状）** | LLD 22.1.8 | **132.0 MB**（`VmHWM` 135144 KB / `ru_maxrss` 130.9 MB） |
+| 强制 `-C link-arg=-fuse-ld=bfd` | GNU ld 2.47 | **135.5 MB**（`VmHWM` 138772 KB / `ru_maxrss` 135.5 MB） |
 
-> 结论：**默认就是最优解（LLD）**。显式配置 `linker = "rust-lld"` / `link-self-contained` 反而会坏事
+两者只差 **2.6%**。另注：rustup 自带的 `ld.lld` 动态链接 `libLLVM`，空载地板就有 **32.8 MB**
+（`ld.lld --version` 的 `ru_maxrss`；`ld.bfd` 空载仅 7.6 MB）。
+
+> ⚠️ 上一版写的「LLD 16.1 MB / bfd 134.0 MB（约 8 倍）」**已作废**：那是用**瞬时 `VmRSS` 采样**
+> （会漏掉峰值）配**合成探针 crate** 得出的 —— `16.1 MB` 甚至低于 `ld.lld` 的空载地板，物理上不可能。
+> 现表是 QA 复核轮（`feature-meta/qa-report-recheck.md` 问题 #1）在真实仓库二进制上的无采样缺口口径实测值。
+
+> 结论：**默认就是最优解（LLD）** —— 但理由是「它是 stable rustc 1.98 的默认行为，无需任何配置」，
+> **不是**「省内存」（实测内存差异只有 2.6%）。
+> 显式配置 `linker = "rust-lld"` / `link-self-contained` 反而会坏事
 > （直连 rust-lld 绕过 gcc 驱动，lld 按自身路径推导 sysroot，在 Arch 上找不到系统库 `-lc` / `-lgcc_s`，链接必然失败）。
 > 本轮**没有**新增任何 linker 键，`.cargo/config.toml` 仍只有 `jobs = 3` + `[alias] xtask` + 一段注释。
 
@@ -212,18 +261,25 @@ $ du -sh target/
 
 | # | 原级别 | 描述 | 处理 |
 |---|--------|------|------|
-| ~~1~~ | 中（偏离） | ~~链接器未按 BA 指南用 `rust-lld`~~ | **撤除**：该偏离不存在。rustc 1.98 的 `x86_64-unknown-linux-gnu` target spec 默认 `linker-flavor = gnu-lld-cc`，默认构建实测链接器为 `LLD 22.1.8`（峰值 16.1 MB），强制 `-fuse-ld=bfd` 才变成 `GNU ld 2.47`（峰值 134.0 MB）。已改写 `docs/dev-environment.md` §2.1 并简化 `.cargo/config.toml` 注释；**未新增任何 linker 键**（加了反而会让链接失败） |
+| ~~1~~ | 中（偏离） | ~~链接器未按 BA 指南用 `rust-lld`~~ | **撤除**：该偏离不存在。rustc 1.98 的 `x86_64-unknown-linux-gnu` target spec 默认 `linker-flavor = gnu-lld-cc`，默认构建实测链接器为 `LLD 22.1.8`（峰值 132.0 MB），强制 `-fuse-ld=bfd` 才变成 `GNU ld 2.47`（峰值 135.5 MB）。已改写 `docs/dev-environment.md` §2.1 并简化 `.cargo/config.toml` 注释；**未新增任何 linker 键**（加了反而会让链接失败） |
 
 ### 本轮已修
 
 | # | 原级别 | 描述 | 处理 | 验证 |
 |---|--------|------|------|------|
-| 2 | 中 | AC-S-010「测试库被重置而非新建」未实现 | `scripts/test-integration.sh` 增加 `reset_test_db()`：`DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;` + 用 `deploy/seed/00-init.sql` 重建基线表。**只作用于 `DATABASE_URL_TEST`**，带 `base_dev` 硬拒绝闸；DB 没起时给清晰提示并跳过 | 重置边界实测（`base_test` 清空 / `base_dev` 原样）+ 4 条分支路径逐条实跑 |
+| 2 | 中 | AC-S-010「测试库被重置而非新建」未实现 | `scripts/test-integration.sh` 增加 `reset_test_db()`：`DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;` + 用 `deploy/seed/00-init.sql` 重建基线表。**白名单闸门**：只有库名恰好是 `base_test` 才允许重置，其它库名一律拒绝并非 0 退出；DB 没起时给清晰提示并跳过 | 重置边界实测（`base_test` 清空 / `base_dev` 原样）+ 6 条分支路径逐条实跑（含 3 条白名单拒绝路径） |
 | 3 | 中 | `set -e` 导致容器数量断言不可达 | 改为 `status=0; cargo test … \|\| status=$?`，比对照常执行，最后 `exit "$status"` | 场景 A/B 实测：测试失败时比对都执行了，exit=101 |
 | 5 | 低 | 未使用依赖 2 处 | `crates/platform-contracts/Cargo.toml` 去掉 `platform-core`；`apps/shell/package.json` 去掉 `@base/auth` `@base/hooks` `@base/schema` `@base/theme` | `cargo check` 通过（`Cargo.lock` 同步）；`pnpm install --frozen-lockfile` + `pnpm -r build` + `pnpm -r check` 通过（vite alias 直指 `packages/*/src/index.ts`，不依赖 node_modules 链接） |
 | 6 | 低 | CI 未运行 E2E | `ci.yml` 新增 `e2e` job：`pnpm exec playwright install --with-deps chromium` + `bun run test:e2e`（配 `oven-sh/setup-bun@v2` 1.4.4） | YAML 解析通过（6 个 job）；**未实际执行**（仓库无 remote，见「未验证」） |
 | 7 | 低 | CI `dependency-audit` 的 `token:` 入参无效 | 删除该入参（`rustsec/audit-check@v2` 认的是 `RUSTEC_AUDIT_TOKEN` 环境变量） | YAML 解析通过；**未实际执行**（同上） |
 | 8 | 低 | 「AC-S-009 全新卷首启未实跑」与事实不符 | 改为已验证，并补上本轮第一手证据（容器标签 `com.docker.compose.project.config_files=compose.yaml` / 卷挂载 / 种子时间戳比容器启动晚 2 秒） | 见「容器与种子数据」小节 |
+
+### 复核轮（`feature-meta/qa-report-recheck.md`）已修
+
+| # | 级别 | 描述 | 处理 | 验证 |
+|---|--------|------|------|------|
+| R1 | 低 | 链接器内存对比表**口径不可复现且方向与实测相反**（文档写「LLD 16.1 MB / bfd 134.0 MB，约 8 倍」；`16.1 MB` 低于 `ld.lld` 的空载地板 32.8 MB，物理上不可能） | 换成复核轮**无采样缺口口径**实测值：LLD **132.0 MB** / bfd **135.5 MB** / 差 **2.6%**，并写明测量方法（内核 `VmHWM` 高水位 + `wait4 ru_maxrss` 双仪器互证，负载为真实仓库二进制）。作废「省 8 倍」说法；**结论保留**「默认即 LLD、显式配置反而会把链接搞坏」，但理由改为「是 stable rustc 1.98 的默认行为、无需任何配置」 | `docs/dev-environment.md` §2.1 + 本报告「链接器复核」小节 + 问题台账 #1 同步更新（数字口径一致） |
+| R2 | 低 | 测试库重置闸门是**黑名单**（`case … *base_dev*`），漏掉其它任何库（实测 `base_probe` 照样被重置） | 改为**白名单**：从连接串解析库名，只有库名**恰好是 `base_test`** 才允许重置；其它库名（含 `base_dev` / `postgres` / 任意其它库）一律**明确报错并 `exit 2`**，不静默跳过；解析不出库名同样拒绝 | 4 条路径实测：`base_test` 正常重置（exit 0，标记表被清、基线表重建）/ `base_dev` 拒绝（exit 2）/ `base_probe` 拒绝（exit 2）/ `postgres` 拒绝（exit 2）；被拒库的 schema 与数据逐字节未变，`cargo test` 未执行 |
 
 ### 保留的说明性记录（非问题）
 
@@ -255,16 +311,21 @@ $ du -sh target/
 6. `@playwright/test` 固定为 `1.58.0`（而非最新 1.65.1）—— 本机 Playwright CDN 下载 1255 卡住，1.58.0 对应的 chromium 1208 本机已有。
 7. `deploy/seed/00-init.sql` 的建库语句改为条件建库（`SELECT ... \gexec`），因为 `CREATE DATABASE` 不支持 `IF NOT EXISTS`。
 8. `scripts/test-integration.sh` 的重置在清空 schema 后，会用 `deploy/seed/00-init.sql` 的 DDL（过滤掉 `\connect`）重建基线表 —— 否则重置后 `base_test` 会丢失 `platform_seed_log`，`bun run seed` 随即失效。
+9. `scripts/test-integration.sh` 的重置闸门是**白名单**（只有库名恰好 `base_test` 才允许重置，其它库名明确报错并 exit 2）—— 需求只要求「不碰 base_dev」，白名单是收得更紧的实现选择，目的是防误配清空别的库。
 
 ## 提交记录
 
 ```text
+cbb877c [Dev] 同步验证报告与追溯矩阵 (关联: REQ-002)
 6968882 [Dev] CI 补 E2E job 并清理无效 token 入参 (关联: REQ-002)
 2040f86 [Dev] 清理未使用依赖 (关联: REQ-002)
 3c891fe [Dev] 集成测试脚本补测试库重置与可达的容器断言 (关联: REQ-002)
 a639df4 [Dev] 修正链接器文档表述 (关联: REQ-002)
 c532718 [Dev] 更新验证报告的最终实测数据 (关联: REQ-002)
 ```
+
+本轮改动规模（相对 `cbb877c`）：**7 文件 / +259 -50 行**（含本报告、追溯矩阵、`CHANGELOG.md`，以及 QA 复核报告归档）。
+累计规模（相对 `develop`）：88 文件 / +7445 -1 行。
 
 本轮改动规模（相对 QA 复核的 `c532718`）：**8 文件 / +217 -50 行**（另加本报告与追溯矩阵、`CHANGELOG.md`）。
 累计规模（相对 `develop`）：88 文件 / +7445 -1 行。

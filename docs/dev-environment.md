@@ -123,12 +123,24 @@ warning: linker stdout: GNU ld (GNU Binutils) 2.47
 
 **结论：仓库里一个 linker 键都不写，默认就已经在用 LLD。**
 
-链接器进程峰值 RSS（对 `platform-core` 真实二进制采样 `/proc/<pid>/status` 的 `VmRSS` 取峰值）：
+链接器进程峰值内存 —— **口径：内核 `VmHWM` 高水位 + `wait4` 的 `ru_maxrss` 双仪器互证**（无采样缺口），
+负载是 `platform-core` 真实仓库二进制（cargo 自己生成的 rustc 命令行原样重放）：
 
-| 模式 | 链接器 | 峰值 RSS |
+| 模式 | 链接器 | 峰值内存 |
 |------|--------|---------|
-| **默认（仓库现状）** | LLD 22.1.8 | **16.1 MB** |
-| 强制 `-C link-arg=-fuse-ld=bfd` | GNU ld 2.47 | **134.0 MB**（约 8 倍） |
+| **默认（仓库现状）** | LLD 22.1.8 | **132.0 MB**（`VmHWM` 135144 KB / `ru_maxrss` 130.9 MB） |
+| 强制 `-C link-arg=-fuse-ld=bfd` | GNU ld 2.47 | **135.5 MB**（`VmHWM` 138772 KB / `ru_maxrss` 135.5 MB） |
+
+两者只差 **2.6%**。另注：rustup 自带的 `ld.lld` 动态链接 `libLLVM`，空载地板就有 **32.8 MB**
+（`ld.lld --version` 的 `ru_maxrss`；`ld.bfd` 空载仅 7.6 MB）。
+
+> ⚠️ 上一版写的「LLD 16.1 MB / bfd 134.0 MB（约 8 倍）」**已作废**：那是用**瞬时 `VmRSS` 采样**
+> （会漏掉峰值）配**合成探针 crate** 得出的 —— `16.1 MB` 甚至低于 `ld.lld` 的空载地板，物理上不可能。
+> 现表是复核轮在真实仓库二进制上的无采样缺口口径实测值。
+
+**结论不变，但理由要改**：选 LLD 是因为它是 stable rustc 1.98 的**默认行为**
+（`linker-flavor = gnu-lld-cc`），**不需要任何配置** —— 而**不是**因为省内存，实测内存差异只有 2.6%。
+（AC-S-006 卡的是端到端编译峰值，量级在 1 GB 左右，见 §2.3 与验证报告，与本表的链接器单进程占用不是一回事。）
 
 > ⚠️ **显式配置反而会把链接搞坏**，所以不要加 `linker = "rust-lld"` 或 `link-self-contained`：
 >

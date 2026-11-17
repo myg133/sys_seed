@@ -3,7 +3,7 @@
 #
 # 规则（低配开发基线）：
 #   - 复用同一个 PostgreSQL 实例的独立库 base_test
-#   - 测试前重置 base_test（只重置测试库，绝不碰 base_dev）
+#   - 测试前重置 base_test（白名单闸门：只允许重置 base_test，绝不碰其它库）
 #   - 测试前后容器数量必须不变 —— 无论测试成功还是失败，这条比对都要执行
 set -euo pipefail
 
@@ -11,7 +11,7 @@ cd "$(dirname "$0")/.."
 
 export XDG_RUNTIME_DIR="/run/user/$(id -u)"
 
-# 测试库地址。只允许指向测试库，绝不指向 base_dev（见 reset_test_db 的安全闸）。
+# 测试库地址。白名单闸门：只有库名恰好是 base_test 才允许重置（见 reset_test_db）。
 export DATABASE_URL_TEST="${DATABASE_URL_TEST:-postgres://base:base@127.0.0.1:5432/base_test}"
 export DATABASE_URL="${DATABASE_URL:-$DATABASE_URL_TEST}"
 export SQLX_OFFLINE="${SQLX_OFFLINE:-true}"
@@ -53,26 +53,32 @@ run_test_db_sql() {
 
 # --- 重置测试库 ---------------------------------------------------------------
 # 用途：每轮集成测试从干净 schema 开始，避免用例之间互相污染。
-# 边界：只作用于 DATABASE_URL_TEST（默认 base_test）。脚本任何分支都不会碰 base_dev。
+# 边界：**白名单** —— 只有库名恰好是 base_test 才允许重置；其它任何库名一律拒绝并非 0 退出。
 # 数据库没起时给出清晰提示并跳过 —— 本地开发不常开 DB，不能静默失败。
 reset_test_db() {
-  # 安全闸：万一有人把 DATABASE_URL_TEST 指向开发库，直接拒绝执行
-  case "$DATABASE_URL_TEST" in
-    *base_dev*)
-      echo "错误：DATABASE_URL_TEST 指向 base_dev，拒绝重置开发库（$DATABASE_URL_TEST）" >&2
-      return 2
-      ;;
-  esac
-
   # 从连接串里拆出 authority 与库名（库名去掉 query string）
   local authority host_port db
   authority="$(printf '%s' "$DATABASE_URL_TEST" | sed -E 's#^[^/]*//([^/]*)/.*#\1#')"
   host_port="${authority##*@}"
   db="$(printf '%s' "$DATABASE_URL_TEST" | sed -E 's#^[^/]*//[^/]*/([^?]*).*#\1#')"
 
+  # 安全闸（白名单）：只有库名恰好是 base_test 才允许执行重置。
+  # 其它库名（base_dev / postgres / 别的应用的库…）一律拒绝并非 0 退出 ——
+  # 不能静默跳过，否则「以为重置了其实没重置」会让用例之间互相污染。
+  local allowed_db="base_test"
   if [ -z "$db" ]; then
-    echo "跳过测试库重置：DATABASE_URL_TEST 里解析不出库名（$DATABASE_URL_TEST）" >&2
-    return 0
+    echo "错误：DATABASE_URL_TEST 里解析不出库名，无法确认是测试库 $allowed_db，拒绝重置（$DATABASE_URL_TEST）" >&2
+    echo "  安全闸为白名单：只有库名恰好是 $allowed_db 才允许重置" >&2
+    return 2
+  fi
+  if [ "$db" != "$allowed_db" ]; then
+    if [ "$db" = 'base_dev' ]; then
+      echo "错误：DATABASE_URL_TEST 指向开发库 base_dev，拒绝重置开发库（$DATABASE_URL_TEST）" >&2
+    else
+      echo "错误：DATABASE_URL_TEST 指向的库 '$db' 不是测试库 $allowed_db，拒绝重置（$DATABASE_URL_TEST）" >&2
+    fi
+    echo "  安全闸为白名单：只有库名恰好是 $allowed_db 才允许重置；请改 DATABASE_URL_TEST 或手动清库" >&2
+    return 2
   fi
 
   # 路径 1：主机装了 psql —— 直连，最通用
