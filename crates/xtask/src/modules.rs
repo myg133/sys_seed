@@ -426,7 +426,8 @@ mod tests {
     fn manifest_with_unknown_field_is_reported() {
         let temp = TempDir::new("unknown-field");
         let dir = make_module(temp.path(), "demo");
-        let raw = manifest_json("demo").replace("\"enabled\": true,", "\"enabled\": true, \"bogus\": 1,");
+        let raw =
+            manifest_json("demo").replace("\"enabled\": true,", "\"enabled\": true, \"bogus\": 1,");
         std::fs::write(dir.join("manifest.json"), raw).expect("写入应成功");
 
         let report = check_modules(temp.path());

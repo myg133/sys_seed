@@ -140,7 +140,8 @@ impl DependencyGraph {
     fn reverse_dependencies(&self, platform: &str) -> Vec<String> {
         let mut violations = Vec::new();
         let mut visited: BTreeSet<String> = BTreeSet::new();
-        let mut pending: Vec<(String, Vec<String>)> = vec![(platform.to_string(), vec![platform.to_string()])];
+        let mut pending: Vec<(String, Vec<String>)> =
+            vec![(platform.to_string(), vec![platform.to_string()])];
 
         while let Some((current, chain)) = pending.pop() {
             if !visited.insert(current.clone()) {
@@ -255,11 +256,7 @@ mod tests {
     ///
     /// `members` 每项是 `(工作区成员目录, 包名, [dependencies] 片段)`；
     /// `workspace_dependencies` 写进根 `Cargo.toml` 的 `[workspace.dependencies]`。
-    fn write_workspace(
-        root: &Path,
-        members: &[(&str, &str, &str)],
-        workspace_dependencies: &str,
-    ) {
+    fn write_workspace(root: &Path, members: &[(&str, &str, &str)], workspace_dependencies: &str) {
         let mut workspace_manifest = String::from("[workspace]\nresolver = \"2\"\nmembers = [");
         for (dir, _, _) in members {
             workspace_manifest.push_str(&format!("\"{dir}\", "));
