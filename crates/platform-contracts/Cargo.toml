@@ -1,6 +1,6 @@
 [package]
 name = "platform-contracts"
-description = "扩展点契约测试套件骨架：本期只放框架，具体 trait 由 REQ-003 定义"
+description = "扩展点契约测试套件：C-1 ~ C-4 四项检查 + #[platform_module_contract] 宏"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,3 +9,8 @@ publish.workspace = true
 
 [dependencies]
 thiserror.workspace = true
+anyhow.workspace = true
+platform-core.workspace = true
+platform-contracts-macros.workspace = true
+# 契约检查需要驱动 future；业务模块的测试 crate 不必自己依赖 tokio
+tokio.workspace = true

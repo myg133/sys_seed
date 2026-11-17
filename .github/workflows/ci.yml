@@ -137,6 +137,8 @@ jobs:
         run: cargo xtask check-modules
       - name: 扩展点契约测试
         run: cargo test -p platform-contracts -- --test-threads=2
+      - name: 业务模块契约测试
+        run: cargo test -p sandbox -- --test-threads=2
       - name: 校验 compose 文件
         run: docker compose -f compose.yaml config --quiet
 

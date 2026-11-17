@@ -1,44 +1,268 @@
 # 验证报告 —— 修复复核（Recheck）
 
-- 需求: REQ-002 平台骨架与工程基线
-- 分支: feature/REQ-002 @ `cbb877c31d9a1704822732dffe0f46d61a7bf83c`
-- 首轮报告: `feature-meta/qa-report.md`（@ `c532718`，结论 PASS-WITH-RISK，3 中 + 5 低）
-- 复核范围: 仅 8 个改动点 + 一次回归（首轮已确认成立的 7 条 AC 未重跑）
-- 验证者: QA（轻量复核轮）
-- 结论: **PASS-WITH-RISK**（首轮 3 中 + 5 低全部修复并复验通过；新发现 2 个**低**级问题，均不阻塞合并）
-
-> 纪律说明：本轮为只读验证。除唯一交付物本文件外，未修改任何实现文件。
-> 临时夹具（`crates/platform-core/tests/` 两个失败用例、`.local/qa-linker-probe` 探针 crate、podman 探针容器、`base_probe` 临时库、`base_dev` 标记表）**全部已清理**；
-> 结束时 `git status --short` 为空，`podman ps -a` 仅剩 `base-postgres` / `base-redis`，`pg_database` 仅剩 `base_dev / base_test / postgres / template0 / template1`。
-> 唯一触碰实现文件的是 `crates/platform-core/src/bin/platform-core.rs` 的 **mtime**（用于复现真实链接负载），**内容未改**（`git status` 为空即证）。
+- 需求: REQ-003 扩展点框架与契约测试
+- 分支: feature/REQ-003 @ `fd12156668b5779ca2daab0ab354cabb819386c2`
+- 基线（首轮 QA 所审提交）: `04b57d39dc92ebf336584a91d65e7ed658a7fb58` → 修复后 `fd12156`（7 个小步提交）
+- 首轮报告: `feature-meta/qa-report.md`（结论 PASS-WITH-RISK，中 2 + 低 4 + 提示 2，共 8 条）
+- 复核范围: **5 个改动点 + 一次回归**（首轮已确认成立的 5 个 trait 签名、C-1~C-4 破坏性验证、依赖方向基线、sandbox 模块质量未重跑）
+- 验证者: QA Agent（独立复现；**未采信** Dev 自验报告中的任何数字与结论，全部自己跑）
+- 工具链: rustc/cargo 1.98.1 / pnpm 12.19.0 / bun / node（ECMA-262 正则对照）/ python3（独立正则引擎）
+- 日期: 2026-11-18
+- 结论: **PASS**
+  - 本轮 5 个改动点 **5/5 复验通过**，两条「中」级门禁盲区（首轮 #1 / #2）经独立造违规复现确认已封堵；
+  - 回归全绿（Rust 73/73、前端 23/23、E2E 1/1、clippy 0 告警、fmt 通过、`Cargo.lock` 零新第三方包）；
+  - 残留：**1 条低**（低 5「完全一致」在 2 个 Unicode 空白码位上仍有差异）、**首轮遗留 1 条低**（低 4 C-2 口径，BA 侧待定）、
+    另有 4 条提示（含 Dev 自陈未做项）。**均不阻塞合并**。
 
 ---
 
 ## 逐项复核
 
 | # | 问题 | Dev 声称 | 复核结果 | 证据 |
-|---|------|---------|---------|------|
-| **M1** | 链接器文档纠正 | 「stable rustc 1.98 默认已用 LLD 22.1.8，无需显式配置」；未引入真配置 | ✅ **修复成立**（措辞 + 无真配置 + 探针可复现）<br>⚠️ 但文档里的**内存对比表不可复现**（见问题 #1） | 措辞：`docs/dev-environment.md` §2.1「### 2.1 链接器：stable rustc 默认已用 LLD，无需显式配置」；`feature-meta/verification-report.md:141`「本轮**没有**新增任何 linker 键」。<br>无真配置：`.cargo/config.toml` 去注释后仅 `[build] jobs = 3` / `[target.x86_64-unknown-linux-gnu]`（**空段**）/ `[alias] xtask`；`grep -nE "linker\|link-arg\|link-self-contained\|rustflags\|linker-flavor" .cargo/config.toml` 仅命中 3 行**注释**（:9/:10/:13）；全仓只有这一个 `.cargo/config.toml`；`~/.cargo/config.toml` 无 linker 键；环境无 `RUSTFLAGS` / `CARGO_TARGET_*_LINKER` / `LINKER`。<br>探针可复现：`RUSTFLAGS="-C link-arg=-Wl,--version" cargo build` → `warning: linker stdout: LLD 22.1.8 (/checkout/src/llvm-project/llvm 52ed14fcd56afc30f9cccd8ca8ce237c2eef7e04) (compatible with GNU linkers)`；强制 `-C link-arg=-fuse-ld=bfd` → `warning: linker stdout: GNU ld (GNU Binutils) 2.47`。**“默认即 LLD” 的结论独立复现成立。** |
-| **M2** | 测试库重置 | `reset_test_db()` 只作用于 `base_test`、用 `00-init.sql` 重建基线表、对 `base_dev` 有硬拒绝闸 | ✅ **修复成立**（4 条路径 + base_dev 零污染 + `\connect` 过滤 + seed 可用）<br>⚠️ 闸门是**黑名单**而非白名单（见问题 #2） | **路径 1（正常）**：`DATABASE_URL_TEST=…/base_test ./scripts/test-integration.sh` → `重置测试库：postgres://base:base@127.0.0.1:5432/base_test（库 base_test）`；base_test public 表由 `platform_seed_log,qa_marker_test` 变为 **`platform_seed_log`（标记表被清）**；`platform_seed_log` 3 列齐全；24/24 通过；`容器数量比对通过：2 → 2`；exit 0。<br>**路径 2（base_dev 硬拒绝）**：`DATABASE_URL_TEST=…/base_dev` → **exit 2**，stderr `错误：DATABASE_URL_TEST 指向 base_dev，拒绝重置开发库（postgres://base:base@127.0.0.1:5432/base_dev）`；`grep -c "test result:" = 0`（**cargo test 未执行**）；base_dev schema+data 指纹（nonce 剥离后 sha256）前后**逐字节相同**（schema `af5d7903…e17c9`、data `0b5d04c7…29ced`）；标记表 `1\|QA-RECHECK-LEFTOVER-MUST-SURVIVE` 原样保留。<br>**路径 3（非本机连接串）**：`…@10.0.0.99:5432/base_test` → `跳过测试库重置：主机未安装 psql，且 DATABASE_URL_TEST 不指向本机 127.0.0.1:5432` + 提示 `需要集成测试时先执行 'bun run db:up'`；base_dev 指纹不变；exit 0。<br>**路径 4（容器未运行）**：用 podman shim 让 `podman ps` 不列出 `base-postgres` → `跳过测试库重置：主机未安装 psql，且数据库容器未运行` + 同一条提示；比对仍执行（`容器数量比对通过：1 → 1`）；exit 0。**未静默失败。**<br>**`\connect` 过滤**：源文件仅 `deploy/seed/00-init.sql:19` 一处 `\connect base_test`；`grep -v '^\\connect'` 后 21 行 → 20 行且**不再含 `\connect`**。行为级验证：对临时库 `base_probe` 执行重置后，**表落在 `base_probe`**（`base_probe` 表 = `platform_seed_log`）而非被 `\connect` 重定向到 `base_test` → 过滤生效。<br>**seed 可用**：重置后 `bun run seed` → exit 0，`已灌入种子：base_dev` / `已灌入种子：base_test`，两库 `platform_seed_log` 均有 `baseline`。Dev「第一版冲掉 `platform_seed_log`」的问题**已修复**（重置后该表仍在、3 列齐全）。 |
-| **M3** | 断言可达 | `status=0; cargo test … \|\| status=$?` → 比对照常执行 → `exit "$status"` | ✅ **修复成立**（A/B 两场景 + 额外 C 场景） | **场景 A（测试失败 且 期间新建容器）**：临时用例 `crates/platform-core/tests/qa_recheck_tmp_container.rs` 内 `podman run -d --name qa-recheck-probe …` 后 panic → 比对**执行并报错**：`集成测试期间容器数量发生变化（2 → 3），不允许新建容器`；**exit 101**（反映测试失败）。<br>**场景 B（测试失败但没新建容器）**：临时用例 `qa_recheck_tmp.rs` 直接 panic → 比对**执行并通过**：`容器数量比对通过：2 → 2（未新建容器）`；**exit 101**。<br>**场景 C（额外自加：测试通过但新建容器）** → `集成测试期间容器数量发生变化（2 → 3），不允许新建容器`；**exit 1**（`status=0` 时置 1，`:136-138`）。<br>无残留 `set -e` 提前退出路径：`scripts/test-integration.sh:125-126` 的 `status=0` + `\|\| status=$?` 使 `cargo test` 失败不触发 errexit，其后 `:128` 的 `after="$(container_count)"` 与 `:131-141` 的比对在 A/B/C 三场景中**均实测执行**；`:143` `exit "$status"`。`bash -n scripts/test-integration.sh` 通过。 |
-| **L1** | 未使用依赖清理 | `platform-core` / `@base/auth` `@base/hooks` `@base/schema` `@base/theme` 已删，构建与测试仍全绿 | ✅ **成立** | `crates/platform-contracts/Cargo.toml` 现仅 `thiserror.workspace = true`；`grep -rn "platform_core" crates/` 仅命中 platform-core 自身（`src/bin/platform-core.rs:7,29`）。`apps/shell/package.json` 现仅 `@base/i18n` `@base/sdk` `@base/ui` —— 与 `apps/shell/src/App.svelte:2-4` 的三条实际 import **完全一致**；`apps/shell/vite.config.ts` 的 alias 仍直指 `../../packages/<name>/src/index.ts`（**不经 node_modules**），故删依赖**不断链**（`@base/auth` 等 alias 仍可解析，但当前无用）。<br>绿灯证据：`cargo build`/`clippy`/`test` 全过；`pnpm install --frozen-lockfile` → `Lockfile is up to date`；`pnpm -r build` → 7 包 tsc + `apps/shell build: ✓ 113 modules transformed`；`pnpm -r test` → 23/23；`bun install --frozen-lockfile --dry-run` → exit 0。 |
-| **L2** | CI 补 E2E job | `e2e` job：playwright install chromium + `bun run test:e2e` | ✅ **成立** | `.github/workflows/ci.yml:143-164`：`e2e:` job（`runs-on: ubuntu-latest`）→ `pnpm/action-setup@v4` + `actions/setup-node@v4` + `oven-sh/setup-bun@v2 (bun-version 1.4.4)` → `pnpm install --frozen-lockfile` → `pnpm exec playwright install --with-deps chromium` → `bun run test:e2e`。本机 `bun run test:e2e` 实跑 1/1 通过。 |
-| **L3** | CI 删无效 `token:` 入参 + 镜像前缀 | `token:` 已删；CI 用官方镜像 | ✅ **成立** | `.github/workflows/ci.yml:96-97` 现为 `- uses: rustsec/audit-check@v2` + 注释 `# rustsec/audit-check@v2 不接受 token 输入；需要鉴权走 RUSTEC_AUDIT_TOKEN 环境变量`，**无 `token:` 键**。<br>镜像：`ci.yml` 全文 `grep -nEi "registry\.\|mirrors\.\|docker\.io\|dockerproxy\|aliyun\|tsinghua\|ustc\|tuna\|npmmirror"` **零命中**；服务镜像为官方 `image: postgres:17-alpine`（`:116`）。<br>YAML 解析：`python3 -c "import yaml;yaml.safe_load(open('.github/workflows/ci.yml'))"` → `YAML OK, jobs: ['lint','test','build','dependency-audit','contract-check','e2e']`（6 job）。<br>（`compose.yaml` 仍用 `docker.m.daocloud.io/library/*` —— 那是**本机**低配环境文件，CI 只对它跑 `docker compose config --quiet` 不拉镜像，符合“CI 在境外用官方镜像”的要求。） |
-| **L4** | 报告更新 AC-S-009 | 「全新卷首启未实跑」→ 已验证并附证据 | ✅ **成立** | `feature-meta/verification-report.md:22`：`AC-S-009 … **本轮实跑**：rootless、双库连通、mem_limit、端口绑定、内存合计、**全新卷启种子路径**` / 结论 `**PASS**（上一轮记为「部分验证」是误判，本轮已实跑补齐）`；`:143-173` 给出第一手证据（容器标签 `com.docker.compose.project.config_files=compose.yaml`、卷挂载、`StartedAt=2026-11-18 00:30:26` vs 种子 `applied_at=…16:30:28`）。首轮问题 #8 的处理记录见 `:226`。 |
-| **L5** | 撤除「链接器偏离」+ 追溯同步 | 原问题条目撤除；`traceability.md` 已同步 | ✅ **成立** | `feature-meta/verification-report.md:215` 原问题条目已删除线 + `**撤除**：该偏离不存在…`；`:250` 偏离清单第 1 条 `~~.cargo/config.toml 未写 linker = "rust-lld"~~ **已撤除**`。`feature-meta/traceability.md` 已同步：AC-S-010 行改判 PASS 并列出 4 条分支路径实测；新增「本轮（QA 退回修复轮）问题处理对照」表（#1–#8 逐条列出处理与落地位置）；「低配基线」行改写为「stable rustc 1.98 默认 `linker-flavor = gnu-lld-cc`，默认即 LLD 22.1.8，**无需显式配置**，非偏离」。 |
+|----|------|---------|---------|------|
+| **中 1** | `check-modules` 静默吞掉 manifest 结构级违规 | `check_manifest_schema` 解析失败时把 serde 错误报为一条 `manifest_issues` | ✅ **通过**（3/3 违规全部拦住，exit 1，字段路径可见） | 见 §1 |
+| **中 2** | 依赖方向检查是文本扫描，可被绕过 | 改读 `cargo metadata --no-deps` 成员依赖图；`platform-contracts-macros` 纳入平台 crate | ✅ **通过**（2/2 绕过全部拦住） | 见 §2 |
+| **低 5** | schema 与平台实现判定不一致 | schema 收紧到与实现完全一致 | ⚠️ **基本通过**（常规字符 0 分歧；**2 个 Unicode 空白码位仍有分歧**，见仍存在的问题 #1） | 见 §3 |
+| **低 6** | sandbox 排序白名单外字段被静默忽略 | 改为返回错误，README / AGENTS.md 写明 | ✅ **通过** | 见 §4 |
+| **提示 7** | `feature-meta/manifest.json` 契约 pin 被冲掉 | 补回 `contracts` / `adrs` / `delivered_by` | ✅ **通过** | 见 §5 |
 
 ---
 
-## 回归（本轮只跑一遍）
+## §1 中 1 —— `xtask check-modules` 报出结构级 manifest 违规
 
-| 套件 | 命令 | 结果 |
-|------|------|------|
-| Rust | `cargo test --workspace -- --test-threads=2` | **24/24 通过**（platform-core 3 + platform-contracts 14 + xtask 7），exit 0 |
-| Lint | `cargo clippy --workspace --all-targets -- -D warnings` | exit 0，**无 error 无 warning** |
-| 前端 | `pnpm -r test` | **23/23 通过**（i18n 3 / hooks 3 / auth 3 / schema 3 / ui 3 / theme 2 / sdk 2 / shell 4），exit 0 |
-| E2E | `bun run test:e2e` | **1/1 通过**（3.6s），exit 0 |
+**实现**（`crates/xtask/src/modules.rs:196-219`）：不再走 `Manifest::from_path(...).ok()`，
+改为 `Manifest::parse_str(&raw)`，serde 失败时把 `err.reason()` 整条报出；JSON 语法错误仍由 `invalid_manifest` 兜底（不重复报）。
 
-补充（L1 需要“构建”而非仅测试）：`pnpm install --frozen-lockfile` exit 0；`pnpm -r build` exit 0（`apps/shell build: ✓ 113 modules transformed`）。
+**独立造违规复现**（临时探针模块目录，建在 `.local/qa-recheck/probe-m1/`，**未改 `modules/sandbox/`**，验完已删）：
+
+```text
+$ ./target/debug/xtask check-modules --root .local/qa-recheck/probe-m1
+模块目录校验失败：错误码 E_MODULE_LAYOUT
+  ✗ empty
+      - manifest.json 不符合 Schema：missing field `id` at line 1 column 2
+  ✗ missingid
+      - manifest.json 不符合 Schema：missing field `id` at line 1 column 31
+  ✗ unknownfield
+      - manifest.json 不符合 Schema：unknown field `bogus`, expected one of `id`, `name`, `version`, `enabled`, `permissions`, `menus`, `dependencies`, `config` at line 6 column 9
+EXIT CODE = 1
+```
+
+| # | 造的违规 | 期望 | 实测 | 结论 |
+|---|---------|------|------|------|
+| 1 | `manifest.json` = `{}` | 报 `missing field 'id'` | `manifest.json 不符合 Schema：missing field \`id\` at line 1 column 2` | ✅ |
+| 2 | `{"name":"Probe","enabled":true}` | 报 `missing field 'id'` | `manifest.json 不符合 Schema：missing field \`id\` at line 1 column 31` | ✅ |
+| 3 | 含未知字段 `"bogus":1` | 报 `unknown field 'bogus'` | `manifest.json 不符合 Schema：unknown field \`bogus\`, expected one of \`id\`, \`name\`, … at line 6 column 9` | ✅ |
+
+**附加探测（同一类违规，Dev 未列）**：字段类型错 `"enabled":"yes"` → 也被拦住：
+
+```text
+  ✗ typeerr
+      - manifest.json 不符合 Schema：invalid type: string "yes", expected a boolean at line 1 column 64
+```
+
+**对照**：首轮同一探针是 `exit 0`「模块目录校验通过」。本轮 `exit 1`。
+
+**残留（提示级）**：结构级违规的消息格式是
+`manifest.json 不符合 Schema：<serde 原始消息>`
+而字段级违规是 `manifest.json 不符合 Schema：<字段路径>：<原因>`
+两段式。前者的「字段路径」混在 serde 消息里（`missing field \`id\``），没有独立的字段路径段，
+与首轮要求的「给出字段路径与原因」在**格式上不统一**。信息本身完整，不影响判失败。
+
+---
+
+## §2 中 2 —— 依赖方向检查改为 cargo metadata 图，且不可绕过
+
+**实现核对**（`crates/xtask/src/deps.rs`）：
+
+```text
+$ grep -n "read_to_string\|lines()\|contains(\"modules/\")\|starts_with(|c" crates/xtask/src/deps.rs
+  -> 无任何文本扫描（0 命中）
+```
+
+- 数据来源：`cargo metadata --format-version 1 --no-deps`（`deps.rs:17,197`），读 `packages[].dependencies[].path` 的**解析后绝对路径**；
+- 平台 crate 集合 = 显式清单 `PLATFORM_CRATES`（已含 `platform-contracts-macros`）∪ `crates/` 下的工作区成员（`deps.rs:124-138`）→ 新增平台 crate 不会漏检；
+- 可达性遍历（`deps.rs:140-176`）按依赖边下钻，遇 `modules/` 下的路径即违规，**不做文本匹配**。
+
+**两个绕过分别复现（均被拦住）**。检查入口是 `cargo test -p xtask deps::tests::the_real_workspace_has_no_reverse_dependency`
+（`xtask` 暂无 `check-deps` 子命令，见仍存在的问题 #4）。
+
+**绕过 ① —— workspace 继承写法**（`crates/platform-contracts/Cargo.toml` 加 `sandbox.workspace = true`，路径放到根 `Cargo.toml` 的 `[workspace.dependencies]`）：
+
+```text
+test deps::tests::the_real_workspace_has_no_reverse_dependency ... FAILED
+平台 crate 不得依赖业务模块：["平台 crate `platform-contracts` 反向依赖了业务模块 `sandbox`（路径：modules/sandbox，依赖链：platform-contracts → sandbox）"]
+TEST EXIT = 101
+```
+
+**绕过 ② —— 未列入清单的 crate**（`crates/platform-contracts-macros/Cargo.toml` 加 `sandbox = { path = "../../modules/sandbox" }`）：
+
+```text
+$ cargo tree -p platform-contracts-macros
+platform-contracts-macros v0.1.0 (proc-macro) (crates/platform-contracts-macros)
+└── sandbox v0.1.0 (modules/sandbox)
+
+test deps::tests::the_real_workspace_has_no_reverse_dependency ... FAILED
+平台 crate 不得依赖业务模块：["平台 crate `platform-contracts` 反向依赖了业务模块 `sandbox`（路径：modules/sandbox，依赖链：platform-contracts → platform-contracts-macros → sandbox）", "平台 crate `platform-contracts-macros` 反向依赖了业务模块 `sandbox`（路径：modules/sandbox，依赖链：platform-contracts-macros → sandbox）"]
+TEST EXIT = 101
+```
+
+绕过 ② 连**间接链**（`platform-contracts → platform-contracts-macros → sandbox`）也一并报出 —— 这一点比首轮要求更强。
+
+**逐字节还原**：每次植入前备份、植入后回写，`sha256sum` 与基线逐位一致（见 §还原与工作树状态）。
+
+---
+
+## §3 低 5 —— schema 与平台实现判定一致吗？**没有循环论证**
+
+### 3.1 确认「不是用实现验实现」
+
+`crates/platform-core/src/extension/manifest_schema.rs:244-442` 有一个**自写正则求值器** `mod pattern`
+（注释明写「用一个**独立于平台实现**的求值器去读 schema 里的 pattern」）。判定链路是三条独立的腿：
+
+```text
+schema 里的 pattern  ──► 自写求值器 mod pattern（606 样本，与 Python re 0 分歧）
+                          ↕ 断言「两边必须给出同一个判定」
+平台实现 is_module_id ──► 硬编码样本表 MODULE_ID_SAMPLES（15 条，期望值写死在测试里）
+```
+
+即：**期望值是写死的常量表**，不是从实现里推导出来的 → 不构成循环论证。
+
+### 3.2 但求值器本身对不对？—— 用独立引擎交叉验证
+
+把 `mod pattern` **逐字节抽取**（`sed -n '244,442p'`，199 行，sha256 `affc2970…e444`）编译成独立 oracle，
+与 **Python 标准 `re`** 引擎对同一批样本对拍：
+
+```text
+schema.id.pattern                = ^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$
+schema.dependencies[].pattern    = ^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$
+id == dependencies pattern?      = True
+
+hand-written evaluator  vs  python re  (id pattern)      : 606 samples, mismatches=0
+hand-written evaluator  vs  python re  (dependencies pat): 606 samples, mismatches=0
+id pattern  vs  dependencies pattern (evaluator)         : 606 samples, mismatches=0
+id pattern  vs  dependencies pattern (python)            : 606 samples, mismatches=0
+```
+
+→ 求值器**本身是正确的独立实现**，不是「自洽但错」。606 样本 = 任务要求的 12 条 + 32 条边界 + 562 条随机 fuzz。
+
+### 3.3 平台实现 vs schema —— 用真实 Rust 实现（不是我的复刻）逐样本比对
+
+平台侧判定**不走我重写的逻辑**，而是走真实代码路径：
+造临时探针模块 → `cargo xtask check-modules` → `Manifest::validate()` → `is_module_id()`。
+schema 侧用 Python `re`（标准引擎）读 `capabilities/schema/manifest.schema.json` 的 pattern。
+
+```text
+MISMATCH COUNT (platform vs schema): 0
+```
+
+覆盖：`id` 44 样本 + `dependencies[]` 44 样本 + 顶层 `name` 8 样本 + `permissions[].name` 8 样本 = **104 组 0 分歧**。
+
+任务点名的 12 个样本逐条结果（三条腿完全一致）：
+
+| 样本 | 平台实现 | schema（Python re） | schema（自写求值器） |
+|------|---------|--------------------|--------------------|
+| `sandbox` | 接受 | 接受 | 接受 |
+| `demo2` | 接受 | 接受 | 接受 |
+| `a-b1` | 接受 | 接受 | 接受 |
+| `a1-b` | 接受 | 接受 | 接受 |
+| `sandbox-1demo` | 拒绝 | 拒绝 | 拒绝 |
+| `a-1` | 拒绝 | 拒绝 | 拒绝 |
+| `sandbox-1` | 拒绝 | 拒绝 | 拒绝 |
+| `Demo` | 拒绝 | 拒绝 | 拒绝 |
+| `demo_x` | 拒绝 | 拒绝 | 拒绝 |
+| ``（空串） | 拒绝 | 拒绝 | 拒绝 |
+| `demo-` | 拒绝 | 拒绝 | 拒绝 |
+| `a--b` | 拒绝 | 拒绝 | 拒绝 |
+
+**首轮指出的 3 处 schema/实现不匹配已全部对齐**：
+`id` pattern 收紧为 `^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$`；
+`dependencies[].items` 补上同款 pattern（原先 schema 完全没有 pattern）；
+顶层 `name` 与 `permissions[].name` 补上 `minLength: 1` + `pattern: \S`。
+
+**残留 1 处**（Unicode 空白码位）→ 见「仍存在的问题 #1」。
+
+---
+
+## §4 低 6 —— sandbox 排序白名单外字段返回错误
+
+**实现**（`modules/sandbox/backend/src/repository.rs:147-151`）：
+
+```rust
+if !SORTABLE_FIELDS.contains(&spec.field.as_str()) {
+    return Err(anyhow!("sort field {} is not sortable", spec.field));
+}
+```
+
+`list()` 用 `sort_rows(&mut rows, &query.sort)?` 向上传播（`repository.rs:89`）—— 是**返回错误**，不再是 `continue` 静默跳过。
+
+**实测**（`cargo test -p sandbox`）：
+
+```text
+test repository::tests::list_rejects_a_sort_field_outside_the_whitelist ... ok
+test repository::tests::list_sorts_by_a_declared_field ... ok
+test result: ok. 2 passed; 0 failed
+```
+
+**README 已写明**（`modules/sandbox/README.md:52-58`）：
+
+```text
+**排序字段不在白名单里 → 直接报错**，不静默忽略：
+sort field unknown is not sortable
+对应契约 C7「排序 … 未声明字段返回 400」。
+```
+
+`modules/sandbox/AGENTS.md:37-38` 也补了同款约束（「排序字段必须先声明」）。
+
+---
+
+## §5 提示 7 —— 契约 pin 已补回
+
+`feature-meta/manifest.json` 实测：
+
+```json
+  "demand_dir": "BA/demands/REQ-003-extension-framework",
+  "contracts": {
+    "api-conventions": "v1"
+  },
+  "adrs": ["ADR-0001"],
+  "delivered_by": "myg133-dev-1"
+```
+
+```text
+contracts    = {'api-conventions': 'v1'}
+adrs         = ['ADR-0001']
+delivered_by = myg133-dev-1
+提示7 三个 pin 齐全 = True
+```
+
+三个键齐全，与 REQ-002 同格式。首轮 QA 记录的「`claim` 工具重建文件时冲掉 pin」确属工具行为，本轮未复现（BA 已记入 roadmap R10）。
+
+---
+
+## 回归
+
+| 项 | 命令 | 结果 |
+|----|------|------|
+| Rust 单测 + 契约测试 | `cargo test --workspace -- --test-threads=2` | **73/73 passed**，0 failed，3 doctest ignored，exit 0 |
+| └ 分布 | — | `platform-core` lib 41 ｜ `platform-contracts` lib 8 ｜ `xtask` lib 18 ｜ `sandbox` lib 2 + `tests/contracts.rs` 4 |
+| Clippy | `cargo clippy --workspace --all-targets -- -D warnings` | **0 告警**，exit 0 |
+| 格式 | `cargo fmt --all --check` | **通过**，exit 0 |
+| 前端单测 | `pnpm -r test` | **23/23**，exit 0（shell 4 ｜ auth/hooks/i18n/schema 各 3 ｜ ui 3 ｜ sdk 2 ｜ theme 2） |
+| E2E | `bun run test:e2e` | **1/1**，chromium，exit 0 |
+| `Cargo.lock` 新增第三方包 | 逐包比对 `04b57d3` vs `fd12156` | **107 → 107 包，ADDED = NONE，REMOVED = NONE**；唯一差异是 `xtask` 的依赖列表多一行 `serde`（`serde` 早已在 workspace） |
+| `serde` 依赖写法 | `crates/xtask/Cargo.toml:14` | `serde.workspace = true`（**workspace 继承，非硬编码版本号**） |
+
+**首轮基线对比**：首轮 64/64 → 本轮 73/73（`platform-core` 39→41、`xtask` 13→18、`sandbox` 0→2），
+增量与本轮新增测试一一对应（结构级 manifest ×2、依赖方向 ×3、schema 一致性 ×2、排序白名单 ×2）。
+
+### 通用清单
+
+| 项 | 结果 |
+|----|------|
+| TODO / FIXME / `dbg!` / `println!` / `eprintln!` / `todo!` / `unimplemented!` | 改动文件内 **0 命中** |
+| 硬编码密钥 / token / password | 改动文件扫描 **0 命中** |
+| 新增依赖是否 workspace 继承 | ✅ `serde.workspace = true` |
+| `Cargo.lock` 禁止清单（sqlx / reqwest / aws-sdk / opendal / jsonwebtoken / diesel / async-trait） | 本轮未新增任何包（107→107），清单不受影响 |
 
 ---
 
@@ -46,52 +270,80 @@
 
 | # | 级别 | 描述 | 证据 | 建议 |
 |---|------|------|------|------|
-| 1 | 低 | **文档里的链接器内存对比表不可复现，且方向与实测相反。** `docs/dev-environment.md` §2.1 与 `feature-meta/verification-report.md:136-137` 写「默认(LLD) 峰值 16.1 MB / 强制 bfd 峰值 134.0 MB（约 8 倍）」。本轮用**无采样缺口**的口径（内核 `VmHWM` 高水位 + `wait4` 的 `ru_maxrss`，两种独立仪器互相印证）在**真实仓库二进制**（`platform-core` bin，cargo 自己生成的 rustc 命令行原样重放）上复测：**LLD 135144 KB = 132.0 MB、bfd 138772 KB = 135.5 MB**，两者只差 2.6%，**不是 8 倍**。另在合成探针 crate（4 MB static + 300 函数）上复测：**LLD 71.5 MB vs bfd 30.0 MB，方向相反**。Dev 的 bfd 值（134.0）基本可复现（我测 135.5），但 **LLD 值 16.1 MB 在物理上不可能**：单独执行 `ld.lld --version` 的基线 RSS 已是 **32.8 MB**（`ld.bfd` 基线 7.6 MB）——因为 rustup 自带的 `ld.lld` 动态链接 `libLLVM`，光启动就占 32.8 MB，低于此值的“峰值”只能来自**瞬时 `VmRSS` 采样**（Dev 自述“采样 `/proc/<pid>/status` 的 `VmRSS` 取峰值”）而非峰值。三轮记录（LLD 2 / 16.1 / 32.6 MB；bfd 130 / 134.0 / 187.4 MB）互不一致，根因就是**口径**（瞬时采样 vs 内核高水位）+ **负载**（探针 crate vs 真实二进制）不同。 | 本轮实测（真实二进制，同一条 rustc 命令行）：<br>`comm=rust-lld pid=285442 VmHWM=135144 KB (132.0 MB)` / `cc-tree ru_maxrss=134060 KB (130.9 MB)`<br>`comm=ld.bfd pid=287026 VmHWM=138772 KB (135.5 MB)` / `cc-tree ru_maxrss=138768 KB (135.5 MB)`<br>基线：`ld.lld --version → ru_maxrss=33560 KB (32.8 MB)`；`ld.bfd --version → ru_maxrss=7796 KB (7.6 MB)`<br>探针 crate：LLD `VmHWM=73240 KB (71.5 MB)` vs bfd `VmHWM=30752 KB (30.0 MB)`<br>文档现文：`docs/dev-environment.md` §2.1 表格「默认（仓库现状） LLD 22.1.8 **16.1 MB** / 强制 bfd **134.0 MB**（约 8 倍）」 | 该表**不影响** M1 的结论（“默认即 LLD、不要加 `linker = "rust-lld"`”已被独立复现，且加配置确实会坏事）。但“省 8 倍内存”是**未经复现且与实测相反**的数据点，且它是首轮“链接器偏离”误记账的源头。建议：<br>① 删掉倍数结论，只保留“默认即 LLD 22.1.8（`linker-flavor = gnu-lld-cc`）”这一可复现事实；<br>② 内存一栏改为引用**端到端冷编译峰值**（首轮实测 1087–1090 MB，阈值 1.5G/2.5G）——那才是 AC-S-006 真正卡的量；<br>③ 若要保留链接器单进程数据，必须写明口径（`/proc/<pid>/status` 的 `VmHWM` 或 `getrusage(RUSAGE_CHILDREN).ru_maxrss`），并注明 LLD 有 ~33 MB 的 `libLLVM` 固定地板。 |
-| 2 | 低 | **测试库重置的闸门是“黑名单 `*base_dev*`”而不是“白名单 `base_test`”** —— `scripts/test-integration.sh:60-65` 只拒绝库名**含** `base_dev` 的连接串；`DATABASE_URL_TEST` 指向**任何其他**库名时，`DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;` 会照常执行。Dev 的表述“只作用于 `base_test`”因此只对默认路径成立。实测：对临时库 `base_probe` 执行后，`base_probe` 的 public schema 被重建。真实风险是**误配**（例如把 `DATABASE_URL_TEST` 写成 `…/postgres` 这个维护库，或指向别的应用的库）→ 该库 public schema 被清空，且当前没有任何“只允许 base_test”的兜底。 | `scripts/test-integration.sh:60-65`（`case "$DATABASE_URL_TEST" in *base_dev*) … return 2`）；实测：`DATABASE_URL_TEST=postgres://base:base@127.0.0.1:5432/base_probe ./scripts/test-integration.sh` → `重置测试库：…（库 base_probe）`，`base_probe` 表 = `platform_seed_log`（原本为 `(none)`） | 改成**白名单**：库名 ≠ `base_test` 时一律拒绝（或加显式 `ALLOW_RESET_ANY_DB=1` 之类的开关）；保留现有 `base_dev` 黑名单作为二次保险。当前实现依赖“人不会手滑把测试库指向开发库”这一假设，DAO 落地后值得收紧。 |
+| **1** | **低** | **低 5「完全一致」在 2 个 Unicode 空白码位上仍未达成。** schema 的 `name` / `permissions[].name` 用 `pattern: \S`（ECMA-262 语义），平台用 `str::trim()`（Rust `char::is_whitespace`，Unicode White_Space 属性）。两者定义不同：<br>• **U+FEFF (ZWNBSP)**：ECMA-262 视为空白 → schema 拒绝；Rust `is_whitespace=false` → **平台接受**（平台更宽松）<br>• **U+0085 (NEL)**：ECMA-262 `\S` 匹配（非空白）→ schema 接受；Rust `is_whitespace=true` → **平台拒绝**（平台更严格）<br>方向相反、无安全洞（最坏是一个「看起来是空白」的模块名被平台接受），但「schema 与平台判定完全一致」这条目标未字面达成。 | Node（ECMA-262）实测：U+FEFF `\S` 不匹配；U+0085 `\S` 匹配。<br>Rust 实测：`'\u{FEFF}'.is_whitespace()=false`、`'\u{0085}'.is_whitespace()=true`。<br>平台侧探针：`name="\ufeff"` 的模块**未出现在失败清单里**（= 平台接受）；`name="\u0085"` → `manifest.json 不符合 Schema：name：must not be empty`（= 平台拒绝）。<br>Dev 已在 `feature-meta/verification-report.md` 风险 #10 自陈，但未修 | 要么把 schema 的 `\S` 换成平台同源的约束（例如 `pattern` 改用更精确的写法 / 或在 schema 里显式声明「以平台实现为准」的例外），要么在 `api-conventions/v1.md` 写明「名称非空以平台 trim 语义为准」。**影响面极小，可排入 REQ-004 批次** |
+| **2** | **低** | **首轮低 4（C-2「登记了权限点」≠「代码里真的做了鉴权」）本轮未修** —— 不在本轮 5 个改动点范围内，Dev 未擅自扩范围（合规）。`crates/platform-contracts/src/manifest_scan.rs` 本轮 **0 改动**，仍是扫 `backend/**/*.rs` 的字符串字面量，因此「只在 `permission.rs` 里定义常量、服务端从不做鉴权判断」的权限点仍能全绿过 C-2。 | `git diff --stat 04b57d3 fd12156 -- crates/platform-contracts/src/manifest_scan.rs` → 空；`manifest_scan.rs:17,56` 仍是 `read_to_string` + `string_literals` | BA 定口径后再改（首轮结论）。Dev 的口径说明（走 AST 需 `syn`，低配机冷编译敏感）成立 |
+| **3** | **提示** | **依赖方向检查把 `dev-dependency` 边也当违规**（不按 `kind` 过滤）。实测：`platform-contracts` 以 `[dev-dependencies]` 依赖 `sandbox` 同样被判违规。属于**比 ADR D7 更严**，不是安全洞；但若将来平台 crate 需要对业务模块写契约测试（dev-only），会被误报。 | 实测输出：`平台 crate \`platform-contracts\` 反向依赖了业务模块 \`sandbox\`（路径：modules/sandbox，依赖链：platform-contracts → sandbox）`（dev 依赖）；`cargo metadata` 输出中 `sandbox → platform-contracts` 明确带 `kind=dev`，而 `deps.rs` 未按 kind 过滤 | 可不改。若要改：按 `kind == "dev"` 分级为「警告」而非「违规」 |
+| **4** | **提示** | **依赖方向门禁仍在单元测试里，没有 CLI 子命令。** `xtask` 只有 `check-modules` 一个子命令；D7 检查靠 `cargo test --workspace` 的 `deps::tests::the_real_workspace_has_no_reverse_dependency` 承担。CI 的 test job 会跑，**不会漏**，但无法像 `check-modules` 那样单独调用/在本地快速验。 | `crates/xtask/src/main.rs:13-19`（只有 `Command::CheckModules`）；`cli.rs:13-18` | 本期可接受（Dev 已自陈风险 #8）。若要提升门禁可见性，后续加 `xtask check-deps` 子命令 |
+| **5** | **提示** | **过滤字段白名单外仍被静默忽略**（本轮只处理了 QA 列出的「排序」，`matches_filter` 对白名单外过滤字段仍按「不参与过滤」处理）。与 C7「未声明字段返回 400」仍有差距，但首轮未列此项。 | `modules/sandbox/backend/src/repository.rs:166-199`（`matches_filters` / `matches_filter` 无白名单报错分支）；Dev 自陈风险 #9 | 若要把过滤也对齐 C7，需另开一项 |
+| **6** | **提示** | **`migrations/` 仍是单份 8 行 README 占位**（首轮提示 8，本轮未改）。`check-modules` 的「非空」规则被 README 满足。 | `modules/sandbox/migrations/README.md`（8 行）；`crates/xtask/src/modules.rs:146-151`（`is_empty_dir` 只判目录项数） | 本期（无 DB 层）可接受。REQ-006/007 落地 DB 层时升级为「至少一个 `*.sql`」 |
 
-> **首轮 8 条问题的处置结论**：#1（链接器偏离，撤除记账）✅、#2（测试库未重置）✅、#3（`set -e` 致断言不可达）✅、#4（AC-S-008 口径）✅（BA 已收窄 AC 并下推 REQ-011/012，本轮不重判）、#5（未使用依赖 2 处）✅、#6（CI 未跑 E2E）✅、#7（CI 无效 `token:` 入参）✅、#8（AC-S-009 误记“未实跑”）✅ —— **全部修复并复验通过，无一遗留**。
-> 本轮新发现 2 个低级别问题（#1 文档数据点、#2 闸门口径），均不阻塞合并，但 #1 建议在合并前或紧随其后修正，以免下一个人继续引用“省 8 倍内存”这个已被实测推翻的说法。
+### 已关闭（首轮问题的当前状态）
+
+| 首轮 # | 级别 | 问题 | 状态 |
+|--------|------|------|------|
+| #1 | 中 | `check-modules` 结构级 manifest 违规漏报 | ✅ **已修并复验**（§1） |
+| #2 | 中 | 依赖方向检查可被绕过 | ✅ **已修并复验**（§2） |
+| #3 | 低 | 扩展点冻结签名的 dyn 兼容性变更未登记 | ✅ **已由 BA 关闭** —— `BA/demands/REQ-003-extension-framework/design-summary.md:48-58` 已补注记：「本期起 5 个 trait 为 RPITIT 形态…不可用于 trait object…异构汇聚延后到 REQ-015 / REQ-017 决策」（该文件不在本工作树，本轮只读核对） |
+| #5 | 低 | schema 与平台实现判定不一致 | ⚠️ **基本修复**，残留 1 处 Unicode 码位差异（仍存在的问题 #1） |
+| #6 | 低 | sandbox 排序白名单外字段被静默忽略 | ✅ **已修并复验**（§4） |
+| #7 | 提示 | `feature-meta/manifest.json` 的 pin 被冲掉 | ✅ **已修并复验**（§5）；归属说明问题随本次补回一并消失 |
+| #4 | 低 | C-2 无法区分「登记」与「鉴权」 | ⬜ **未修**，见仍存在的问题 #2 |
+| #8 | 提示 | `migrations/` 只有 README 占位 | ⬜ **未改**，见仍存在的问题 #6 |
 
 ---
 
 ## 未验证
 
-| 项 | 原因 | 影响 / 建议 |
-|----|------|----------------|
-| **CI 六个 job 的实际执行** | 仓库无 remote，GitHub Actions 跑不起来 | 本轮只做 YAML 解析（`yaml.safe_load` 通过，6 job）+ 人工审阅 + 本地等价命令（`cargo fmt/clippy/test`、`pnpm install/build/check/test`、`bun run test:e2e` 全绿）。**推 remote 后仍建议跑一次真实 CI**，特别是新加的 `e2e` job（`playwright install --with-deps chromium` 在境外 runner 上的下载与 `--with-deps` 的 apt 安装路径本机无法验证）。 |
-| **冷编译峰值内存与耗时（AC-S-006 主体）** | 任务书明确本轮为轻量复核、不重做冷编译；`cargo clean` 会清掉 `target/` 并重编 77 个依赖 | 沿用首轮实测引用值（冷 check 21.2s/1087 MB、冷 test 29.4s/1090 MB，均远低于 1.5G/2.5G）。本轮未新增冷编译数据。 |
-| **链接器内存对比的“真实大二进制”场景** | 本仓二进制是骨架级小体量；`libLLVM` 地板占主导，无法代表 LLD 在超大工程上的优势 | 只影响问题 #1 的**表述口径**，不影响任何 AC 判定。 |
-| **代码覆盖率** | 角色规范的“整体 ≥ 80%”未测（需 `cargo-llvm-cov`，本机不装、占盘大） | 与首轮一致，未变；按骨架需求的实际测试密度替代（24 Rust + 23 前端用例）。 |
-| **`bun run dev` 全栈联调** | 本期无业务接口，后端二进制需常驻 | 与首轮一致，未变。 |
-| **Playwright 浏览器版本跨机可移植性** | 本机已有 chromium-1208，`bun run test:e2e` 直接跑通未触发下载 | 与首轮一致；换机首次跑需 `pnpm exec playwright install chromium`（`@playwright/test` 固定 1.58.0，**不要升级**）。 |
+| 项 | 状态 |
+|----|------|
+| **CI 六个 job 实跑** | **未验证**。本仓库无 remote，GitHub Actions 跑不起来。本地已跑等价命令（`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all --check`、`pnpm -r test`），CI 的 `cargo test -p sandbox` 一步已含在 workspace 测试内 |
+| **覆盖率数字** | **未验证**。本机无覆盖率工具，按低配机约束未 `cargo install`。角色规范的「覆盖率 ≥ 80%」未量化，以「每条 AC 均有自动化测试 + 破坏性验证」替代 |
+| **圈复杂度 / 认知复杂度** | **未验证**。本机无 `lizard` / `complexipy`，未安装 |
+| **冷编译峰值内存 / 耗时** | **未验证**。按要求未 `cargo clean`、未做 RSS 采样 |
+| **C-3 的真实多租户数据库行为** | **不适用**（BA 已澄清本期不连库）。C-3 验的是契约语义，非真实库口径 |
+| **C-4 的真实事务回滚** | **不适用**（本期无 DB 访问层） |
+| **REQ-002 的数据库集成脚本 `scripts/test-integration.sh`** | **未运行**（需 podman + `psql`，本机无 psql 客户端）。与本需求无耦合 |
+| **`#[platform_module_contract]` 的错误路径** | **未验证**。宏对「传参」「非 mod item」「缺 `contract_subject()`」的处理代码存在但无对应测试，本轮未额外造违规（不在验收要求内） |
+| **`inventory` 跨平台行为** | **未验证**。依赖 ELF `.init_array`，本仓库只在 Linux 跑 |
+| **`api-conventions/v1.md` 的 C7 措辞与 sandbox 新行为是否逐字对齐** | **未验证**。该文件不在本工作树；本轮只核对了 sandbox README / AGENTS.md 的表述与实现一致 |
 
 ---
 
-## 本轮验证动作清单（可复现）
+## 还原与工作树状态
 
-```console
-# M1 链接器
-grep -nE "linker|link-arg|link-self-contained|rustflags|linker-flavor" .cargo/config.toml   # 仅注释
-RUSTFLAGS="-C link-arg=-Wl,--version" cargo build            # → LLD 22.1.8
-RUSTFLAGS="-C link-arg=-fuse-ld=bfd -C link-arg=-Wl,--version" cargo build   # → GNU ld 2.47
-# 峰值口径：/proc/<pid>/status 的 VmHWM（内核高水位，无采样缺口）+ wait4 的 ru_maxrss
+- 本轮对已跟踪文件的变异共 **5 次**（绕过①×1、绕过②×1、dev-dep 附加探测×1；每次都连带 `Cargo.lock`），
+  每次均**备份 → 植入 → 回写 → `sha256sum` 校验 → `git status --porcelain` 复核**。
+- 终态 sha256 与基线**逐位一致**：
 
-# M2 测试库重置
-DATABASE_URL_TEST=postgres://base:base@127.0.0.1:5432/base_test  ./scripts/test-integration.sh   # 正常
-DATABASE_URL_TEST=postgres://base:base@127.0.0.1:5432/base_dev   ./scripts/test-integration.sh   # → exit 2
-DATABASE_URL_TEST=postgres://base:base@10.0.0.99:5432/base_test   ./scripts/test-integration.sh   # → 跳过
-DATABASE_URL_TEST=postgres://base:base@127.0.0.1:5432/base_probe ./scripts/test-integration.sh   # → 证明 \connect 过滤
-podman exec base-postgres psql -U base -d base_dev -c "CREATE TABLE qa_recheck_marker(...)"       # 标记表
-podman exec base-postgres pg_dump -U base -d base_dev --schema-only | grep -v '^\\restrict\|^\\unrestrict' | sha256sum
-bun run seed
+  ```text
+  9ecc4a8d88e7d8bd9362b342b1d2f6dcc881c1c5af407126659256443e8afff6  Cargo.toml
+  996b8e6bdedb3643161de28d80250da0933fc779d21e3762e23b8a085bf847d9  crates/platform-contracts/Cargo.toml
+  e2ef182e0998ed90314846c5fc5e895ddb1357a8ea312242053b15e040de0d24  crates/platform-contracts-macros/Cargo.toml
+  564f6b6f706791549590fb5aa0eda757611973d0bff77ffe99422f3e56d19bc6  Cargo.lock
+  ```
 
-# M3 断言可达（临时用例，跑完已删）
-crates/platform-core/tests/qa_recheck_tmp.rs             # 失败、不建容器
-crates/platform-core/tests/qa_recheck_tmp_container.rs   # 失败、建容器
+- 临时探针目录（`manifest` 结构违规 ×4、schema 样本 ×104、Unicode 空白 ×3）与临时 oracle/脚本
+  全部建在 `.local/qa-recheck/`（已被 `.gitignore` 覆盖），**已整目录删除**；`.local/` 现为空。
+- **被审实现代码与配置零改动**。
+- 结束时 `git status --porcelain`：
 
-# 回归
-cargo test --workspace -- --test-threads=2
-cargo clippy --workspace --all-targets -- -D warnings
-pnpm -r test
-bun run test:e2e
-```
+  ```text
+   M feature-meta/qa-report.md            <- 首轮 QA 报告（本轮开始前即存在，未提交）
+   M feature-meta/qa-report-recheck.md    <- 本文件（槽位覆写）
+  ```
+
+  关于第二条：`feature-meta/qa-report-recheck.md` 原为 **REQ-002** 的复核轮报告（tracked，blob sha256 `59a2595d…c9a6e`）。
+  按任务指定路径写入本轮报告属**槽位覆写**，与本仓库既有约定一致（首轮 QA 覆写 `qa-report.md` 是同一模式）。
+  **REQ-002 的复核轮报告未丢失**：完整保留在提交 `3ff22fb` 与 `develop:feature-meta/qa-report-recheck.md`，可随时取回。
+- 未改动任何被审实现代码，未 commit / push / merge。
+
+---
+
+## 给 BA 的处置建议
+
+1. **可以合** —— 本轮 5 个改动点经独立造违规复现确认全部生效；两条「中」级门禁盲区已封堵；
+   回归全绿、`Cargo.lock` 零新第三方包。
+2. **合前可选**处理仍存在的问题 #1（U+FEFF / U+0085 两个码位的 schema/平台分歧）——
+   一行 schema 调整或一行契约注记即可，但影响面极小，不阻塞。
+3. **BA 侧待办**：仍存在的问题 #2（C-2「登记 ≠ 鉴权」口径）—— 首轮已转给 BA 定口径，Dev 未擅自扩范围，符合预期。
+4. **REQ-004 批次候选**：仍存在的问题 #5（过滤字段白名单）、#6（`migrations/` 升级为「至少一个 `*.sql`」）。

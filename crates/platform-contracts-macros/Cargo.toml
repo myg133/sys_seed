@@ -1,0 +1,15 @@
+[package]
+name = "platform-contracts-macros"
+description = "扩展点契约测试宏：#[platform_module_contract]"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# 过程宏 crate：只依赖标准库的 proc_macro，不引入任何第三方依赖
+# （syn / quote / proc-macro2 都不需要 —— 本宏只做 mod 块的最小解析）。
+[lib]
+name = "platform_contracts_macros"
+path = "src/lib.rs"
+proc-macro = true

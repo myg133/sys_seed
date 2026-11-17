@@ -2,8 +2,20 @@
 //!
 //! 约定来自 ADR-0001 D7：一个目录 = 一个完整业务模块，
 //! 必备 `manifest.json` / `backend/` / `frontend/` / `migrations/` / `AGENTS.md` / `README.md`。
+//!
+//! REQ-003 补齐的五项校验：
+//!
+//! | 校验 | 失败信息 |
+//! |------|----------|
+//! | 必备文件齐全 | 列出缺失的文件 |
+//! | `manifest.json` 符合 Schema | 给出字段路径与原因 |
+//! | `manifest.id` 与目录名一致 | 说明应以哪个为准 |
+//! | `backend/`、`frontend/`、`migrations/` 非空 | 指出空目录 |
+//! | `AGENTS.md`、`README.md` 存在 | 列出缺失 |
 
 use std::path::Path;
+
+use platform_core::extension::manifest::Manifest;
 
 /// 模块必备文件。
 pub const REQUIRED_FILES: [&str; 3] = ["manifest.json", "AGENTS.md", "README.md"];
@@ -20,16 +32,25 @@ pub struct ModuleStatus {
     pub missing_files: Vec<String>,
     /// 缺失的目录。
     pub missing_dirs: Vec<String>,
+    /// 存在但为空的目录。
+    pub empty_dirs: Vec<String>,
     /// `manifest.json` 解析失败时的原因。
     pub invalid_manifest: Option<String>,
+    /// `manifest.json` 不符合 Schema 时的问题清单。
+    pub manifest_issues: Vec<String>,
+    /// `manifest.id` 与目录名不一致时的说明。
+    pub id_mismatch: Option<String>,
 }
 
 impl ModuleStatus {
-    /// 模块是否合规。
+    /// 模块是否完全合规。
     pub fn is_valid(&self) -> bool {
         self.missing_files.is_empty()
             && self.missing_dirs.is_empty()
+            && self.empty_dirs.is_empty()
             && self.invalid_manifest.is_none()
+            && self.manifest_issues.is_empty()
+            && self.id_mismatch.is_none()
     }
 
     /// 全部问题清单（供 CLI 直接打印）。
@@ -41,8 +62,15 @@ impl ModuleStatus {
         for dir in &self.missing_dirs {
             problems.push(format!("缺少目录 {dir}/"));
         }
+        for dir in &self.empty_dirs {
+            problems.push(format!("目录 {dir}/ 为空"));
+        }
         if let Some(reason) = &self.invalid_manifest {
             problems.push(format!("manifest.json 不是合法 JSON：{reason}"));
+        }
+        problems.extend(self.manifest_issues.iter().cloned());
+        if let Some(mismatch) = &self.id_mismatch {
+            problems.push(mismatch.clone());
         }
         problems
     }
@@ -115,14 +143,34 @@ fn check_module(module_dir: &Path, name: String) -> ModuleStatus {
         .map(|required| (*required).to_string())
         .collect();
 
-    let invalid_manifest = check_manifest(&module_dir.join("manifest.json"));
+    let empty_dirs = REQUIRED_DIRS
+        .iter()
+        .filter(|required| module_dir.join(required).is_dir())
+        .filter(|required| is_empty_dir(&module_dir.join(required)))
+        .map(|required| (*required).to_string())
+        .collect();
+
+    let manifest_path = module_dir.join("manifest.json");
+    let invalid_manifest = check_manifest(&manifest_path);
+    let manifest_issues = check_manifest_schema(&manifest_path);
+    let id_mismatch = check_manifest_id(&manifest_path, &name);
 
     ModuleStatus {
         name,
         missing_files,
         missing_dirs,
+        empty_dirs,
         invalid_manifest,
+        manifest_issues,
+        id_mismatch,
     }
+}
+
+/// 目录是否为空。
+fn is_empty_dir(path: &Path) -> bool {
+    std::fs::read_dir(path)
+        .map(|mut entries| entries.next().is_none())
+        .unwrap_or(false)
 }
 
 /// 校验 `manifest.json` 是否为合法 JSON。
@@ -138,6 +186,48 @@ fn check_manifest(path: &Path) -> Option<String> {
         Ok(_) => None,
         Err(err) => Some(err.to_string()),
     }
+}
+
+/// 校验 `manifest.json` 是否符合 Schema（字段路径 + 原因）。
+///
+/// 结构级违规（缺必备字段、未知字段、字段类型错）在 serde 反序列化阶段就会失败，
+/// 这里必须把它们报出来 —— 否则 `manifest.json` = `{}` 这种整体不合规的 manifest
+/// 会因为「解析失败就跳过」而蒙混过关。
+fn check_manifest_schema(path: &Path) -> Vec<String> {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    // JSON 语法错误已由 `invalid_manifest` 记录，不重复报。
+    if serde_json::from_str::<serde_json::Value>(&raw).is_err() {
+        return Vec::new();
+    }
+    match Manifest::parse_str(&raw) {
+        Ok(manifest) => manifest
+            .validate()
+            .into_iter()
+            .map(|issue| {
+                format!(
+                    "manifest.json 不符合 Schema：{}：{}",
+                    issue.field(),
+                    issue.reason()
+                )
+            })
+            .collect(),
+        // serde 的报错自带字段路径与位置，如 "missing field `id` at line 1 column 2"。
+        Err(err) => vec![format!("manifest.json 不符合 Schema：{}", err.reason())],
+    }
+}
+
+/// 校验 `manifest.id` 是否与目录名一致。
+fn check_manifest_id(path: &Path, dir_name: &str) -> Option<String> {
+    let manifest = Manifest::from_path(path).ok()?;
+    if manifest.id == dir_name {
+        return None;
+    }
+    Some(format!(
+        "manifest.id 为 `{}`，与目录名 `{dir_name}` 不一致（应以目录名为准）",
+        manifest.id
+    ))
 }
 
 #[cfg(test)]
@@ -172,14 +262,30 @@ mod tests {
         }
     }
 
+    /// 合法的 manifest 内容（`id` 与目录名一致）。
+    fn manifest_json(id: &str) -> String {
+        format!(
+            r#"{{
+              "id": "{id}",
+              "name": "demo",
+              "version": "0.1.0",
+              "enabled": true,
+              "permissions": [],
+              "menus": [],
+              "dependencies": []
+            }}"#
+        )
+    }
+
     fn make_module(root: &Path, name: &str) -> PathBuf {
         let dir = root.join("modules").join(name);
         std::fs::create_dir_all(&dir).expect("模块目录应可创建");
-        std::fs::write(dir.join("manifest.json"), "{\"name\":\"demo\"}").expect("写入应成功");
+        std::fs::write(dir.join("manifest.json"), manifest_json(name)).expect("写入应成功");
         std::fs::write(dir.join("AGENTS.md"), "# demo\n").expect("写入应成功");
         std::fs::write(dir.join("README.md"), "# demo\n").expect("写入应成功");
         for required in REQUIRED_DIRS {
             std::fs::create_dir_all(dir.join(required)).expect("目录应可创建");
+            std::fs::write(dir.join(required).join("placeholder.txt"), "x\n").expect("写入应成功");
         }
         dir
     }
@@ -216,7 +322,7 @@ mod tests {
         let temp = TempDir::new("missing");
         let dir = temp.path().join("modules").join("broken");
         std::fs::create_dir_all(&dir).expect("目录应可创建");
-        std::fs::write(dir.join("manifest.json"), "{}").expect("写入应成功");
+        std::fs::write(dir.join("manifest.json"), manifest_json("broken")).expect("写入应成功");
 
         let report = check_modules(temp.path());
         assert!(!report.is_valid());
@@ -259,5 +365,109 @@ mod tests {
         assert_eq!(report.modules.len(), 2);
         let invalid: Vec<&str> = report.invalid_modules().map(|m| m.name.as_str()).collect();
         assert_eq!(invalid, vec!["bad"]);
+    }
+
+    #[test]
+    fn manifest_schema_violations_are_reported_with_field_path() {
+        let temp = TempDir::new("schema");
+        let dir = make_module(temp.path(), "demo");
+        std::fs::write(
+            dir.join("manifest.json"),
+            r#"{
+              "id": "Demo",
+              "name": "demo",
+              "version": "0.1",
+              "enabled": true,
+              "permissions": [],
+              "menus": [],
+              "dependencies": []
+            }"#,
+        )
+        .expect("写入应成功");
+
+        let report = check_modules(temp.path());
+        assert!(!report.is_valid());
+        let status = &report.modules[0];
+        assert!(
+            status
+                .manifest_issues
+                .iter()
+                .any(|issue| issue.contains("id") && issue.contains("Schema")),
+            "issues = {:?}",
+            status.manifest_issues
+        );
+        assert!(
+            status
+                .manifest_issues
+                .iter()
+                .any(|issue| issue.contains("version")),
+            "issues = {:?}",
+            status.manifest_issues
+        );
+    }
+
+    #[test]
+    fn manifest_without_required_fields_is_reported() {
+        let temp = TempDir::new("empty-manifest");
+        let dir = make_module(temp.path(), "demo");
+        std::fs::write(dir.join("manifest.json"), "{}").expect("写入应成功");
+
+        let report = check_modules(temp.path());
+        assert!(!report.is_valid(), "空 manifest 必须判失败");
+        let status = &report.modules[0];
+        assert_eq!(status.manifest_issues.len(), 1, "issues = {status:?}");
+        let issue = &status.manifest_issues[0];
+        assert!(issue.contains("Schema"), "issue = {issue}");
+        assert!(issue.contains("missing field"), "issue = {issue}");
+        assert!(issue.contains("id"), "issue = {issue}");
+    }
+
+    #[test]
+    fn manifest_with_unknown_field_is_reported() {
+        let temp = TempDir::new("unknown-field");
+        let dir = make_module(temp.path(), "demo");
+        let raw =
+            manifest_json("demo").replace("\"enabled\": true,", "\"enabled\": true, \"bogus\": 1,");
+        std::fs::write(dir.join("manifest.json"), raw).expect("写入应成功");
+
+        let report = check_modules(temp.path());
+        assert!(!report.is_valid(), "含未知字段的 manifest 必须判失败");
+        let status = &report.modules[0];
+        assert_eq!(status.manifest_issues.len(), 1, "issues = {status:?}");
+        let issue = &status.manifest_issues[0];
+        assert!(issue.contains("Schema"), "issue = {issue}");
+        assert!(issue.contains("unknown field"), "issue = {issue}");
+        assert!(issue.contains("bogus"), "issue = {issue}");
+    }
+
+    #[test]
+    fn manifest_id_must_match_the_directory_name() {
+        let temp = TempDir::new("id-mismatch");
+        let dir = make_module(temp.path(), "demo");
+        std::fs::write(dir.join("manifest.json"), manifest_json("other")).expect("写入应成功");
+
+        let report = check_modules(temp.path());
+        assert!(!report.is_valid());
+        let mismatch = report.modules[0]
+            .id_mismatch
+            .as_deref()
+            .expect("id 不一致应被报告");
+        assert!(mismatch.contains("other"));
+        assert!(mismatch.contains("demo"));
+    }
+
+    #[test]
+    fn empty_required_directories_are_reported() {
+        let temp = TempDir::new("empty-dirs");
+        let dir = make_module(temp.path(), "demo");
+        for required in REQUIRED_DIRS {
+            let path = dir.join(required).join("placeholder.txt");
+            std::fs::remove_file(&path).expect("删除应成功");
+        }
+
+        let report = check_modules(temp.path());
+        assert!(!report.is_valid());
+        let status = &report.modules[0];
+        assert_eq!(status.empty_dirs, vec!["backend", "frontend", "migrations"]);
     }
 }

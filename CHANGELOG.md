@@ -4,6 +4,23 @@
 
 ## Unreleased
 
+### REQ-003 扩展点框架与契约测试
+
+- 扩展点 trait（`crates/platform-core/src/extension/`）：`PlatformModule` / `Repository` /
+  `Auditable` / `NotificationSender` / `WorkflowHandler`，配套类型 `RequestContext`（复用 REQ-002）/
+  `ListQuery` / `List` / `AuditEventSpec` / `NotificationMessage` / `DeliveryResult` / `TransitionEvent` /
+  `ModuleContext`
+- 编译期注册：`inventory` 收集 + `discover()` / `discover_enabled()`，业务模块用
+  `platform_core::register_platform_module!` 登记
+- 契约测试套件（`crates/platform-contracts`）：C-1 manifest 一致 / C-2 权限点声明完整 /
+  C-3 租户隔离 / C-4 事务边界，外加简化版 `#[platform_module_contract]` 宏
+  （`crates/platform-contracts-macros`，过程宏，零第三方依赖）
+- manifest JSON Schema + Rust 校验器：`crates/platform-core/src/extension/manifest.rs`，
+  Schema 导出到 `capabilities/schema/manifest.schema.json`
+- 目录规范校验补齐（`cargo xtask check-modules`）：manifest 符合 Schema、`manifest.id` 与目录名一致、
+  `backend/`/`frontend/`/`migrations/` 非空；新增依赖方向检查（平台 crate 不得依赖业务模块）
+- 示例模块 `modules/sandbox/`：扩展点实现 + 契约测试接入，**二次开发的标准范例**
+
 ### REQ-002 平台骨架与工程基线
 
 - Rust workspace 骨架：`crates/platform-core`、`crates/platform-contracts`、`crates/xtask`

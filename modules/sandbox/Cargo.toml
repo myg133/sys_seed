@@ -1,0 +1,23 @@
+[package]
+name = "sandbox"
+description = "业务模块示例：扩展点实现与契约测试的标准范例"
+# 业务模块版本独立于平台版本：manifest.json 必须与本版本一致（契约检查 C-1）
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+# 业务模块的后端实现放在 backend/ 下
+name = "sandbox"
+path = "backend/src/mod.rs"
+
+[dependencies]
+anyhow.workspace = true
+# 业务模块只依赖平台核心（扩展点 trait），不依赖平台内部模块
+platform-core.workspace = true
+
+[dev-dependencies]
+# 契约测试套件随平台分发：业务模块只依赖 platform-contracts 即可获得契约测试
+platform-contracts.workspace = true

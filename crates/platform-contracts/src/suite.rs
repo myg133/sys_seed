@@ -22,6 +22,29 @@ impl ContractViolation {
     }
 }
 
+/// 一处契约告警：不阻断契约，但应当被处理。
+///
+/// 典型场景：`manifest.json` 声明了代码里没用到的权限点 —— 可能是预留，
+/// 因此只警告不失败。
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[error("contract warning at {check_id}: {message}")]
+pub struct ContractWarning {
+    /// 涉及的检查项 ID。
+    pub check_id: String,
+    /// 面向开发者的英文描述。
+    pub message: String,
+}
+
+impl ContractWarning {
+    /// 构造一条告警。
+    pub fn new(check_id: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            check_id: check_id.into(),
+            message: message.into(),
+        }
+    }
+}
+
 /// 一项契约检查。
 ///
 /// 业务模块为每个扩展点实现检查逻辑，平台分发同一套测试；
@@ -32,6 +55,11 @@ pub trait ContractCheck {
 
     /// 执行检查；通过返回 `Ok(())`。
     fn run(&self) -> Result<(), ContractViolation>;
+
+    /// 检查过程中的告警；默认没有告警。
+    fn warnings(&self) -> Vec<ContractWarning> {
+        Vec::new()
+    }
 }
 
 /// 契约套件：收集若干检查项并汇总结果。
@@ -49,6 +77,8 @@ pub struct SuiteReport {
     pub passed: usize,
     /// 收集到的违例。
     pub violations: Vec<ContractViolation>,
+    /// 收集到的告警。
+    pub warnings: Vec<ContractWarning>,
 }
 
 impl SuiteReport {
@@ -97,6 +127,7 @@ impl ContractSuite {
                 Ok(()) => report.passed += 1,
                 Err(violation) => report.violations.push(violation),
             }
+            report.warnings.extend(check.warnings());
         }
         report
     }
@@ -164,5 +195,34 @@ mod tests {
         assert!(!report.is_compliant());
         assert_eq!(report.violations[0].check_id, "always-fail");
         assert_eq!(report.violations[0].message, "must reject");
+    }
+
+    #[test]
+    fn warnings_are_collected_without_failing_the_check() {
+        struct WithWarning;
+
+        impl ContractCheck for WithWarning {
+            fn id(&self) -> &str {
+                "with-warning"
+            }
+
+            fn run(&self) -> Result<(), ContractViolation> {
+                Ok(())
+            }
+
+            fn warnings(&self) -> Vec<ContractWarning> {
+                vec![ContractWarning::new("with-warning", "declared but unused")]
+            }
+        }
+
+        let mut suite = ContractSuite::new();
+        suite.register(Box::new(WithWarning));
+
+        let report = suite.run();
+        assert!(report.is_compliant());
+        assert_eq!(report.passed, 1);
+        assert_eq!(report.warnings.len(), 1);
+        assert_eq!(report.warnings[0].check_id, "with-warning");
+        assert_eq!(report.warnings[0].message, "declared but unused");
     }
 }
