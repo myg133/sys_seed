@@ -86,6 +86,11 @@ USER base
 EXPOSE 8080
 
 # 镜像自带的健康检查：就绪探针（数据库连通 + 迁移已应用）
+#
+# --timeout 必须**大于**连接池的 acquire_timeout（当前 2s，见
+# crates/platform-server/src/db.rs 的 ACQUIRE_TIMEOUT）：数据库不可达时
+# /health/ready 要等满 acquire_timeout 才返回 503，超时若等于或小于它，
+# 容器会被判定为 unhealthy 而不是拿到那个语义清晰的 503。
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
     CMD ["/usr/local/bin/base", "healthcheck"]
 

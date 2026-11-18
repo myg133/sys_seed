@@ -11,6 +11,21 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 /// 连接池默认上限。低配机与私有化单机场景够用。
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 5;
 
+/// 连接池**获取连接**的超时。
+///
+/// **与探针超时的关系（改一个必须同时改另一个，否则探针拿不到 503）**：
+///
+/// | 谁 | 值 | 位置 |
+/// |---|---|---|
+/// | 连接池 acquire_timeout | **2s** | 本常量 |
+/// | K8s readinessProbe.timeoutSeconds | **5s** | `deploy/helm/base-platform/templates/deployment.yaml` |
+/// | 镜像 HEALTHCHECK --timeout | **5s** | `Dockerfile` |
+///
+/// 数据库不可达时，`/health/ready` 要等满 `acquire_timeout` 才返回 **503**
+/// （实测约 2s）。探针超时必须**大于**它，否则 kubelet 会先掐断请求，
+/// 那个语义清晰的 `503 / DATABASE_UNAVAILABLE` 就永远进不了 K8s 事件。
+pub const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// 按连接串建连接池。
 ///
 /// 用 `connect_lazy_with`：进程启动不依赖数据库是否已就绪 ——
@@ -21,7 +36,7 @@ pub async fn pool(database_url: &str, max_connections: u32) -> Result<PgPool, sq
     let options = PgConnectOptions::from_str(database_url)?;
     Ok(PgPoolOptions::new()
         .max_connections(max_connections)
-        .acquire_timeout(Duration::from_secs(5))
+        .acquire_timeout(ACQUIRE_TIMEOUT)
         .connect_lazy_with(options))
 }
 
@@ -48,5 +63,15 @@ mod tests {
             .await
             .expect("合法连接串应可构造连接池");
         assert_eq!(pool.options().get_max_connections(), 1);
+    }
+
+    /// 探针超时（5s）必须大于 acquire_timeout（2s），否则探针先超时，
+    /// 拿不到 `503 / DATABASE_UNAVAILABLE`。见 `ACQUIRE_TIMEOUT` 的说明。
+    #[test]
+    fn acquire_timeout_is_shorter_than_the_probe_timeout() {
+        assert!(
+            ACQUIRE_TIMEOUT < Duration::from_secs(5),
+            "连接池 acquire_timeout 必须小于探针超时（5s）"
+        );
     }
 }

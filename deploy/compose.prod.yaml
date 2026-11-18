@@ -4,14 +4,21 @@
 #   - 用发布镜像（base-platform:${TAG}），不本地构建
 #   - 配置从 .env 注入（.env 不入库）
 #   - **迁移是独立服务**：走 profile，手动触发，`up -d` 不会自动跑迁移
+#   - **口令没有默认值**：POSTGRES_PASSWORD 必须由 .env / Secret 显式注入，
+#     缺失时 compose 直接报错退出（不会静默用弱口令建库）
+#   - **基础镜像走官方地址**：生产交付物默认从 docker.io 拉，
+#     客户可把 POSTGRES_IMAGE / REDIS_IMAGE 指向自己的镜像仓库
 #
-# 交付物：把本文件与 .env 放在同一目录，整体拷给客户即可。
+# 交付物：把本文件、.env 与 scripts/prod-preflight.sh 放在同一套目录里
+#         （脚本放同级 scripts/ 子目录），整体拷给客户即可。
 #
-# 用法：
-#   cp .env.example .env && 编辑 .env
-#   docker compose -f deploy/compose.prod.yaml up -d
-#   docker compose -f deploy/compose.prod.yaml --profile migrate run --rm migrate
-#   docker compose -f deploy/compose.prod.yaml up -d --no-deps app   # 迁移成功后滚 app
+# 用法（在 deploy/ 目录里执行；.env 与本文件同目录 —— compose 从
+#       **compose 文件所在目录**读 .env）：
+#   cp ../.env.example .env && 编辑 .env（**必须**设置 POSTGRES_PASSWORD）
+#   ../scripts/prod-preflight.sh                      # 口令/库名校验，缺失直接退出
+#   docker compose -f compose.prod.yaml up -d
+#   docker compose -f compose.prod.yaml --profile migrate run --rm migrate
+#   docker compose -f compose.prod.yaml up -d --no-deps app   # 迁移成功后滚 app
 #
 # 完整发布流程（备份 → 迁移 → 滚动 → 健康检查 → 回滚）见 deploy/RUNBOOK.md。
 name: base-platform-prod
@@ -19,13 +26,16 @@ name: base-platform-prod
 services:
   postgres:
     # 镜像地址可覆盖：企业内网请指向自己的镜像仓库
-    # （国内直连 docker.io 超时，默认值沿用仓库既有约定）
-    image: ${POSTGRES_IMAGE:-docker.m.daocloud.io/library/postgres:17-alpine}
+    #   POSTGRES_IMAGE=registry.internal/library/postgres:17-alpine
+    # 默认值是**官方地址**（国内加速是开发环境的事，见仓库根 compose.yaml）。
+    image: ${POSTGRES_IMAGE:-docker.io/library/postgres:17-alpine}
     container_name: base-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-base}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-base}
+      # **没有默认值**：缺失（或为空）时 compose 解析阶段就报错退出，
+      # 不会静默用弱口令建库。生产口令用 .env 或 Docker secrets 注入。
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required - inject it via .env or a Docker secret (see .env.example / deploy/RUNBOOK.md 3.1)}
       POSTGRES_DB: ${POSTGRES_DB:-base}
     # 只绑本机回环：数据库不对外暴露
     ports:
@@ -40,7 +50,8 @@ services:
       start_period: 30s
 
   redis:
-    image: ${REDIS_IMAGE:-docker.m.daocloud.io/library/redis:7-alpine}
+    # 同上：默认官方地址，内网场景用 REDIS_IMAGE 指向自己的仓库
+    image: ${REDIS_IMAGE:-docker.io/library/redis:7-alpine}
     container_name: base-redis
     restart: unless-stopped
     command: ['redis-server', '--appendonly', 'yes']

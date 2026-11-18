@@ -26,7 +26,10 @@ pub struct Readiness {
     pub dirty: Option<i64>,
     /// 不就绪时的错误码；就绪时为 `None`。
     pub error_code: Option<&'static str>,
-    /// 不就绪时的说明（面向运维）。
+    /// 不就绪时的说明。
+    ///
+    /// 契约 C6（`api-conventions v1`）：`detail` 是**面向开发者的英文描述** ——
+    /// 面向用户的中文文案由前端按 `code` 做 i18n 渲染，后端**不得**在这里拼中文句子。
     pub detail: Option<String>,
 }
 
@@ -49,7 +52,7 @@ pub async fn check_readiness(pool: &PgPool, migrator: &Migrator) -> Readiness {
             pending: expected_versions(migrator),
             dirty: None,
             error_code: Some(CODE_DB_UNAVAILABLE),
-            detail: Some(format!("database is unreachable: {err}")),
+            detail: Some(detail_database_unavailable(&err.to_string())),
         };
     }
 
@@ -62,9 +65,7 @@ pub async fn check_readiness(pool: &PgPool, migrator: &Migrator) -> Readiness {
                 pending: expected_versions(migrator),
                 dirty: None,
                 error_code: Some(CODE_MIGRATIONS_PENDING),
-                detail: Some(format!(
-                    "migration state is unreadable, migrations may not have run: {err}"
-                )),
+                detail: Some(detail_migration_state_unreadable(&err.to_string())),
             };
         }
     };
@@ -74,19 +75,7 @@ pub async fn check_readiness(pool: &PgPool, migrator: &Migrator) -> Readiness {
         .filter(|version| !applied.contains(version))
         .collect();
 
-    let (error_code, detail) = if let Some(version) = dirty {
-        (
-            Some(CODE_MIGRATION_DIRTY),
-            Some(format!("迁移 {version} 处于 dirty 状态，需人工处理")),
-        )
-    } else if !pending.is_empty() {
-        (
-            Some(CODE_MIGRATIONS_PENDING),
-            Some(format!("待应用迁移：{pending:?}")),
-        )
-    } else {
-        (None, None)
-    };
+    let (error_code, detail) = migration_error(&pending, dirty);
 
     Readiness {
         database_ok: true,
@@ -96,6 +85,67 @@ pub async fn check_readiness(pool: &PgPool, migrator: &Migrator) -> Readiness {
         error_code,
         detail,
     }
+}
+
+/// 迁移状态判定（纯函数，便于单测）。
+///
+/// 返回 `(错误码, detail)`；一切正常时错误码为 `None`。
+fn migration_error(pending: &[i64], dirty: Option<i64>) -> (Option<&'static str>, Option<String>) {
+    if let Some(version) = dirty {
+        return (
+            Some(CODE_MIGRATION_DIRTY),
+            Some(detail_migration_dirty(version)),
+        );
+    }
+    if !pending.is_empty() {
+        return (
+            Some(CODE_MIGRATIONS_PENDING),
+            Some(detail_migrations_pending(pending)),
+        );
+    }
+    (None, None)
+}
+
+// ---------------------------------------------------------------------------
+// detail 文案（契约 C6：必须是面向开发者的**英文**描述）
+// ---------------------------------------------------------------------------
+
+/// `DATABASE_UNAVAILABLE` 的 detail：数据库连不上。
+fn detail_database_unavailable(err: &str) -> String {
+    dev_detail(&format!("database is unreachable: {err}"))
+}
+
+/// `MIGRATIONS_PENDING` 的 detail：迁移表读不出来（多半是没跑过迁移）。
+fn detail_migration_state_unreadable(err: &str) -> String {
+    dev_detail(&format!(
+        "migration state is unreadable, migrations may not have run: {err}"
+    ))
+}
+
+/// `MIGRATIONS_PENDING` 的 detail：还有待应用的迁移。
+fn detail_migrations_pending(pending: &[i64]) -> String {
+    dev_detail(&format!("pending migrations: {pending:?}"))
+}
+
+/// `MIGRATION_DIRTY` 的 detail：迁移执行到一半失败，需人工处理。
+fn detail_migration_dirty(version: i64) -> String {
+    dev_detail(&format!(
+        "migration {version} is in a dirty state and needs manual recovery"
+    ))
+}
+
+/// 收敛 detail 文案：剔除非 ASCII 字符。
+///
+/// 契约 C6 要求 `detail` 是英文的开发者描述。数据库服务端消息会随
+/// `lc_messages` 本地化，直接拼进 `detail` 就可能漏出中文 ——
+/// 这里统一只保留可打印 ASCII，保证 `detail` 里**不可能**出现中文句子。
+/// 面向用户的中文文案由前端按 `code` 做 i18n 渲染。
+fn dev_detail(raw: &str) -> String {
+    let ascii: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_graphic() || *c == ' ')
+        .collect();
+    ascii.trim().to_string()
 }
 
 /// 当前镜像携带的迁移版本（只取 up 方向，down 文件与 up 同版本号）。
@@ -133,6 +183,16 @@ async fn applied_versions(pool: &PgPool) -> Result<(Vec<i64>, Option<i64>), sqlx
 mod tests {
     use super::*;
 
+    /// 是否含中文/日文/韩文字符（CJK 统一表意文字 + 扩展 A + CJK 标点 + 全角）。
+    fn contains_cjk(text: &str) -> bool {
+        text.chars().any(|c| {
+            matches!(
+                c as u32,
+                0x4E00..=0x9FFF | 0x3400..=0x4DBF | 0x3000..=0x303F | 0xFF00..=0xFFEF
+            )
+        })
+    }
+
     #[test]
     fn readiness_without_error_code_is_ready() {
         let readiness = Readiness {
@@ -154,7 +214,7 @@ mod tests {
             pending: vec![1],
             dirty: None,
             error_code: Some(CODE_DB_UNAVAILABLE),
-            detail: Some("数据库不可达".to_string()),
+            detail: Some("database is unreachable".to_string()),
         };
         assert!(!readiness.is_ready());
     }
@@ -164,5 +224,70 @@ mod tests {
         assert_eq!(CODE_DB_UNAVAILABLE, "DATABASE_UNAVAILABLE");
         assert_eq!(CODE_MIGRATIONS_PENDING, "MIGRATIONS_PENDING");
         assert_eq!(CODE_MIGRATION_DIRTY, "MIGRATION_DIRTY");
+    }
+
+    /// 契约 C6：`detail` 是面向开发者的**英文**描述，后端不得拼中文句子
+    /// （面向用户的中文文案由前端按 `code` 做 i18n 渲染）。
+    ///
+    /// 三个 readiness 错误路径（`DATABASE_UNAVAILABLE` / `MIGRATIONS_PENDING` /
+    /// `MIGRATION_DIRTY`）的 `detail` 必须全部不含中文字符。
+    #[test]
+    fn readiness_detail_is_english_on_every_error_path() {
+        let details = [
+            detail_database_unavailable("pool timed out while waiting for an open connection"),
+            detail_migration_state_unreadable("relation \"_sqlx_migrations\" does not exist"),
+            detail_migrations_pending(&[20261118000100]),
+            detail_migration_dirty(20261118000100),
+        ];
+
+        for detail in &details {
+            assert!(detail.is_ascii(), "detail 必须是 ASCII：{detail}");
+            assert!(!contains_cjk(detail), "detail 不得含中文字符：{detail}");
+        }
+    }
+
+    #[test]
+    fn dirty_migration_error_carries_english_detail() {
+        let (code, detail) = migration_error(&[], Some(20261118000100));
+        assert_eq!(code, Some(CODE_MIGRATION_DIRTY));
+        let detail = detail.expect("dirty 必须带 detail");
+        assert!(
+            detail.contains("20261118000100"),
+            "detail 要点名版本：{detail}"
+        );
+        assert!(detail.contains("dirty"), "detail 要说明 dirty：{detail}");
+        assert!(!contains_cjk(&detail));
+    }
+
+    #[test]
+    fn pending_migrations_error_carries_english_detail() {
+        let (code, detail) = migration_error(&[20261118000100], None);
+        assert_eq!(code, Some(CODE_MIGRATIONS_PENDING));
+        let detail = detail.expect("有待应用迁移时必须带 detail");
+        assert!(
+            detail.contains("20261118000100"),
+            "detail 要列出待应用版本：{detail}"
+        );
+        assert!(!contains_cjk(&detail));
+    }
+
+    #[test]
+    fn healthy_database_has_no_error_and_no_detail() {
+        let (code, detail) = migration_error(&[], None);
+        assert_eq!(code, None);
+        assert_eq!(detail, None);
+    }
+
+    /// 数据库服务端消息可能按 `lc_messages` 本地化 —— 即便如此，
+    /// 中文也不许漏进 `detail`。
+    #[test]
+    fn dev_detail_strips_non_ascii_from_database_errors() {
+        let detail = dev_detail("database is unreachable: 数据库不可达（连接超时）");
+        assert!(detail.is_ascii(), "detail 必须是 ASCII：{detail}");
+        assert!(!contains_cjk(&detail), "detail 不得含中文字符：{detail}");
+        assert!(
+            detail.starts_with("database is unreachable:"),
+            "英文描述必须保留：{detail}"
+        );
     }
 }

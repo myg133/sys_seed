@@ -152,6 +152,11 @@ jobs:
       - name: 准备私有化部署的 .env（校验用）
         run: cp .env.example deploy/.env
       - name: 校验 compose 文件（私有化）
+        env:
+          # 私有化 compose 的生产口令**没有默认值**（${POSTGRES_PASSWORD:?…}），
+          # 缺失时 compose 解析阶段就报错退出 —— 校验时必须显式给一个值。
+          # 这是 CI 专用的占位值，不是任何环境的真实口令。
+          POSTGRES_PASSWORD: ci-validation-only-not-a-real-secret
         run: docker compose -f deploy/compose.prod.yaml config --quiet
       - name: 校验 Helm Chart
         uses: azure/setup-helm@v4

@@ -292,11 +292,14 @@ async fn ready(State(state): State<Arc<AppState>>) -> Response {
 
     let code = readiness.error_code.unwrap_or(health::CODE_DB_UNAVAILABLE);
     let detail = readiness.detail.clone().unwrap_or_default();
+    // `detail` 是面向开发者的英文描述（契约 C6），面向用户的中文文案由前端按 `code` 渲染；
+    // 运维视角的中文说明放在**日志**里。
     tracing::warn!(
         code = code,
         detail = %detail,
         pending = ?readiness.pending,
-        "readiness 未通过：数据库不可达或迁移未应用"
+        dirty = ?readiness.dirty,
+        "readiness 未通过：数据库不可达或迁移未应用（面向用户的中文文案由前端按 code 渲染）"
     );
     let problem = ProblemDetails {
         kind: "https://errors.base.example/service-not-ready".to_string(),

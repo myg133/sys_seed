@@ -40,6 +40,20 @@
 - **新增第三方依赖**：`sqlx` 0.8（仅 `runtime-tokio` / `postgres` / `migrate`，
   关闭 `macros` 与 `json` 以压低编译开销）—— 只用于部署期健康检查与迁移，
   业务数据访问层仍待 REQ-006/007
+- **修复轮（QA 退回 5 项）**：
+  - **契约 C6**：健康检查三个错误路径的 `detail` 统一改为**英文**（此前
+    `MIGRATIONS_PENDING` / `MIGRATION_DIRTY` 塞的是中文句子），并统一过
+    `dev_detail()`（只保留可打印 ASCII —— 数据库服务端消息会随 `lc_messages` 本地化）；
+    面向运维的中文说明移到日志。5 条单测守着
+  - **探针超时**：连接池 `acquire_timeout` 由 5s 降到 **2s**（K8s readinessProbe
+    与镜像 HEALTHCHECK 仍是 5s）—— 数据库不可达时 ready 在 **2.0s** 返回 503，
+    探针不再先超时、拿不到 `DATABASE_UNAVAILABLE`
+  - **私有化 compose**：生产口令**无默认值**（`${POSTGRES_PASSWORD:?…}`，缺失即报错
+    退出），基础镜像默认值改**官方地址**；新增 `scripts/prod-preflight.sh`
+    拒绝弱口令与库名不一致
+  - **Helm 口径**：RUNBOOK 与验证产物改为「默认渲染 **5 类资源，不含 Ingress**」
+    （`ingress.enabled` 默认 false），并给出 `--set ingress.enabled=true` 的开法
+  - **`core-change-detect.sh`**：「平台 crate 必须登记」的检查并进 `--self-test` 入口
 
 ### REQ-004 AI 引导体系与能力索引
 

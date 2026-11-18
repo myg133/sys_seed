@@ -22,7 +22,8 @@
 #   scripts/core-change-detect.sh --self-test
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO_ROOT"
 
 # 自检用的临时目录（trap 在退出时清理）
 TEMP_DIR=""
@@ -44,11 +45,15 @@ NON_CORE_CRATES=(
 
 # 自检：crates/ 下的每个平台 crate 都必须在核心清单里，
 # 否则「新增了平台 crate 却忘了加进评审门禁」会静默漏放。
+#
+# 参数：$1 = 要检查的仓库根目录（默认本仓库），供自检在临时仓库里跑。
 check_core_coverage() {
+  local root="${1:-$REPO_ROOT}"
   local missing=0
   local dir name
-  for dir in crates/*/; do
-    name="${dir%/}"
+  for dir in "$root"/crates/*/; do
+    [ -d "$dir" ] || continue
+    name="crates/$(basename "$dir")"
     local covered=0
     local core
     for core in "${CORE_PATHS[@]}"; do
@@ -111,7 +116,33 @@ self_test() {
     return 1
   fi
 
-  echo "✓ 自检通过：merge-base 口径不误算 base 侧改动，PR 侧核心改动能检出"
+  # 未登记的平台 crate 必须被检出（临时仓库里的 crates/other 不在清单里）
+  local coverage_out coverage_status=0
+  coverage_out=$(check_core_coverage "$temp" 2>&1) || coverage_status=$?
+  if [ "$coverage_status" -eq 0 ]; then
+    echo "✗ 自检失败：未登记的平台 crate 没被检出（输出：$coverage_out）" >&2
+    return 1
+  fi
+  case "$coverage_out" in
+    *crates/other*) ;;
+    *)
+      echo "✗ 自检失败：检出信息没点名未登记的 crate（输出：$coverage_out）" >&2
+      return 1
+      ;;
+  esac
+
+  # 全部 crate 都已登记 → 覆盖检查必须通过
+  local ok_repo="$TEMP_DIR/ok-repo"
+  mkdir -p "$ok_repo/crates/platform-core"
+  echo a >"$ok_repo/crates/platform-core/a.txt"
+  coverage_status=0
+  coverage_out=$(check_core_coverage "$ok_repo" 2>&1) || coverage_status=$?
+  if [ "$coverage_status" -ne 0 ]; then
+    echo "✗ 自检失败：已登记的 crate 被误报（输出：$coverage_out）" >&2
+    return 1
+  fi
+
+  echo "✓ 自检通过：merge-base 口径不误算 base 侧改动，PR 侧核心改动能检出，未登记平台 crate 能检出"
 }
 
 if [ "${1:-}" = "--self-test" ]; then
@@ -132,7 +163,7 @@ if ! git rev-parse --verify --quiet "$base_ref" >/dev/null; then
   exit 2
 fi
 
-check_core_coverage
+check_core_coverage "$REPO_ROOT"
 
 merge_base="$(git merge-base "$base_ref" "$head_sha")"
 git diff --name-only "$merge_base" "$head_sha" -- "${CORE_PATHS[@]}"

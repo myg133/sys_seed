@@ -108,17 +108,48 @@ runtime 阶段非 root 运行（uid 10001），只装 `ca-certificates`，时区
 
 ### 3.1 首次部署
 
+> 以下命令**在 `deploy/` 目录里执行**（`.env` 与 `compose.prod.yaml` 同目录 ——
+> `docker compose` 与 `podman-compose` 都从**compose 文件所在目录**读 `.env`）。
+>
+> §3.2 / §3.3 的示例从**仓库根目录**执行（用 `-f deploy/compose.prod.yaml`）。
+> 两种 compose 实现解析服务级 `env_file` 的基准不同：`docker compose` 按
+> **compose 文件所在目录**解析（哪里执行都行），`podman-compose` 按**当前目录**解析 ——
+> 用 `podman-compose` 时请在 `deploy/` 目录里执行，或显式指定
+> `ENV_FILE=deploy/.env`。
+
 ```bash
 cd deploy
 cp ../.env.example .env      # 编辑 .env：改 DATABASE_URL、BASE_ENV=prod
+
+# ⚠️ 生产口令**没有默认值**：POSTGRES_PASSWORD 必须显式注入，
+#    缺失时 compose 直接报错退出（弱口令另由 preflight 拒绝）。
+#    生成：openssl rand -base64 24
+#    .env 里至少要有：
+#      POSTGRES_PASSWORD=<随机口令>
+#      POSTGRES_DB=base
+#      DATABASE_URL=postgres://base:<同一个口令>@postgres:5432/base   ← 库名必须与 POSTGRES_DB 一致
+
+../scripts/prod-preflight.sh   # 口令 / 库名 / 连接串前置校验，不通过就不许 up
+
 docker compose -f compose.prod.yaml up -d
 docker compose -f compose.prod.yaml --profile migrate run --rm migrate
 docker compose -f compose.prod.yaml ps
 curl -fsS http://127.0.0.1:8080/health/ready
 ```
 
+> **交付给客户**：`compose.prod.yaml` + `.env` + `scripts/prod-preflight.sh`
+> 放在同一套目录里（脚本放同级 `scripts/` 子目录），命令改成 `./scripts/prod-preflight.sh`。
+
 > 迁移是**独立步骤**：`up -d` **不会**自动跑迁移（`migrate` 服务带 `profiles: ["migrate"]`）。
 > 必须先迁移、再滚 app —— 多副本并发迁移会冲突。
+
+**私有化 compose 的三个要点**：
+
+| 项 | 规则 |
+|---|---|
+| `POSTGRES_PASSWORD` | **无默认值**。`${POSTGRES_PASSWORD:?...}` —— 缺失或为空时 compose 解析阶段就报错退出，不会静默用弱口令建库；弱口令（`base` / `postgres` / `password` …）由 `scripts/prod-preflight.sh` 拒绝 |
+| `POSTGRES_IMAGE` / `REDIS_IMAGE` | 默认**官方地址**（`docker.io/library/postgres:17-alpine` / `docker.io/library/redis:7-alpine`）。客户内网请指向自己的仓库：`POSTGRES_IMAGE=registry.internal/library/postgres:17-alpine`。国内加速是**开发环境**的事（仓库根 `compose.yaml` 才用 daocloud 前缀） |
+| 库名 | `POSTGRES_DB`（默认 `base`）必须与 `DATABASE_URL` 里的库名一致，否则应用连到不存在的库 —— `prod-preflight.sh` 会比对 |
 
 ### 3.2 发布流程（备份 → 迁移 → 滚动 → 健康检查 → 回滚）
 
@@ -189,8 +220,15 @@ helm rollback base-platform <revision> -n base-platform
 
 ```bash
 helm template base-platform deploy/helm/base-platform | grep -E '^kind:'
-# 应含：ServiceAccount / ConfigMap / Service / Deployment / Ingress / Job
+# 默认渲染 5 类：ServiceAccount / ConfigMap / Service / Deployment / Job
+# **不含 Ingress** —— values.yaml 里 ingress.enabled 默认 false
+
+helm template base-platform deploy/helm/base-platform --set ingress.enabled=true | grep -E '^kind:'
+# 加 --set ingress.enabled=true 后才有 6 类：上面 5 类 + Ingress
 ```
+
+> `ingress.enabled` 默认 **false**（Chart 默认不接管入口，暴露方式由集群决定）。
+> 需要 Ingress 时显式打开：helm install 时 `--set ingress.enabled=true --set ingress.hosts[0].host=...`（见本节第 2 步）。
 
 ---
 
@@ -211,6 +249,34 @@ curl -s http://127.0.0.1:8080/health/ready
 ```
 
 镜像自带健康检查：`docker exec <容器> base healthcheck`（就绪探针）。
+
+### 5.1 错误码与 `detail` 的语言（契约 C6）
+
+`detail` 是**面向开发者的英文描述**；**面向用户的中文文案由前端按 `code` 做 i18n 渲染**
+（契约 `api-conventions v1` C6：后端不得在 `detail` 里拼中文句子）。
+后端只保证 `code` 稳定、`detail` 是 ASCII 英文。
+
+| `code` | 触发条件 | `detail`（英文） |
+|---|---|---|
+| `DATABASE_UNAVAILABLE` | 数据库连不上 | `database is unreachable: <原因>` |
+| `MIGRATIONS_PENDING` | 连上了但迁移没跑 / 迁移表读不出来 | `pending migrations: [...]` / `migration state is unreadable, ...` |
+| `MIGRATION_DIRTY` | 迁移执行到一半失败，需人工处理 | `migration <版本> is in a dirty state and needs manual recovery` |
+
+运维视角的中文说明在**日志**里（`tracing::warn!` 记 `code` + `detail` + `pending` + `dirty`），
+不进响应体。
+
+### 5.2 探针超时与连接池超时（改一个必须同时改另一个）
+
+| 谁 | 值 | 位置 |
+|---|---|---|
+| 连接池 `acquire_timeout` | **2s** | `crates/platform-server/src/db.rs`（`ACQUIRE_TIMEOUT`） |
+| K8s `readinessProbe.timeoutSeconds` | **5s** | `deploy/helm/base-platform/templates/deployment.yaml` |
+| 镜像 `HEALTHCHECK --timeout` | **5s** | `Dockerfile` |
+
+数据库不可达时，`/health/ready` 要等满 `acquire_timeout` 才返回 **503**（实测约 2s）。
+**探针超时必须大于 `acquire_timeout`**，否则 kubelet / docker 会先掐断请求，
+那个语义清晰的 `503 / DATABASE_UNAVAILABLE` 就拿不到（只会看到探针超时）。
+`crates/platform-server/src/db.rs` 有一条单测守着这个关系。
 
 ---
 
@@ -308,6 +374,7 @@ docker compose -f deploy/compose.prod.yaml logs app
 | readiness 503 + `MIGRATIONS_PENDING` | 连上了，但迁移没跑 | 跑迁移：`base migrate up` |
 | 连得上但认证失败 | 口令错 / `pg_hba` 拒绝 | 核对 `DATABASE_URL` 里的用户口令；容器内本地 socket 连接不需要口令 |
 | `pool timed out while waiting for an open connection` | 连接池打满 / 数据库卡住 | 看数据库负载；`max_connections` 是否太小 |
+| ready 要 **2 秒**左右才返回 503 | 数据库不可达时要等满 `acquire_timeout`（2s） | 正常现象；探针超时（当前 5s）必须大于它，见 §5.2 |
 
 ### 7.4 磁盘满
 

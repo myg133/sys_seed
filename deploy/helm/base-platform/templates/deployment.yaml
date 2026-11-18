@@ -74,6 +74,12 @@ spec:
             failureThreshold: 3
           # readiness：数据库连通 **且** 迁移已应用才接流量
           # （否则滚动更新时流量会打到还没迁移好的实例）
+          #
+          # timeoutSeconds 必须**大于**连接池的 acquire_timeout（当前 2s，
+          # 见 crates/platform-server/src/db.rs 的 ACQUIRE_TIMEOUT）：
+          # 数据库不可达时 /health/ready 要等满 acquire_timeout 才返回 503，
+          # 探针超时若等于或小于它，kubelet 会先掐断请求，
+          # 那个语义清晰的 503 / DATABASE_UNAVAILABLE 就进不了 K8s 事件。
           readinessProbe:
             httpGet:
               path: /health/ready
