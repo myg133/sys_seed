@@ -459,6 +459,33 @@ podman ps                       # 两个都应 Up (healthy)
 | bus watcher | 没了 | `aw.py watch --ensure` | 几秒 |
 | `~/.cargo` 缓存 | 不会 | 无需恢复 | 0 |
 
+### ⚠️ 容器可能起不来：seed 挂载指向已删除的目录
+
+`compose.yaml` 把 `./deploy/seed` 挂进 postgres 容器的 `/docker-entrypoint-initdb.d`。
+podman 在**创建容器时**把这个相对路径解析成**绝对路径**记进容器元数据。
+如果当初是从一个**后来被回收的 worktree**（如 `feature-REQ-005/`）里起的 compose，
+那个目录一删，容器的挂载源就没了 —— 容器**再也起不来**，报错：
+
+```
+crun: cannot stat `/home/.../feature-REQ-005/deploy/seed`: No such file or directory
+```
+
+**症状**：podman 报容器起不来，但 `podman ps -a` 看容器还在（Exited）。
+
+**修复**（数据在 volume 里，不会丢）：
+
+```bash
+export XDG_RUNTIME_DIR=/run/user/$(id -u)
+cd /home/myg133/Projects/system_seed/code     # ← 必须是稳定的 develop worktree
+podman rm -f base-postgres
+podman-compose -f compose.yaml up -d
+```
+
+**预防**：**永远从 `code/`（develop worktree）起 compose**，不要从 feature worktree 起。
+`code/` 是常驻 worktree,挂载源指向它就永远有效。
+
+> 已在 REQ-002 的 compose 里踩过两次。详见 roadmap R14。
+
 ### 经验
 
 - **子 Agent 的工作产物不会丢，但进程会死** —— 派 Agent 时让它**小步提交**，

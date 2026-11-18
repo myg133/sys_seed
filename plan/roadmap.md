@@ -145,6 +145,8 @@ REQ-002 → REQ-005 (并行)                                          ↓
 | R11 | 扩展点 trait 为 RPITIT 形态，**不可用于 trait object**（`Box<dyn Trait>` → E0038）。异构汇聚（多通道通知、多流程处理器）会撞墙 | 中 | 已记入 REQ-003 design-summary §2 的扩展点版本注记 + api-conventions；**REQ-015 / REQ-017 必须先决策**：加对象安全包装，还是引入 `async-trait` |
 | ~~R12~~ | ~~超级用户绕过 RLS —— 租户隔离 fail open~~。开发库的 `base` 是超级用户，超级用户**绕过 RLS**，所以当前环境里 RLS **实际不生效**，只有应用层的租户过滤在挡 | **高** | REQ-006 已加 `deploy/seed/02-app-role.sql`、`require_isolation` 拒绝、`tenant-policies` 接入 compose+Helm。**另发现**：app 容器拿到整包 `.env`/Secret 仍能读到超管串 → 已改为逐个列变量。**✅ REQ-006 已解决**：部署侧 7 处全部切到普通角色；超管启动 → 退出码 3 拒绝；prod 绕过开关 → 退出码 2 |
 | **R13** | 策略重应用曾有「全部拒绝」窗口（`DROP POLICY` + `CREATE POLICY` 分两条语句 → 中间表上没有 policy → 并发读表现为「表是空的」假象，10 次并发跑 3 次偶发失败） | 中 | REQ-006 已改为**在一个事务里应用**，复测 10/10 全绿。但**生产重新应用策略时仍有短暂抖动** → 要么写进 RUNBOOK，要么换更安全的替换方式（先建后删 / `ALTER POLICY`） |
+| **R14** | **`compose.yaml` 的 seed 绑定挂载会随 worktree 回收而失效** —— podman 在创建容器时把 `./deploy/seed` 解析成绝对路径记进容器元数据；若当初从**后来被回收的 feature worktree** 起 compose，目录一删容器就再也起不来（`crun: cannot stat .../deploy/seed`） | 中 | **预防：永远从 `code/`（常驻 develop worktree）起 compose**，不要从 feature worktree 起。已写进 dev-guide §8.5。根治方案（待定）：把 seed 挂载换成 init 容器或命名卷，或在 compose 里显式声明只允许从 `code/` 启动 |
+| **R15** | `ACCOUNT_LOCKED` / `ACCOUNT_DISABLED` 与「账号不存在 → INVALID_CREDENTIALS」**错误码可区分** → 攻击者发够 5 次错密码即可试出账号存在性 | 中（待 QA 定级） | REQ-007 QA 正在判定严重度与改法。既要不泄露账号存在性，又要让被锁用户知道被锁 —— 这两个要求有张力 |
 
 ## 状态流转约定
 
