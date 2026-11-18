@@ -47,7 +47,7 @@
 - **预期结果**:
   1. `can('order:invoice:approve')` 返回 `false`。
   2. 页面 DOM 中不存在审批按钮节点（查询选择器为空）。
-  3. 接口返回 HTTP 403，响应为 `application/problem+json`，`code` 为权限类错误码（如 `permission_denied`），且响应体不包含业务数据。
+  3. 接口返回 HTTP 403，响应为 `application/problem+json`，`code` 为 `INSUFFICIENT_PERMISSION`（契约 `api-conventions v1` C6 的示例取值，**REQ-009 定案**；不再用 `permission_denied`），且响应体不包含业务数据。
 - **类型**: 安全
 - **优先级**: P0
 - **自动化**: 可自动化
