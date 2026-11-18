@@ -58,7 +58,7 @@ pub struct AuthCallScan {
     pub codes: Vec<String>,
     /// 参数**不是字面量**的调用点（fail closed）。
     pub non_literal_calls: Vec<String>,
-    /// 绕过平台入口的自定义鉴权入口（`文件:行`）。
+    /// 绕过平台入口的自定义鉴权入口（`文件:行:列`）。
     pub custom_entries: Vec<String>,
 }
 
@@ -113,8 +113,7 @@ fn scan_source(source: &str, file: &Path, scan: &mut AuthCallScan) {
         if name == AUTH_ENTRY_POINT {
             if is_definition {
                 // 模块自己定义了鉴权入口 → 绕过平台入口。
-                scan.custom_entries
-                    .push(format!("{}:{}", file.display(), start));
+                scan.custom_entries.push(position(file, &bytes, start));
                 continue;
             }
             if preceded_by_path {
@@ -122,9 +121,7 @@ fn scan_source(source: &str, file: &Path, scan: &mut AuthCallScan) {
             }
             match first_argument(&bytes, cursor) {
                 Some(Some(literal)) => scan.codes.push(literal),
-                Some(None) => scan
-                    .non_literal_calls
-                    .push(format!("{}:{}", file.display(), start)),
+                Some(None) => scan.non_literal_calls.push(position(file, &bytes, start)),
                 None => {}
             }
             continue;
@@ -132,10 +129,37 @@ fn scan_source(source: &str, file: &Path, scan: &mut AuthCallScan) {
 
         // 别名：定义了它，或自由调用了它 → 都是「绕过平台入口」。
         if AUTH_ENTRY_ALIASES.contains(&name.as_str()) && (is_definition || !preceded_by_path) {
-            scan.custom_entries
-                .push(format!("{}:{}", file.display(), start));
+            scan.custom_entries.push(position(file, &bytes, start));
         }
     }
+}
+
+/// 源码里的位置（**行:列**，都从 1 起算）。
+///
+/// ⚠️ **不是字符偏移** —— 字符偏移报出来的是「文件里有第几个字符」，
+/// 人根本没法定位（QA 实测报出 `lib.rs:96`，而那个文件只有 3 行）。
+///
+/// 行号是**精确**的：注释被剥掉时**换行结构被保留**（见 [`strip_comments`]），
+/// 所以剥注释前后的行号一致。列号在同一行有块注释时可能偏小 ——
+/// 行号才是定位用的关键信息。
+fn line_and_column(source: &[char], offset: usize) -> (usize, usize) {
+    let mut line = 1usize;
+    let mut column = 1usize;
+    for ch in source.iter().take(offset) {
+        if *ch == '\n' {
+            line += 1;
+            column = 1;
+        } else {
+            column += 1;
+        }
+    }
+    (line, column)
+}
+
+/// 拼出「`文件:行:列`」。
+fn position(file: &Path, source: &[char], offset: usize) -> String {
+    let (line, column) = line_and_column(source, offset);
+    format!("{}:{}:{}", file.display(), line, column)
 }
 
 /// 标识符前面是不是 `fn`（即它是**定义**而不是调用）。
@@ -519,5 +543,39 @@ mod tests {
             "pub fn require_permissions(code: &str) { }"
         ));
         assert!(!defines_auth_entry("let x = require_permission(\"a\");"));
+    }
+
+    /// 违例位置必须是**行:列**，不是字符偏移 —— 报错要能直接定位到那一行。
+    ///
+    /// ⚠️ 曾经的写法是 `format!("{}:{}", file, start)`，`start` 是**字符下标**：
+    /// 报出来的是「文件里第几个字符」，人没法定位（QA 实测报出 `lib.rs:96`，
+    /// 而那个文件只有 3 行）。
+    #[test]
+    fn a_violation_points_at_the_line_it_is_on() {
+        let source = "fn handler() {}\nfn check_perm(code: &str) -> bool { true }\n";
+        let stripped = strip_comments(source);
+        let mut scan = AuthCallScan::default();
+        scan_source(&stripped, Path::new("demo.rs"), &mut scan);
+        assert_eq!(scan.custom_entries.len(), 1, "自定义入口必须被报出来");
+        assert_eq!(
+            scan.custom_entries[0], "demo.rs:2:4",
+            "位置必须是行:列（要能直接定位到那一行）：{}",
+            scan.custom_entries[0]
+        );
+    }
+
+    /// 非字面量调用的位置同样是**行:列**。
+    #[test]
+    fn a_non_literal_call_points_at_the_line_it_is_on() {
+        let source = "fn handler() {\n    require_permission(PERM);\n}\n";
+        let stripped = strip_comments(source);
+        let mut scan = AuthCallScan::default();
+        scan_source(&stripped, Path::new("demo.rs"), &mut scan);
+        assert_eq!(scan.non_literal_calls.len(), 1);
+        assert_eq!(
+            scan.non_literal_calls[0], "demo.rs:2:5",
+            "位置必须是行:列：{}",
+            scan.non_literal_calls[0]
+        );
     }
 }

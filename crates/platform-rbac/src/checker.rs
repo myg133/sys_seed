@@ -358,6 +358,11 @@ impl PermissionChecker for RbacChecker {
             .unwrap_or_else(fail_closed)
     }
 
+    /// 该权限点携带的**属性条件**；**没有条件**时返回 `None`。
+    ///
+    /// **非法条件返回「永不匹配」而不是 `None`**（BA 决策 D40）——
+    /// `None` 只表示「无条件」；把非法条件塞进 `None` 会让调用方
+    /// （`if let Some(c) = ... { 应用条件 }`）把它当成「无条件」而**静默放行**。
     fn condition(&self, ctx: &RequestContext, permission: &str) -> Option<CompiledCondition> {
         let (tenant, user) = (ctx.tenant_id()?, ctx.user_id()?);
         let cache = self.cache.lock().ok()?;

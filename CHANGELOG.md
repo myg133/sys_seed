@@ -24,6 +24,10 @@
   - **主部门缺失或歧义 → fail closed 到 `SELF`**（**不是** `ALL`）：
     DB 侧加部分唯一索引（**预防层**）+ 判定侧退化（**防御层**），两层都要
   - 多角色 scope **取最宽松**（并集语义）；权限点级 scope **覆盖**角色级
+  - 同一个角色内**多条 grant 命中同一权限点**时：**精确优先于通配**
+    （`module:resource:action` > `module:resource:*` > `module:*`）；
+    同具体度取**更严格**的 scope（`ALL` < `OWN_ORG_AND_BELOW` < `OWN_ORG` < `SELF`）——
+    跨角色仍然是**并集**（D37 / D43）
 - **受限表达式 DSL**（`platform-core::extension::expr`）：
   **白名单字段 + 参数化 + 禁函数调用 + 禁多语句** ——
   生成的 SQL 里**只有占位符**，字面值一律走绑定

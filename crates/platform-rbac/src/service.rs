@@ -867,6 +867,20 @@ pub fn expand_user_permissions(
 }
 
 /// 用户的有效权限点的**范围贡献**（每个角色一条）。
+///
+/// # 同一个角色内多条 grant 命中同一权限点时：**精确优先于通配**（D43）
+///
+/// | 维度 | 优先级 |
+/// |---|---|
+/// | **匹配具体度** | 精确 `module:resource:action` > `module:resource:*` > `module:*` |
+/// | 同具体度 | 取**更严格**的 scope（`ALL` < `OWN_ORG_AND_BELOW` < `OWN_ORG` < `SELF`） |
+///
+/// ⚠️ **不能靠「取排序里最后一条匹配的」**：直接授权时精确的恰好赢
+/// （`'*' < 小写字母`），但那只是**排序的副产物**；经角色继承时胜者由
+/// **角色 ID 的字典序**决定（角色 ID 是 UUID → 实际等同随机）。
+/// **随机是不合格的** —— 同一份配置两次部署可能给出不同的可见范围。
+///
+/// 跨角色仍然是**并集**（D37）—— 这条只管**同一个角色内部**的多条 grant。
 pub fn contributions_for(
     graph: &RoleGraph,
     user_id: &str,
@@ -879,15 +893,35 @@ pub fn contributions_for(
             continue;
         };
         let grants = graph.grants_of(&role_id);
-        // 该角色是否授予了这个权限点（含通配与继承）。
-        let mut matched: Option<Option<DataScope>> = None;
+        // 角色级 scope（**权限点级 scope 覆盖它**）。
+        let role_scope = DataScope::parse(&role.data_scope).unwrap_or(DataScope::OnlySelf);
+        // 该角色是否授予了这个权限点（含通配与继承）；命中多条时按 D43 选一条。
+        let mut matched: Option<MatchedGrant> = None;
         for grant in &grants {
             let Ok(pattern) = PermissionPattern::parse(&grant.permission_code) else {
                 continue;
             };
-            if pattern.matches(permission) {
-                matched = Some(grant.data_scope.as_deref().and_then(DataScope::parse));
+            if !pattern.matches(permission) {
+                continue;
             }
+            let candidate = MatchedGrant {
+                specificity: pattern_specificity(&pattern),
+                override_scope: grant.data_scope.as_deref().and_then(DataScope::parse),
+            };
+            matched = Some(match matched {
+                None => candidate,
+                Some(best) => {
+                    if candidate.specificity > best.specificity {
+                        // 更具体 → 赢（**显式意图覆盖宽泛默认**）。
+                        candidate
+                    } else if candidate.specificity == best.specificity {
+                        // 同具体度 → 取**更严格**的 scope。
+                        stricter(best, candidate, role_scope)
+                    } else {
+                        best
+                    }
+                }
+            });
         }
         if matched.is_none() {
             // 内置管理员仍然拥有注册表全集。
@@ -900,8 +934,11 @@ pub fn contributions_for(
         }
         // 权限点级 scope 覆盖角色级。
         let scope = match matched {
-            Some(Some(override_scope)) => override_scope,
-            _ => DataScope::parse(&role.data_scope).unwrap_or(DataScope::OnlySelf),
+            Some(MatchedGrant {
+                override_scope: Some(override_scope),
+                ..
+            }) => override_scope,
+            _ => role_scope,
         };
         contributions.push(ScopeContribution {
             scope,
@@ -910,6 +947,65 @@ pub fn contributions_for(
         });
     }
     contributions
+}
+
+/// 命中的那一条 grant（D43 的选取结果）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MatchedGrant {
+    /// 匹配具体度（越大越具体）。
+    specificity: u8,
+    /// 权限点级 scope（`None` = 不覆盖角色级）。
+    override_scope: Option<DataScope>,
+}
+
+/// 一个 grant 形态的**匹配具体度**（D43）。
+///
+/// 管理员写精确的那条是**显式意图**，写通配的是**宽泛默认** → 显式覆盖默认。
+fn pattern_specificity(pattern: &PermissionPattern) -> u8 {
+    match pattern {
+        PermissionPattern::Exact(_) => 3,
+        PermissionPattern::ResourceWildcard { .. } => 2,
+        PermissionPattern::ModuleWildcard(_) => 1,
+    }
+}
+
+/// 包含型 scope 的**严格度**（D43）：`ALL` < `OWN_ORG_AND_BELOW` < `OWN_ORG` < `SELF`。
+///
+/// 越靠后越严格。`CUSTOM` **不参与**这个比较（它不是包含型 scope）→ `None`。
+fn containment_strictness(scope: DataScope) -> Option<u8> {
+    match scope {
+        DataScope::All => Some(0),
+        DataScope::OwnOrgAndBelow => Some(1),
+        DataScope::OwnOrg => Some(2),
+        DataScope::OnlySelf => Some(3),
+        DataScope::Custom => None,
+    }
+}
+
+/// 同具体度时**取更严格的 scope**（D43）。
+///
+/// - 两条都是包含型 → 取更严格的；
+/// - 一条包含型一条 `CUSTOM` → **按包含型那条**（`CUSTOM` 不参与比较；
+///   它与包含型的 OR 是**跨角色**的事，D37）；
+/// - 两条都是 `CUSTOM` → 保留先命中的（顺序确定 → 结果确定）。
+fn stricter(best: MatchedGrant, candidate: MatchedGrant, role_scope: DataScope) -> MatchedGrant {
+    let best_scope = best.override_scope.unwrap_or(role_scope);
+    let candidate_scope = candidate.override_scope.unwrap_or(role_scope);
+    match (
+        containment_strictness(best_scope),
+        containment_strictness(candidate_scope),
+    ) {
+        (Some(best_rank), Some(candidate_rank)) => {
+            if candidate_rank > best_rank {
+                candidate
+            } else {
+                best
+            }
+        }
+        (Some(_), None) => best,
+        (None, Some(_)) => candidate,
+        (None, None) => best,
+    }
 }
 
 /// 用户直接绑定的角色 ID。
@@ -990,6 +1086,14 @@ mod tests {
             role_id: role_id.to_string(),
             permission_code: code.to_string(),
             data_scope: None,
+        }
+    }
+
+    /// 带**权限点级 scope** 的授权行。
+    fn grant_with_scope(role_id: &str, code: &str, scope: DataScope) -> RolePermissionRow {
+        RolePermissionRow {
+            data_scope: Some(scope.as_str().to_string()),
+            ..grant(role_id, code)
         }
     }
 
@@ -1131,6 +1235,113 @@ mod tests {
         assert!(
             !permissions.contains("org:org-node:read"),
             "`sandbox:*` 不得覆盖 `org:`：{permissions:?}"
+        );
+    }
+
+    // -- D43：同一个角色内多条 grant 命中同一权限点 → 精确优先于通配 -------
+
+    /// 精确授权与通配授权同时命中 → **精确的赢**（显式意图覆盖宽泛默认）。
+    #[test]
+    fn an_exact_grant_wins_over_a_wildcard_grant() {
+        let mut graph = build_graph(
+            vec![role_row("r-a", "rbac-d43", DataScope::OwnOrg, false)],
+            BTreeMap::from([("u-d43".to_string(), vec!["r-a".to_string()])]),
+        );
+        graph.permissions.insert(
+            "r-a".to_string(),
+            vec![
+                grant_with_scope("r-a", "sandbox:*", DataScope::All),
+                grant_with_scope("r-a", "sandbox:scope-item:read", DataScope::OnlySelf),
+            ],
+        );
+        let contributions = contributions_for(
+            &graph,
+            "u-d43",
+            "sandbox:scope-item:read",
+            &["sandbox:scope-item:read".to_string()],
+        );
+        assert_eq!(contributions.len(), 1);
+        assert_eq!(
+            contributions[0].scope,
+            DataScope::OnlySelf,
+            "精确授权必须赢过通配授权（D43）"
+        );
+    }
+
+    /// **经继承**：两条 grant 都在父角色上 → 子角色继承后仍是**精确的赢**。
+    #[test]
+    fn an_exact_grant_inherited_from_a_parent_role_wins_over_a_wildcard_grant() {
+        let mut graph = build_graph(
+            vec![
+                role_row("r-child", "rbac-d43-child", DataScope::OwnOrg, false),
+                role_row("r-parent", "rbac-d43-parent", DataScope::OwnOrg, false),
+            ],
+            BTreeMap::from([("u-d43".to_string(), vec!["r-child".to_string()])]),
+        );
+        graph.permissions.insert(
+            "r-parent".to_string(),
+            vec![
+                grant_with_scope("r-parent", "sandbox:*", DataScope::All),
+                grant_with_scope("r-parent", "sandbox:scope-item:read", DataScope::OnlySelf),
+            ],
+        );
+        graph
+            .inherits
+            .insert("r-child".to_string(), vec!["r-parent".to_string()]);
+        let contributions = contributions_for(
+            &graph,
+            "u-d43",
+            "sandbox:scope-item:read",
+            &["sandbox:scope-item:read".to_string()],
+        );
+        assert_eq!(contributions.len(), 1);
+        assert_eq!(
+            contributions[0].scope,
+            DataScope::OnlySelf,
+            "经继承也必须由精确授权说了算（D43）"
+        );
+    }
+
+    /// ⚠️ **这条专门证伪「取排序里最后一条匹配的」**。
+    ///
+    /// 通配在**子角色**上、精确在**父角色**上：祖先是按**角色 ID**排序的
+    /// （角色 ID 是 UUID → 字典序等同随机）→ 「取最后一个」的结果取决于
+    /// 角色 ID 的字典序，**不是**取决于具体度。
+    #[test]
+    fn an_exact_grant_on_a_parent_role_wins_over_a_wildcard_grant_on_the_child_role() {
+        let mut graph = build_graph(
+            vec![
+                role_row("r-narrow", "rbac-d43-narrow", DataScope::OwnOrg, false),
+                role_row("r-wide", "rbac-d43-wide", DataScope::OwnOrg, false),
+            ],
+            BTreeMap::from([("u-d43".to_string(), vec!["r-wide".to_string()])]),
+        );
+        graph.permissions.insert(
+            "r-narrow".to_string(),
+            vec![grant_with_scope(
+                "r-narrow",
+                "sandbox:scope-item:read",
+                DataScope::OnlySelf,
+            )],
+        );
+        graph.permissions.insert(
+            "r-wide".to_string(),
+            vec![grant_with_scope("r-wide", "sandbox:*", DataScope::All)],
+        );
+        graph
+            .inherits
+            .insert("r-wide".to_string(), vec!["r-narrow".to_string()]);
+        let contributions = contributions_for(
+            &graph,
+            "u-d43",
+            "sandbox:scope-item:read",
+            &["sandbox:scope-item:read".to_string()],
+        );
+        assert_eq!(contributions.len(), 1);
+        assert_eq!(
+            contributions[0].scope,
+            DataScope::OnlySelf,
+            "精确授权必须赢过通配授权 —— 不能由角色 ID 的字典序决定（D43）"
         );
     }
 }

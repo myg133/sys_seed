@@ -177,10 +177,19 @@ pub trait PermissionChecker: Send + Sync + 'static {
     /// [`Self::has`] 判过权限点，否则「没权限」会被误当成「范围不限」。
     fn effective_scope(&self, ctx: &RequestContext, permission: &str) -> ScopeFilter;
 
-    /// 某个权限点携带的**属性条件**（属性级校验 / ABAC）；没有则 `None`。
+    /// 某个权限点携带的**属性条件**（属性级校验 / ABAC）；**没有条件**时返回 `None`。
     ///
-    /// 条件引用白名单外的属性时返回 `None` —— 调用方据此**判定不通过**
-    /// （fail closed），**不是**「忽略条件放行」。
+    /// 返回值语义（**必须**严格区分，BA 决策 D40）：
+    ///
+    /// | 返回值 | 含义 | 调用方动作 |
+    /// |---|---|---|
+    /// | `None` | 这个权限点**根本没有**条件 | 直接放行 |
+    /// | `Some(永不匹配的条件)` | 条件**非法**（引用白名单外属性 / 编译失败） | **判不通过**（fail closed） |
+    ///
+    /// ⚠️ **非法条件不得返回 `None`** —— 那会让调用方把「无条件」与「条件非法」混为一谈：
+    /// 要么误拒全部无条件权限点，要么把非法条件**静默放行**。两者都是错的。
+    /// 非法条件必须编译成**永不匹配**的条件（如 `1 = 0`），
+    /// 调用方应用它之后**一行都看不到**。
     fn condition(&self, ctx: &RequestContext, permission: &str) -> Option<CompiledCondition>;
 }
 

@@ -798,20 +798,88 @@ async fn the_part_time_membership_defaults_to_the_primary_department() {
 // AC-S-040：主部门缺失 / 歧义 → fail closed 到 SELF
 // ---------------------------------------------------------------------------
 
+/// 探针 schema 名（**每轮唯一** —— 并发跑不撞名）。
+fn probe_schema() -> String {
+    format!("{PROBE_SCHEMA_PREFIX}_{}", run_id())
+}
+
+/// 部分唯一索引（**预防层**）在不在。
+///
+/// 判据 = `pg_indexes` 里查得到 `user_org_one_primary_idx`。
+async fn primary_index_exists(pool: &sqlx::PgPool, schema: &str) -> bool {
+    let row: (i64,) = sqlx::query_as(
+        "SELECT count(*)::bigint FROM pg_indexes \
+         WHERE schemaname = $1 AND indexname = 'user_org_one_primary_idx'",
+    )
+    .bind(schema)
+    .fetch_one(pool)
+    .await
+    .expect("索引应当能查");
+    row.0 > 0
+}
+
+/// 摘掉**探针**的部分唯一索引（预防层失效）。
+///
+/// ⚠️ **只摘探针 schema 里的那个** —— 全局索引一点不碰
+/// （QA 问题 #2：全局摘索引会让**所有**租户与并发用例失去 DB 层保护）。
+async fn drop_probe_primary_index(pool: &sqlx::PgPool, schema: &str) {
+    sqlx::query(&format!(
+        "DROP INDEX IF EXISTS {schema}.user_org_one_primary_idx"
+    ))
+    .execute(pool)
+    .await
+    .unwrap_or_else(|err| panic!("摘掉探针的部分唯一索引应当成功（{schema}）：{err}"));
+}
+
+/// 把**探针**的部分唯一索引装回去（**先清重复再建**）。
+///
+/// ⚠️ 清理**带租户条件** —— 只删本用例自己租户的歧义夹具，
+/// 不碰别的租户（QA 问题 #2：跨租通配 DELETE 会清掉并发用例的夹具）。
+async fn restore_probe_primary_index(pool: &sqlx::PgPool, schema: &str, tenant: &str) {
+    sqlx::query("DELETE FROM user_org WHERE tenant_id = $1 AND user_id LIKE 'u-dual-primary-%'")
+        .bind(tenant)
+        .execute(pool)
+        .await
+        .unwrap_or_else(|err| panic!("清理本用例租户的歧义夹具应当成功：{err}"));
+    sqlx::query(&format!(
+        "CREATE UNIQUE INDEX IF NOT EXISTS user_org_one_primary_idx \
+         ON {schema}.user_org (tenant_id, user_id) WHERE is_primary"
+    ))
+    .execute(pool)
+    .await
+    .unwrap_or_else(|err| {
+        panic!(
+            "重建探针的部分唯一索引应当成功（{schema}）：{err}\n  \
+             （报「could not create unique index」= 库里还有重复主部门 —— \
+             先清干净重复再建，别让索引建不起来）"
+        )
+    });
+}
+
 #[tokio::test]
 #[ignore = "需要 base_test 库：scripts/test-integration.sh 会用 --include-ignored 跑到"]
 async fn a_missing_or_ambiguous_primary_department_falls_back_to_self() {
     let fixture = setup().await;
-    let (service, checker) = build(&fixture);
+    // ⚠️ **这条用例在独立 schema（探针）里跑** —— 见 `create_probe_fixture`。
+    //
+    // 验证「预防层失效」必须摘掉部分唯一索引，而那个索引是**全局**的：
+    // 摘掉它会影响所有租户与所有并发用例（QA 问题 #2 实测：
+    // 索引摘掉期间第二个主部门写得进去，`CREATE UNIQUE INDEX` 随即失败；
+    // 若在两者之间 panic，预防层会留在关闭状态直到本轮结束）。
+    // 探针里摘的是**探针自己**的索引 —— **全局索引一点不碰**。
+    let schema = probe_schema();
+    drop_stale_probe_schemas(&fixture, &schema).await;
+    let probe = create_probe_fixture(&fixture, &schema).await;
+    let (service, checker) = build(&probe);
     let tenant = format!("tenant-{}-{}", run_id(), unique_suffix());
     let ctx = ctx_for(&tenant);
     let users = users(&tenant, &unique_suffix());
-    seed_base_fixture(&fixture, &users, &tenant).await;
+    seed_base_fixture(&probe, &users, &tenant).await;
 
     // 用户 V（无主部门）自己创建了一条记录。
-    seed_iam_user(&fixture, &tenant, &users.no_primary).await;
+    seed_iam_user(&probe, &tenant, &users.no_primary).await;
     seed_scope_item(
-        &fixture,
+        &probe,
         &tenant,
         "item-noprimary",
         "dept-c",
@@ -831,18 +899,21 @@ async fn a_missing_or_ambiguous_primary_department_falls_back_to_self() {
     .await;
     seed_grant_and_bind(&service, &ctx, &r_own, PERM_READ, None, &users.no_primary).await;
 
-    // 0) 先把「预防层」摆正：清掉上一轮遗留的歧义夹具，确保唯一索引在。
-    sqlx::query("DELETE FROM user_org WHERE user_id LIKE 'u-dual-primary-%'")
-        .execute(&fixture.admin_pool)
+    // 0) 先把「预防层」摆正：清掉本用例租户的歧义夹具，确保唯一索引在。
+    //
+    //    ⚠️ DELETE **带租户条件** —— 只删本用例自己租户的夹具
+    //    （不带租户条件会清掉**所有**租户下匹配前缀的成员行 →
+    //    并发用例的夹具被清掉）。
+    sqlx::query("DELETE FROM user_org WHERE tenant_id = $1 AND user_id LIKE 'u-dual-primary-%'")
+        .bind(&tenant)
+        .execute(&probe.admin_pool)
         .await
-        .ok();
-    sqlx::query(
-        "CREATE UNIQUE INDEX IF NOT EXISTS user_org_one_primary_idx \
-         ON user_org (tenant_id, user_id) WHERE is_primary",
-    )
-    .execute(&fixture.admin_pool)
-    .await
-    .expect("部分唯一索引应当能建立（预防层）");
+        .expect("清理本用例租户的歧义夹具应当成功");
+    restore_probe_primary_index(&probe.admin_pool, &schema, &tenant).await;
+    assert!(
+        primary_index_exists(&probe.admin_pool, &schema).await,
+        "预防层（部分唯一索引）必须在位"
+    );
 
     // 1) 数据库**拒绝**第二个主部门（部分唯一索引）。
     //
@@ -853,7 +924,7 @@ async fn a_missing_or_ambiguous_primary_department_falls_back_to_self() {
          VALUES ({tenant}, 'uo-second-primary', ?, 'dept-c', NULL, TRUE)",
     )
     .bind(users.own.as_str());
-    let mut conn = fixture.admin_db.begin(&ctx).await.expect("事务应当能开");
+    let mut conn = probe.admin_db.begin(&ctx).await.expect("事务应当能开");
     let rejected = conn.execute(&insert).await;
     assert!(
         rejected.is_err(),
@@ -862,8 +933,7 @@ async fn a_missing_or_ambiguous_primary_department_falls_back_to_self() {
     conn.rollback().await.ok();
 
     // 2) 主部门缺失 → 退化为 SELF（**只看到本人创建的记录**）。
-    let visible =
-        set(&visible_ids(&fixture, &checker, &tenant, &users.no_primary, PERM_READ).await);
+    let visible = set(&visible_ids(&probe, &checker, &tenant, &users.no_primary, PERM_READ).await);
     assert_eq!(
         visible,
         set(&["item-noprimary".to_string()]),
@@ -872,16 +942,13 @@ async fn a_missing_or_ambiguous_primary_department_falls_back_to_self() {
     assert!(!visible.contains("item-a1"), "不得退化成更宽的范围");
 
     // 3) 歧义（两个主部门）→ **同样**退化为 SELF。
-    //    歧义状态**绕过数据库约束**造出来（部分唯一索引先摘掉）。
-    sqlx::query("DROP INDEX IF EXISTS user_org_one_primary_idx")
-        .execute(&fixture.admin_pool)
-        .await
-        .expect("摘掉索引应当成功");
-    seed_iam_user(&fixture, &tenant, &users.dual_primary).await;
-    seed_membership(&fixture, &tenant, &users.dual_primary, "dept-a", true).await;
-    seed_membership(&fixture, &tenant, &users.dual_primary, "dept-c", true).await;
+    //    歧义状态**绕过数据库约束**造出来（**探针**的部分唯一索引先摘掉）。
+    drop_probe_primary_index(&probe.admin_pool, &schema).await;
+    seed_iam_user(&probe, &tenant, &users.dual_primary).await;
+    seed_membership(&probe, &tenant, &users.dual_primary, "dept-a", true).await;
+    seed_membership(&probe, &tenant, &users.dual_primary, "dept-c", true).await;
     seed_scope_item(
-        &fixture,
+        &probe,
         &tenant,
         "item-dualprimary",
         "dept-c",
@@ -910,7 +977,7 @@ async fn a_missing_or_ambiguous_primary_department_falls_back_to_self() {
     .await;
 
     let visible =
-        set(&visible_ids(&fixture, &checker, &tenant, &users.dual_primary, PERM_READ).await);
+        set(&visible_ids(&probe, &checker, &tenant, &users.dual_primary, PERM_READ).await);
     assert_eq!(
         visible,
         set(&["item-dualprimary".to_string()]),
@@ -918,19 +985,23 @@ async fn a_missing_or_ambiguous_primary_department_falls_back_to_self() {
     );
     assert!(!visible.contains("item-a1"), "歧义时不得看到任何部门数据");
 
-    // 把索引装回去（别把库留在坏状态）：先清掉歧义行，再重建索引。
-    sqlx::query("DELETE FROM user_org WHERE user_id = $1")
-        .bind(users.dual_primary)
-        .execute(&fixture.admin_pool)
-        .await
-        .expect("清理歧义夹具应当成功");
-    sqlx::query(
-        "CREATE UNIQUE INDEX IF NOT EXISTS user_org_one_primary_idx \
-         ON user_org (tenant_id, user_id) WHERE is_primary",
-    )
-    .execute(&fixture.admin_pool)
-    .await
-    .expect("重建索引应当成功");
+    // 4) 把探针的索引装回去（别把隔离区留在坏状态）：
+    //    **先清掉本用例租户的歧义行，再重建索引**。
+    restore_probe_primary_index(&probe.admin_pool, &schema, &tenant).await;
+
+    // 5) **收尾自查**：预防层必须**仍在**（「预防层被关掉」要变成可观测的失败，
+    //    而不是静默的后续异常）。
+    assert!(
+        primary_index_exists(&probe.admin_pool, &schema).await,
+        "用例结束时探针的部分唯一索引必须在位"
+    );
+    assert!(
+        primary_index_exists(&fixture.admin_pool, "public").await,
+        "全局的部分唯一索引必须仍在（这条用例**不许**动它）"
+    );
+
+    // 6) 清理隔离区（别把探针 schema 留在库里）。
+    drop_probe_schema(&fixture, &schema).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1023,6 +1094,243 @@ async fn multiple_roles_take_the_most_permissive_scope() {
         read_after, read,
         "解绑前后的结果必须不同（否则说明取的是交集而不是并集）"
     );
+}
+
+// ---------------------------------------------------------------------------
+// D43：同一个角色内多条 grant 命中同一权限点 → **精确优先于通配**
+//
+// ⚠️ 旧实现是「取排序里最后一条匹配的」：直接授权时精确的恰好赢
+// （`'*' < 小写字母`），但那只是**排序的副产物**；经角色继承时胜者由
+// **角色 ID 的字典序**决定（角色 ID 是 UUID → 实际等同随机）。
+// **随机是不合格的** —— 同一份配置两次部署可能给出不同的可见范围。
+//
+// 跨角色仍然是**并集**（D37）—— 这几条只管**同一个角色内部**的多条 grant。
+// ---------------------------------------------------------------------------
+
+/// D43 的夹具：造一个用户 + 一条**本人创建**的记录。
+///
+/// 有了这条记录就能区分「SELF」与「更宽的范围」：
+/// `SELF` 只看得到它；`OWN_ORG` / `ALL` 看得到别的部门的记录。
+async fn seed_d43_probe(fixture: &Fixture, tenant: &str, tag: &str) -> (String, String) {
+    let user = format!("u-d43-{tenant}-{tag}");
+    let item = format!("item-d43-{tag}");
+    seed_iam_user(fixture, tenant, &user).await;
+    seed_membership(fixture, tenant, &user, "dept-a", true).await;
+    seed_scope_item(fixture, tenant, &item, "dept-a", &user, 5000).await;
+    (user, item)
+}
+
+/// 断言「有效范围是 `SELF`」（只看得到本人创建的记录）。
+fn assert_self_scope(visible: &BTreeSet<String>, own_item: &str) {
+    assert_eq!(
+        *visible,
+        set(&[own_item.to_string()]),
+        "有效范围必须是 SELF（精确授权优先于通配）"
+    );
+    assert!(
+        !visible.contains("item-a1"),
+        "不得退化成更宽的范围（ALL / OWN_ORG）：{visible:?}"
+    );
+}
+
+/// 同一个角色上同时授予「模块通配（ALL）」与「精确（SELF）」→ **精确赢**。
+#[tokio::test]
+#[ignore = "需要 base_test 库：scripts/test-integration.sh 会用 --include-ignored 跑到"]
+async fn an_exact_grant_wins_over_a_module_wildcard_grant_in_the_same_role() {
+    let fixture = setup().await;
+    let (service, checker) = build(&fixture);
+    let tenant = format!("tenant-{}-{}", run_id(), unique_suffix());
+    let ctx = ctx_for(&tenant);
+    let users = users(&tenant, &unique_suffix());
+    seed_base_fixture(&fixture, &users, &tenant).await;
+    let (user, item) = seed_d43_probe(&fixture, &tenant, "module").await;
+
+    let role = seed_role(
+        &service,
+        &ctx,
+        "r-d43-module",
+        "r-d43-module",
+        DataScope::OwnOrg,
+        false,
+    )
+    .await;
+    // 宽泛默认（ALL）+ 显式意图（SELF）—— 两条都在**同一个角色**上。
+    service
+        .grant_permission(&ctx, &role, "sandbox:*", Some(DataScope::All))
+        .await
+        .expect("通配授权应当成功");
+    service
+        .grant_permission(&ctx, &role, PERM_READ, Some(DataScope::OnlySelf))
+        .await
+        .expect("精确授权应当成功");
+    service
+        .bind_user_role(&ctx, &user, &role)
+        .await
+        .expect("绑定应当成功");
+
+    let visible = set(&visible_ids(&fixture, &checker, &tenant, &user, PERM_READ).await);
+    assert_self_scope(&visible, &item);
+}
+
+/// 「资源通配（ALL）」与「精确（SELF）」→ 仍然**精确赢**。
+#[tokio::test]
+#[ignore = "需要 base_test 库：scripts/test-integration.sh 会用 --include-ignored 跑到"]
+async fn an_exact_grant_wins_over_a_resource_wildcard_grant_in_the_same_role() {
+    let fixture = setup().await;
+    let (service, checker) = build(&fixture);
+    let tenant = format!("tenant-{}-{}", run_id(), unique_suffix());
+    let ctx = ctx_for(&tenant);
+    let users = users(&tenant, &unique_suffix());
+    seed_base_fixture(&fixture, &users, &tenant).await;
+    let (user, item) = seed_d43_probe(&fixture, &tenant, "resource").await;
+
+    let role = seed_role(
+        &service,
+        &ctx,
+        "r-d43-resource",
+        "r-d43-resource",
+        DataScope::OwnOrg,
+        false,
+    )
+    .await;
+    service
+        .grant_permission(&ctx, &role, "sandbox:scope-item:*", Some(DataScope::All))
+        .await
+        .expect("资源通配授权应当成功");
+    service
+        .grant_permission(&ctx, &role, PERM_READ, Some(DataScope::OnlySelf))
+        .await
+        .expect("精确授权应当成功");
+    service
+        .bind_user_role(&ctx, &user, &role)
+        .await
+        .expect("绑定应当成功");
+
+    let visible = set(&visible_ids(&fixture, &checker, &tenant, &user, PERM_READ).await);
+    assert_self_scope(&visible, &item);
+}
+
+/// 父角色上的**精确**授权 vs 子角色上的**通配**授权 —— 与角色 ID 的字典序**无关**。
+///
+/// ⚠️ 两种角色 ID 顺序**都跑一遍**：
+///
+/// | 顺序 | 「取排序里最后一个」的旧实现会选到 |
+/// |---|---|
+/// | 子角色 ID 排在父角色**后面** | 子角色的通配（`ALL`）→ **错** |
+/// | 子角色 ID 排在父角色**前面** | 父角色的精确（`SELF`）→ 碰巧对 |
+///
+/// 两条一起断言 → 旧实现**必然**有一条红（不依赖角色 ID 的字典序）。
+#[tokio::test]
+#[ignore = "需要 base_test 库：scripts/test-integration.sh 会用 --include-ignored 跑到"]
+async fn an_exact_grant_on_the_parent_role_wins_over_a_wildcard_grant_on_the_child_role() {
+    let fixture = setup().await;
+    let (service, checker) = build(&fixture);
+    let tenant = format!("tenant-{}-{}", run_id(), unique_suffix());
+    let ctx = ctx_for(&tenant);
+    let users = users(&tenant, &unique_suffix());
+    seed_base_fixture(&fixture, &users, &tenant).await;
+
+    for (tag, parent_base, child_base) in [
+        ("child-last", "r-d43-a-parent", "r-d43-z-child"),
+        ("child-first", "r-d43-z-parent", "r-d43-a-child"),
+    ] {
+        let (user, item) = seed_d43_probe(&fixture, &tenant, tag).await;
+        let parent = seed_role(
+            &service,
+            &ctx,
+            parent_base,
+            parent_base,
+            DataScope::OwnOrg,
+            false,
+        )
+        .await;
+        let child = seed_role(
+            &service,
+            &ctx,
+            child_base,
+            child_base,
+            DataScope::OwnOrg,
+            false,
+        )
+        .await;
+        // 父角色：精确（SELF）—— 显式意图。
+        service
+            .grant_permission(&ctx, &parent, PERM_READ, Some(DataScope::OnlySelf))
+            .await
+            .expect("精确授权应当成功");
+        // 子角色：通配（ALL）—— 宽泛默认。
+        service
+            .grant_permission(&ctx, &child, "sandbox:*", Some(DataScope::All))
+            .await
+            .expect("通配授权应当成功");
+        service
+            .set_inherit(&ctx, &child, &parent)
+            .await
+            .expect("继承应当成功");
+        service
+            .bind_user_role(&ctx, &user, &child)
+            .await
+            .expect("绑定应当成功");
+
+        let visible = set(&visible_ids(&fixture, &checker, &tenant, &user, PERM_READ).await);
+        assert_self_scope(&visible, &item);
+    }
+}
+
+/// **经继承**：两条 grant 都在父角色上 → 子角色继承后仍是**精确赢**。
+///
+/// 这一条专门证伪「靠排序碰运气」：继承链上的角色顺序是**角色 ID 的字典序**
+/// （UUID → 随机），具体度必须**显式**说了算。
+#[tokio::test]
+#[ignore = "需要 base_test 库：scripts/test-integration.sh 会用 --include-ignored 跑到"]
+async fn an_exact_grant_wins_over_a_wildcard_grant_through_inheritance() {
+    let fixture = setup().await;
+    let (service, checker) = build(&fixture);
+    let tenant = format!("tenant-{}-{}", run_id(), unique_suffix());
+    let ctx = ctx_for(&tenant);
+    let users = users(&tenant, &unique_suffix());
+    seed_base_fixture(&fixture, &users, &tenant).await;
+    let (user, item) = seed_d43_probe(&fixture, &tenant, "inherit").await;
+
+    let parent = seed_role(
+        &service,
+        &ctx,
+        "r-d43-parent",
+        "r-d43-parent",
+        DataScope::OwnOrg,
+        false,
+    )
+    .await;
+    let child = seed_role(
+        &service,
+        &ctx,
+        "r-d43-child",
+        "r-d43-child",
+        DataScope::OwnOrg,
+        false,
+    )
+    .await;
+    // 两条 grant 都在**父角色**上。
+    service
+        .grant_permission(&ctx, &parent, "sandbox:*", Some(DataScope::All))
+        .await
+        .expect("通配授权应当成功");
+    service
+        .grant_permission(&ctx, &parent, PERM_READ, Some(DataScope::OnlySelf))
+        .await
+        .expect("精确授权应当成功");
+    service
+        .set_inherit(&ctx, &child, &parent)
+        .await
+        .expect("继承应当成功");
+    // 用户只绑子角色 → 有效范围由**子角色这一份贡献**决定（含继承来的授权）。
+    service
+        .bind_user_role(&ctx, &user, &child)
+        .await
+        .expect("绑定应当成功");
+
+    let visible = set(&visible_ids(&fixture, &checker, &tenant, &user, PERM_READ).await);
+    assert_self_scope(&visible, &item);
 }
 
 // ---------------------------------------------------------------------------
@@ -1646,9 +1954,15 @@ async fn a_condition_outside_the_whitelist_never_grants_access() {
         .await
         .expect("判定缓存应当能刷新");
 
-    let denied = restricted_checker
-        .condition(&user_ctx, PERM_APPROVE)
-        .expect("权限点带条件");
+    // ⚠️ D40：**非法条件返回 `Some(永不匹配)`**，不是 `None` ——
+    // `None` 只表示「没有条件」；返回 `None` 会让调用方
+    // （`if let Some(c) = ... { 应用条件 }`）把非法条件**静默放行**。
+    let maybe = restricted_checker.condition(&user_ctx, PERM_APPROVE);
+    assert!(
+        maybe.is_some(),
+        "非法条件必须返回 Some（永不匹配）—— 返回 None 会被调用方当成「无条件」而放行"
+    );
+    let denied = maybe.expect("上面已断言是 Some");
     assert_eq!(
         denied.sql, "1 = 0",
         "白名单外的属性必须落到永不匹配（fail closed），不是「忽略条件放行」"
