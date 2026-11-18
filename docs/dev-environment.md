@@ -292,6 +292,21 @@ base tenant-policies --check
 > 策略要用**超级用户**连接（建策略需要表的属主权限）；应用连接用**普通角色**。
 > 部署流程里它是**独立于迁移的一步**，且**必须排在迁移之后**（见 `deploy/RUNBOOK.md` §0.1）。
 
+> ⚠️ **`--check` 对库状态敏感**：它校验的是「**当前这个库**里声明的表有没有 policy」。
+> 在一个**陈旧的库**上跑（例如模块表还没建、或者迁移跑了一半），它会因为
+> 「`sandbox_tenant_item` 未开 RLS」而失败 —— 那是**库没就绪**，不是代码有问题。
+>
+> **本地开发的标准顺序**（先重置库，再校验策略）：
+>
+> ```bash
+> ./scripts/test-integration.sh        # 重置 base_test + 跑真实库用例（退出码 0 = 库已就绪）
+> DATABASE_URL=postgres://... cargo xtask tenant-policies --check
+> ```
+>
+> 换句话说：**先跑 `scripts/test-integration.sh`，再跑 `tenant-policies --check`**。
+> `scripts/test-integration.sh` 会把 `base_test` 重置到「迁移 + 策略都已应用」的干净状态，
+> 此时 `--check` 才有意义。**绝不要**在没重置过的旧库上把 `--check` 的失败当成回归。
+
 ⚠️ 策略应用在**一个事务**里完成：`DROP POLICY` + `CREATE POLICY` 分两条语句执行时，
 中间有一个「表上没有 policy」的窗口 —— 那一瞬间 RLS 变成**全部拒绝**
 （fail closed，不泄漏，但读写全挂）。
