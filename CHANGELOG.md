@@ -30,6 +30,25 @@
 - `cargo xtask check-deps` 子命令：把 REQ-003 已有的 `cargo metadata` 依赖图
   遍历暴露给 CI（未重写实现）
 
+### REQ-004 修复轮（首轮 QA PASS-WITH-RISK）
+
+- **CI 补 `pull_request_review` 触发器**：`on:` 增加
+  `pull_request_review: types: [submitted, edited, dismissed]`，`pull_request` 补
+  `review_requested` —— 修复前评审者批准后 workflow 不会重跑，
+  「核心变更需非作者批准」的门禁永远停在旧状态、无法变绿。
+  分支保护（required check + Require review from Code Owners）仍是**仓库设置、需人工配置**
+- **修正提示词里的假绿命令**：`prompts/02-add-permission.md` 与
+  `prompts/07-write-test-cases.md` 的 `cargo test` 命令多了一个 `--`，
+  会**跑 0 个用例却 exit 0**；已修正，并把这条坑写进 `AGENTS.md` 硬规则第 8 条
+- **契约引用可操作**：`AGENTS.md` / `prompts/03` 不再指向仓库内不存在的 `BA/contracts/...`；
+  正本用 `git show demand:contracts/<name>/<version>.md` 取，
+  另在 `docs/contracts/` 放随版本发布的**快照**，由 `scripts/sync-contracts.sh`
+  从正本生成并校验（CI 强制），不会出现两份正本漂移
+- **`cargo xtask capabilities` 会清理多余产物**：此前只写不删，
+  `--check` 报的「多余文件」按提示「重新生成」也修不掉；现在按同一口径剪除并清理空目录
+- 口径更正：`already_provided` 为 **18** 条（非 17）；
+  AGENTS.md 与 `index.json` 是**内容一致、行的顺序不同**（语义序 vs 字典序），非「逐行一致」
+
 ### REQ-003 扩展点框架与契约测试
 
 - 扩展点 trait（`crates/platform-core/src/extension/`）：`PlatformModule` / `Repository` /
