@@ -466,3 +466,233 @@ $ DATABASE_URL='postgres://base:base@127.0.0.1:5432/base_test' BASE_MANIFEST_ROO
    #8 的生产侧已由本轮的 `app-role` 步骤解决（口令由 `APP_ROLE_PASSWORD` 注入），
    但 `deploy/seed/02-app-role.sql` 里**开发用的弱口令仍在**（开发环境专用）。
 5. **AC-S-008（缓存 / 消息链路的租户维度）** 仍然未实现（本期边界外）。
+
+---
+
+## 9. 第三轮：QA 复核（PASS-WITH-RISK）后的修复
+
+- **依据**: `feature-meta/qa-report-recheck.md`（2 个中危 + 3 个低级项）
+- **范围**: 极窄 —— 只动「凭据边界」「存量表授权」「三个低级项」
+- **未动**: `crates/platform-core/`（冻结）· `crates/platform-db/src/` 的核心查询逻辑 ·
+  `BA/contracts/` 下的 ratified 契约 · `Cargo.toml` 的 profile · `.cargo/config.toml`
+
+### 9.1 中 1 —— 应用容器 / Pod 不再拿到超管凭据
+
+**问题**：拆变量名不够 —— app 容器仍拿到**整包** `.env` / **整包** Secret，
+里面躺着 `MIGRATION_DATABASE_URL`（超管连接串）与 `APP_ROLE_PASSWORD`。
+应用进程只要能读到它（环境变量泄露 / 崩溃转储 / 某个依赖读环境变量），
+攻击者就能拿超管连库 → **RLS 被绕过 → 跨租户全量可读** = 把上一轮修的「高 1」又打开了。
+
+**改法**：
+
+| 位置 | 改前 | 改后 |
+|---|---|---|
+| `deploy/compose.prod.yaml` 的 `app` | `env_file: ${ENV_FILE:-.env}`（整包） | **删掉 `env_file`**，逐个列 `environment:`（`DATABASE_URL` ← `${APP_DATABASE_URL:?}` + 10 个非敏感项） |
+| Helm `templates/deployment.yaml` | `envFrom: [configMapRef, secretRef]`（整包 Secret） | **删掉 `envFrom`**，逐个 `env:`（`DATABASE_URL` ← `valueFrom.secretKeyRef`；`REDIS_URL` ← `secretKeyRef` + `optional: true`；`.Values.config` 逐条内联） |
+| Helm `templates/migrate-job.yaml` | `envFrom: [configMapRef, secretRef]`（整包 Secret） | **删掉 `envFrom.secretRef`**，只留 `envFrom.configMapRef`（非敏感）+ 显式 `DATABASE_URL` ← `MIGRATION_DATABASE_URL` |
+| Helm `templates/{app-role,policies}-job.yaml` | 已是显式点名 | **未动**（各自只引用自己要用的键） |
+
+**★ 实测（compose）**：`podman-compose -f deploy/compose.prod.yaml --profile app-role --profile migrate --profile policies config`
+
+```console
+$ podman-compose -f deploy/compose.prod.yaml --profile app-role --profile migrate --profile policies config
+EXIT=0
+
+  app:
+    container_name: base-app
+    environment:
+      BASE_AUTH_MODE: local
+      BASE_ENV: prod
+      BASE_LOG_LEVEL: info
+      BASE_MIGRATIONS_DIR: /app/migrations
+      BASE_SEED_ON_START: 'false'
+      BASE_STATIC_DIR: /app/static
+      BASE_TENANT_MODE: shared
+      DATABASE_URL: postgres://base_app:apppw@postgres:5432/base   ← 普通角色
+      HOST: 0.0.0.0
+      REDIS_URL: ''
+      SERVER_PORT: '8080'
+    image: base-platform:latest
+    ports:
+    - 8080:8080
+    restart: unless-stopped
+```
+
+- app 块里**没有** `env_file` 键（`grep -n env_file` 只命中 `migrate` / `policies` 两个服务）；
+- app 块里**没有** `MIGRATION_DATABASE_URL` / `APP_ROLE_PASSWORD` / `POSTGRES_PASSWORD`
+  （`awk` 提取 app 块后 grep `postgres://base:` → **0 命中**）；
+- app 的 `DATABASE_URL` 是**普通角色** `base_app`。
+
+**★ 实测（Helm）**：`helm template base-platform deploy/helm/base-platform`
+（helm v3.16.3，临时下载到 `/tmp`，用完删除；本机未安装 helm）
+
+```console
+$ helm template base-platform deploy/helm/base-platform | grep -A40 'kind: Deployment'
+          # ⚠️ **不用 `envFrom` 整包注入**：Secret 里含 …
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: base-platform-secret
+                  key: DATABASE_URL
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: base-platform-secret
+                  key: REDIS_URL
+                  optional: true
+            - name: BASE_AUTH_MODE
+              value: "local"
+            - name: BASE_ENV
+              value: "prod"
+            - name: BASE_LOG_LEVEL
+              value: "info"
+            - name: BASE_MIGRATIONS_DIR
+              value: "/app/migrations"
+            - name: BASE_SEED_ON_START
+              value: "false"
+            - name: BASE_STATIC_DIR
+              value: "/app/static"
+            - name: BASE_TENANT_MODE
+              value: "shared"
+            - name: HOST
+              value: "0.0.0.0"
+            - name: SERVER_PORT
+              value: "8080"
+```
+
+逐工作负载清点（脚本按渲染产物解析）：
+
+| 工作负载 | `envFrom` | 显式 env 键 | 引用 `MIGRATION_DATABASE_URL`？ |
+|---|---|---|---|
+| **Deployment（app）** | **无** | `DATABASE_URL`、`REDIS_URL`（+ 9 条非敏感） | **否** ✅ |
+| Job `app-role` | 无 | `MIGRATION_DATABASE_URL`、`APP_ROLE_NAME`、`APP_ROLE_PASSWORD` | 是（它就该用） |
+| Job `migrate` | `configMapRef`（非敏感） | `DATABASE_URL` ← `MIGRATION_DATABASE_URL` | 是（它就该用） |
+| Job `policies` | 无 | `DATABASE_URL` ← `MIGRATION_DATABASE_URL`、`BASE_MANIFEST_ROOT` | 是（它就该用） |
+
+渲染类别数不变：**ConfigMap 1 / Deployment 1 / Job 3 / Service 1 / ServiceAccount 1 = 7 类**
+（与 RUNBOOK §4 的自检口径一致）。
+
+### 9.2 中 2 —— 补建命令救得了**已存在**的表
+
+**问题**：`ALTER DEFAULT PRIVILEGES` **只影响之后创建的表**，对已存在的表无效；
+而补建场景恰恰是「表早就建好了」→ 存量表权限仍是 `f` → 应用照样
+`permission denied for table`。
+
+**改法**：三处建角色的地方都补上**存量**授权（`ALTER DEFAULT PRIVILEGES` 保留，两套并存）：
+
+| 位置 | 补上的语句 |
+|---|---|
+| `deploy/seed/02-app-role.sql` | `GRANT USAGE ON SCHEMA public` + `GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public` + `GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public` |
+| `deploy/compose.prod.yaml` 的 `app-role` 服务 | 同上（内嵌 SQL） |
+| `deploy/helm/base-platform/templates/app-role-job.yaml` | 同上（内嵌 SQL） |
+
+`deploy/RUNBOOK.md` §3.4.3 重写：两套授权机制对照表 + 「`ALTER DEFAULT PRIVILEGES` 只管
+未来表」的显式说明 + **可直接复制执行**的手工补存量授权 SQL + 两条自查命令。
+
+**★ 实测（`base_test`，三步 + 复原）**：
+
+```console
+########## 第 1 步：撤销存量表权限（模拟「表早就建好、权限没落到」）##########
+REVOKE / REVOKE / REVOKE
+--- has_table_privilege ---
+ quota_select | meta_select | migrations_select
+--------------+-------------+-------------------
+ f            | f           | f
+--- base_app 实际读表 ---
+ERROR:  permission denied for table platform_tenant_quota
+
+########## 第 2 步（对照组）：用**修复前**的脚本补建（git show HEAD:deploy/seed/02-app-role.sql）##########
+DO / NOTICE: role "base_app" has already been granted membership … / GRANT ROLE / ALTER DEFAULT PRIVILEGES / DO
+--- has_table_privilege（旧脚本）---
+ quota_select | migrations_select
+--------------+-------------------
+ f            | f                      ← 仍然 f：复现了 QA 的结论
+--- base_app 实际读表（旧脚本补建后）---
+ERROR:  permission denied for table platform_tenant_quota
+
+########## 第 3 步：用**修复后**的脚本补建（deploy/seed/02-app-role.sql）##########
+DO / GRANT ROLE / GRANT / GRANT / GRANT / ALTER DEFAULT PRIVILEGES / DO
+--- has_table_privilege（新脚本）---
+ quota_select | meta_select | migrations_select | sandbox_select
+--------------+-------------+-------------------+--------------
+ t            | t           | t                 | t
+--- base_app 实际读表（新脚本补建后）---
+ count
+-------
+     0
+
+########## 第 4 步：复原核对 ##########
+（撤销前 vs 复原后的权限快照 diff）→ ✅ 逐行一致
+--- 结束前确认 base_app 仍有 SELECT ---
+ quota | meta | migrations | sandbox | tenant_config
+-------+------+------------+---------+---------------
+ t     | t    | t          | t       | t
+```
+
+> **对照组是承重的**：修复前的脚本跑完权限**仍然是 `f`** —— 证明这次修的正是
+> 「存量授权」这件事，而不是别的什么恰好生效了。
+>
+> 复原说明：新脚本的 `GRANT … ON ALL TABLES IN SCHEMA public` 会把 public schema 下
+> **所有**表一并授权（含 `platform_seed_log`，它在补建前本来就没有授权）——
+> 这是该语句的既定语义（私有化单机的 public schema 里只有平台表与模块表）。
+> 为让「复原」逐行可核，验完后单独把 `platform_seed_log` 的授权撤掉，
+> 快照 diff 与撤销前**逐行一致**；`base_test` 每次跑集成脚本都会整体重置。
+
+### 9.3 顺带修的三个低级项
+
+| # | 项 | 做法 | 结果 |
+|---|---|---|---|
+| **L-a** | 开发弱口令 | `deploy/seed/02-app-role.sql` 的 `base_app` 口令处加注释「**开发环境专用弱口令**，生产由 `APP_ROLE_PASSWORD` 建」；`.env.example` 的连接串样例加同样提示；RUNBOOK §3.4.2 加「应用角色的口令要求」表（开发弱口令 / 生产 `openssl rand -base64 24` / 弱口令被 `prod-preflight.sh` 拒绝） | ✅ 三处一致 |
+| **L-b** | 配额无自动化用例 | 新增 `crates/platform-db/tests/quota_real_db.rs`（真实库层）：**计数**（10 → 15 累加）→ **超限判定**（限额 20：15 未超 / 25 超限）→ **重启后计数仍在**（换一个**全新连接池** = 内存态全丢，用量仍是 25、限额仍是 20）→ 附带隔离断言（租户 B 看不到 A 的用量）；另有**防假绿护栏**（缺 `DATABASE_URL_TEST` 必须非零退出 + `0 passed`） | ✅ 实测 `2 passed`（含护栏）；**护栏经变异验证是承重的**：把整条用例改成「缺环境变量就早退」→ 护栏立刻 RED，报出首轮那个一模一样的 `1 passed / 0.00s` 假绿签名 → 已还原 |
+| **L-c** | 契约口径 | **未改** `docs/contracts/api-conventions/v1.md`（已 ratified 的快照）；改在**引用处** `docs/contracts/README.md` 新增「本仓库的落地口径（不改契约）」小节：登记「响应体 `detail` = 英文（ASCII），面向用户的中文由前端按 `code` 做 i18n 渲染」，并指向 `AGENTS.md` 规则 6 / `docs/architecture.md` §4 / RUNBOOK §5.1 | ✅ 契约快照**零改动**（`git diff --stat docs/contracts/api-conventions/v1.md` 为空） |
+
+### 9.4 回归
+
+| 检查 | 结果 |
+|---|---|
+| `cargo check --workspace --all-targets` | ✅ 通过 |
+| `cargo test --workspace -- --test-threads=2` | ✅ **183 passed / 0 failed / 9 ignored**（第二轮 182 → **+1** = 配额护栏；ignored 8 → 9 = 配额真实库用例；**182 基线未破**） |
+| `bash scripts/test-integration.sh` | ✅ exit 0（`quota_real_db` **2/2**、`c3_real_db` **4/4**，其余全绿；容器数量 2 → 2） |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ **0 告警** |
+| `cargo fmt --all --check` | ✅ 通过 |
+| `cargo xtask capabilities --check` | ✅ 13 个文件与源码一致 |
+| `cargo xtask check-deps` | ✅ 依赖方向校验通过 |
+| `cargo xtask check-modules` | ✅ 模块目录校验通过：1 个模块 |
+| `cargo xtask tenant-policies --check` | ✅ 通过（应用角色跑：**无**绕过告警；超管跑：有告警但通过） |
+| `podman-compose -f deploy/compose.prod.yaml config` | ✅ exit 0（三个 profile 全渲染） |
+| `helm template base-platform deploy/helm/base-platform` | ✅ exit 0，**7 类**（与 RUNBOOK §4 口径一致） |
+| `pnpm -r test` | ✅ **23/23** |
+| `bun run test:e2e` | ✅ **1/1** |
+| 依赖树 | ✅ **179 个 crate**（与第二轮一致，第三方 +0；新用例没引任何新依赖） |
+
+### 9.5 本轮如实登记（不藏问题）
+
+1. **Helm 侧仍未在真集群验证**：本轮用 `helm template`（v3.16.3，临时下载）**渲染**核对，
+   **未**上真集群跑那三个 hook Job（`app-role` / `migrate` / `policies`）。
+   真集群上的执行顺序、Secret 预置、`psql` 镜像拉取**仍未验证**。
+2. **compose 的 `app-role` / `migrate` / `policies` 三个服务本轮仍未真起容器**：
+   只做了 `config` 渲染核对 + 把内嵌 SQL **原文**取出来在容器里连跑验证幂等
+   （与第二轮同口径）。
+3. **prod compose 的 `app` 服务有两处默认值口径变化**（有意为之，如实登记）：
+   ① `BASE_ENV` 默认值从「`.env` 里给什么算什么」改成 **`prod`**（私有化交付物本就该是
+   prod；`BASE_ALLOW_SUPERUSER` 在 prod 下本就禁止）；
+   ② `BASE_ALLOW_SUPERUSER` **不再注入** app 容器（生产只允许普通角色连接）。
+   `.env` 里显式写的 `BASE_ENV` 仍然生效（compose 插值优先）。
+4. **Helm 的 `REDIS_URL` 改成 `optional: true`**：Secret 里没有这个键时，
+   Pod 不再因为缺键而起不来（与 RUNBOOK §1.3「REDIS_URL 可选」一致）。
+5. **`GRANT … ON ALL TABLES IN SCHEMA public` 会授权 public schema 下的全部表**：
+   私有化单机的 public schema 里只有平台表与模块表，这正是要授权的范围；
+   若将来库里有**不该给应用**的表，需把它挪出 public schema 或单独 `REVOKE`
+   （已写进 RUNBOOK §3.4.3 的提示）。
+6. **QA 复核报告问题 #3（`base_dev` 缺表权限）经复核是**事实误判** —— 本轮按复核结论
+   更正了 `feature-meta/traceability.md` 与 `feature-meta/status.md` 里的表述：
+   `base_dev` 的默认权限**已落地**，`base_app` 对 `_sqlx_migrations` / `platform_meta`
+   **均有 SELECT**；`base_dev` 的 `/health/ready` 503 的真实原因是
+   **迁移未应用**（`pending migrations: [20261118000200]`），跑一次 `migrate up` 即可，
+   属常规开发态、**不构成缺陷**。本轮**仍未对 `base_dev` 做任何写操作**。
+7. **AC-S-008 / AC-S-012** 仍未实现（本期边界外，见 §5）。
+8. **契约口径张力（C3/C7「平台自动叠加过滤条件」）仍未处理** —— 需 BA 裁定
+   （改契约 or 改实现）；本轮只把「`detail` 英文 / 中文由前端 i18n 渲染」这条
+   口径登记到了引用处（L-c），**没有动 ratified 契约本身**。
+

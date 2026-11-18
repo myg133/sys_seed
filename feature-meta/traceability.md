@@ -45,6 +45,21 @@
 | **中 1 C-3 假绿** | `modules/sandbox/tests/c3_real_db.rs`（夹具改「缺环境变量 = 失败」+ 新增护栏用例） | ① 不设 `DATABASE_URL_TEST` 跑 `--include-ignored` → **3 failed / 退出码 101**（**不是 "3 passed"**）；② 护栏用例每次 `cargo test --workspace` 都跑（子进程必须非零退出 + `0 passed` + 无 "3 passed"）；③ 设上环境变量 → 真跑通过（0.72s，集成脚本 exit 0） | **PASS** |
 | **中 2 策略进部署流程** | `crates/platform-server/src/policies.rs`（`base tenant-policies [--check]`）、`compose.yaml` / `deploy/compose.prod.yaml` 的 `policies` 服务、`deploy/helm/base-platform/templates/policies-job.yaml`、`Dockerfile`（镜像带 manifest）、`deploy/RUNBOOK.md` §0.1 / §3.2 | ① `--check` 通过时 exit 0；**破坏性验证**：删掉一条 policy → `--check` **exit 1** 并点名表；② `base tenant-policies` 能补建（幂等）；③ 顺序：迁移（`-5` / `migrate` 服务）→ 策略（`-4` / `policies` 服务）→ 应用 | **PASS** |
 
+## 2.2 第三轮：QA 复核（PASS-WITH-RISK）后的修复
+
+> QA 复核报告：`feature-meta/qa-report-recheck.md`（首轮 3 个问题**全部复验为真已修**，
+> 新发现 **2 个中危** + 3 个低级项）。本轮**只修这 5 项**，不扩大 scope。
+> `platform-core` 一行未改；`platform-db/src` 的**核心查询逻辑**一行未改；
+> `docs/contracts/api-conventions/v1.md`（ratified 快照）**零改动**。
+
+| 项 | 实现位置 | 验证方式与证据 | 结论 |
+|----|----------|----------------|------|
+| **中 1 应用容器不再拿到超管凭据** | `deploy/compose.prod.yaml`（`app` 服务：删掉 `env_file: .env`，改为逐个列 `environment:`）、`deploy/helm/base-platform/templates/deployment.yaml`（删掉 `envFrom`，改为逐个 `env:` + `valueFrom.secretKeyRef`）、`deploy/helm/base-platform/templates/migrate-job.yaml`（删掉 `envFrom.secretRef`）、`deploy/RUNBOOK.md` §1.3 / §3.1 / §4 | ① compose 实测：`podman-compose -f deploy/compose.prod.yaml --profile app-role --profile migrate --profile policies config` → app 块**无 `env_file`**、**无 `MIGRATION_DATABASE_URL` / `APP_ROLE_PASSWORD` / `POSTGRES_PASSWORD`**（`postgres://base:` 形态 0 命中），`DATABASE_URL` = 普通角色 `base_app`；② Helm 实测：`helm template`（v3.16.3）渲染的 Deployment **无 `envFrom`**、**无 `MIGRATION_DATABASE_URL`**；`MIGRATION_DATABASE_URL` 只出现在 app-role / migrate / policies 三个 Job；③ 渲染类别数不变（7 类） | **PASS**（Helm 未上真集群，见 §5） |
+| **中 2 补建命令救得了存量表** | `deploy/seed/02-app-role.sql`、`deploy/compose.prod.yaml`（`app-role` 服务内嵌 SQL）、`deploy/helm/base-platform/templates/app-role-job.yaml`、`deploy/RUNBOOK.md` §3.4.3（重写） | ① `base_test` 实测三步：撤销 → `has_table_privilege = f` + `permission denied for table` → **用修复前的脚本补建仍为 `f`（对照组复现 QA 结论）** → 用修复后的脚本补建 → `f` 变 `t`、实际能读；② 复原核对：权限快照与撤销前**逐行一致**，结束前 `base_app` 对 5 张表**均有 SELECT**；③ RUNBOOK 写明「`ALTER DEFAULT PRIVILEGES` 只管未来表；存量表要 `GRANT … ON ALL TABLES`」+ 可直接复制执行的 SQL | **PASS** |
+| **L-a 开发弱口令标注** | `deploy/seed/02-app-role.sql`（注释）、`.env.example`（连接串样例注释）、`deploy/RUNBOOK.md` §3.4.2（口令要求表） | 三处口径一致：开发口令 `base` **仅开发用**；生产必须 `openssl rand -base64 24`，弱口令被 `scripts/prod-preflight.sh` 拒绝 | **PASS** |
+| **L-b 配额自动化用例** | `crates/platform-db/tests/quota_real_db.rs`（新增） | ① 真实库层实测 **2/2**：**计数**（10 → 15 累加）→ **超限判定**（限额 20：15 未超 / 25 超限）→ **重启后计数仍在**（换**全新连接池** = 内存态全丢，用量仍 25、限额仍 20）→ 隔离断言（租户 B 看不到 A 的用量）；② **护栏经变异验证承重**：把整条用例改成「缺 `DATABASE_URL_TEST` 就早退」→ 护栏立刻 RED（报出首轮那个一模一样的 `1 passed / 0.00s` 假绿签名）→ 已还原 | **PASS** |
+| **L-c 契约口径登记** | `docs/contracts/README.md`（新增「本仓库的落地口径（不改契约）」小节） | 登记「响应体 `detail` = 英文（ASCII）；面向用户的中文由前端按 `code` 做 i18n 渲染」，并指向 `AGENTS.md` 规则 6 / `docs/architecture.md` §4 / RUNBOOK §5.1；**ratified 契约快照零改动** | **PASS** |
+
 ## 3. 设计决策 D1–D8 的符合性
 
 | 决策 | 要求 | 实现与证据 | 结论 |
@@ -83,9 +98,9 @@
 | 项 | 原因 | 影响 |
 |----|------|------|
 | **AC-S-008（上下文跨消息边界）** | 本期设计边界不含缓存/消息链路（`design-summary` §8）；本轮只做了**数据库层**的租户上下文贯穿 | 该 AC **未实现**，需要后续需求（租户上下文中间件 / REQ-019）补齐 |
-| **`base_dev`（开发库）上的真实验证** | 本轮的数据库验证全部跑在 `base_test`（`scripts/test-integration.sh` 的白名单闸门只允许重置 `base_test`）；**开发库未被写入**（纪律要求只读） | 开发库上还没有应用角色的策略（需手工跑一次 `base tenant-policies`）；**且存量开发卷早于 `02-app-role.sql` 创建 → `base_app` 在 `base_dev` 上缺表权限**（补建命令见 RUNBOOK §3.4.3） |
+| **`base_dev`（开发库）上的真实验证** | 本轮的数据库验证全部跑在 `base_test`（`scripts/test-integration.sh` 的白名单闸门只允许重置 `base_test`）；**开发库未被写入**（纪律要求只读） | 开发库上还没有应用角色的策略（需手工跑一次 `base tenant-policies`）。**更正（依据 QA 复核报告问题 #3）**：此前记的「存量开发卷早于 `02-app-role.sql` 创建 → `base_app` 在 `base_dev` 上缺表权限」**与实测不符** —— `base_dev` 的默认权限**已落地**（`pg_default_acl` 里 `base_platform_app=arwd/base`），`base_app` 对 `_sqlx_migrations` / `platform_meta` **均有 SELECT**；`/health/ready` 503 的真实原因是**迁移未应用**（`pending migrations: [20261118000200]`），跑一次 `base migrate up` 即可，属常规开发态、**不构成缺陷** |
 | **K8s / 私有化部署里的策略生成** | ✅ **第二轮已接上**：`base tenant-policies` 子命令 + compose `policies` 服务 + Helm `policies` hook Job（迁移之后）；**Helm 侧未在真集群渲染验证**（本机无 helm 二进制） | compose 侧已实测通过；Helm 侧只做了模板静态审阅 |
 | **覆盖率数字** | 本轮未跑覆盖率工具（低配机 + 无覆盖率工具链） | 角色规范里的「覆盖率 ≥ 80%」这条**未验证**（新增代码的每个分支都有对应用例，但无工具数字） |
 | **真实负载下的性能** | 未做压测；每次访问多一次 `BEGIN`/`COMMIT` 往返 | 性能影响未量化（设计上的刻意取舍，见 `platform-db` 的 crate 文档） |
 | **AC-S-012（HTTP 租户上下文全链路）** | 本期未实现（QA 报告问题 #4：`X-Tenant-Id` 全仓零命中，平台服务只有两条健康路由） | 该 AC **未实现** —— 本轮只修「部署侧切普通角色 / C-3 假绿 / 策略接线」3 项，未纳入；需后续需求补齐 |
-| **契约口径张力（QA 报告 #5）** | `api-conventions v1` C3/C7 写「业务模块不得手工加 tenant_id 过滤条件 / 平台自动叠加」，本期实现是「模块在自己写的 SQL 里写 `tenant_id = {tenant}`，平台强制占位符」 | 契约文字与实现机制不一致，需 BA 裁定（改契约 or 改实现）；**本轮未处理** |
+| **契约口径张力（QA 报告 #5）** | `api-conventions v1` C3/C7 写「业务模块不得手工加 tenant_id 过滤条件 / 平台自动叠加」，本期实现是「模块在自己写的 SQL 里写 `tenant_id = {tenant}`，平台强制占位符」 | 契约文字与实现机制不一致，需 BA 裁定（改契约 or 改实现）；**第三轮未处理**（只把「`detail` 英文 / 面向用户中文由前端 i18n 渲染」这条口径登记到引用处 `docs/contracts/README.md`，**ratified 契约快照零改动**） |

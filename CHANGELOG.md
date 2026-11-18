@@ -49,6 +49,20 @@
 - **C-3 真实库层不再假绿**：缺 `DATABASE_URL_TEST` 时**判为失败**（不是「跳过」）
   —— 以前「安静地跳过」会让框架报 "3 passed"，断言一条没跑却被当成通过；
   新增护栏用例：缺环境变量时子进程**必须非零退出**且不得报 "3 passed"
+- **应用容器不再拿到超管凭据**（QA 复核后的修复 —— 拆变量名不够，得断在凭据层）：
+  - compose 的 `app` 服务**不再 `env_file: .env` 整包注入**，改为**逐个列**它真正需要的
+    变量（`DATABASE_URL` ← `APP_DATABASE_URL` + 10 个非敏感项）
+  - Helm 的 Deployment **不再 `envFrom` 整包 Secret**，改为逐个 `env:` +
+    `valueFrom.secretKeyRef`；迁移 Job 也不再整包引用 Secret
+  - 理由：整包 = 应用进程里躺着超管连接串 —— 应用被拿下（环境变量泄露 / 崩溃转储 /
+    某个依赖读环境变量）就能拿超管连库，**RLS 被绕过 → 跨租户全量可读**
+- **补建命令救得了存量表**（`ALTER DEFAULT PRIVILEGES` **只管未来表**）：
+  三处建角色的地方（`02-app-role.sql` / compose `app-role` / Helm `app-role` Job）
+  都补上 `GRANT … ON ALL TABLES IN SCHEMA public`（存量）与 `ALTER DEFAULT PRIVILEGES`
+  （增量）**两套并存**；RUNBOOK §3.4.3 重写（可直接复制执行的 SQL + 自查命令）
+- **配额有了自动化用例**（真实库层 `crates/platform-db/tests/quota_real_db.rs`）：
+  计数 → 超限判定 → **重启后计数仍在**（换全新连接池 = 内存态全丢，用量不变），
+  外加防假绿护栏（缺 `DATABASE_URL_TEST` 必须非零退出）
 - **沙箱模块升级为标准范例**：新增 `tenant_id` 作用域表（`tenantScoped` 声明）
   与走 `platform-db` 租户入口的仓储实现
 - **能力索引与门禁**：能力目录新增 `tenant_scoped_db`；
