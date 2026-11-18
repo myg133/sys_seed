@@ -32,6 +32,7 @@ use std::sync::Arc;
 
 use common::*;
 use platform_core::RequestContext;
+use platform_core::extension::expr::ValueKind;
 use platform_core::extension::permission::{DataScope, PermissionChecker, ScopeFilter};
 use platform_db::TenantQuery;
 use platform_rbac::entity::BUILTIN_ADMIN;
@@ -298,9 +299,51 @@ async fn visible_ids(
     rows.into_iter().map(|(id,)| id).collect()
 }
 
+/// 某用户在某权限点下**看得见**的记录 id（**同时**应用数据范围与属性条件）。
+///
+/// 属性条件走 [`PermissionChecker::condition`] —— 调用方拿到的条件
+/// **必须**应用（跳过它 = 绕过属性级校验）。
+async fn visible_ids_with_condition(
+    fixture: &Fixture,
+    checker: &RbacChecker,
+    tenant_id: &str,
+    user_id: &str,
+    permission: &str,
+) -> Vec<String> {
+    let ctx = RequestContext::new()
+        .with_tenant(tenant_id)
+        .with_user(user_id);
+    checker
+        .ensure_fresh(&ctx)
+        .await
+        .expect("判定缓存应当能刷新");
+    let filter = checker.effective_scope(&ctx, permission);
+    let mut query = TenantQuery::new(
+        "SELECT id FROM sandbox_scope_item WHERE tenant_id = {tenant} ORDER BY id",
+    )
+    .with_scope(&filter)
+    .expect("范围条件应当能渲染");
+    if let Some(condition) = checker.condition(&ctx, permission) {
+        query = query
+            .with_condition(&condition)
+            .expect("属性条件应当能渲染");
+    }
+    let rows: Vec<(String,)> = fixture
+        .app_db
+        .fetch_all(&ctx, &query)
+        .await
+        .expect("记录应当能读出");
+    rows.into_iter().map(|(id,)| id).collect()
+}
+
 /// 把 id 列表转成集合（便于比较）。
 fn set(ids: &[String]) -> BTreeSet<String> {
     ids.iter().cloned().collect()
+}
+
+/// 把 id 列表转成集合（字面量版）。
+fn ids(items: &[&str]) -> BTreeSet<String> {
+    items.iter().map(|item| item.to_string()).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -983,6 +1026,314 @@ async fn multiple_roles_take_the_most_permissive_scope() {
 }
 
 // ---------------------------------------------------------------------------
+// REQ-009 定点修复：多角色的可见范围取**并集**
+//
+// 旧实现（design-summary §4.4 的笔误）「有 CUSTOM 就只走 CUSTOM 那一路」——
+// 丢掉了其它角色（OWN_ORG / OWN_ORG_AND_BELOW）的贡献：加一个角色反而**缩小**
+// 了可见范围。BA 已裁定：多角色的过滤条件取**并集**（与权限点「任一满足即通过」
+// 一致），多个 CUSTOM 之间也是 **OR**。
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "需要 base_test 库：scripts/test-integration.sh 会用 --include-ignored 跑到"]
+async fn a_custom_scope_is_unioned_with_the_other_roles_scope() {
+    let fixture = setup().await;
+    let (service, checker) = build(&fixture);
+    let tenant = format!("tenant-{}-{}", run_id(), unique_suffix());
+    let ctx = ctx_for(&tenant);
+    let users = users(&tenant, &unique_suffix());
+    seed_base_fixture(&fixture, &users, &tenant).await;
+
+    // 主部门之外、金额又超限的记录（两边都不满足 → 不可见）。
+    seed_scope_item(
+        &fixture,
+        &tenant,
+        "item-out-big",
+        "dept-b",
+        "u-other",
+        20000,
+    )
+    .await;
+
+    // R1 = OWN_ORG（主部门 dept-a），R2 = CUSTOM(金额 ≤ 10000)。
+    let r_own = seed_role(
+        &service,
+        &ctx,
+        "r-union-own",
+        "r-union-own",
+        DataScope::OwnOrg,
+        false,
+    )
+    .await;
+    let r_custom = seed_custom_role(
+        &service,
+        &ctx,
+        "r-union-custom",
+        "r-union-custom",
+        "$record.amount <= 10000",
+    )
+    .await;
+    seed_grant_and_bind(&service, &ctx, &r_own, PERM_READ, None, &users.own).await;
+    seed_grant_and_bind(&service, &ctx, &r_custom, PERM_READ, None, &users.own).await;
+
+    let visible = set(&visible_ids(&fixture, &checker, &tenant, &users.own, PERM_READ).await);
+
+    // 四个象限（逐条断言）：
+    // 1) 主部门内 **且** 满足 CUSTOM → 可见。
+    assert!(
+        visible.contains("item-a1"),
+        "主部门内且满足 CUSTOM 的记录必须可见：{visible:?}"
+    );
+    // 2) 主部门内 **但** 不满足 CUSTOM → **可见**。
+    //    ★ 本次修复的核心判据：旧实现会把它判成不可见 ——
+    //    「加一个 CUSTOM 角色反而缩小了可见范围」。
+    assert!(
+        visible.contains("item-big"),
+        "主部门内不满足 CUSTOM 的记录必须仍然可见（并集 —— 不是「取 CUSTOM 那一路」）：{visible:?}"
+    );
+    // 3) 主部门外 **但** 满足 CUSTOM → 可见。
+    assert!(
+        visible.contains("item-b1"),
+        "主部门外但满足 CUSTOM 的记录必须可见：{visible:?}"
+    );
+    // 4) 主部门外 **且** 不满足 CUSTOM → 不可见。
+    assert!(
+        !visible.contains("item-out-big"),
+        "两边都不满足的记录必须不可见：{visible:?}"
+    );
+
+    // 整个集合（逐条列出）。
+    assert_eq!(
+        visible,
+        ids(&[
+            "item-a1",
+            "item-a2",
+            "item-a3",
+            "item-b1",
+            "item-b2",
+            "item-c1",
+            "item-self1",
+            "item-self2",
+            "item-big",
+            "item-multi",
+        ]),
+        "并集后的可见集合"
+    );
+
+    // 过滤条件是「自定义条件 OR 包含型范围」。
+    let user_ctx = RequestContext::new()
+        .with_tenant(&tenant)
+        .with_user(&users.own);
+    checker
+        .ensure_fresh(&user_ctx)
+        .await
+        .expect("判定缓存应当能刷新");
+    let filter = checker.effective_scope(&user_ctx, PERM_READ);
+    match &filter {
+        ScopeFilter::CustomOr { conditions, scope } => {
+            assert_eq!(conditions.len(), 1, "自定义条件一条");
+            assert!(
+                matches!(**scope, ScopeFilter::OrgNodes { .. }),
+                "另一侧必须是包含型范围：{scope:?}"
+            );
+        }
+        other => panic!("应当是「自定义条件 OR 包含型范围」：{other:?}"),
+    }
+
+    // 渲染：整体是**一个**括号包起来的 OR 表达式，值**全部**走参数绑定。
+    let query = TenantQuery::new(
+        "SELECT id FROM sandbox_scope_item WHERE tenant_id = {tenant} ORDER BY id",
+    )
+    .with_scope(&filter)
+    .expect("范围条件应当能渲染");
+    let (sql, values) = query.render(&tenant).expect("应当能渲染");
+    assert!(sql.contains(" OR "), "渲染出的 SQL 必须是 OR 表达式：{sql}");
+    assert!(
+        !sql.contains("dept-a") && !sql.contains("10000"),
+        "范围的值必须走参数绑定（SQL 文本里不得出现字面值）：{sql}"
+    );
+    assert_eq!(
+        values.len(),
+        3,
+        "租户 + 金额 + 节点数组各一个参数（节点集合仍是数组绑定）：{sql}"
+    );
+}
+
+#[tokio::test]
+#[ignore = "需要 base_test 库：scripts/test-integration.sh 会用 --include-ignored 跑到"]
+async fn multiple_custom_scopes_are_unioned() {
+    let fixture = setup().await;
+    let (service, checker) = build(&fixture);
+    let tenant = format!("tenant-{}-{}", run_id(), unique_suffix());
+    let ctx = ctx_for(&tenant);
+    let users = users(&tenant, &unique_suffix());
+    seed_base_fixture(&fixture, &users, &tenant).await;
+
+    // 主部门之外、金额超限的记录（只满足归属条件）。
+    seed_scope_item(
+        &fixture,
+        &tenant,
+        "item-out-big",
+        "dept-b",
+        "u-other",
+        20000,
+    )
+    .await;
+
+    // 两个 CUSTOM 角色，条件不同。
+    let r1 = seed_custom_role(
+        &service,
+        &ctx,
+        "r-two-custom-a",
+        "r-two-custom-a",
+        "$record.amount <= 10000",
+    )
+    .await;
+    let r2 = seed_custom_role(
+        &service,
+        &ctx,
+        "r-two-custom-b",
+        "r-two-custom-b",
+        "$record.org_node_id == \"dept-b\"",
+    )
+    .await;
+    seed_grant_and_bind(&service, &ctx, &r1, PERM_READ, None, &users.own).await;
+    seed_grant_and_bind(&service, &ctx, &r2, PERM_READ, None, &users.own).await;
+
+    let visible = set(&visible_ids(&fixture, &checker, &tenant, &users.own, PERM_READ).await);
+
+    // 满足**任一**条件的记录可见（**OR**，不是 AND）。
+    assert!(
+        visible.contains("item-a1"),
+        "只满足金额条件的记录必须可见（并集 —— 不是交集）：{visible:?}"
+    );
+    assert!(
+        visible.contains("item-out-big"),
+        "只满足归属条件的记录必须可见（并集 —— 不是交集）：{visible:?}"
+    );
+    assert!(
+        !visible.contains("item-big"),
+        "两个条件都不满足的记录必须不可见：{visible:?}"
+    );
+
+    assert_eq!(
+        visible,
+        ids(&[
+            "item-a1",
+            "item-a2",
+            "item-a3",
+            "item-b1",
+            "item-b2",
+            "item-c1",
+            "item-self1",
+            "item-self2",
+            "item-multi",
+            "item-out-big",
+        ]),
+        "多个 CUSTOM 的并集可见集合"
+    );
+}
+
+#[tokio::test]
+#[ignore = "需要 base_test 库：scripts/test-integration.sh 会用 --include-ignored 跑到"]
+async fn all_wins_over_a_custom_scope() {
+    let fixture = setup().await;
+    let (service, checker) = build(&fixture);
+    let tenant = format!("tenant-{}-{}", run_id(), unique_suffix());
+    let ctx = ctx_for(&tenant);
+    let users = users(&tenant, &unique_suffix());
+    seed_base_fixture(&fixture, &users, &tenant).await;
+    seed_scope_item(
+        &fixture,
+        &tenant,
+        "item-out-big",
+        "dept-b",
+        "u-other",
+        20000,
+    )
+    .await;
+
+    let r_all = seed_role(
+        &service,
+        &ctx,
+        "r-all-custom",
+        "r-all-custom",
+        DataScope::All,
+        false,
+    )
+    .await;
+    let r_custom = seed_custom_role(
+        &service,
+        &ctx,
+        "r-all-custom-c",
+        "r-all-custom-c",
+        "$record.amount <= 10000",
+    )
+    .await;
+    seed_grant_and_bind(&service, &ctx, &r_all, PERM_READ, None, &users.own).await;
+    seed_grant_and_bind(&service, &ctx, &r_custom, PERM_READ, None, &users.own).await;
+
+    let visible = set(&visible_ids(&fixture, &checker, &tenant, &users.own, PERM_READ).await);
+    assert_eq!(
+        visible,
+        ids(&[
+            "item-a1",
+            "item-a2",
+            "item-a3",
+            "item-b1",
+            "item-b2",
+            "item-c1",
+            "item-self1",
+            "item-self2",
+            "item-big",
+            "item-multi",
+            "item-out-big",
+        ]),
+        "`ALL` 最宽松 —— 混合 CUSTOM 时也是全部可见"
+    );
+}
+
+#[tokio::test]
+#[ignore = "需要 base_test 库：scripts/test-integration.sh 会用 --include-ignored 跑到"]
+async fn the_most_permissive_containment_scope_still_wins() {
+    let fixture = setup().await;
+    let (service, checker) = build(&fixture);
+    let tenant = format!("tenant-{}-{}", run_id(), unique_suffix());
+    let ctx = ctx_for(&tenant);
+    let users = users(&tenant, &unique_suffix());
+    seed_base_fixture(&fixture, &users, &tenant).await;
+
+    // 回归：没有 CUSTOM 时，多角色的行为**不变**。
+    let r_own = seed_role(
+        &service,
+        &ctx,
+        "r-reg-own",
+        "r-reg-own",
+        DataScope::OwnOrg,
+        false,
+    )
+    .await;
+    let r_below = seed_role(
+        &service,
+        &ctx,
+        "r-reg-below",
+        "r-reg-below",
+        DataScope::OwnOrgAndBelow,
+        false,
+    )
+    .await;
+    seed_grant_and_bind(&service, &ctx, &r_own, PERM_READ, None, &users.own).await;
+    seed_grant_and_bind(&service, &ctx, &r_below, PERM_READ, None, &users.own).await;
+
+    let visible = set(&visible_ids(&fixture, &checker, &tenant, &users.own, PERM_READ).await);
+    assert_eq!(
+        visible,
+        ids(&["item-a1", "item-a2", "item-a3", "item-big"]),
+        "`OWN_ORG` + `OWN_ORG_AND_BELOW` → 取更宽松的 `OWN_ORG_AND_BELOW`（行为不变）"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // AC-S-035 / AC-S-036：继承展开 + 成环被拒 + 通配语义
 // ---------------------------------------------------------------------------
 
@@ -1183,6 +1534,140 @@ async fn a_revoked_data_scope_takes_effect_on_the_next_request() {
         "撤销数据范围后必须立即生效（另一个实例也一样）"
     );
     assert_ne!(before, after, "收紧范围后结果必须变化");
+}
+
+// ---------------------------------------------------------------------------
+// 顺带确认 1：四个方法全同步 → trait 仍 dyn 兼容（`Arc<dyn PermissionChecker>`）
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "需要 base_test 库：scripts/test-integration.sh 会用 --include-ignored 跑到"]
+async fn the_permission_checker_is_usable_as_a_trait_object() {
+    let fixture = setup().await;
+    let (service, checker) = build(&fixture);
+    let tenant = format!("tenant-{}-{}", run_id(), unique_suffix());
+    let ctx = ctx_for(&tenant);
+    let users = users(&tenant, &unique_suffix());
+    seed_base_fixture(&fixture, &users, &tenant).await;
+
+    let r = seed_role(&service, &ctx, "r-dyn", "r-dyn", DataScope::OwnOrg, false).await;
+    seed_grant_and_bind(&service, &ctx, &r, PERM_READ, None, &users.own).await;
+    seed_grant_and_bind(&service, &ctx, &r, PERM_APPROVE, None, &users.own).await;
+
+    let user_ctx = RequestContext::new()
+        .with_tenant(&tenant)
+        .with_user(&users.own);
+    checker
+        .ensure_fresh(&user_ctx)
+        .await
+        .expect("判定缓存应当能刷新");
+
+    // ⚠️ **这一行能编译过就是证明**：四个方法全是同步的（无 `async fn`、无 RPITIT）
+    // → trait 对象安全 → `Arc<dyn PermissionChecker>` 成立。
+    let dyn_checker: Arc<dyn PermissionChecker> = platform_rbac::as_dyn_checker(checker.clone());
+
+    // 四个方法逐个经由 trait 对象调用（都是同步返回）。
+    assert!(dyn_checker.has(&user_ctx, PERM_READ), "has");
+    assert!(
+        dyn_checker.scope(&user_ctx, DataScope::All).is_all(),
+        "scope"
+    );
+    assert!(
+        !dyn_checker.effective_scope(&user_ctx, PERM_READ).is_all(),
+        "effective_scope"
+    );
+    let condition = dyn_checker.condition(&user_ctx, PERM_APPROVE);
+    assert!(condition.is_some(), "condition（权限点带属性条件）");
+    assert_ne!(
+        condition.expect("条件应当存在").sql,
+        "1 = 0",
+        "白名单内的属性必须编译成真实条件"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 顺带确认 2：条件引用白名单外的属性 → fail closed（**不是**「忽略条件放行」）
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "需要 base_test 库：scripts/test-integration.sh 会用 --include-ignored 跑到"]
+async fn a_condition_outside_the_whitelist_never_grants_access() {
+    let fixture = setup().await;
+    let (service, checker) = build(&fixture);
+    let tenant = format!("tenant-{}-{}", run_id(), unique_suffix());
+    let ctx = ctx_for(&tenant);
+    let users = users(&tenant, &unique_suffix());
+    seed_base_fixture(&fixture, &users, &tenant).await;
+
+    // `sandbox:scope-item:approve` 在注册表里带条件 `$record.amount <= 10000`。
+    let r = seed_role(&service, &ctx, "r-cond", "r-cond", DataScope::All, false).await;
+    seed_grant_and_bind(&service, &ctx, &r, PERM_APPROVE, None, &users.own).await;
+
+    // 1) 白名单**内**的属性 → 编译成**真实**条件，调用方应用它 → 超限记录被挡住
+    //    （证明条件**不是**被忽略的）。
+    let visible =
+        set(
+            &visible_ids_with_condition(&fixture, &checker, &tenant, &users.own, PERM_APPROVE)
+                .await,
+        );
+    assert!(
+        !visible.contains("item-big"),
+        "属性条件必须生效（金额超限的记录看不到）：{visible:?}"
+    );
+    assert!(
+        visible.contains("item-a1"),
+        "满足条件的记录必须可见：{visible:?}"
+    );
+
+    // 2) 白名单**外**的属性 → **永不匹配**（fail closed）。
+    //    做法：用一个**不含 `record.amount`** 的白名单重建判定器 ——
+    //    注册表里的 `$record.amount <= 10000` 就成了白名单外的写法。
+    let restricted = ScopePolicy {
+        record_fields: vec![
+            ("record.id".to_string(), "id".to_string(), ValueKind::Text),
+            (
+                "record.created_by".to_string(),
+                "created_by".to_string(),
+                ValueKind::Text,
+            ),
+        ],
+        ..ScopePolicy::default()
+    };
+    let restricted_checker = Arc::new(RbacChecker::new(Arc::new(RbacService::new(
+        RbacStore::new(fixture.app_db.clone()),
+        restricted,
+    ))));
+
+    let user_ctx = RequestContext::new()
+        .with_tenant(&tenant)
+        .with_user(&users.own);
+    restricted_checker
+        .ensure_fresh(&user_ctx)
+        .await
+        .expect("判定缓存应当能刷新");
+
+    let denied = restricted_checker
+        .condition(&user_ctx, PERM_APPROVE)
+        .expect("权限点带条件");
+    assert_eq!(
+        denied.sql, "1 = 0",
+        "白名单外的属性必须落到永不匹配（fail closed），不是「忽略条件放行」"
+    );
+    assert!(denied.values.is_empty(), "永不匹配的条件不绑定任何值");
+
+    // 3) 调用方据此**判定不通过**：一行都看不到（数据范围是 ALL，也看不到）。
+    let visible = visible_ids_with_condition(
+        &fixture,
+        &restricted_checker,
+        &tenant,
+        &users.own,
+        PERM_APPROVE,
+    )
+    .await;
+    assert!(
+        visible.is_empty(),
+        "白名单外的条件必须 fail closed（一行都看不到）：{visible:?}"
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -194,9 +194,22 @@ impl TenantQuery {
                 Ok(self)
             }
             ScopeFilter::Custom { conditions } => {
-                for condition in conditions {
-                    self = self.with_condition(condition)?;
-                }
+                // 多个条件是**并集**（OR）—— 与「多角色取最宽松」一致。
+                let (group, values) = render_condition_group(conditions)?;
+                self.statement = insert_where_condition(&self.statement, &format!("({group})"));
+                self.args.extend(values);
+                Ok(self)
+            }
+            ScopeFilter::CustomOr { conditions, scope } => {
+                // 整体是**一个**括号包起来的 OR 表达式：
+                // `((自定义条件) OR (包含型范围))`。
+                let (mut group, mut values) = render_condition_group(conditions)?;
+                let (fragment, fragment_values) = render_scope_fragment(scope)?;
+                group.push_str(" OR ");
+                group.push_str(&fragment);
+                values.extend(fragment_values);
+                self.statement = insert_where_condition(&self.statement, &format!("({group})"));
+                self.args.extend(values);
                 Ok(self)
             }
         }
@@ -305,6 +318,71 @@ fn safe_column(column: &str) -> DbResult<String> {
         });
     }
     Ok(column.to_string())
+}
+
+/// 把一组条件渲染成 OR 组的**内部片段**（`c1` OR `c2` …；不含最外层括号）。
+///
+/// - 条件里的值**一律走绑定**（SQL 文本里不出现字面值）；
+/// - 空条件组 → `1 = 0`（**永不匹配**，fail closed —— 不是「不限范围」）。
+fn render_condition_group(conditions: &[CompiledCondition]) -> DbResult<(String, Vec<BindValue>)> {
+    let mut fragments: Vec<String> = Vec::with_capacity(conditions.len());
+    let mut values: Vec<BindValue> = Vec::new();
+    for condition in conditions {
+        if condition.placeholder_count() != condition.values.len() {
+            return Err(DbError::InvalidQuery {
+                reason: format!(
+                    "the condition has {} placeholders but {} values are bound",
+                    condition.placeholder_count(),
+                    condition.values.len()
+                ),
+            });
+        }
+        fragments.push(format!("({})", condition.sql));
+        for value in &condition.values {
+            values.push(bind_from_condition_value(value));
+        }
+    }
+    if fragments.is_empty() {
+        return Ok(("1 = 0".to_string(), Vec::new()));
+    }
+    Ok((fragments.join(" OR "), values))
+}
+
+/// 把一个范围渲染成「可放进 OR 组」的片段（值走绑定）。
+///
+/// - `OrgNodes` → `org_node_id = ANY($n)`（**数组绑定**，不展开成字符串拼接）；
+/// - `Owner` → `created_by = $n`；
+/// - `All` → `1 = 1`（恒真 —— 「不限范围」在 OR 组里就是「这一侧不设限」）。
+fn render_scope_fragment(scope: &ScopeFilter) -> DbResult<(String, Vec<BindValue>)> {
+    match scope {
+        ScopeFilter::All => Ok(("(1 = 1)".to_string(), Vec::new())),
+        ScopeFilter::OrgNodes { column, nodes } => {
+            let column = safe_column(column)?;
+            Ok((
+                format!("({column} = ANY(?))"),
+                vec![BindValue::TextArray(nodes.clone())],
+            ))
+        }
+        ScopeFilter::Owner { column, user_id } => {
+            let column = safe_column(column)?;
+            Ok((
+                format!("({column} = ?)"),
+                vec![BindValue::Text(user_id.clone())],
+            ))
+        }
+        ScopeFilter::Custom { conditions } => {
+            let (group, values) = render_condition_group(conditions)?;
+            Ok((format!("({group})"), values))
+        }
+        ScopeFilter::CustomOr { conditions, scope } => {
+            let (mut group, mut values) = render_condition_group(conditions)?;
+            let (fragment, fragment_values) = render_scope_fragment(scope)?;
+            group.push_str(" OR ");
+            group.push_str(&fragment);
+            values.extend(fragment_values);
+            Ok((format!("({group})"), values))
+        }
+    }
 }
 
 /// 把一个条件插进语句的 **WHERE 子句末尾**。
@@ -597,9 +675,9 @@ mod tests {
         assert_eq!(values[1], BindValue::Int(10000));
     }
 
-    /// 自定义范围（多个条件是**交集**）。
+    /// 自定义范围（多个条件取**并集** —— 一个括号包起来的 OR 表达式）。
     #[test]
-    fn a_custom_scope_renders_every_condition() {
+    fn a_custom_scope_renders_every_condition_as_one_or_group() {
         let scope = ScopeFilter::Custom {
             conditions: vec![
                 CompiledCondition {
@@ -618,9 +696,39 @@ mod tests {
         let (sql, values) = query.render("tenant-a").expect("应当能渲染");
         assert_eq!(
             sql,
-            "SELECT id FROM t WHERE tenant_id = $1 AND (amount <= $2) AND (dept_id = $3)"
+            "SELECT id FROM t WHERE tenant_id = $1 AND ((amount <= $2) OR (dept_id = $3))"
         );
         assert_eq!(values.len(), 3);
+    }
+
+    /// 自定义条件 **OR** 包含型范围：整体是**一个**括号包起来的 OR 表达式，
+    /// 且包含型范围的节点集合仍是**数组绑定**（不展开成字符串拼接）。
+    #[test]
+    fn a_custom_or_scope_renders_one_or_group_with_an_array_bound() {
+        let scope = ScopeFilter::CustomOr {
+            conditions: vec![CompiledCondition {
+                sql: "amount <= ?".to_string(),
+                values: vec![ConditionValue::Int(10000)],
+            }],
+            scope: Box::new(ScopeFilter::OrgNodes {
+                column: "org_node_id".to_string(),
+                nodes: vec!["dept-a".to_string(), "dept-a-1".to_string()],
+            }),
+        };
+        let query = TenantQuery::new("SELECT id FROM t WHERE tenant_id = {tenant}")
+            .with_scope(&scope)
+            .expect("应当能叠加");
+        let (sql, values) = query.render("tenant-a").expect("应当能渲染");
+        assert_eq!(
+            sql,
+            "SELECT id FROM t WHERE tenant_id = $1 \
+             AND ((amount <= $2) OR (org_node_id = ANY($3)))"
+        );
+        assert!(!sql.contains("dept-a"), "节点集合必须走绑定：{sql}");
+        assert_eq!(
+            values[2],
+            BindValue::TextArray(vec!["dept-a".to_string(), "dept-a-1".to_string()])
+        );
     }
 
     /// 占位符与绑定值数量对不上 → 拒绝（不渲染出半截 SQL）。

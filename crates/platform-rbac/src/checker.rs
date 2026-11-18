@@ -46,6 +46,14 @@ fn never_match() -> CompiledCondition {
     }
 }
 
+/// 编译权限点携带的**属性条件**。
+///
+/// **编译失败 → 永不匹配**（fail closed）—— 引用白名单外的属性、语法错、
+/// 函数调用都会落到这里。**不是**「忽略条件放行」。
+fn compile_condition(expression: &str, eval: &EvalContext<'_>) -> CompiledCondition {
+    compile(expression, eval).unwrap_or_else(|_| never_match())
+}
+
 /// 一个用户在一个租户下的判定缓存。
 #[derive(Debug, Clone)]
 struct CacheEntry {
@@ -196,7 +204,7 @@ impl RbacChecker {
                 continue;
             };
             // 编译失败 → **永不匹配**（fail closed），不是「忽略条件放行」。
-            let compiled = compile(expression, &eval).unwrap_or_else(|_| never_match());
+            let compiled = compile_condition(expression, &eval);
             conditions.insert(permission.clone(), compiled);
         }
 
@@ -365,4 +373,67 @@ pub fn describe_contributions(contributions: &[ScopeContribution]) -> String {
         .map(|item| item.scope.as_str())
         .collect::<Vec<_>>()
         .join(",")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scope::ScopePolicy;
+    use platform_core::extension::expr::FieldWhitelist;
+
+    /// 求值上下文（白名单来自平台的 `ScopePolicy`）。
+    fn eval_context<'a>(whitelist: &'a FieldWhitelist) -> EvalContext<'a> {
+        EvalContext {
+            whitelist,
+            user_id: Some("u-1"),
+            tenant_id: Some("tenant-a"),
+        }
+    }
+
+    /// 白名单内的属性 → 编译成**真实**条件（不是永不匹配）。
+    #[test]
+    fn a_condition_on_a_whitelisted_attribute_is_compiled() {
+        let whitelist = ScopePolicy::default().whitelist();
+        let eval = eval_context(&whitelist);
+        let compiled = compile_condition("$record.amount <= 10000", &eval);
+        assert_ne!(
+            compiled.sql, "1 = 0",
+            "白名单内的属性必须编译成真实条件：{}",
+            compiled.sql
+        );
+        assert_eq!(compiled.placeholder_count(), compiled.values.len());
+    }
+
+    /// **白名单外的属性 → 永不匹配**（fail closed）—— 不是「忽略条件放行」。
+    #[test]
+    fn a_condition_outside_the_whitelist_never_matches() {
+        let whitelist = ScopePolicy::default().whitelist();
+        let eval = eval_context(&whitelist);
+        let compiled = compile_condition("$record.secret_field == \"x\"", &eval);
+        assert_eq!(
+            compiled.sql, "1 = 0",
+            "白名单外的属性必须落到永不匹配（fail closed）：{}",
+            compiled.sql
+        );
+        assert!(compiled.values.is_empty(), "永不匹配的条件不绑定任何值");
+    }
+
+    /// 函数调用 / 多语句同样编译失败 → 永不匹配。
+    #[test]
+    fn a_forbidden_expression_never_matches() {
+        let whitelist = ScopePolicy::default().whitelist();
+        let eval = eval_context(&whitelist);
+        for expression in [
+            "now() > 0",
+            "$record.amount <= 10000; DROP TABLE t",
+            "$record.amount +",
+        ] {
+            let compiled = compile_condition(expression, &eval);
+            assert_eq!(
+                compiled.sql, "1 = 0",
+                "禁止的表达式必须落到永不匹配（fail closed）：{expression} → {}",
+                compiled.sql
+            );
+        }
+    }
 }

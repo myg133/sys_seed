@@ -57,6 +57,15 @@
     `require_permission` 用法；脚手架模板带上鉴权调用点与 `condition` 示例
   - `modules/sandbox` 改成**参考实现**：新增 `backend/src/http.rs`（鉴权调用点）、
     `sandbox_scope_item` 迁移（含 `org_node_id` 与 `created_by` 两列）
+- **定点修复：多角色 scope 的合并语义改成真正的并集**（BA 裁定 design-summary §4.4 的笔误）：
+  - 旧语义「有 `CUSTOM` 就只走 `CUSTOM` 那一路」**丢掉了其它角色的贡献** ——
+    用户同时有「本部门」角色和一个「CUSTOM 条件」角色时，
+    **本部门里不满足 CUSTOM 条件的记录反而看不见了**（加一个角色**缩小**了可见范围）
+  - 新语义：多角色的过滤条件取**并集**（与权限点「任一满足即通过」一致）——
+    `CUSTOM` 条件 **OR** 其它角色的最宽松范围；**多个 `CUSTOM` 之间也是 OR**（不是交集）
+  - `ScopeFilter` 新增 `CustomOr { conditions, scope }`（平台契约的**纯增量**演进）：
+    渲染成**一个**括号包起来的 OR 表达式，值**全部走参数绑定**，
+    组织节点子树集合仍是**数组绑定**（`= ANY($n)`，不展开成字符串拼接）
 
 ### REQ-008 用户与组织架构
 

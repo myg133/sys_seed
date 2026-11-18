@@ -6,7 +6,7 @@
 - **契约**: `api-conventions v1`（C1 / C4 / C5 / C6 / C7）、`extension-points v2`（C-1 ~ C-5）
 - **开发者**: myg133-dev-1
 - **日期**: 2026-11-18
-- **轮次**: 第一轮（实现 + 自验）
+- **轮次**: 第一轮（实现 + 自验）→ **第二轮（定点修复：多角色 scope 的合并语义改成真正的并集，见 §8）**
 
 ---
 
@@ -17,9 +17,9 @@
 | 交付形态 | 新建平台 crate **`crates/platform-rbac`**（10 个源文件 + 3 个测试文件）；新增 `platform-core` 的 `extension/permission.rs`（鉴权入口）、`extension/expr.rs`（受限表达式 DSL）、`problem.rs`（RFC 9457 错误体唯一一份）；新增契约检查 **C-5**；`platform-server` 挂载 `/api/rbac/*` 并在**启动时**对账 |
 | 改动规模 | **60 文件 / +11653 −675 行**（新建 29 个、修改 31 个；删除的 675 行是**替换掉 REQ-008 遗留的** `feature-meta/traceability.md` 与 `verification-report.md`） |
 | 依赖预算 | **第三方包数不变**：锁文件里 **registry 包 284 → 284**（总数 293 → 294，多出的 1 个是**新增的本地工作区成员** `crates/platform-rbac`）。未引策略引擎（Casbin/Opa）、未引 Redis 客户端、未引 nom/pest；表达式解析器自研；`tower` / `http-body-util` 已在锁文件里（只做 **dev-dependency**，**不增长依赖树**） |
-| **测试** | `scripts/test-integration.sh`（重置 `base_test` + `--include-ignored`）→ **439 passed / 0 failed**（含真实库层）；`cargo clippy --workspace --all-targets -- -D warnings` → **0 warning** |
+| **测试** | `scripts/test-integration.sh`（重置 `base_test` + `--include-ignored`）→ **452 passed / 0 failed**（含真实库层）；`cargo clippy --workspace --all-targets -- -D warnings` → **0 warning** |
 | **破坏性验证** | C-5 的 **4 类违规**逐个造出来 → 全部被拦住 → **逐字节还原**（sha256 校验） |
-| **变异验证** | **4 个关键判定**故意改错 → 对应测试**变红** → 还原 → **变绿**（含 1 次「变异没被抓住 → 补断言 → 再验」） |
+| **变异验证** | 第一轮 **4 个** + 第二轮 **2 个**关键判定故意改错 → 对应测试**变红** → 还原（sha256）→ **变绿**（含 1 次「变异没被抓住 → 补断言 → 再验」） |
 | **未验证项** | 见 §6（**如实列出**，未跑的没写成跑了） |
 
 ---
@@ -66,15 +66,15 @@ DATABASE_URL_TEST=postgres://base:base@127.0.0.1:5432/base_test \
 | `platform-contracts`（lib） | 15 |
 | `platform-core`（lib） | 72 |
 | `platform-core`（`tests/authz_entry.rs`） | 7 |
-| `platform-db`（lib） | 34 |
+| `platform-db`（lib） | 35 |
 | `platform-db`（`tests/quota_real_db.rs`） | 2 |
 | `platform-iam`（lib） | 41 |
 | `platform-iam`（`tests/iam_real_db.rs`） | 16 |
 | `platform-org`（lib） | 68 |
 | `platform-org`（`tests/org_real_db.rs`） | 15 |
 | `platform-org`（`tests/scim_outbound.rs`） | 7 |
-| **`platform-rbac`（lib）** | **33** |
-| **`platform-rbac`（`tests/rbac_real_db.rs`，真实库）** | **12** |
+| **`platform-rbac`（lib）** | **39** |
+| **`platform-rbac`（`tests/rbac_real_db.rs`，真实库）** | **18** |
 | **`platform-rbac`（`tests/http_admin.rs`，真实库）** | **3** |
 | `platform-server`（lib） | 38 |
 | `base`（bin） | 9 |
@@ -83,7 +83,10 @@ DATABASE_URL_TEST=postgres://base:base@127.0.0.1:5432/base_test \
 | `sandbox`（`tests/contracts.rs`，C-1 ~ C-5） | 5 |
 | **`sandbox`（`tests/http_authz.rs`，真实库）** | **6** |
 | `xtask`（lib） | 49 |
-| **合计** | **439 passed / 0 failed** |
+| **合计** | **452 passed / 0 failed** |
+
+> 第二轮（定点修复）的增量：**+13** = 真实库层 **+6**（§8.5）、
+> `platform-rbac` 单测 **+6**（§8.5）、`platform-db` 单测 **+1**（§8.4）。
 
 ### 2.2 其它门禁
 
@@ -193,15 +196,194 @@ AccessExclusiveLock 与另一个用例的 INSERT 的 RowShareLock 互等）。
 | 4 | **`rbac:permission:read` 登记了却没有调用点** | 按 BA 裁定**豁免** `GET /api/rbac/permissions` 的管理权限点 | 它是**唯一**「登记了但无调用点」的权限点；不是假权限（该接口对任何已认证用户开放） |
 | 5 | **AC-S-045 前置条件的自相矛盾**（BA 已在 §9 提过） | 按 BA 第二轮裁定实现：**无权资源 vs 不存在资源**必须无法区分；**有权资源 → 200** | 夹具里可见记录（`dept-a-2`）与不可见记录（`dept-b`）落在**不同部门分支** |
 
+> **第 1 条已由 BA 裁定并在本轮修复** → 见 §8（多角色 scope 的合并语义改成**真正的并集**）。
+> 下面第 1 行保留第一轮的原样，作为「当时按规格实现」的记录。
+
 ---
 
-## 8. 提交与分支
+## 8. 第二轮：定点修复 —— 多角色 scope 的合并语义改成**真正的并集**
+
+> 触发：BA 裁定了 §7 的第 1 条疑问。**实现是忠实的，错的是规格**（design-summary §4.4 的笔误）。
+> 本轮只做这一处定点修复 + 两个「顺带确认」，不夹带别的需求。
+
+### 8.1 错在哪：旧语义既不是并集也不是交集
+
+design-summary §4.4 原文：
+
+> `CUSTOM` 不参与宽松比较：与其它 scope 同时出现时，**取 `CUSTOM` 的那一路**
+
+按这条实现出来的效果是：**多角色里有 `CUSTOM` 时，其它角色（`OWN_ORG` / `OWN_ORG_AND_BELOW`）
+的贡献被整个丢掉**。后果：
+
+- 用户同时有「本部门」角色和一个「CUSTOM 条件」角色时，
+  **本部门里不满足 CUSTOM 条件的记录反而看不见了** —— **加一个角色缩小了可见范围**；
+- 这与同节 §4.3「多个角色的 scope **取最宽松的**（并集语义）—— 与权限点『任一满足即通过』一致」
+  直接矛盾；
+- 多个 `CUSTOM` 之间取**交集**（原 §4.4 的另一条）同样与并集原则矛盾 → **一并作废**。
+
+### 8.2 BA 裁定后的新规则（实现按此）
+
+| 情况 | 结果 |
+|------|------|
+| 任一角色是 `ALL` | `ALL`（最宽松，其他都不必看） |
+| 否则有 `CUSTOM` 角色 | **CUSTOM 的条件 OR 其它（非 CUSTOM）角色的最宽松范围** |
+| 否则有 `OWN_ORG_AND_BELOW` | `OWN_ORG_AND_BELOW`（最宽松） |
+| 否则有 `OWN_ORG` | `OWN_ORG` |
+| 否则 | `SELF` |
+
+多个 `CUSTOM` 角色：条件之间取 **OR**（并集），**不是 AND**。
+
+### 8.3 改动落点
+
+| 文件 | 改动 |
+|------|------|
+| `crates/platform-rbac/src/scope.rs` | `CombinedScope::Custom` 增加 `plus: Option<ContainmentScope>`；`combine_scopes` 改成并集；`ScopeResolver` 把包含型范围与自定义条件合成**一个** OR 组 |
+| `crates/platform-rbac/src/checker.rs` | 抽出 `compile_condition`（编译失败 → 永不匹配）+ 3 条单测 |
+| `crates/platform-core/src/extension/permission.rs` | **平台契约的最小演进**：`ScopeFilter` 增加 `CustomOr { conditions, scope }`（理由见 §8.4） |
+| `crates/platform-db/src/query.rs` | 渲染 `CustomOr`：**一个**括号包起来的 OR 表达式；`Custom` 的多个条件由 AND 改为 OR |
+| `crates/platform-rbac/tests/rbac_real_db.rs` | 新增 **6** 条真实库用例 + 1 个新夹具（`visible_ids_with_condition`） |
+
+**没有**改 BA 的任何文件；**没有**改 `platform-core` 以外的平台契约面（`PermissionChecker` 的
+四个方法签名、`DataScope` 五种语义、`require_permission` 入口都**原样**）。
+
+### 8.4 为什么必须动 `platform-core`（**不是**顺手扩平台，是契约表达能力的缺口）
+
+BA 的渲染要求是「整体必须是**一个**括号包起来的 OR 表达式，且**所有值走参数绑定**」，
+同时「`OWN_ORG_AND_BELOW` 的子树 id 集合是**数组绑定**，与 OR 组合时**不要**把数组展开成字符串拼接」。
+这两条在旧契约下**无法同时满足**：
+
+| 障碍 | 事实 |
+|------|------|
+| `ScopeFilter` 没有能表达「OR」的变体 | 四个变体（`All` / `OrgNodes` / `Owner` / `Custom`）各自渲染成**独立**的 AND 条件；`Custom` 的多个条件之间也是 AND |
+| 自定义条件的载体装不下数组 | `CompiledCondition.values` 的类型是 `ConditionValue`（`Text` / `Int` / `Bool` / `Float`），**没有数组** → `org_node_id = ANY($n)` 根本无法放进 `CompiledCondition` → 也就无法与自定义条件拼成同一个 OR 表达式 |
+| 展开数组被明确禁止 | 把节点集合拼成 `IN ('dept-a', 'dept-b')` 违反「值走参数绑定」，也不许做 |
+
+所以契约必须**恰好长一个变体**：
+
+```rust
+/// 自定义条件 **OR** 一个包含型范围（**并集**语义）。
+CustomOr {
+    conditions: Vec<CompiledCondition>,   // 彼此 OR
+    scope: Box<ScopeFilter>,              // 另一侧：OrgNodes / Owner
+}
+```
+
+- 落在 `platform-core`（`ScopeFilter` 的定义处）→ 属 AGENTS.md 硬规则 1 的**例外条款**
+  （「平台 crate 可以在**已评审的需求**里演进」，REQ-009 已在该文件新增过 `extension/permission.rs`）；
+- 改动是**纯增量**：既有四个变体的渲染行为不变；只有 `Custom` 的「多条件之间」由 AND 改为 OR ——
+  那是**本轮语义修正的一部分**（且只有 `platform-rbac` 生产 `ScopeFilter`，业务模块只消费）；
+- `AGENTS.md` **不需要**改：没有新增 crate / 文件 / 能力项，它对 `platform-core` 的描述仍然成立；
+- 能力索引 `cargo xtask capabilities --check` → **13 个文件与源码一致**（无需重新生成）。
+
+### 8.5 渲染（一个括号包起来的 OR 表达式 + 值全部走绑定）
+
+```sql
+-- 自定义条件 OR 本部门（OWN_ORG）
+... AND ((amount <= $2) OR (org_node_id = ANY($3)))
+```
+
+| 要求 | 落实 |
+|------|------|
+| 一个括号包起来的 OR 表达式 | 整个 OR 组只加**一对**括号 → 不会被外层的 AND 拆开 |
+| 自定义条件的值走绑定 | `$2`（`ConditionValue` → `BindValue`） |
+| 子树 id 集合走**数组绑定** | `$3` = `BindValue::TextArray` —— **没有**展开成字符串拼接 |
+| 多个 CUSTOM 取 OR | `((c1) OR (c2))` |
+
+证据：`platform-db` 的 2 条单测（`a_custom_scope_renders_every_condition_as_one_or_group`、
+`a_custom_or_scope_renders_one_or_group_with_an_array_bound`）+ 真实库用例里的 SQL 断言
+（`sql.contains(" OR ")`、SQL 文本里**不含** `dept-a` / `10000`、绑定值 3 个）。
+
+### 8.6 新增用例（真实库层，**6** 条）
+
+| 用例 | 覆盖 |
+|------|------|
+| `a_custom_scope_is_unioned_with_the_other_roles_scope` | **四个象限**（主部门内/外 × 满足/不满足 CUSTOM）；★「主部门内但不满足 CUSTOM → **可见**」是本次修复的核心判据；另断言过滤条件形态是 `CustomOr`、SQL 是 OR 组、值全走绑定 |
+| `multiple_custom_scopes_are_unioned` | 两个 CUSTOM 条件不同 → **满足任一**即可见（OR，不是 AND） |
+| `all_wins_over_a_custom_scope` | `ALL` + `CUSTOM` → `ALL`（全部可见，含金额超限的记录） |
+| `the_most_permissive_containment_scope_still_wins` | **回归**：`OWN_ORG` + `OWN_ORG_AND_BELOW` → `OWN_ORG_AND_BELOW`（行为不变） |
+| `the_permission_checker_is_usable_as_a_trait_object` | 顺带确认 1（dyn 兼容） |
+| `a_condition_outside_the_whitelist_never_grants_access` | 顺带确认 2（fail closed） |
+
+另有 **7** 条单测（`platform-rbac` 的 `scope::tests` **+3**、`checker::tests` **+3**；
+`platform-db` 的 `query::tests` **+1**）。
+
+### 8.7 变异验证（第二轮 **2** 条）
+
+判据：改错 → **对应测试红** → 还原（**sha256 校验**）→ **对应测试绿**。
+
+| # | 故意改错的地方 | 期望变红的测试 | 实测 | 还原 |
+|---|--------------|--------------|------|------|
+| 1 | **退回旧行为**：「有 CUSTOM 就只返回 CUSTOM」（`scope.rs::combine_scopes` 把 `plus` 丢成 `None`） | `rbac_real_db::a_custom_scope_is_unioned_with_the_other_roles_scope` + `scope::tests::a_custom_scope_is_unioned_with_the_other_roles_scope` | ✅ **FAILED（2 条）**：真实库报「主部门内不满足 CUSTOM 的记录必须仍然可见」且可见集合少了 `item-big`；单测报 `left: None / right: Some(OwnOrg { .. })` | ✅ sha256 一致（`f2b62728…d9bb0`）→ 还原后 1 passed / 2 passed |
+| 2 | **多个 CUSTOM 由 OR 改成 AND**（`platform-db::render_condition_group` 的 `join(" OR ")` → `join(" AND ")`） | `rbac_real_db::multiple_custom_scopes_are_unioned` + `platform-db::query::tests::a_custom_scope_renders_every_condition_as_one_or_group` | ✅ **FAILED（2 条）**：真实库只剩交集 `{item-b1, item-self2}`；单测渲染出 `((amount <= $2) AND (dept_id = $3))` | ✅ sha256 一致（`655df077…51f94`）→ 还原后 2 passed / 1 passed |
+
+> 两次变异都**没有**靠「整条 SQL 文本比对」蒙对：第 1 条红在**记录集合**上，
+> 第 2 条红在**记录集合**与**渲染结果**上 —— 也就是说，修复的语义本身被用例**真的**盯着。
+
+### 8.8 两个「顺带确认」的结论
+
+#### ① 四个方法全同步 → trait 仍 dyn 兼容 ✅
+
+`PermissionChecker` 的四个方法（`has` / `scope` / `effective_scope` / `condition`）
+**全部是同步方法**：没有 `async fn`、没有 RPITIT（返回具名类型）→ trait **对象安全**。
+
+证据（`the_permission_checker_is_usable_as_a_trait_object`，真实库层）：
+
+- `let dyn_checker: Arc<dyn PermissionChecker> = platform_rbac::as_dyn_checker(checker.clone());`
+  —— **这一行能编译过就是证明**：任何一个方法改成 `async fn` 或返回 `impl Trait`，
+  这行都编译不过（`Arc<dyn PermissionChecker>` 不成立）；
+- 四个方法**逐个经由 trait 对象**调用并断言结果（`has` / `scope` / `effective_scope` / `condition`）；
+- 平台侧本来就靠它注入请求扩展（`platform-core::permission::authorize` 从扩展里取
+  `Arc<dyn PermissionChecker>`），`platform-core/tests/authz_entry.rs` 另有 7 条用例覆盖。
+
+#### ② `condition()` 引用白名单外属性 → fail closed ✅（但**返回的不是 `None`**）
+
+**实测行为**：返回 **`Some(1 = 0)`**（永不匹配的条件），**不是** `None`。
+（`platform-core` 的 trait 文档写的是「条件引用白名单外的属性时返回 `None`」——
+**文档与实现不一致**，见下面的说明。）
+
+证据（`a_condition_outside_the_whitelist_never_grants_access`，真实库层）：
+
+1. 做法：用一个**不含 `record.amount`** 的白名单重建判定器 → 注册表里
+   `sandbox:scope-item:approve` 的条件 `$record.amount <= 10000` 就成了**白名单外**的写法；
+2. `checker.condition(ctx, PERM_APPROVE)` → `sql == "1 = 0"`、`values` 为空
+   → **永不匹配**；
+3. 调用方把它交给 `TenantQuery::with_condition` → **一行都看不到**（数据范围是 `ALL` 也看不到）
+   → 调用方据此**判定不通过**（fail closed），**不是**「忽略条件放行」；
+4. 对照组：白名单内的同一条件 → 编译成**真实**条件 → 金额超限的记录被挡住、满足条件的可见
+   → 证明条件**确实被生效**，不是被忽略；
+5. 另有 3 条单测（`checker::tests`）钉住同一条策略：白名单外属性 / 函数调用 / 多语句
+   → 一律落到 `1 = 0`。
+
+**为什么实现不改成「返回 `None`」**（这点需要 BA 复核）：
+
+| 方案 | 后果 |
+|------|------|
+| 返回 `None`（照 trait 文档改） | `None` 同时表示「该权限点**没有**条件」与「条件**非法**」→ 调用方无法区分 → 按文档「`None` 即判定不通过」的话，**所有没有条件的权限点都会被拒**（把「无条件」误当成「条件非法」）；若调用方选择「`None` 就放行」，则白名单外的条件会被**静默忽略 = 放行** |
+| 保持 `Some(1 = 0)`（现实现） | 「没有条件」= `None`（调用方不加条件）；「条件非法」= 永不匹配（调用方**必然**判不通过）→ **两个语义不混淆，且都是 fail closed** |
+
+→ **建议 BA 修订 trait 文档**（把「引用白名单外的属性时返回 `None`」改成
+「返回**永不匹配**的条件」），而不是改实现。**本轮按「不改，只确认」的要求没有动它。**
+
+### 8.9 本轮的已知取舍与剩余风险（如实列出）
+
+| 项 | 说明 |
+|----|------|
+| **改了 `platform-core`** | 契约表达能力缺口所迫（§8.4），**需要 BA 复核这处演进**；改动是纯增量 |
+| **trait 文档与实现不一致** | 见 §8.8 ② —— 建议改文档，本轮未改 |
+| `use_all_memberships` 开关口径 | 「取所有成员节点的并集」的开关取自**所有**贡献（任一角色要求并集 → 整体并集）—— 与第一轮一致，**行为未变** |
+| 自定义 + 包含型范围时的查询次数 | 组合出 `CustomOr` 时，每个权限点会**多查一次**组织节点（第一轮只查纯 scope）。只在「有 CUSTOM 角色」的用户上发生，量级是「权限点数 × 1 次查询 / 缓存刷新」—— **未做优化**（正确性优先），留作后续 |
+| `platform-org` 的偶发失败 | 一次完整套件跑里 `platform-org` 的 `org_real_db` 有 **1 条**偶发失败（单独重跑 **15 passed**，另两次完整套件全绿）—— 与本次改动**无关**（platform-org 不碰 `ScopeFilter`），属本仓既有的回归不稳定（见 §2.3） |
+| 依赖预算 | **不变**：锁文件未改动，仍是 **293 → 294**（+1 是本地工作区成员 `platform-rbac`）；本轮**未引入任何新依赖** |
+
+---
+
+## 9. 提交与分支
 
 | 项 | 值 |
 |----|---|
 | 分支 | `feature/REQ-009` |
 | 基线 | `develop` @ `400cefa` |
-| 提交 | `[Dev] 实现 RBAC 权限与数据范围（角色模型 / 数据范围 / 鉴权中间件 / 契约 C-5） (关联: REQ-009)` |
+| 提交 | ① `[Dev] 实现 RBAC 权限与数据范围（角色模型 / 数据范围 / 鉴权中间件 / 契约 C-5） (关联: REQ-009)`<br>② `[Dev] 修正 CUSTOM scope 的多角色合并语义为真正的并集 (关联: REQ-009)` |
 | 契约 pin | `feature-meta/manifest.json` → `{"api-conventions": "v1", "extension-points": "v2"}` |
 | 追溯矩阵 | `feature-meta/traceability.md` |
 | 变更日志 | `CHANGELOG.md` → `### REQ-009 RBAC 权限与数据范围` |

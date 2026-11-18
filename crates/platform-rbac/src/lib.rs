@@ -47,7 +47,7 @@ pub use entity::{
 pub use error::{RbacError, code};
 pub use registry::{ManifestPermission, Reconciliation, collect_manifest_permissions, reconcile};
 pub use scope::{
-    CombinedScope, ScopeContribution, ScopePolicy, ScopeResolver, combine_scopes,
+    CombinedScope, ContainmentScope, ScopeContribution, ScopePolicy, ScopeResolver, combine_scopes,
     primary_department,
 };
 pub use service::{RbacService, RoleGraph, RoleView, UserPermissionView};

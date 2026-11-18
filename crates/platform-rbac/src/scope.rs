@@ -18,12 +18,17 @@
 //!    被兼职部门撑大。
 //! 2. **主部门缺失或歧义 → fail closed 到 `SELF`**（**不是** `ALL`）。
 //!    DB 的部分唯一索引是**预防层**，这里的判定是**防御层** —— 两层都要。
-//! 3. **多角色取最宽松**（并集语义）；`CUSTOM` 不参与宽松比较（见 [`combine_scopes`]）。
+//! 3. **多角色取最宽松**（**并集**语义）：多角色的可见范围过滤条件取并集 ——
+//!    与权限点「任一满足即通过」一致（见 [`combine_scopes`]）。
+//!    `CUSTOM` **不**被排除在并集之外：自定义条件与其它角色的范围取 **OR**，
+//!    多个 `CUSTOM` 条件之间也是 **OR** —— **加一个角色不会缩小可见范围**。
 
 use std::collections::BTreeSet;
 
 use platform_core::RequestContext;
-use platform_core::extension::expr::{EvalContext, FieldWhitelist, ValueKind, compile};
+use platform_core::extension::expr::{
+    CompiledCondition, EvalContext, FieldWhitelist, ValueKind, compile,
+};
 use platform_core::extension::permission::{DataScope, ScopeFilter};
 
 use crate::error::RbacError;
@@ -143,11 +148,33 @@ pub enum CombinedScope {
     },
     /// 仅本人。
     OnlySelf,
-    /// 自定义条件（多个条件是**交集**）。
+    /// 自定义条件 **OR** 包含型范围（**并集**语义）。
     Custom {
-        /// 自定义表达式（每个角色一条）。
+        /// 自定义表达式（每个角色一条；彼此 **OR** —— 不是交集）。
         filters: Vec<String>,
+        /// 另一侧的范围（非 `CUSTOM` 角色里最宽松的那个）；`None` = 只有自定义条件。
+        plus: Option<ContainmentScope>,
     },
+}
+
+/// 包含型范围（本部门 / 本部门及下级 / 仅本人）。
+///
+/// 与自定义条件的区别：包含型范围是「**某一组**组织节点（或本人）」，
+/// 自定义条件是「任意表达式」—— 两者取**并集**（OR）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContainmentScope {
+    /// 本部门（用户**主部门**节点）。
+    OwnOrg {
+        /// 是否取所有成员节点的并集。
+        use_all_memberships: bool,
+    },
+    /// 本部门及下级（主部门节点的**子树**）。
+    OwnOrgAndBelow {
+        /// 是否取所有成员节点的并集。
+        use_all_memberships: bool,
+    },
+    /// 仅本人（`created_by = 当前用户`）。
+    OnlySelf,
 }
 
 impl CombinedScope {
@@ -168,15 +195,32 @@ impl CombinedScope {
     }
 }
 
-/// 合并多个角色的范围（design-summary §4.4）。
+/// 合并多个角色的范围（design-summary §4.4，**并集语义**）。
+///
+/// # 语义：多角色的可见范围取**并集**
+///
+/// 每个角色给一份授权（权限 + 一份可见范围过滤条件），多角色的过滤条件取**并集** ——
+/// 与权限点「任一满足即通过」完全一致。
+///
+/// | 规则 | 结果 |
+/// |------|------|
+/// | 任一角色是 `ALL` | `ALL`（最宽松，其他都不必看） |
+/// | 否则有 `CUSTOM` 角色 | **自定义条件 OR 其它（非 `CUSTOM`）角色的最宽松范围** |
+/// | 否则有 `OWN_ORG_AND_BELOW` | `OWN_ORG_AND_BELOW`（最宽松） |
+/// | 否则有 `OWN_ORG` | `OWN_ORG` |
+/// | 否则 | `SELF` |
+///
+/// # 多个 `CUSTOM` 角色
+///
+/// 条件之间取 **OR**（并集），**不是 AND** —— 加一个角色**不会**缩小可见范围。
 ///
 /// | 规则 | 说明 |
 /// |------|------|
 /// | `ALL` 最宽松 | 任何含 `ALL` 的角色组合 → `ALL` |
 /// | `SELF` 最严格 | 只有 `SELF` → `SELF` |
 /// | `OWN_ORG` ⊂ `OWN_ORG_AND_BELOW` | 同为「本部门」时，后者更宽松 |
-/// | `CUSTOM` 不参与宽松比较 | 与其它 scope 同时出现时**取 `CUSTOM` 的那一路** |
-/// | 多 `CUSTOM` | 两者**都要满足**（交集）——「最宽松」在自定义条件下没有定义 |
+/// | `CUSTOM` 与其它 scope | 取**并集**（`CUSTOM` 条件 **OR** 其它角色的范围） |
+/// | 多 `CUSTOM` | 条件之间取 **OR**（并集），**不是**交集 |
 pub fn combine_scopes(contributions: &[ScopeContribution]) -> CombinedScope {
     if contributions.is_empty() {
         return CombinedScope::OnlySelf;
@@ -190,35 +234,68 @@ pub fn combine_scopes(contributions: &[ScopeContribution]) -> CombinedScope {
         return CombinedScope::All;
     }
 
-    // `CUSTOM` 不参与宽松比较：取 CUSTOM 的那一路。
-    let custom: Vec<String> = contributions
+    // 自定义条件（每个角色一条；彼此 **OR** —— 并集）。
+    let filters: Vec<String> = contributions
         .iter()
         .filter(|item| item.scope == DataScope::Custom)
         .filter_map(|item| item.custom_filter.clone())
         .collect();
-    if !custom.is_empty() {
-        return CombinedScope::Custom { filters: custom };
+
+    // 非 `CUSTOM` 角色里**最宽松**的那个包含型范围。
+    let plus = most_permissive_containment(contributions);
+
+    if !filters.is_empty() {
+        // 自定义条件 **OR** 其它角色的范围（并集）。
+        return CombinedScope::Custom { filters, plus };
     }
 
-    let has_below = contributions
-        .iter()
-        .any(|item| item.scope == DataScope::OwnOrgAndBelow);
-    let has_own = contributions
-        .iter()
-        .any(|item| item.scope == DataScope::OwnOrg);
+    match plus {
+        Some(ContainmentScope::OwnOrgAndBelow {
+            use_all_memberships,
+        }) => CombinedScope::OwnOrgAndBelow {
+            use_all_memberships,
+        },
+        Some(ContainmentScope::OwnOrg {
+            use_all_memberships,
+        }) => CombinedScope::OwnOrg {
+            use_all_memberships,
+        },
+        Some(ContainmentScope::OnlySelf) | None => CombinedScope::OnlySelf,
+    }
+}
+
+/// 非 `CUSTOM` 贡献里**最宽松**的包含型范围。
+///
+/// 宽松顺序：`OWN_ORG_AND_BELOW` ⊃ `OWN_ORG` ⊃ `SELF`。
+///
+/// 「取所有成员节点的并集」的开关取自**所有**贡献（任一角色要求并集 → 整体并集）——
+/// 与「取最宽松」的口径一致。
+fn most_permissive_containment(contributions: &[ScopeContribution]) -> Option<ContainmentScope> {
     let use_all_memberships = contributions.iter().any(|item| item.use_all_memberships);
 
-    if has_below {
-        return CombinedScope::OwnOrgAndBelow {
+    if contributions
+        .iter()
+        .any(|item| item.scope == DataScope::OwnOrgAndBelow)
+    {
+        return Some(ContainmentScope::OwnOrgAndBelow {
             use_all_memberships,
-        };
+        });
     }
-    if has_own {
-        return CombinedScope::OwnOrg {
+    if contributions
+        .iter()
+        .any(|item| item.scope == DataScope::OwnOrg)
+    {
+        return Some(ContainmentScope::OwnOrg {
             use_all_memberships,
-        };
+        });
     }
-    CombinedScope::OnlySelf
+    if contributions
+        .iter()
+        .any(|item| item.scope == DataScope::OnlySelf)
+    {
+        return Some(ContainmentScope::OnlySelf);
+    }
+    None
 }
 
 /// 主部门判定结果。
@@ -269,23 +346,65 @@ impl<'a> ScopeResolver<'a> {
     ) -> Result<ScopeFilter, RbacError> {
         match combined {
             CombinedScope::All => Ok(ScopeFilter::All),
-            CombinedScope::OnlySelf => Ok(ScopeFilter::Owner {
-                column: self.policy.created_by_column.clone(),
-                user_id: ctx.user_id().unwrap_or_default().to_string(),
-            }),
+            CombinedScope::OnlySelf => Ok(self.self_filter(ctx)),
             CombinedScope::OwnOrg {
                 use_all_memberships,
             } => {
-                match self.org_nodes(ctx, *use_all_memberships, false).await? {
-                    OrgNodes::Nodes(nodes) => Ok(ScopeFilter::OrgNodes {
-                        column: self.policy.org_node_column.clone(),
-                        nodes,
-                    }),
-                    // 主部门缺失 / 歧义 → **退化为 SELF**（不是「什么都看不到」）。
-                    OrgNodes::DegradeToSelf => Ok(self.self_filter(ctx)),
-                }
+                self.resolve_containment(
+                    ctx,
+                    &ContainmentScope::OwnOrg {
+                        use_all_memberships: *use_all_memberships,
+                    },
+                )
+                .await
             }
             CombinedScope::OwnOrgAndBelow {
+                use_all_memberships,
+            } => {
+                self.resolve_containment(
+                    ctx,
+                    &ContainmentScope::OwnOrgAndBelow {
+                        use_all_memberships: *use_all_memberships,
+                    },
+                )
+                .await
+            }
+            CombinedScope::Custom { filters, plus } => {
+                let conditions = self.compile_custom(ctx, filters)?;
+                match plus {
+                    // 只有自定义条件（多个条件之间是 **OR**）。
+                    None => Ok(ScopeFilter::Custom { conditions }),
+                    // 自定义条件 **OR** 包含型范围（并集）。
+                    Some(containment) => {
+                        let scope = self.resolve_containment(ctx, containment).await?;
+                        Ok(ScopeFilter::CustomOr {
+                            conditions,
+                            scope: Box::new(scope),
+                        })
+                    }
+                }
+            }
+        }
+    }
+
+    /// 求值一个包含型范围（本部门 / 本部门及下级 / 仅本人）。
+    pub async fn resolve_containment(
+        &self,
+        ctx: &RequestContext,
+        containment: &ContainmentScope,
+    ) -> Result<ScopeFilter, RbacError> {
+        match containment {
+            ContainmentScope::OwnOrg {
+                use_all_memberships,
+            } => match self.org_nodes(ctx, *use_all_memberships, false).await? {
+                OrgNodes::Nodes(nodes) => Ok(ScopeFilter::OrgNodes {
+                    column: self.policy.org_node_column.clone(),
+                    nodes,
+                }),
+                // 主部门缺失 / 歧义 → **退化为 SELF**（不是「什么都看不到」）。
+                OrgNodes::DegradeToSelf => Ok(self.self_filter(ctx)),
+            },
+            ContainmentScope::OwnOrgAndBelow {
                 use_all_memberships,
             } => match self.org_nodes(ctx, *use_all_memberships, true).await? {
                 OrgNodes::Nodes(nodes) => Ok(ScopeFilter::OrgNodes {
@@ -294,26 +413,34 @@ impl<'a> ScopeResolver<'a> {
                 }),
                 OrgNodes::DegradeToSelf => Ok(self.self_filter(ctx)),
             },
-            CombinedScope::Custom { filters } => {
-                let whitelist = self.policy.whitelist();
-                let eval = EvalContext {
-                    whitelist: &whitelist,
-                    user_id: ctx.user_id(),
-                    tenant_id: ctx.tenant_id(),
-                };
-                let mut conditions = Vec::new();
-                for filter in filters {
-                    // 白名单外的属性 → **编译失败** → fail closed（不放行）。
-                    let compiled =
-                        compile(filter, &eval).map_err(|error| RbacError::InvalidArgument {
-                            field: "customFilter".to_string(),
-                            reason: error.reason,
-                        })?;
-                    conditions.push(compiled);
-                }
-                Ok(ScopeFilter::Custom { conditions })
-            }
+            ContainmentScope::OnlySelf => Ok(self.self_filter(ctx)),
         }
+    }
+
+    /// 编译自定义条件（每个角色一条；彼此 **OR** —— 并集）。
+    ///
+    /// 白名单外的属性 → **编译失败** → fail closed（不放行）。
+    fn compile_custom(
+        &self,
+        ctx: &RequestContext,
+        filters: &[String],
+    ) -> Result<Vec<CompiledCondition>, RbacError> {
+        let whitelist = self.policy.whitelist();
+        let eval = EvalContext {
+            whitelist: &whitelist,
+            user_id: ctx.user_id(),
+            tenant_id: ctx.tenant_id(),
+        };
+        let mut conditions = Vec::with_capacity(filters.len());
+        for filter in filters {
+            // 白名单外的属性 → **编译失败** → fail closed（不放行）。
+            let compiled = compile(filter, &eval).map_err(|error| RbacError::InvalidArgument {
+                field: "customFilter".to_string(),
+                reason: error.reason,
+            })?;
+            conditions.push(compiled);
+        }
+        Ok(conditions)
     }
 
     /// 求值单个 scope（[`PermissionChecker::scope`](platform_core::extension::permission::PermissionChecker::scope) 的实现体）。
@@ -483,23 +610,82 @@ mod tests {
     }
 
     #[test]
-    fn custom_takes_its_own_path_and_multiple_customs_are_intersected() {
+    fn multiple_customs_are_unioned_not_intersected() {
         let combined = combine_scopes(&[
             ScopeContribution::new(DataScope::Custom).with_filter("$record.amount <= 10000"),
             ScopeContribution::new(DataScope::Custom).with_filter("$record.dept_id == \"dept-a\""),
         ]);
         match combined {
-            CombinedScope::Custom { filters } => {
+            CombinedScope::Custom { filters, plus } => {
                 assert_eq!(
                     filters.len(),
                     2,
-                    "多个 CUSTOM 的条件都要参与（交集）：{filters:?}"
+                    "多个 CUSTOM 的条件都要参与（并集 / OR）：{filters:?}"
+                );
+                assert!(
+                    plus.is_none(),
+                    "只有 CUSTOM 角色时，另一侧没有包含型范围：{plus:?}"
                 );
             }
             other => panic!("应当是 CUSTOM：{other:?}"),
         }
     }
 
+    /// **本次修复的核心**：自定义条件 **OR** 其它角色的范围（并集）。
+    ///
+    /// 旧实现（有 CUSTOM 就只返回 CUSTOM）会丢掉 `OWN_ORG` 的贡献 ——
+    /// 加一个角色反而**缩小**了可见范围。
+    #[test]
+    fn a_custom_scope_is_unioned_with_the_other_roles_scope() {
+        let combined = combine_scopes(&[
+            ScopeContribution::new(DataScope::OwnOrg),
+            ScopeContribution::new(DataScope::Custom).with_filter("$record.amount <= 10000"),
+        ]);
+        match combined {
+            CombinedScope::Custom { filters, plus } => {
+                assert_eq!(filters, vec!["$record.amount <= 10000".to_string()]);
+                assert_eq!(
+                    plus,
+                    Some(ContainmentScope::OwnOrg {
+                        use_all_memberships: false
+                    }),
+                    "自定义条件必须与本部门范围取**并集**（OR）"
+                );
+            }
+            other => panic!("应当是 CUSTOM + 包含型范围：{other:?}"),
+        }
+    }
+
+    /// `OWN_ORG_AND_BELOW` 比 `OWN_ORG` 更宽松 → 取它。
+    #[test]
+    fn a_custom_scope_prefers_the_most_permissive_other_scope() {
+        let combined = combine_scopes(&[
+            ScopeContribution::new(DataScope::OwnOrg),
+            ScopeContribution::new(DataScope::OwnOrgAndBelow),
+            ScopeContribution::new(DataScope::Custom).with_filter("$record.amount <= 10000"),
+        ]);
+        match combined {
+            CombinedScope::Custom { plus, .. } => assert_eq!(
+                plus,
+                Some(ContainmentScope::OwnOrgAndBelow {
+                    use_all_memberships: false
+                })
+            ),
+            other => panic!("应当是 CUSTOM + 包含型范围：{other:?}"),
+        }
+    }
+
+    /// `ALL` 最宽松 —— 有 `ALL` 时不看别的。
+    #[test]
+    fn all_wins_over_custom() {
+        let combined = combine_scopes(&[
+            ScopeContribution::new(DataScope::All),
+            ScopeContribution::new(DataScope::Custom).with_filter("$record.amount <= 10000"),
+        ]);
+        assert_eq!(combined, CombinedScope::All);
+    }
+
+    /// 没有自定义条件时，行为与旧实现一致（`OWN_ORG` + `OWN_ORG_AND_BELOW` → 后者）。
     #[test]
     fn the_union_flag_is_carried_over() {
         let combined =

@@ -96,6 +96,12 @@ impl DataScope {
 ///
 /// 渲染由 `platform-db` 的 `TenantQuery::with_scope` 负责 ——
 /// **业务模块构造不出「跳过范围」的东西**，因为这个枚举里没有那个选项。
+///
+/// # 多角色的可见范围取**并集**
+///
+/// 与权限点「任一满足即通过」一致：每个角色给一份授权（权限 + 一份可见范围过滤条件），
+/// 多角色的过滤条件取**并集** —— [`Self::Custom`] 的多个条件之间是 **OR**，
+/// [`Self::CustomOr`] 表达「自定义条件 **OR** 包含型范围」。
 #[derive(Debug, Clone, PartialEq)]
 pub enum ScopeFilter {
     /// 全部：不追加任何条件。
@@ -114,10 +120,23 @@ pub enum ScopeFilter {
         /// 当前用户 ID。
         user_id: String,
     },
-    /// 自定义条件（多个条件是**交集** —— 「最宽松」在自定义条件下没有定义）。
+    /// 自定义条件（多个条件取**并集** —— 与「多角色取最宽松」一致）。
     Custom {
         /// 已编译的条件（SQL 片段里的字面值一律走绑定）。
         conditions: Vec<CompiledCondition>,
+    },
+    /// 自定义条件 **OR** 一个包含型范围（**并集**语义）。
+    ///
+    /// 多角色的可见范围取**并集** —— 与权限点「任一满足即通过」一致：
+    /// `CUSTOM` 条件 **OR** `OWN_ORG` / `OWN_ORG_AND_BELOW` / `SELF` 的范围。
+    ///
+    /// 渲染成**一个**括号包起来的 OR 表达式；两边的值**一律走参数绑定**
+    /// （包含型范围的节点集合仍是**数组绑定**，不展开成字符串拼接）。
+    CustomOr {
+        /// 已编译的自定义条件（彼此 **OR**）。
+        conditions: Vec<CompiledCondition>,
+        /// 另一侧的范围（包含型：`OrgNodes` / `Owner`）。
+        scope: Box<ScopeFilter>,
     },
 }
 
@@ -134,6 +153,7 @@ impl ScopeFilter {
             Self::OrgNodes { nodes, .. } => usize::from(!nodes.is_empty()),
             Self::Owner { .. } => 1,
             Self::Custom { conditions } => conditions.len(),
+            Self::CustomOr { conditions, scope } => conditions.len() + scope.condition_count(),
         }
     }
 }
