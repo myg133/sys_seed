@@ -38,7 +38,9 @@ use platform_iam::config::{
 use platform_iam::http::IamState;
 use platform_iam::service::IamService;
 use platform_iam::store::IamStore;
+use sqlx::Row;
 use sqlx::postgres::PgPoolOptions;
+use time::OffsetDateTime;
 use tower::ServiceExt;
 
 /// 防假绿护栏的子进程标记（防止护栏自己递归拉起子进程）。
@@ -214,6 +216,36 @@ fn request_with_tenant(
         .expect("请求应当能构造")
 }
 
+/// 带租户头 **+ 来源 IP** 的请求。
+///
+/// IP 决定**限流桶**，而限流是**全局**的（跨租户、跨用例共享）——
+/// 所以用例必须能指定自己的 IP。
+fn request_with_tenant_and_ip(
+    method: &str,
+    path: &str,
+    tenant: &str,
+    ip: &str,
+    body: serde_json::Value,
+) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(path)
+        .header("x-tenant-id", tenant)
+        .header("x-forwarded-for", ip)
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("请求应当能构造")
+}
+
+/// 一次运行一个**唯一**的 IP。
+///
+/// 失败计数的限流窗口是 5 分钟，而限流桶是**全局**的 ——
+/// 如果用例共用 IP，上一轮跑过的失败记录会让这一轮的用例莫名其妙地收到 429。
+fn unique_ip() -> String {
+    let bytes = uuid::Uuid::new_v4().into_bytes();
+    format!("{}.{}.{}.{}", bytes[0], bytes[1], bytes[2], bytes[3])
+}
+
 /// 读响应：状态码 + JSON。
 async fn read_json(response: Response) -> (StatusCode, serde_json::Value) {
     let status = response.status();
@@ -275,6 +307,34 @@ async fn login_timed(
     (status, value, elapsed)
 }
 
+/// 登录（**带来源 IP**；返回状态码 + JSON + 耗时）。
+///
+/// 限流桶是**全局**的 → 用例必须能指定 IP，否则会互相顶到 429。
+async fn login_timed_from_ip(
+    router: &axum::Router,
+    tenant: &str,
+    username: &str,
+    password: &str,
+    ip: &str,
+) -> (StatusCode, serde_json::Value, Duration) {
+    let body = serde_json::json!({ "username": username, "password": password });
+    let started = Instant::now();
+    let response = router
+        .clone()
+        .oneshot(request_with_tenant_and_ip(
+            "POST",
+            "/api/iam/login",
+            tenant,
+            ip,
+            body,
+        ))
+        .await
+        .expect("登录请求应当能发出");
+    let elapsed = started.elapsed();
+    let (status, value) = read_json(response).await;
+    (status, value, elapsed)
+}
+
 /// 登录（只关心结果）。
 async fn login(
     router: &axum::Router,
@@ -292,12 +352,16 @@ async fn login(
 // ---------------------------------------------------------------------------
 
 /// 账号不存在与密码错误：**响应体与错误码完全相同**，耗时接近。
+///
+/// ⚠️ 这条用例必须**逐轮**断言状态码 —— 只断言第一轮的话，
+///    第 5 轮起的 `401 → 403` 漂移（账号被锁定）根本不会被看见（QA 报告 MEDIUM 4）。
 #[tokio::test]
 #[ignore = "需要 base_test 库：scripts/test-integration.sh 会用 --include-ignored 跑到"]
 async fn login_failure_does_not_reveal_whether_the_account_exists() {
     let db_url = setup().await;
     let (_state, router) = build_stack(&db_url).await;
     let tenant = tenant_id("enum");
+    let ip = unique_ip();
 
     register(
         &router,
@@ -309,53 +373,71 @@ async fn login_failure_does_not_reveal_whether_the_account_exists() {
     .await;
 
     // 情况一：账号存在 + 密码错误。
-    let (status_existing, body_existing, _) = login_timed(
+    let (status_existing, body_existing, _) = login_timed_from_ip(
         &router,
         &tenant,
         "alice",
         "definitely-the-wrong-password",
-        None,
+        &ip,
     )
     .await;
     // 情况二：账号不存在。
-    let (status_missing, body_missing, _) = login_timed(
+    let (status_missing, body_missing, _) = login_timed_from_ip(
         &router,
         &tenant,
         "nobody-here",
         "definitely-the-wrong-password",
-        None,
+        &ip,
     )
     .await;
 
     // 耗时对比：**多轮取中位数**（单次测量会被网络/DB 抖动带偏）。
+    //
+    // ⚠️ 每轮都**逐条断言状态码** —— 否则循环里的漂移（例如第 5 轮起
+    //    账号被锁定、状态码变成 403）从来不会被断言到（QA 报告 MEDIUM 4）。
     let mut existing_times: Vec<Duration> = Vec::new();
     let mut missing_times: Vec<Duration> = Vec::new();
-    for _ in 0..3 {
-        existing_times.push(
-            login_timed(
-                &router,
-                &tenant,
-                "alice",
-                "definitely-the-wrong-password",
-                None,
-            )
-            .await
-            .2,
+    for round in 1..=3 {
+        let (status, body, elapsed) = login_timed_from_ip(
+            &router,
+            &tenant,
+            "alice",
+            "definitely-the-wrong-password",
+            &ip,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "第 {round} 轮（账号存在）必须是 401，body = {body}"
         );
-        missing_times.push(
-            login_timed(
-                &router,
-                &tenant,
-                "nobody-here",
-                "definitely-the-wrong-password",
-                None,
-            )
-            .await
-            .2,
+        assert_eq!(
+            body["code"], "INVALID_CREDENTIALS",
+            "第 {round} 轮（账号存在）必须是 INVALID_CREDENTIALS，body = {body}"
         );
+        existing_times.push(elapsed);
+
+        let (status, body, elapsed) = login_timed_from_ip(
+            &router,
+            &tenant,
+            "nobody-here",
+            "definitely-the-wrong-password",
+            &ip,
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "第 {round} 轮（账号不存在）必须是 401，body = {body}"
+        );
+        assert_eq!(
+            body["code"], "INVALID_CREDENTIALS",
+            "第 {round} 轮（账号不存在）必须是 INVALID_CREDENTIALS，body = {body}"
+        );
+        missing_times.push(elapsed);
     }
-    let elapsed_existing = median(&mut existing_times);
-    let elapsed_missing = median(&mut missing_times);
+    let elapsed_existing = true_median(&mut existing_times);
+    let elapsed_missing = true_median(&mut missing_times);
 
     // 状态码相同。
     assert_eq!(status_existing, status_missing, "两种情况的状态码必须相同");
@@ -403,6 +485,230 @@ async fn login_failure_does_not_reveal_whether_the_account_exists() {
     println!(
         "防枚举耗时：存在账号+错密码 = {:?}；账号不存在 = {:?}；比值 = {ratio:.2}",
         elapsed_existing, elapsed_missing
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 1b. 账号枚举面：`ACCOUNT_LOCKED` 必须是「知道密码」才拿得到的信号
+// ---------------------------------------------------------------------------
+
+/// 连续 6 次错密码：**每一次**都必须是 `INVALID_CREDENTIALS` + 401。
+///
+/// 守的是 QA 报告 HIGH 1：`ACCOUNT_LOCKED` 如果排在密码校验**之前**，
+/// 第 6 次就会变成 403 `ACCOUNT_LOCKED` —— 而「未注册账号永远拿不到它」
+/// 本身就是判别器 → **6 个请求就能枚举账号存在性**（CWE-204）。
+#[tokio::test]
+#[ignore = "需要 base_test 库：scripts/test-integration.sh 会用 --include-ignored 跑到"]
+async fn six_wrong_passwords_never_reveal_that_the_account_exists() {
+    let db_url = setup().await;
+    let (_state, router) = build_stack(&db_url).await;
+    let tenant = tenant_id("enum6");
+    let ip = unique_ip();
+
+    register(&router, &tenant, "alice", PASSWORD, None).await;
+
+    let mut existing: Vec<(u16, String)> = Vec::new();
+    let mut missing: Vec<(u16, String)> = Vec::new();
+
+    for round in 1..=6 {
+        let (status, body, _) =
+            login_timed_from_ip(&router, &tenant, "alice", "wrong-password-here", &ip).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "第 {round} 次（账号存在）必须是 401，body = {body}"
+        );
+        assert_eq!(
+            body["code"], "INVALID_CREDENTIALS",
+            "第 {round} 次（账号存在）必须是 INVALID_CREDENTIALS，body = {body}"
+        );
+        existing.push((
+            status.as_u16(),
+            body["code"].as_str().unwrap_or("").to_string(),
+        ));
+
+        let (status, body, _) =
+            login_timed_from_ip(&router, &tenant, "nobody-here", "wrong-password-here", &ip).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "第 {round} 次（账号不存在）必须是 401，body = {body}"
+        );
+        assert_eq!(
+            body["code"], "INVALID_CREDENTIALS",
+            "第 {round} 次（账号不存在）必须是 INVALID_CREDENTIALS，body = {body}"
+        );
+        missing.push((
+            status.as_u16(),
+            body["code"].as_str().unwrap_or("").to_string(),
+        ));
+    }
+
+    // 两条序列**完全一致** → 攻击者无法区分账号是否存在。
+    assert_eq!(
+        existing, missing,
+        "账号存在与不存在的响应序列必须完全一致（否则就是枚举面）"
+    );
+}
+
+/// 锁定期内用**正确密码**登录 → `ACCOUNT_LOCKED`。
+///
+/// 这是 HIGH 1 修复的另一半：把锁定判定挪到密码校验之后，**不能**把
+/// 「被锁的用户知道自己被锁」这条能力一起弄坏 —— 拿到 `ACCOUNT_LOCKED`
+/// 的人**已经证明知道密码**，所以它不是枚举信号。
+#[tokio::test]
+#[ignore = "需要 base_test 库：scripts/test-integration.sh 会用 --include-ignored 跑到"]
+async fn a_locked_account_with_the_right_password_is_told_it_is_locked() {
+    let db_url = setup().await;
+    let (_state, router) = build_stack(&db_url).await;
+    let tenant = tenant_id("locked-hint");
+    let ip = unique_ip();
+
+    register(&router, &tenant, "alice", PASSWORD, None).await;
+
+    // 连续失败 5 次（阈值）→ 锁定。
+    for attempt in 1..=5 {
+        let (status, body, _) =
+            login_timed_from_ip(&router, &tenant, "alice", "wrong-password-here", &ip).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "第 {attempt} 次失败：body = {body}"
+        );
+        assert_eq!(body["code"], "INVALID_CREDENTIALS", "body = {body}");
+    }
+
+    // 锁定期内用**正确密码** → 403 ACCOUNT_LOCKED。
+    let (status, body, _) = login_timed_from_ip(&router, &tenant, "alice", PASSWORD, &ip).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "body = {body}");
+    assert_eq!(body["code"], "ACCOUNT_LOCKED", "body = {body}");
+}
+
+/// 锁定期内的错密码**不续期**；锁定到期后失败计数**从头开始**。
+///
+/// 守的是 QA 报告 HIGH 2：如果锁定期内每来一次错密码就把 `locked_until`
+/// 重算成 `now + 15min`，攻击者**每 15 分钟一次错密码**就能让受害者
+/// **永远登不进去**（连正确密码都被拒）—— 未认证的账号锁死 DoS。
+#[tokio::test]
+#[ignore = "需要 base_test 库：scripts/test-integration.sh 会用 --include-ignored 跑到"]
+async fn a_lock_is_never_extended_and_the_failure_count_restarts_after_it_expires() {
+    let db_url = setup().await;
+    let (_state, router) = build_stack(&db_url).await;
+    let tenant = tenant_id("lock-extend");
+    let ip = unique_ip();
+
+    register(&router, &tenant, "alice", PASSWORD, None).await;
+
+    // 连续失败 5 次（阈值）→ 锁定。
+    for attempt in 1..=5 {
+        let (status, body, _) =
+            login_timed_from_ip(&router, &tenant, "alice", "wrong-password-here", &ip).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "第 {attempt} 次失败：body = {body}"
+        );
+    }
+    let (attempts, locked_until) = lock_state(&tenant, "alice").await;
+    assert_eq!(attempts, 5, "失败计数应当是 5");
+    let locked_until = locked_until.expect("达到阈值后应当被锁定");
+
+    // 锁定期内再错一次密码 → 锁定**不前移**、失败计数**不增**。
+    let (status, body, _) =
+        login_timed_from_ip(&router, &tenant, "alice", "wrong-password-here", &ip).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "body = {body}");
+    assert_eq!(body["code"], "INVALID_CREDENTIALS", "body = {body}");
+    let (attempts_locked, locked_until_locked) = lock_state(&tenant, "alice").await;
+    assert_eq!(
+        attempts_locked, attempts,
+        "锁定期内的失败计数不得增加（否则锁会被无限续期）"
+    );
+    assert_eq!(
+        locked_until_locked,
+        Some(locked_until),
+        "锁定期内不得续期（否则受害者永远登不进去）"
+    );
+
+    // 模拟「锁定已到期」（管理员把 locked_until 挪到过去）。
+    expire_lock(&tenant, "alice").await;
+
+    // 到期后的第一次错密码 → 失败计数**从头开始**（= 1），且不再处于锁定期。
+    let (status, body, _) =
+        login_timed_from_ip(&router, &tenant, "alice", "wrong-password-here", &ip).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "body = {body}");
+    assert_eq!(body["code"], "INVALID_CREDENTIALS", "body = {body}");
+    let (attempts_restart, locked_until_restart) = lock_state(&tenant, "alice").await;
+    assert_eq!(
+        attempts_restart, 1,
+        "锁定到期后失败计数必须从头开始（不接着旧的累计）"
+    );
+    assert_eq!(locked_until_restart, None, "锁定到期后不应继续处于锁定期");
+}
+
+/// 账号被锁 + **正确密码** → `ACCOUNT_LOCKED`；但**错误密码**仍然是
+/// `INVALID_CREDENTIALS`（攻击者拿不到锁定信号）。
+///
+/// 三条失败路径的**耗时**也必须接近 —— 锁定路径同样要跑 Argon2
+/// （QA 报告 MEDIUM 3：修复前锁定路径 8.1ms vs 普通失败 606.9ms，差 75 倍）。
+#[tokio::test]
+#[ignore = "需要 base_test 库：scripts/test-integration.sh 会用 --include-ignored 跑到"]
+async fn the_three_failure_paths_have_similar_latency() {
+    let db_url = setup().await;
+    let (_state, router) = build_stack(&db_url).await;
+    let tenant = tenant_id("latency");
+    let ip = unique_ip();
+
+    register(&router, &tenant, "alice", PASSWORD, None).await;
+
+    // 路径一：错密码（账号未锁）。
+    let mut unlocked_times: Vec<Duration> = Vec::new();
+    for _ in 0..3 {
+        let (status, body, elapsed) =
+            login_timed_from_ip(&router, &tenant, "alice", "wrong-password-here", &ip).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "body = {body}");
+        unlocked_times.push(elapsed);
+    }
+
+    // 触发锁定（继续错密码）。
+    for _ in 0..5 {
+        let _ = login_timed_from_ip(&router, &tenant, "alice", "wrong-password-here", &ip).await;
+    }
+
+    // 路径二：错密码（账号已锁）→ 仍然是 `INVALID_CREDENTIALS`。
+    let mut locked_times: Vec<Duration> = Vec::new();
+    for _ in 0..3 {
+        let (status, body, elapsed) =
+            login_timed_from_ip(&router, &tenant, "alice", "wrong-password-here", &ip).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "锁定期内的错密码必须是 INVALID_CREDENTIALS，body = {body}"
+        );
+        assert_eq!(body["code"], "INVALID_CREDENTIALS", "body = {body}");
+        locked_times.push(elapsed);
+    }
+
+    // 路径三：账号不存在。
+    let mut missing_times: Vec<Duration> = Vec::new();
+    for _ in 0..3 {
+        let (status, body, elapsed) =
+            login_timed_from_ip(&router, &tenant, "nobody-here", "wrong-password-here", &ip).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "body = {body}");
+        missing_times.push(elapsed);
+    }
+
+    let unlocked = true_median(&mut unlocked_times);
+    let locked = true_median(&mut locked_times);
+    let missing = true_median(&mut missing_times);
+    let ratio = worst_ratio(&[unlocked, locked, missing]);
+    assert!(
+        ratio < 1.5,
+        "三条失败路径的耗时必须接近（ratio = {ratio:.2}，\
+         错密码(未锁) = {unlocked:?}，错密码(已锁) = {locked:?}，账号不存在 = {missing:?}）"
+    );
+    println!(
+        "三条失败路径耗时：错密码(未锁) = {unlocked:?}；错密码(已锁) = {locked:?}；\
+         账号不存在 = {missing:?}；最差比值 = {ratio:.2}"
     );
 }
 
@@ -682,10 +988,38 @@ async fn totp_codes_cannot_be_replayed_and_recovery_codes_are_single_use() {
     assert_eq!(body_second["code"], "MFA_INVALID", "body = {body_second}");
 }
 
-/// 中位数（耗时的稳健统计量）。
-fn median(values: &mut [Duration]) -> Duration {
+/// **真中位数**（耗时的稳健统计量）。
+///
+/// ⚠️ **不能**用 `values[values.len() / 2]`：偶数长度时它取的是**上中位数**。
+///    在双峰分布上（例如「锁定样本 3ms / 未锁定样本 230ms」）它会**恰好落在**
+///    其中一簇，把另一簇整个丢掉 —— 护栏就成了摆设（QA 报告 MEDIUM 4：
+///    8 个样本 `[3,3,3,6,227,232,235,252]` 取到下标 4 = 227ms，
+///    4 个 3~6ms 的锁定样本全被丢掉，比值算出来是 1.08，用例仍然报「通过」）。
+///
+/// 偶数长度取**中间两个的平均值** → 两簇都会被如实反映。
+fn true_median(values: &mut [Duration]) -> Duration {
+    assert!(!values.is_empty(), "中位数至少要一个样本");
     values.sort_unstable();
-    values[values.len() / 2]
+    let middle = values.len() / 2;
+    if values.len() % 2 == 1 {
+        values[middle]
+    } else {
+        (values[middle - 1] + values[middle]) / 2
+    }
+}
+
+/// 一组耗时里**最差**的一对比值（最大值 / 最小值）。
+fn worst_ratio(values: &[Duration]) -> f64 {
+    let fastest = values
+        .iter()
+        .map(|value| value.as_secs_f64())
+        .fold(f64::MAX, f64::min)
+        .max(0.000_001);
+    let slowest = values
+        .iter()
+        .map(|value| value.as_secs_f64())
+        .fold(0.0, f64::max);
+    slowest / fastest
 }
 
 /// 用当前的 secret 算出当前时间步的验证码。
@@ -817,6 +1151,71 @@ async fn refresh_fails(router: &axum::Router, tenant: &str, refresh_token: &str)
         .expect("请求应当能发出");
     let (status, _) = read_json(response).await;
     status == StatusCode::UNAUTHORIZED
+}
+
+/// 刷新是否**仍然可用**（返回新令牌对）。
+async fn refresh_succeeds(router: &axum::Router, tenant: &str, refresh_token: &str) -> bool {
+    let response = router
+        .clone()
+        .oneshot(request_with_tenant(
+            "POST",
+            "/api/iam/refresh",
+            tenant,
+            serde_json::json!({ "refreshToken": refresh_token }),
+        ))
+        .await
+        .expect("请求应当能发出");
+    let (status, _) = read_json(response).await;
+    status == StatusCode::OK
+}
+
+/// 管理员连接（**超级用户**）。
+///
+/// 应用角色受 RLS 约束，读不到「自己的租户之外的行」；这里要用管理员身份
+/// 直接查 / 改锁定状态（用例要能模拟「锁定已到期」）。
+async fn admin_pool() -> sqlx::PgPool {
+    let url = required_test_database_url();
+    PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .expect("管理员连接应当能建立")
+}
+
+/// 读账号的锁定状态（失败计数 + 锁定到期时间）。
+async fn lock_state(tenant: &str, username: &str) -> (i32, Option<OffsetDateTime>) {
+    let pool = admin_pool().await;
+    let row = sqlx::query(
+        "SELECT failed_attempts, locked_until FROM platform_iam_user \
+         WHERE tenant_id = $1 AND username = $2",
+    )
+    .bind(tenant)
+    .bind(username)
+    .fetch_one(&pool)
+    .await
+    .expect("账号行应当存在");
+    let attempts: i32 = row
+        .try_get("failed_attempts")
+        .expect("failed_attempts 应当可读");
+    let locked_until: Option<OffsetDateTime> =
+        row.try_get("locked_until").expect("locked_until 应当可读");
+    pool.close().await;
+    (attempts, locked_until)
+}
+
+/// 把锁定挪到过去（模拟「锁定已到期」）。
+async fn expire_lock(tenant: &str, username: &str) {
+    let pool = admin_pool().await;
+    sqlx::query(
+        "UPDATE platform_iam_user SET locked_until = now() - interval '1 minute' \
+         WHERE tenant_id = $1 AND username = $2",
+    )
+    .bind(tenant)
+    .bind(username)
+    .execute(&pool)
+    .await
+    .expect("应当能改锁定到期时间");
+    pool.close().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1055,19 +1454,23 @@ async fn every_error_path_returns_an_english_ascii_detail() {
 // ---------------------------------------------------------------------------
 
 /// 连续失败达阈值 → 锁定 → 锁定期内即使密码正确也拒。
+///
+/// ⚠️ 第 6 次（**错密码**）必须**仍然**是 `INVALID_CREDENTIALS`：
+///    否则「账号被锁定」就成了账号枚举的预言机（QA 报告 HIGH 1）。
 #[tokio::test]
 #[ignore = "需要 base_test 库：scripts/test-integration.sh 会用 --include-ignored 跑到"]
 async fn repeated_failures_lock_the_account() {
     let db_url = setup().await;
     let (_state, router) = build_stack(&db_url).await;
     let tenant = tenant_id("lockout");
+    let ip = unique_ip();
 
     register(&router, &tenant, "alice", PASSWORD, None).await;
 
-    // 连续失败 5 次（阈值）。
-    for attempt in 1..=5 {
+    // 连续失败 6 次（阈值是 5）—— **每一次**都必须是 `INVALID_CREDENTIALS`。
+    for attempt in 1..=6 {
         let (status, body, _) =
-            login_timed(&router, &tenant, "alice", "wrong-password-here", None).await;
+            login_timed_from_ip(&router, &tenant, "alice", "wrong-password-here", &ip).await;
         assert_eq!(
             status,
             StatusCode::UNAUTHORIZED,
@@ -1076,10 +1479,85 @@ async fn repeated_failures_lock_the_account() {
         assert_eq!(body["code"], "INVALID_CREDENTIALS", "body = {body}");
     }
 
-    // 锁定期内即使密码正确也拒。
-    let (status, body, _) = login_timed(&router, &tenant, "alice", PASSWORD, None).await;
+    // 锁定期内即使密码正确也拒 —— 但**只有知道密码的人**才拿得到这个信号。
+    let (status, body, _) = login_timed_from_ip(&router, &tenant, "alice", PASSWORD, &ip).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "body = {body}");
     assert_eq!(body["code"], "ACCOUNT_LOCKED", "body = {body}");
+}
+
+// ---------------------------------------------------------------------------
+// 9b. IP 限流：跨租户共享预算 + 只算失败尝试（AC-S-017）
+// ---------------------------------------------------------------------------
+
+/// IP 限流：**跨租户共享**同一个 IP 的预算，且**只算失败**。
+///
+/// - 跨租户：同一个 IP 换租户不应该拿到一份新的额度 —— 否则限流预算被放大成
+///   「租户数倍」（QA 报告 LOW 6）。
+/// - 只算失败：成功登录**不进入**窗口 —— 否则共用一个 NAT 出口的办公网
+///   在 5 分钟内 20 次正常登录就会被 429 误伤（QA 报告 LOW 6）。
+#[tokio::test]
+#[ignore = "需要 base_test 库：scripts/test-integration.sh 会用 --include-ignored 跑到"]
+async fn the_ip_rate_limit_is_shared_across_tenants_and_only_counts_failures() {
+    let db_url = setup().await;
+    let (_state, router) = build_stack(&db_url).await;
+    let tenant_a = tenant_id("rate-a");
+    let tenant_b = tenant_id("rate-b");
+    let ip = unique_ip();
+
+    register(&router, &tenant_a, "alice", PASSWORD, None).await;
+    register(&router, &tenant_b, "alice", PASSWORD, None).await;
+
+    // 租户 A：这个 IP 连打 20 次错密码（阈值 20）→ 前 20 次放行。
+    for attempt in 1..=20 {
+        let (status, body, _) =
+            login_timed_from_ip(&router, &tenant_a, "alice", "wrong-password-here", &ip).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "第 {attempt} 次应当放行（未达阈值），body = {body}"
+        );
+    }
+
+    // 第 21 次 → 429。
+    let (status, body, _) =
+        login_timed_from_ip(&router, &tenant_a, "alice", "wrong-password-here", &ip).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "body = {body}");
+    assert_eq!(body["code"], "LOGIN_RATE_LIMITED", "body = {body}");
+
+    // **换租户**：同一个 IP 同样受限（限流预算跨租户共享）。
+    let (status, body, _) =
+        login_timed_from_ip(&router, &tenant_b, "alice", "wrong-password-here", &ip).await;
+    assert_eq!(
+        status,
+        StatusCode::TOO_MANY_REQUESTS,
+        "同一个 IP 换租户也必须受限，body = {body}"
+    );
+    assert_eq!(body["code"], "LOGIN_RATE_LIMITED", "body = {body}");
+
+    // 成功登录**不进入**失败窗口：另一个 IP 连打 20 次**成功**登录之后，
+    // 仍然还能再失败一次（不会被 429）。
+    let ip_success = unique_ip();
+    let tenant_c = tenant_id("rate-c");
+    register(&router, &tenant_c, "alice", PASSWORD, None).await;
+    for _ in 0..20 {
+        let (status, body, _) =
+            login_timed_from_ip(&router, &tenant_c, "alice", PASSWORD, &ip_success).await;
+        assert_eq!(status, StatusCode::OK, "成功登录必须成功，body = {body}");
+    }
+    let (status, body, _) = login_timed_from_ip(
+        &router,
+        &tenant_c,
+        "alice",
+        "wrong-password-here",
+        &ip_success,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "成功登录不得计入失败窗口，body = {body}"
+    );
+    assert_eq!(body["code"], "INVALID_CREDENTIALS", "body = {body}");
 }
 
 // ---------------------------------------------------------------------------
@@ -1087,7 +1565,7 @@ async fn repeated_failures_lock_the_account() {
 // ---------------------------------------------------------------------------
 
 /// 改密：新密码要满足策略；与历史重复要报 `PASSWORD_REUSED`；
-/// 改密成功后**其它设备**的 refresh family 立即作废。
+/// 改密成功后**其它设备**的 refresh family 立即作废，而**当前设备**的仍然可用。
 #[tokio::test]
 #[ignore = "需要 base_test 库：scripts/test-integration.sh 会用 --include-ignored 跑到"]
 async fn changing_the_password_revokes_the_other_families_and_rejects_history() {
@@ -1100,6 +1578,7 @@ async fn changing_the_password_revokes_the_other_families_and_rejects_history() 
     let device_a = login(&router, &tenant, "alice", PASSWORD).await;
     let device_b = login(&router, &tenant, "alice", PASSWORD).await;
     let access_a = device_a["accessToken"].as_str().unwrap().to_string();
+    let refresh_a = device_a["refreshToken"].as_str().unwrap().to_string();
     let refresh_b = device_b["refreshToken"].as_str().unwrap().to_string();
 
     // 不满足策略的新密码 → 被拒，并指出**具体违反哪条规则**。
@@ -1167,6 +1646,14 @@ async fn changing_the_password_revokes_the_other_families_and_rejects_history() 
     assert!(
         refresh_fails(&router, &tenant, &refresh_b).await,
         "改密后，其它设备的 refresh 必须立即失效"
+    );
+
+    // ⚠️ **当前设备**的 refresh 必须**仍然可用**（design-summary §7：
+    //    「改密后踢出其他设备」= 踢掉**除当前以外**的 family）。
+    //    否则用户在自己设备上改完密就得重新登录。
+    assert!(
+        refresh_succeeds(&router, &tenant, &refresh_a).await,
+        "改密后，当前设备自己的 refresh 必须继续可用"
     );
 
     // 与历史密码重复 → `PASSWORD_REUSED`。
