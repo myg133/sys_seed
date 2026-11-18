@@ -1,123 +1,80 @@
-# REQ-007 追溯性矩阵
+# REQ-008 追溯性矩阵
 
-- **需求**: REQ-007 认证与账号体系
-- **分支**: `feature/REQ-007`
-- **基线**: `develop` @ `91d8e09`（REQ-002 工程基线 + REQ-003 扩展点框架 + REQ-004 AI 引导体系 + REQ-005 交付基线 + REQ-006 多租户与隔离已合并）
-- **设计依据**: `BA/demands/REQ-007-auth-account/design-summary.md`（D1–D11 已定死，本轮照它做）
-- **契约**: api-conventions v1（尤其 C3 / C6 / C8 / C13）、extension-points v1
+- **需求**: REQ-008 用户与组织架构
+- **分支**: `feature/REQ-008`
+- **基线**: `develop` @ `a0a8d7a`（REQ-002 ~ REQ-007 已合并）
+- **设计依据**: `BA/demands/REQ-008-user-org/design-summary.md`（D1–D12 照做）
+- **契约**: api-conventions v1（C1 路径前缀 / C3 租户上下文 / C5 越权 404 / C6 错误体 / C13 命名与时间）、extension-points v1（`NotificationSender` / `Auditable`）
 - **开发者**: myg133-dev-1
 - **更新时间**: 2026-11-18
-- **本轮改动**: 第一轮 **29 文件 / +7806 -191 行**（提交 `c66605f` 实现 + `6ad3f95` 文档）；
-  **修复轮 10 文件**（3 个源文件 + 1 个测试文件 + 2 个新迁移 + 1 个文档 + 3 个报告）—— 见 §0.1 所在的验证报告
 
-图例：**PASS** = 已实现且有自动化或可复现的验证证据；**未验证** = 没有证据，如实标注；
-**部分** = 本期只做了一部分（范围外的部分写清楚）。
+图例：**PASS** = 已实现且有自动化验证证据；**未验证** = 没有证据（如实标注）；**部分** = 本期只做了一部分。
 
 ---
 
-## 1. 自有 AC（AC-S-009 ~ AC-S-020）
+## 0. 交付形态：为什么是**平台 crate**而不是业务模块
+
+| 候选 | 结论 |
+|------|------|
+| `modules/org`（业务模块） | ❌ 业务模块**不得**依赖平台内部模块（`extension-points v1` §1「D7 硬约束」），而离职禁用**必须**撤销 IAM 会话 → 越界；且 `check-deps` 禁止 `platform-server`（平台 crate）依赖业务模块 → **`/api/org/*` 无法挂载** |
+| **`crates/platform-org`（平台 crate）** | ✅ 与 `platform-iam` 同级同构：`platform-core ← platform-db ← platform-iam ← platform-org ← platform-server`；租户作用域表的 policy 仍由平台按 manifest 的 `tenantScoped` 段**统一生成**（模块不手写） |
+
+> 因此 `crates/platform-org/manifest.json` 是**平台 crate 的租户作用域声明**；
+> `platform-db::collect_scopes` 扩展为扫 `modules/` **与** `crates/` 两处。
+
+---
+
+## 1. 自有 AC（AC-S-011 ~ AC-S-019）
 
 | AC | 内容 | 实现位置 | 验证方式与证据 | 结论 |
 |----|------|----------|----------------|------|
-| AC-S-009 | 密码策略可配置：不满足时拒绝并指出**具体违反哪条规则**（`PASSWORD_POLICY_VIOLATION` + `params`）；与最近 5 次重复被拒（`PASSWORD_REUSED`） | `crates/platform-iam/src/config.rs`（`PasswordPolicySettings` + `check_password_policy`）、`crates/platform-iam/src/password.rs`（`is_common_password` 本地词库）、`crates/platform-iam/src/service.rs`（`apply_new_password` 查历史）、`crates/platform-iam/src/error.rs`（`PolicyViolation`） | ① 单测：`config.rs::common_passwords_are_rejected_by_the_policy`（命中 `common_password` 规则）、`password_policy_violations_name_the_rule`（`params.violations[].rule`）；② **真实库层**（`crates/platform-iam/tests/iam_real_db.rs::changing_the_password_revokes_the_other_families_and_rejects_history`）：弱密码 → **422** + `code=PASSWORD_POLICY_VIOLATION` + `params.violations[0].rule == "min_length"`；改回历史密码 → **422** + `code=PASSWORD_REUSED`；③ 参数可配：`config.rs::parameters_are_configurable`（`BASE_IAM_PASSWORD_MIN_LENGTH` 等） | **PASS** |
-| AC-S-010 | 密钥轮换不中断：轮换后新令牌用 K2 签发可验签；宽限期内旧令牌（K1）仍可用；JWKS 同时暴露两个公钥；**私钥绝不出现在 JWKS** | `crates/platform-iam/src/jwt.rs`（`JwtKeySet`：当前 + 上一把、`entry_by_kid`）、`crates/platform-iam/src/config.rs`（`BASE_JWT_PREVIOUS_*`）、`crates/platform-iam/src/http.rs`（`jwks` 端点） | ① 单测 `jwt.rs::rotation_keeps_the_previous_key_valid_and_publishes_both_kids`：旧密钥签发的令牌在宽限期内仍能验签 + JWKS 有 **2 个 kid**；② 单测 `jwt.rs::the_jwks_never_contains_private_key_material`：**逐个 key 成员检查**，不得出现 `d`/`p`/`q`/`dp`/`dq`/`qi`/`k`（EC 私钥的 `d`、RSA 私钥成员）；③ 真实库层 `the_jwks_endpoint_only_exposes_public_keys`：HTTP 端点返回体里无 `PRIVATE`、无私钥成员；④ 私钥**只从环境注入**：`config.rs::placeholder_keys_are_rejected`（`changeme` / `replace_me` / `example` 等占位符 → 启动 fail-fast） | **PASS** |
-| AC-S-011 | 密码哈希不可逆且参数可配：存储值不含明文、是 `$argon2id$...` 的 PHC 串（算法自描述）、参数可按目标机器配置 | `crates/platform-iam/src/password.rs`（`hash_password` / `verify_password`）、`crates/platform-iam/src/config.rs`（`Argon2Settings`）、`migrations/20261118000400_iam_auth.up.sql`（`password_hash` 列） | ① 单测 `password.rs::the_stored_value_is_a_phc_string_and_hides_the_plaintext`：以 `$argon2id$` 开头、含 `m=64,t=1,p=1`、**不含明文**；② 单测 `a_hash_made_with_other_parameters_still_verifies`：换参数哈希同一密码仍能验签（**算法自描述** → 换参数不必改表结构）；③ 真实库层：`platform_iam_user.password_hash` 存 PHC 串（表结构见迁移文件）；④ 参数可配：`config.rs::a_complete_environment_produces_the_default_policy`（默认 19456 KiB / t=2 / p=1 = OWASP 下限） | **PASS** |
-| AC-S-012 | 登录失败不泄露账号是否存在：两种情况**响应体与错误码完全相同**（`INVALID_CREDENTIALS`）；耗时**接近** | `crates/platform-iam/src/service.rs`（`login`：**先校验密码 → 再判锁定**；账号不存在走 `DummyHash::verify` + **同样的数据库工作量**）、`crates/platform-iam/src/password.rs`（`DummyHash`：与真密码**同参数**的假哈希） | ① 真实库层 `login_failure_does_not_reveal_whether_the_account_exists`：**逐轮**断言状态码 + **真中位数**；两种情况 **401** + `code=INVALID_CREDENTIALS` + `detail`/`type`/`title`/`status` **逐字段相同**；② **连发 6 次错密码**（越过锁定阈值）仍**逐次**是 `401 INVALID_CREDENTIALS`，且与「账号不存在」的 6 次**逐次完全一致**（`six_wrong_passwords_never_reveal_that_the_account_exists`）；③ **真机实测**（`base serve` + 生产 Argon2 参数）：存在 / 不存在各 6 次 → **全部 401 INVALID_CREDENTIALS**，两条序列**完全相等**；④ **三路径耗时**：错密码(未锁) **563.1ms** / 错密码(已锁) **569.0ms** / 账号不存在 **543.2ms** → 最差比值 **1.048**（`the_three_failure_paths_have_similar_latency`）；⑤ **变异验证**：把锁定判定挪回密码校验前 → 3 条用例**变红** | **PASS**（修复轮重写；第一轮用例**结构上看不见**枚举面，QA MEDIUM 4） |
-| AC-S-013 | 密码重置不泄露邮箱是否存在：已注册与未注册邮箱**响应完全相同** | `crates/platform-iam/src/service.rs`（`forgot_password` 返回 `Option`；未注册时**什么都不做**）、`crates/platform-iam/src/http.rs`（`forgot_password` 处理器：**两种情况都返回同一个 `{"status":"accepted"}`**，令牌走邮件通道不进响应体） | 真实库层 `password_forgot_does_not_reveal_whether_the_email_is_registered`：两个响应体 **JSON 逐字段相等**（`assert_eq!(body_registered, body_unregistered)`），状态码相同 | **PASS** |
-| AC-S-014 | refresh token 轮换与重放检测：旧 refresh **立即失效**；重放 → **整个 family 作废**（`TOKEN_REUSE_DETECTED`）；refresh_2 也已失效 | `crates/platform-iam/src/service.rs`（`refresh`：轮换与作废在**同一个事务**里）、`crates/platform-iam/src/store.rs`（`find_refresh_by_hash_for_update_in` 带 `FOR UPDATE` 行锁、`mark_refresh_used_in`、`revoke_family_in`） | 真实库层 `refresh_rotation_revokes_the_whole_family_on_reuse`：① refresh_1 → refresh_2（**新令牌 ≠ 旧令牌**）；② **再次**用 refresh_1 → **401** + `code=TOKEN_REUSE_DETECTED`；③ refresh_2 → **401** + `code=TOKEN_REVOKED`（**family 确实被作废**）。⚠️ 实现细节：family 作废必须**提交**事务（回滚 = 「检测到泄露却什么都没作废」）—— 该缺陷在开发期被本用例抓到并已修 | **PASS** |
-| AC-S-015 | TOTP 防重放与恢复码一次性：同一时间步的验证码**不能用第二次**；恢复码**只能用一次** | `crates/platform-iam/src/totp.rs`（`verify_code` 返回命中时间步并与 `last_used_step` 比对）、`crates/platform-iam/src/store.rs`（`set_mfa_last_step`、`mark_recovery_code_used`）、`crates/platform-iam/src/service.rs`（`verify_mfa_code`） | 真实库层 `totp_codes_cannot_be_replayed_and_recovery_codes_are_single_use`：① 绑定后**同一个验证码再用一次** → **401** + `code=MFA_INVALID`；② 恢复码第一次可用（**204**）、第二次 → **401** + `code=MFA_INVALID`；③ 单测 `totp.rs::the_same_code_cannot_be_used_twice`（纯函数层同样守住） | **PASS** |
-| AC-S-016 | 会话带租户维度且不可跨租户复用：跨租户访问被拒（404/403）；**所有会话记录都带 tenant_id** | `crates/platform-iam/src/store.rs`（全部 9 张表都带 `tenant_id`，查询一律 `WHERE tenant_id = {tenant}`）、`crates/platform-iam/src/http.rs`（`Authenticated` 提取器：令牌租户 ≠ 请求头租户 → **404**）、`crates/platform-iam/src/jwt.rs`（`tid` 声明）、`migrations/20261118000400_iam_auth.up.sql`（每张表 RLS + `WITH CHECK`） | 真实库层 `tokens_cannot_cross_tenants_and_sessions_record_the_tenant`：① A 租户的令牌 + B 租户头 → **404**（不泄露资源存在性）；② A 的 refresh token 到 B 租户刷新 → **401**；③ **直查库**：每条 `platform_iam_session` 记录的 `tenant_id` 都非空（断言全部以 `iam-test-` 开头） | **PASS** |
-| AC-S-017 | 登录限流与账号锁定：达阈值后锁定并返回 `ACCOUNT_LOCKED`；锁定期内即使密码正确也拒；成功登录后计数清零 | `crates/platform-iam/src/service.rs`（`check_ip_rate_limit`：**按 IP 全局（跨租户）+ 只算失败**；`next_lock_state`：**锁定期内不续期、计数不增**，到期后**从头开始**；`reset_login_failures`）、`crates/platform-iam/src/store.rs`（`count_login_failures_since` / `record_login_rate_in`）、`migrations/20261118000500_iam_login_rate.up.sql`（全局失败计数表）、`crates/platform-iam/src/config.rs`（`LoginSettings`） | ① 真实库层 `repeated_failures_lock_the_account`：连续 **6** 次失败**逐次**是 `401 INVALID_CREDENTIALS`（**第 6 次也不能变成 403** —— 否则就是枚举面）；锁定期内用**正确密码** → **403** + `code=ACCOUNT_LOCKED`；② `a_lock_is_never_extended_and_the_failure_count_restarts_after_it_expires`：直查库断言锁定期内 `locked_until` **不前移**、`failed_attempts` **不增**；到期后第一次错密码 → 计数**从头开始**（= 1）、锁定解除；③ `the_ip_rate_limit_is_shared_across_tenants_and_only_counts_failures`：第 21 次 → **429 `LOGIN_RATE_LIMITED`**；**换租户同 IP 同样 429**（预算跨租户共享）；20 次**成功**登录**不计入**失败窗口；④ 真机实测同上 | **PASS**（修复轮重写：QA HIGH 1 / HIGH 2 / LOW 6 全部修掉；「成功登录后计数清零」仍**未写**用例，QA 已独立实测为真） |
-| AC-S-018 | 设备会话可管理：列表展示设备 / IP / 最近活跃；从 A 下线 B 后 **B 的 refresh token 立即失效**；「登出全端」作废该用户全部 family | `crates/platform-iam/src/service.rs`（`list_sessions` / `revoke_session` / `logout_all`）、`crates/platform-iam/src/store.rs`（`revoke_family` / `revoke_all_sessions` / `revoke_all_refresh_tokens` / `revoke_other_refresh_tokens`） | 真实库层 `sessions_can_be_revoked_and_logout_all_revokes_every_family`：① 列表 **2 条**，每条都有 `deviceLabel` / `ip` / `lastUsedAt`；② 逐个踢下线直到 **B 的 refresh 失效**（**立即**失效）；③ 登出全端 → **A 的 refresh 也失效**（全部 family 作废）；④ `changing_the_password_revokes_the_other_families_and_rejects_history`：**改密后其它设备 refresh → 401 `TOKEN_REVOKED`，当前设备 refresh → 200**（design-summary §7：只踢**其它**设备） | **PASS**（修复轮修正 LOW 5：改密不再作废当前设备的 family） |
-| AC-S-019 | 错误体符合契约 C6：`detail` **必须是英文 ASCII**；中文文案由前端 i18n 按 `code` 渲染 | `crates/platform-iam/src/error.rs`（每个错误的 `detail()` / `code()` / `status()`）、`crates/platform-iam/src/http.rs`（`ProblemDetails`：RFC 9457 形状 + `params`） | ① 单测 `error.rs::every_detail_is_english_ascii`（**全部 17 个错误路径**逐个断言 ASCII）；② 单测 `every_error_code_is_upper_snake_case`；③ 真实库层 `every_error_path_returns_an_english_ascii_detail`：**逐个 HTTP 错误路径**实测并打印 `detail`（`INVALID_CREDENTIALS` → `invalid username or password`；`PASSWORD_POLICY_VIOLATION` → `the password does not satisfy the password policy: min_length`；`UNAUTHENTICATED` → `authentication is required`；`TENANT_CONTEXT_MISSING` → `the tenant context is missing`）；④ `detail` 与设计摘要 §5.1 **逐字一致**（单测 `invalid_credentials_detail_matches_the_design_summary`） | **PASS** |
-| AC-S-020 | 依赖预算与编译资源在可控范围：依赖树增长在预算内；**冷编译峰值内存 < 1.5G**；日常增量 `cargo check` < 60 秒 | 根 `Cargo.toml`（依赖声明与注释）、`crates/platform-iam/Cargo.toml` | 见验证报告 §3.1：**第三方 crate 232**（QA 同口径实测 232；第一轮的 240 是总数口径）—— **超出 AC-S-020 的 200~210**；**修复轮未改任何依赖**（`git diff -- '*Cargo.toml' '*Cargo.lock'` 为空 → 232 → **232**）；**冷编译实测**见验证报告 §3.2；`.cargo/config.toml` 的 `jobs` **保持 3**（峰值 < 1.5G 时不下调）。**QA 判定**：资源侧全部达标（冷 check 46.7s/1074MB、冷 test+link 63.1s/1414MB < 1.5G、增量 check 0.98s）且**无可行的更省替代** → **不改代码**，由 BA 把预算**重定基线到 235** 并登记偏差 | **部分**（依赖树超预估，见 §5；BA 记账中） |
+| AC-S-011 | 组织树操作：移动后子树查询**立即**反映新结构；`path_labels` 与 `parent_id` **保持一致**（不一致以 `parent_id` 为准并可重建）；**成员关系不被移动破坏** | `crates/platform-org/src/store.rs`（`subtree_in`：**PostgreSQL 递归 CTE**，租户条件抽成 CTE `t` 以满足「`{tenant}` 只出现一次」）、`crates/platform-org/src/service.rs`（`move_node`：**一个事务**内改父节点 + 逐个重算子孙 `path_labels`；`verify_path_labels` / `rebuild_path_labels`）、`crates/platform-org/src/tree.rs`（`expected_path` / `inconsistent_nodes` / `rebuild_path`） | ① 真实库层 `moving_a_node_updates_the_subtree_immediately_and_keeps_memberships`：建 company→dept→team → 移动 dept → **子树查询立即**反映新结构（`parent_id` 已变）；`verify_path_labels` **返回空**；成员关系**仍在**（`org_node_id` 不变）；② 真实库层 `path_labels_are_detected_and_rebuilt_from_the_authoritative_parent_id`：人为写坏 `path_labels` → 校验**报出该节点** → `rebuild_path_labels` 修正 **1** 条 → 再校验**空**；③ 单测 `tree.rs::moving_a_node_changes_the_expected_path_of_its_descendants` / `inconsistent_nodes_reports_only_the_broken_ones` / `a_cycle_does_not_hang_the_path_computation` | **PASS** |
+| AC-S-012 | 同步幂等：连续两次全量同步**不产生重复条目**（PUT 语义） | `crates/platform-org/src/scim.rs`（`ScimProviderConfig::user_payload` / `group_payload`；`HttpScimGateway::put_user` / `put_group` → **PUT**）、`crates/platform-org/src/service.rs`（`full_scim_sync`：**入队**即返回）、`crates/platform-org/src/entity.rs`（`ExternalIdentity`：幂等键 `(provider, external_id)`） | ① 真实库层 `two_consecutive_full_syncs_do_not_duplicate_entries`：目标端是**真的 SCIM mock HTTP 服务**（`tests/common/mod.rs`）→ 第一次同步后 User/Group **条目数**记下 → 第二次全量同步 + 推送 → **条目数不变**；② 单测 `scim.rs::pushing_the_same_user_twice_does_not_duplicate_it`（内存网关，PUT 两次 → 1 条）；③ 单测 `tests/scim_outbound.rs::put_semantics_do_not_duplicate_entries`（**真的 HTTP**） | **PASS** |
+| AC-S-013 | SCIM 出站字段映射正确：按映射规则转换后的值送到目标端；**推送失败进重试且不阻塞本地请求** | `crates/platform-org/src/scim.rs`（`ScimUserFields` / `ScimGroupFields`：**字段名外置可配**；`user_payload` 按配置拼键名；`ScimOutbox`：入队即返回 + 指数退避重试 `MAX_PUSH_ATTEMPTS=3`）、`crates/platform-org/src/config.rs`（`BASE_ORG_SCIM_MAPPING`） | ① `tests/scim_outbound.rs::the_field_mapping_is_applied_to_the_payload`：映射成 `login` / `workEmail` / `cn` → mock 服务收到的请求体**逐字段断言**（且**不含**默认字段名）；② `tests/scim_outbound.rs::a_slow_target_does_not_block_the_local_request`：mock 延迟 **800ms** → **入队耗时 < 100ms**，推送本身 ≥ 700ms（**本地不等第三方**）；③ `tests/scim_outbound.rs::a_failed_push_is_retried`：失败 → 留在队列 → 退避到期 → 重试成功；④ 单测 `scim.rs::a_push_is_not_retried_forever`（上限 3 次后丢弃） | **PASS** |
+| AC-S-014 | 冲突进人工队列且是**字段级**；裁决后按裁决生效；**不静默覆盖** | `crates/platform-org/src/sync.rs`（`ConflictStrategy`：**默认 `manual`**；`SyncField`：字段级粒度）、`crates/platform-org/src/service.rs`（`apply_remote_user`：`manual` → 记冲突**不改本地**；`local_wins` → 记冲突**状态 ignored**；`remote_wins` → 显式配置才覆盖；`resolve_conflict`：按裁决落值）、`crates/platform-org/src/store.rs`（`upsert_conflict`：同 `(source, external_id, field)` 只留一条） | ① 真实库层 `conflicts_are_recorded_per_field_and_applied_after_adjudication`：目录里邮箱不同 → 同步产出**恰好 1 个字段级冲突**（`field=email` / `local_value` / `remote_value` **逐字段断言**）→ **本地值未被覆盖**（manual 策略）→ 人工裁决 `take_remote` → **本地值生效** → 再同步**冲突数 = 0**；② 单测 `sync.rs::the_default_strategy_is_manual` / `an_unknown_strategy_is_rejected_instead_of_defaulting` | **PASS** |
+| AC-S-015 | 离职自动禁用并撤销会话：账号禁用；**旧 refresh token 立即失效**；角色与成员关系解绑；产生审计事件 | `crates/platform-org/src/service.rs`（`disable_departed_user`：**6 步**，第 2 步是撤销全部会话）、`crates/platform-iam/src/store.rs`（`disable_user` / `revoke_all_refresh_tokens` / `revoke_all_sessions` —— **复用 REQ-007 的 family 作废**）、`crates/platform-org/src/audit.rs`（`AUDIT_EVENTS` 声明 + `AuditRecorder` 接缝）、`crates/platform-org/src/notify.rs` | ① 真实库层 `departure_disables_the_account_and_revokes_every_session`：`status=disabled` + `departed_at` 非空；`refresh_tokens_revoked=1` / `sessions_revoked=1`；**直查库**：旧 refresh 记录 `revoked_at` **非空**（**立即失效**，不是等 access TTL）；会话**全部** `revoked_at` 非空；成员关系**已解绑**；审计事件 `org.user.departed` **已产生**；通知**已发出**；② 真实库层 `the_ad_disabled_bit_triggers_the_departure_flow`（AD 位 → 离职 → 账号禁用）；③ ⚠️ **角色解绑属 REQ-009**（角色表本期还不存在）—— 见 §4 | **PASS**（角色解绑部分属 REQ-009，见 §4） |
+| AC-S-016 | AD 离职位运算识别正确：按**位运算**判定，不是简单布尔比较 | `crates/platform-org/src/ldap.rs`（`AttrExpression::BitAnd` / `BitNot`；`LdapSourceConfig::map_entry` → `value_of`）、`crates/platform-org/src/entity.rs` | ① 单测 `ldap.rs::the_ad_disabled_flag_is_decided_by_bitwise_operations`：`512`→在职、`514`→离职、`546`→离职、`4098`→离职、`660`→**在职**（布尔比较会误判）、`402653184`→在职、`2`→离职；② 单测 `ldap.rs::bit_not_expresses_the_inverted_flag`（`bit_not` 语义 = 被掩码位**未**置上）；③ 真实库层 `the_ad_disabled_bit_triggers_the_departure_flow`（`userAccountControl=514` → 自动禁用） | **PASS** |
+| AC-S-017 | 组织变更事件通知受影响人；**节点删除前成员已被处理**（不留悬空成员） | `crates/platform-org/src/notify.rs`（`PlatformNotifier`：**只转发**平台的 `NotificationSender`；`OrgEvent` / `OrgEventKind`）、`crates/platform-org/src/service.rs`（`add_member` / `remove_member` / `move_node` / `rename_node` / `delete_node` → `notify`；`delete_node`：**有成员且未指定迁移目标 → 拒绝删除**）、`crates/platform-org/src/entity.rs` | ① 真实库层 `members_receive_a_notification_when_their_node_moves`：节点移动 → 通知**已发出**；② 真实库层 `deleting_a_node_with_members_requires_handling_them_first`：有成员的节点 → **422 `ORG_NODE_HAS_MEMBERS`**（节点没被删）；指定 `move_members_to` → 成员**迁到目标节点** → 节点才删得掉；③ 单测 `notify.rs::the_platform_sender_is_forwarded_through_the_adapter` / `an_org_event_carries_its_recipients_and_payload` | **PASS** |
+| AC-S-018 | 组织数据带租户维度：只返回本租户节点；**跨租户 id 访问被拒**；组织表按 `tenantScoped` 声明生成 policy | `crates/platform-org/src/store.rs`（全部语句带 `{tenant}`）、`crates/platform-org/manifest.json`（`tenantScoped.tables` = 6 张表）、`crates/platform-db/src/scopes.rs`（`collect_scopes`：**平台 crate 的 manifest 也参与收集**）、`crates/platform-db/src/rls.rs`（策略生成）、`migrations/20261118000700_org_schema.up.sql`（6 张表，跨表外键**带 tenant_id** → 结构上杜绝跨租户引用） | ① 真实库层 `organization_data_is_isolated_per_tenant`：两租户**同名**节点 → 各自只看到自己的；`find(tenant_b 的 id)` 在 tenant_a 下 → **`None`**；**绕过应用层**（不设 `app.tenant_id`）→ **0 行**（管理员连接能看到数据 → 对照组有效）；② 真实库层 `every_organization_table_has_a_tenant_policy`：**直查 `pg_class`** → 6 张表**全部** `relrowsecurity=true` 且**有 policy**；③ `cargo xtask tenant-policies --check` ✅「2 个模块声明的表都开了 RLS 且有策略」 | **PASS** |
+| AC-S-019 | 结构可供 REQ-009 消费：`org_node` / `user_org` / `user_position` / 汇报关系**足以支撑**数据范围判定；且 REQ-008 **不实现任何权限判定逻辑** | `crates/platform-org/src/entity.rs`（`OrgNode` / `UserOrg`（`is_primary`）/ `UserPosition`）、`crates/platform-org/src/service.rs`（`subtree` / `members_of_subtree`：**本部门及下级**判定所需；`set_manager` / `manager_of`：**我的下属**判定所需）、`crates/platform-iam/src/store.rs`（`manager_id` 列） | ① 真实库层 `moving_a_node_updates_the_subtree_immediately_and_keeps_memberships`：`members_of_subtree` **按新结构**返回成员（「本部门及下级」的结构齐备）；② `platform_org::service` **无任何**「能不能访问 / 有没有权限」的判定分支（判定在 REQ-009）；③ 单测 `entity.rs::positions_are_not_an_organization_node_type`（岗位不是节点） | **PASS** |
+
+---
 
 ## 2. 承接的父 AC（REQ-001）
 
 | 父 AC | 内容 | 实现位置 | 验证方式与证据 | 结论 |
 |-------|------|----------|----------------|------|
-| AC-003 | 注册策略可配置且**按租户隔离** | `crates/platform-iam/src/service.rs`（`register`）、`crates/platform-iam/src/store.rs`（`insert_user`：`UNIQUE (tenant_id, username)`）、`migrations/20261118000400_iam_auth.up.sql`（RLS） | ① 注册数据**按租户隔离**：用户名在租户内唯一（跨租户同名可共存）；② 密码策略**可配**（平台级，见 AC-S-009）。⚠️ **租户级**的注册开关与域名白名单属 REQ-010（需求文档「不在范围内」明列），本期**未做** | **部分**（租户级开关属 REQ-010） |
-| AC-004 | 邀请链接**一次性且可过期** | `crates/platform-iam/src/service.rs`（`reset_password`：一次性 + 过期判定）、`crates/platform-iam/src/store.rs`（`mark_password_reset_used` / `find_password_reset`） | 本期落地的是**密码重置令牌**（一次性 + 可过期，模式与邀请链接一致）。⚠️ **邀请链接本身**属 REQ-010 的注册策略（域名白名单、审批待定态），本期**未做** | **部分**（邀请链接属 REQ-010） |
-| AC-007 | 令牌轮换与撤销：旧 refresh 立即不可用；登出后令牌不可用；状态码 401 | `crates/platform-iam/src/service.rs`（`refresh` / `logout` / `logout_all`）、`crates/platform-iam/src/store.rs` | ① 轮换 → 旧令牌立即不可用（AC-S-014 用例）；② 登出 → 该会话的 family 作废（AC-S-018 用例）；③ 状态码 **401**（同上两处实测） | **PASS** |
-| AC-008 | 设备会话可见且可远程下线：列表展示两台设备；从 A 端下线 B → **B 端下一次请求被强制登出** | 同 AC-S-018 | 真实库层实测：列表 2 条；从 A 端下线 B → **B 的 refresh 立即失效**（401）。⚠️ 「B 端下一次请求被强制登出」对 **refresh** 路径已验；**access token** 走 15 分钟短 TTL（设计摘要 §2 与 R4 的取舍），本期**不做** access token 的即时撤销检查 | **部分**（access token 即时撤销属设计取舍，见 §4） |
+| AC-011 | SCIM 出站：把底座组织推给第三方 | `crates/platform-org/src/scim.rs`、`crates/platform-org/src/service.rs`（`full_scim_sync`） | 见 AC-S-012 / AC-S-013（**真的 HTTP**打到 mock SCIM 服务） | **PASS** |
+| AC-012 | 同步冲突进人工队列 | `crates/platform-org/src/sync.rs`、`crates/platform-org/src/service.rs`（`resolve_conflict`）、`crates/platform-org/src/http.rs`（`POST /api/org/sync-conflict/{id}/resolve`） | 见 AC-S-014 | **PASS** |
 
-## 3. 交付清单（设计摘要 §9「本期交付边界」）
+## 3. 设计摘要 D1–D12 逐条对照
 
-| 交付项 | 实现位置 | 验证方式与证据 | 结论 |
-|--------|----------|----------------|------|
-| 本地账号：注册、登录、登出、登出全端 | `service.rs`（`register` / `login` / `logout` / `logout_all`）、`http.rs`（对应路由） | 真实库层：注册 → 201、登录 → 200 + 令牌对、登出 / 登出全端 → 令牌失效 | **PASS** |
-| 密码：Argon2id + PHC + 可配策略 + 本地词库 | `password.rs`、`config.rs` | AC-S-009 / AC-S-011 | **PASS** |
-| 密码找回与重置（防枚举） | `service.rs`（`forgot_password` / `reset_password`） | AC-S-013 | **PASS** |
-| 混合令牌 + 轮换 + 重放检测 + family 作废 | `jwt.rs`、`service.rs`（`refresh`） | AC-S-014 | **PASS** |
-| JWT：密钥注入、`kid`、JWKS、轮换宽限期 | `jwt.rs`、`config.rs`、`http.rs`（`jwks`） | AC-S-010 | **PASS** |
-| TOTP：绑定、校验、防重放、恢复码 | `totp.rs`、`service.rs` | AC-S-015 | **PASS** |
-| **WebAuthn 只留接口** | `crates/platform-iam/src/totp.rs`（`MfaMethod::WebAuthn` → `NOT_IMPLEMENTED`） | 单测 `webauthn_is_declared_but_not_implemented` | **PASS** |
-| 登录限流 + 账号锁定 | `service.rs`（`check_ip_rate_limit` / `on_password_failure`）、`store.rs` | AC-S-017（部分，见 §4） | **部分** |
-| 设备会话：列表、踢下线、全端失效 | `service.rs`、`store.rs` | AC-S-018 | **PASS** |
-| **全部会话与令牌带 tenant_id** | 全部 9 张表 + `AccessClaims.tid` + `Authenticated` 提取器 | AC-S-016 | **PASS** |
-| 错误码统一（防账号枚举） | `error.rs` | AC-S-019 | **PASS** |
-| **本期新增：第一个真实 HTTP 业务路由 + 租户上下文中间件** | `crates/platform-iam/src/http.rs`（12 个 `/api/iam/*` 路由 + `/.well-known/jwks.json` + `tenant_context` 中间件）、`crates/platform-server/src/main.rs`（挂载） | 真实库层全部走真实 HTTP 路由（`tower::ServiceExt::oneshot` 驱动 axum Router，不连网络）；租户头 → `RequestContext` → `SET LOCAL app.tenant_id` → RLS **闭环**（AC-S-012 的前提） | **PASS** |
+| # | 决策 | 实现位置 | 结论 |
+|---|------|----------|------|
+| D1 | 组织树 = 邻接表 + **递归 CTE**，**不用 ltree** | `store.rs::subtree_in`（`WITH RECURSIVE`）；迁移里**没有** `CREATE EXTENSION` | **PASS** |
+| D2 | 节点类型 `company`/`dept`/`team`；**岗位不是节点** | `entity.rs::NodeType`（`all()` 只有 3 个）；`user_position` 表；`entity.rs::positions_are_not_an_organization_node_type` | **PASS** |
+| D3 | 汇报关系是**人的属性**（`user.manager_id`）；用户↔节点多对多 | `platform_iam_user.manager_id`（迁移 `20261118000600`）；`user_org` 表（含 `is_primary`） | **PASS**（⚠️ 见 §4 的设计摘要内部冲突） |
+| D4 | 5 张表全部带 `tenant_id` + RLS | `migrations/20261118000700_org_schema.up.sql`（6 张：5 张 + `sync_source_state`） | **PASS**（多 1 张，见 §4） |
+| D5 | `path_labels` 是加速字段，权威是 `parent_id`，可重建 | `tree.rs` + `service.rs::verify_path_labels` / `rebuild_path_labels` | **PASS** |
+| D6 | SCIM 出站**自己实现**、**PUT 幂等**、**推送异步** | `scim.rs`（无 SCIM 库依赖）；`ScimOutbox` | **PASS** |
+| D7 | LDAP 入站用 `ldap3`；映射**外置**；离职用**位运算** | `ldap.rs` + `Cargo.toml`（`ldap3` `default-features = false`） | **PASS**（TLS 边界见 §4） |
+| D8 | 冲突默认 `manual`、**字段级**、**绝不静默覆盖** | `sync.rs::ConflictStrategy`（`Default = Manual`）、`entity.rs::SyncConflict` | **PASS** |
+| D9 | 离职：禁用 + **撤销全部 session** + 解绑 + 审计 + 通知 | `service.rs::disable_departed_user` | **PASS** |
+| D10 | 组织变更事件 → `NotificationSender` | `notify.rs`（`PlatformNotifier` 适配） | **PASS** |
+| D11 | **不实现任何权限判定逻辑** | 全 crate 无判定分支 | **PASS** |
+| D12 | 不做：同步管理界面 / SCIM 入站 / 多版本历史 | 无相关代码 | **PASS**（HTTP API 已做，界面不做） |
 
-## 4. 如实登记：未验证 / 未做 / 有取舍的部分
+## 4. 偏离与「未做」登记（如实）
 
-> **修复轮变化**：下面 3 条已由本轮补上自动化用例（见「修复轮已补上」小节）；
-> `ACCOUNT_LOCKED` 的枚举面**已消除**（不再是取舍，而是修掉的缺陷）。
-
-### 4.1 修复轮已补上
-
-| 项 | 状态 | 说明 |
-|----|------|------|
-| 锁定期**过后**自动解锁 | ✅ **已补用例** | `a_lock_is_never_extended_and_the_failure_count_restarts_after_it_expires`（管理员连接把 `locked_until` 挪到过去 → 到期后计数**从头开始**、锁定解除） |
-| 按 IP 滑动窗口限流的 **429 分支** | ✅ **已补用例** | `the_ip_rate_limit_is_shared_across_tenants_and_only_counts_failures`（429 + 跨租户共享 + 成功登录不计入） |
-| `ACCOUNT_LOCKED` / `ACCOUNT_DISABLED` 的枚举面 | ✅ **已消除** | 锁定判定挪到密码校验**之后** → 攻击者永远只拿到 `INVALID_CREDENTIALS`；`ACCOUNT_LOCKED` 只有**知道密码**的人拿得到 |
-
-### 4.2 仍然未验证 / 未做 / 有取舍
-
-| 项 | 状态 | 说明 |
-|----|------|------|
-| 「成功登录后失败计数清零」 | **未写自动化用例** | 实现上登录成功调 `reset_login_failures`（清零 + 解除锁定）；**没有**端到端断言。⚠️ QA 已**独立实测**为真 |
-| 幂等键（C8）的端到端行为 | **未写自动化用例** | 中间件已实现（认领 → 重复请求返回首次结果 / 处理中返回 409）；**没有**断言「同一 key 两次 POST 返回同一响应体」。⚠️ QA 已**独立实测**为真 |
-| access token 的**即时**撤销 | **本期不做**（设计取舍） | 设计摘要 R4：access token 是 15 分钟短 TTL 的自包含 JWT，撤销能力由 refresh token 与会话承担；「改密码后旧 access token 仍可用 ≤ 15 分钟」是**已知取舍**，本期不引入逐请求查库 |
-| 限流的**多副本一致性** | **未实测** | 限流是 DB 计数（不是 Redis）→ 多实例共享 DB 行为理论上一致，但本期**单机单实例**实测 |
-| `platform_iam_login_rate` 的**清理/归档** | **未做**（与既有流水表同状况） | 全局失败计数表按行累积；既有 `purge_login_attempts_before` 也**没有被定时任务调用** —— 属**既有**状况。索引 `(ip_hash, occurred_at DESC)` 保证计数查询与表大小无关 |
-| 租户级注册策略（开关 / 域名白名单 / 审批态） | **不做** | 需求文档「不在范围内」明列（REQ-010） |
-| 邀请链接 | **不做** | 同上（REQ-010） |
-| WebAuthn / FIDO2 实现 | **不做** | 设计摘要 §9：只留接口（`MfaMethod::WebAuthn` → `NOT_IMPLEMENTED`） |
-| 短信验证码、图形验证码 | **不做** | 设计摘要 §9；限流与锁定已覆盖「登录失败限流」这条需求 |
-| 完整 HIBP k-anonymity 泄露库接入 | **不做** | 设计摘要 §9：本期只做本地小词库 + 长度策略 |
-| SSO 入站、企业目录同步 | **不做** | 属 REQ-013 / REQ-008 |
-
-## 5. 偏离清单
-
-### 5.1 第一轮的偏离
-
-| 偏离 | 原计划 | 实际 | 原因与影响 |
-|------|--------|------|-----------|
-| **依赖树超出预算** | 179 → 约 215（AC-S-020 写 200~210） | **179 → 240**（+61，总数口径；第三方口径 **232**） | `jsonwebtoken` 10 的 `rust_crypto` feature 是**全量**的（`ed25519-dalek` + `p256` + `p384` + `rsa` + `hmac` + `sha2`），不能只挑 P-256；jsonwebtoken 9.x 的默认后端是 **ring**（要编 C/汇编，任务明确禁止）。另加 `chacha20poly1305`（TOTP secret 静态加密，设计摘要 §3「安全模块不省依赖，自制密码学绝不可接受」）。**影响**：冷编译峰值仍在 1.5G 以内（见验证报告 §3.2），但增量编译时间变长。**QA 判定**：资源侧全达标 + 无可行替代 → **不改代码**，BA 把预算重定基线到 **235** |
-| **按 IP 的限流用 DB 计数而不是 Redis** | 设计摘要 §6：Redis 滑动窗口 | DB 滑动窗口（`occurred_at >= now() - window`） | 任务书明确允许「登录限流/配额若需 DB 计数则复用 `platform-db` 的配额能力」；引入 `redis` 客户端会再加一批依赖（与依赖预算冲突）。**语义等价**（都是滑动窗口），**存储位置不同**（DB vs Redis）。⚠️ **QA 附：观察已登记**：`platform-iam` 里 `grep -i redis` → **0 命中**，`base-redis` 容器在跑但 IAM 不用 → **高并发下 DB 计数会成为瓶颈，建议后续需求补** |
-| **登录失败计数写在用户表而不是独立表** | 设计摘要 §6：Redis 快计数 + DB 持久 | 用户表的 `failed_attempts` + `locked_until` | 同上；账号锁定必须**持久**（重启不能丢），DB 是唯一可靠位置；快计数层（Redis）留待后续 |
-| **恢复码用 SHA-256 而不是慢哈希** | 设计摘要 §4：只说「存 hash」 | SHA-256（base64url） | 恢复码是 **80 位熵**（16 字符 × 5 bit）的高熵值，快哈希就够（慢哈希只对低熵的密码必要）。已在代码注释里写明口径 |
-| **`title` 用中文、`detail` 用英文** | 契约 C6：`detail` 是英文描述 | `title` = 中文类别名（如「凭证无效」），`detail` = **英文 ASCII** | 契约 C6 的**示例**里 `title` 就是中文（「权限不足」）；仓库既有实现（REQ-005 的 `ProblemDetails`）也是中文 `title` + 英文 `detail`。**约束对象是 `detail`**（AC-S-019 明写「`detail` 必须是英文 ASCII」） |
-| **`platform-db` 被扩展** | REQ-006 的数据访问层 | `BindValue` 新增 `Timestamp` / `NullableText` / `NullableTimestamp`；`sqlx` 打开 `time` feature | 令牌过期、重置令牌过期、账号锁定到期都要写时间戳；`platform-db` 的 `BindValue` 原本只有标量。`platform-core` / `platform-contracts` **一行未改**（CODEOWNERS 保护目录） |
-| **平台表不走 manifest 的 `tenantScoped`** | REQ-006 的统一生成机制 | IAM 表在**平台迁移**里直接建 RLS policy | 账号体系是底座自身的身份权威源（ADR-0001 A3），属**平台表**，不是业务模块表 |
-
-### 5.2 修复轮新增的偏离与 QA「附：观察」登记
-
-| 偏离 / 观察 | 原计划 | 实际 | 原因与影响 |
-|------------|--------|------|-----------|
-| **QA 附：观察 ① —— 「Redis 滑动窗口 + Redis 锁定快计数」未实现** | 设计摘要 §6 | **纯 DB 计数**（`platform_iam_login_attempt` 审计流水 + `platform_iam_login_rate` 全局失败计数） | `platform-iam` 里 `grep -i redis` → **0 命中**；`base-redis` 容器在跑但 **IAM 不用**。**功能等价**（429 分支实测通过），但**高并发下 DB 计数会成为瓶颈** → **建议后续需求补** |
-| **QA 附：观察 ② —— 前端没有 IAM 接入面** | —— | `apps/shell/src/lib/nav.ts` 的 IAM 入口是**占位数据**（点击落到 404） | **本期不含前端登录页**（设计摘要 §9 未列入）→ **不算缺陷**。但**本期没有 UI 验收面**（IAM 的验收全在 HTTP / 数据库层） |
-| **QA 附：观察 ③ —— `tenant-policies --check` 对库状态敏感** | —— | 在**未经 `scripts/test-integration.sh` 重置**的旧库上会失败（报 `sandbox_tenant_item` 未开 RLS） | 那是**模块表**、与 REQ-007 无关。→ **已写进 `docs/dev-environment.md` §4.2**：「**先跑 `scripts/test-integration.sh` 再跑 `tenant-policies --check`**」 |
-| **修复轮：新增一张**不带租户维度**的全局表** | 设计摘要 §6：限流按租户 | `platform_iam_login_rate`（**只有 IP 的 SHA-256 摘要 + 时间戳**，**不含任何租户数据**、**不开 RLS**） | 限流预算必须**跨租户共享**（QA LOW 6：按租户计 → 预算被放大成「租户数倍」），而 RLS 下的租户作用域表**只能看见自己租的行**。**影响**：全局表里**不存明文 IP**；只记**失败**尝试（成功登录压根不记） |
-| **修复轮：`ACCOUNT_LOCKED` 的判定位置** | 第一轮：锁定判定在密码校验**之前** | 锁定判定挪到密码校验**之后** | 修复前的 `ACCOUNT_LOCKED` 是**账号枚举预言机**（QA HIGH 1）。**契约不变**：`ACCOUNT_LOCKED` 仍是稳定 `code`，前端 i18n 按 `code` 渲染；只是**拿到它的人**变了（必须是**知道密码**的人） |
-
-## 6. 改动统计与产物
-
-- **新增 crate**：`crates/platform-iam`（平台 crate）
-- **新增平台表**：**10 张** —— 第一轮 9 张（`platform_iam_user` / `_password_history` / `_session` / `_refresh_token` / `_mfa_secret` / `_recovery_code` / `_password_reset` / `_login_attempt` / `_idempotency`，全部带 `tenant_id` + RLS）
-  + **修复轮 1 张**：`platform_iam_login_rate`（**全局失败计数**；**不带 `tenant_id`、不开 RLS**，只存 IP 的 SHA-256 摘要与时间戳）
-- **新增路由**：12 个 `/api/iam/*` + 1 个 `/.well-known/jwks.json`
-- **新增用例**：41 条单测 + **16 条真实库层用例**（含 1 条防假绿护栏；第一轮 11 条 → 修复轮 **+5** 条）
-- **修复轮改动**：**7 文件**（`service.rs` / `store.rs` / `error.rs` / `iam_real_db.rs` / 2 个新迁移文件 / `docs/dev-environment.md`）+ 3 个报告文件
-- **依赖增量**：**0**（232 → 232）
-- **产物**：`feature-meta/traceability.md`（本文件）、`feature-meta/verification-report.md`、`feature-meta/status.md`
+| # | 项 | 说明 |
+|---|----|------|
+| 1 | **设计摘要 §1.2 与 D3 自相矛盾** | §1.2 写「`org_node.manager_id`（直属上级）」，D3 写「汇报关系是**人的属性**（`user.manager_id`），**不是**节点的属性」。本实现按 **D3**（任务书里的冻结决策）做：`manager_id` 挂在 `platform_iam_user` 上，`org_node` **没有** `manager_id` 列 —— 否则「部门经理」与「我的上级」会混为一谈。**请 BA 确认** |
+| 2 | **多 1 张表 `sync_source_state`** | 设计摘要 §9 要求交付「同步状态的可见性（上次同步时间、同步错误计数）」，D4 的 5 张表里没有承载它的地方 → 加第 6 张表 |
+| 3 | **只支持明文** | SCIM 只支持 `http://`，LDAP 只支持 `ldap://`。理由：树里**无任何 TLS 栈**，引入会带 30~50 个 crate，且 `rustls` 默认后端会拉进 `ring` / `aws-lc-rs`（依赖预算要求两者 **0 命中**）。配置项已留口（`ScimProviderConfig::tls_mode` / LDAP 连接串），HTTPS/LDAPS 留后续需求 |
+| 4 | **LDAP 入站不自动开号** | 目录里有、本地没有的账号**不自动创建**（计入 `skipped`）。开号涉及密码策略 / SSO 绑定 / 初始状态，属账号生命周期的决策，不该由同步顺带决定。SSO 绑定属 REQ-013 |
+| 5 | **角色解绑属 REQ-009** | 离职流程解绑了**组织成员关系与岗位**；**角色**绑定表本期还不存在（REQ-009 才建），因此「解绑角色」本期**无处可解** |
+| 6 | **审计落库属 REQ-014** | 本模块**声明**审计事件（`Auditable` + `AUDIT_EVENTS`）并把事件交给 `AuditRecorder` 接缝；平台的审计 sink（落库与查询）本期不存在 → 生产用 `NoopAuditRecorder`，测试用 `RecordingAuditRecorder` |
+| 7 | **通知通道属 REQ-015** | 事件**照常产生**并交给平台的 `NotificationSender`；生产用 `LoggingNotifier`（写日志），测试用 `RecordingNotifier`。平台没有内置通道实现 |
+| 8 | **同步的管理界面** | 按 D12 不做（数据层 + API 已做） |
+| 9 | **`platform-iam` 的测试夹具被本需求改动** | `crates/platform-iam/tests/iam_real_db.rs` 的「所有会话记录都带 tenant_id」断言原本检查**整张表** —— 测试库 `base_test` 是共享的，本需求的离职用例也会写会话 → 断言误判。已改成**只看本用例的租户前缀**（`iam-test-%`） |
+| 10 | **`platform-db` / `platform-iam` / `platform-server` 的改动** | `platform-db`：`TenantTx` 增 `schema()`、`collect_scopes` 增扫 `crates/`；`platform-iam`：`UserRecord` 增 3 列 + 增 `disable_user` / `set_user_manager` / `update_user_profile_field` / `list_users`、`IamState.service` 改 `Arc`；`platform-server`：挂 `/api/org/*`。**均未改 `platform-core` / `platform-contracts`**（CODEOWNERS 保护目录） |
