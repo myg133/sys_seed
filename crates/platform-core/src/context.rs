@@ -8,10 +8,19 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 /// 单次请求的上下文。
+///
+/// # 用户身份
+///
+/// `user_id` 是**已认证的调用方**（REQ-007 的令牌主体）。
+/// 权限判定（REQ-009）需要它 —— 「谁能做什么」里的「谁」。
+///
+/// 它由**认证中间件**写入（认证之前是 `None`）。
+/// 业务模块**不得**手工设置它 —— 那等于自己声明「我是谁」。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestContext {
     tenant_id: Option<String>,
     space_id: Option<String>,
+    user_id: Option<String>,
     trace_id: String,
     entered_at: OffsetDateTime,
 }
@@ -28,6 +37,7 @@ impl RequestContext {
         Self {
             tenant_id: None,
             space_id: None,
+            user_id: None,
             trace_id: new_trace_id(),
             entered_at: OffsetDateTime::now_utc(),
         }
@@ -53,6 +63,19 @@ impl RequestContext {
     /// 空间 ID，不限空间时为 `None`。
     pub fn space_id(&self) -> Option<&str> {
         self.space_id.as_deref()
+    }
+
+    /// 绑定已认证的调用方；空值视为未认证。
+    ///
+    /// **只应由认证中间件调用** —— 业务模块自己调它等于自封身份。
+    pub fn with_user(mut self, user_id: impl Into<String>) -> Self {
+        self.user_id = normalize(user_id.into());
+        self
+    }
+
+    /// 已认证的调用方 ID；未认证时为 `None`。
+    pub fn user_id(&self) -> Option<&str> {
+        self.user_id.as_deref()
     }
 
     /// 追踪 ID，串联日志用。
@@ -117,5 +140,19 @@ mod tests {
         let a = RequestContext::new();
         let b = RequestContext::new();
         assert_ne!(a.trace_id(), b.trace_id());
+    }
+
+    #[test]
+    fn a_fresh_context_has_no_authenticated_user() {
+        let ctx = RequestContext::new();
+        assert_eq!(ctx.user_id(), None);
+    }
+
+    #[test]
+    fn the_authenticated_user_is_bound_and_trimmed() {
+        let ctx = RequestContext::new().with_user("  u-1001 ");
+        assert_eq!(ctx.user_id(), Some("u-1001"));
+        let blank = RequestContext::new().with_user("   ");
+        assert_eq!(blank.user_id(), None, "空值视为未认证");
     }
 }

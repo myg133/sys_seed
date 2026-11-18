@@ -250,11 +250,17 @@ fn permissions_json(root: &Path) -> Result<String> {
                 .permissions
                 .iter()
                 .map(|permission| {
-                    json!({
+                    // `condition` 是**可选**字段（属性级校验 / ABAC）；
+                    // 不填 = 无条件 —— 索引里也要如实反映。
+                    let mut value = json!({
                         "code": permission.code,
                         "name": permission.name,
                         "type": permission.kind,
-                    })
+                    });
+                    if let Some(condition) = &permission.condition {
+                        value["condition"] = json!(condition);
+                    }
+                    value
                 })
                 .collect();
             total += permissions.len();
@@ -287,7 +293,8 @@ fn extension_points_json(root: &Path) -> Result<String> {
     Ok(to_json(&json!({
         "generated_by": GENERATOR,
         "source": "crates/platform-core/src/extension/",
-        "contract": "extension-points v1",
+        // 与 `feature-meta/manifest.json` 的契约 pin 保持一致（v2 新增 C-5）。
+        "contract": "extension-points v2",
         "extension_point_count": extension_points,
         "traits": entries,
     })))

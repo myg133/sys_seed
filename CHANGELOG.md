@@ -4,6 +4,60 @@
 
 ## Unreleased
 
+### REQ-009 RBAC 权限与数据范围
+
+- **新建 `crates/platform-rbac`**（平台 crate；依赖方向
+  `platform-core ← platform-db ← platform-iam ← platform-rbac ← platform-server`）：
+  - **角色模型**：`platform_role` / `platform_role_permission` / `platform_role_inherit` /
+    `platform_user_role`（**都带 `tenant_id`** + RLS policy），
+    权限点注册表 `platform_permission` 是**平台级**（不带 `tenant_id`）
+  - **内置角色按租户物化**：`platform-admin`（`data_scope = ALL`）与 `platform-user`
+    （`SELF`）；**不可删除、不可降权**（改 `data_scope` / 改权限点都被拒）
+  - **`platform-admin` 的权限集合 = 注册表全集**（**动态得出**，不是通配 `*`）——
+    新增权限点它自动拥有，不靠人工补授权
+  - **角色继承**在查询时展开；**成环的写入被拒**，错误信息**指出是哪两个角色构成的环**
+  - **权限点通配**只允许 `module:*` 与 `module:resource:*`；
+    `*:*` 与跨模块通配（`*:demo:read`）**写入被拒**
+- **数据范围五种语义**：`ALL` / `OWN_ORG` / `OWN_ORG_AND_BELOW` / `SELF` / `CUSTOM`
+  - **兼岗默认按主部门**（`user_org.is_primary`）；取并集必须**显式开启**
+    （`platform_role.use_all_memberships`）
+  - **主部门缺失或歧义 → fail closed 到 `SELF`**（**不是** `ALL`）：
+    DB 侧加部分唯一索引（**预防层**）+ 判定侧退化（**防御层**），两层都要
+  - 多角色 scope **取最宽松**（并集语义）；权限点级 scope **覆盖**角色级
+- **受限表达式 DSL**（`platform-core::extension::expr`）：
+  **白名单字段 + 参数化 + 禁函数调用 + 禁多语句** ——
+  生成的 SQL 里**只有占位符**，字面值一律走绑定
+- **鉴权入口 `require_permission` 住在 `platform-core`**（不是 `platform-rbac`）：
+  业务模块的运行期依赖仍然只有 `platform-core` + `platform-db`（AGENTS.md 硬规则 2）；
+  判定实现由平台通过请求扩展注入（`Arc<dyn PermissionChecker>`，方法全同步 → dyn 兼容）
+  - 三种拒绝语义（契约 C5）：未认证 **401 `UNAUTHENTICATED`**；
+    缺权限点 **403 `INSUFFICIENT_PERMISSION`**；
+    记录不在数据范围内 **404 `NOT_FOUND`**（不泄露资源存在性）
+- **数据范围过滤在 SQL 层生效**：`platform-db` 的 `TenantQuery::with_scope` /
+  `with_condition` —— 条件**插进 WHERE 子句**（不是拼在 `ORDER BY` 后面），
+  值走参数绑定；**平台没有「跳过范围」的入口**
+- **权限点注册表双向对账**：manifest ↔ 库不一致 → **启动失败**（退出码非 0），
+  逐条列出缺失编码与**来源 manifest 路径**
+- **缓存 + 数据库 epoch 主动失效**（**不引 Redis 客户端**）：
+  角色 / 授权 / 绑定 / 继承 / 数据范围的写操作在同一事务里 `epoch + 1` →
+  **撤销在下一个请求即生效**（跨进程也成立）
+- **`/api/rbac/*` 管理接口自举防护**：写接口要 `rbac:role:write` /
+  `rbac:user-role:write`，读角色列表要 `rbac:role:read` ——
+  **普通用户不得调用**（否则任何登录用户都能给自己授权 `platform-admin`）；
+  **豁免** `GET /api/rbac/permissions`（前端 `can()` 靠它读注册表）
+- **契约检查 C-5**（`extension-points v2`）：已登记权限点必须有**鉴权调用点**，
+  鉴权入口**全仓库唯一**，调用参数**必须是字面量** —— 契约测试宏从 4 项变 **5 项**
+- **平台基建的连带修复**：
+  - `feature-meta/manifest.json` 补 **`contracts` pin**（此前**恒定缺失**，
+    `scripts/sync-contracts.sh` 恒 exit 2 → 契约门禁在 CI 上常红）
+  - 同步 `docs/contracts/extension-points/v2.md` 快照
+  - `manifest.json` 的 `permissions[].condition`（**可选**字段，属性级校验 / ABAC）
+  - `platform-db` 的 `BindValue::TextArray`（子树 id 集合走 `= ANY($n)`）
+  - `AGENTS.md` 补 `platform-rbac` 目录、C-1~C-5、硬规则 1 的例外说明与
+    `require_permission` 用法；脚手架模板带上鉴权调用点与 `condition` 示例
+  - `modules/sandbox` 改成**参考实现**：新增 `backend/src/http.rs`（鉴权调用点）、
+    `sandbox_scope_item` 迁移（含 `org_node_id` 与 `created_by` 两列）
+
 ### REQ-008 用户与组织架构
 
 - **新建 `crates/platform-org`**（平台 crate；依赖方向

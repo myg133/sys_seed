@@ -5,12 +5,20 @@
   "enabled": true,
   "permissions": [
     { "code": "sandbox:demo:read", "name": "查看沙箱示例", "type": "menu" },
-    { "code": "sandbox:demo:write", "name": "编辑沙箱示例", "type": "button" }
+    { "code": "sandbox:demo:write", "name": "编辑沙箱示例", "type": "button" },
+    { "code": "sandbox:scope-item:read", "name": "查看数据范围示例", "type": "button" },
+    {
+      "code": "sandbox:scope-item:approve",
+      "name": "审批数据范围示例",
+      "type": "button",
+      "condition": "$record.amount <= 10000"
+    },
+    { "code": "sandbox:scope-item:export", "name": "导出数据范围示例", "type": "button" }
   ],
   "menus": [{ "label": "沙箱", "icon": "flask", "route": "/sandbox", "perm": "sandbox:demo:read" }],
   "dependencies": [],
   "tenantScoped": {
-    "tables": ["sandbox_tenant_item"],
+    "tables": ["sandbox_tenant_item", "sandbox_scope_item"],
     "column": "tenant_id"
   },
   "config": {

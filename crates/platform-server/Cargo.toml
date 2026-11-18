@@ -25,6 +25,7 @@ platform-db.workspace = true
 platform-iam.workspace = true
 # 用户与组织架构（REQ-008）：/api/org/* 路由 + 组织树 / 成员关系 / SCIM / LDAP
 platform-org.workspace = true
+platform-rbac.workspace = true
 # 部署期数据库客户端：迁移 + 健康检查；不承担业务数据访问
 sqlx.workspace = true
 

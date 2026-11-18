@@ -22,8 +22,10 @@
 //! 所以业务模块绕不过租户条件。
 
 pub mod entity;
+pub mod http;
 pub mod permission;
 pub mod repository;
+pub mod scope_item;
 pub mod service;
 pub mod tenant_repository;
 

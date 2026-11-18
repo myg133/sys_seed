@@ -53,7 +53,7 @@ pub const ALREADY_PROVIDED: &[ProvidedCapability] = &[
     },
     ProvidedCapability {
         key: "contract_suite",
-        summary: "#[platform_module_contract] 自动生成 C-1~C-4 四项契约测试，勿自写重复的契约检查",
+        summary: "#[platform_module_contract] 自动生成 C-1~C-5 五项契约测试（C-5：已登记权限点必须有鉴权调用点、鉴权入口全仓库唯一），勿自写重复的契约检查",
     },
     ProvidedCapability {
         key: "audit_declaration",
@@ -109,7 +109,11 @@ pub const ALREADY_PROVIDED: &[ProvidedCapability] = &[
     },
     ProvidedCapability {
         key: "org_structure",
-        summary: "platform-org 提供 /api/org/* 组织架构接口（组织树用邻接表 + 递归 CTE、用户↔节点成员关系、岗位与汇报关系）、SCIM 2.0 出站与 LDAP/AD 入站、字段级同步冲突队列与人工裁决；权限判定在 REQ-009，勿自造组织树或数据范围判定",
+        summary: "platform-org 提供 /api/org/* 组织架构接口（组织树用邻接表 + 递归 CTE、用户↔节点成员关系、岗位与汇报关系）、SCIM 2.0 出站与 LDAP/AD 入站、字段级同步冲突队列与人工裁决；数据范围的输入是它，勿自造组织树",
+    },
+    ProvidedCapability {
+        key: "rbac_authorization",
+        summary: "platform-core 的 require_permission 是平台唯一鉴权入口，platform-rbac 提供 /api/rbac/* 角色授权接口、5 种数据范围与 DB epoch 主动失效；业务模块用 require_permission + TenantQuery::with_scope，勿自写鉴权或数据范围",
     },
 ];
 
@@ -121,7 +125,7 @@ pub const NOT_YET_PROVIDED: &[ProvidedCapability] = &[
     },
     ProvidedCapability {
         key: "permission_can",
-        summary: "前端 can() 与服务端鉴权中间件尚未落地（REQ-009 补），权限判定别自己写一套",
+        summary: "前端 can() 尚未落地（REQ-011 补）；服务端鉴权中间件已在 REQ-009 提供（require_permission），前端别自己写一套",
     },
     ProvidedCapability {
         key: "http_api_layer",

@@ -16,8 +16,9 @@
 通用管理系统底座。业务方在此之上开发自己的业务模块，**不修改底座本身**。
 
 底座目前提供的是**骨架**：请求上下文、扩展点 trait、契约测试套件、目录规范校验、
-能力索引、**租户作用域数据访问层**（`platform-db`）。
-HTTP 层、通用 CRUD 脚手架、鉴权中间件、组件库都还没落地（见「尚未提供」）。
+能力索引、**租户作用域数据访问层**（`platform-db`）、**认证**（`platform-iam`）、
+**组织架构**（`platform-org`）、**角色与权限**（`platform-rbac` + `require_permission`）。
+通用 CRUD 脚手架、前端组件库、异步任务与文件存储都还没落地（见「尚未提供」）。
 
 ## 目录
 
@@ -26,6 +27,10 @@ crates/platform-core/        平台核心（**禁止修改**，改动需人工�
 crates/platform-contracts/   扩展点契约测试套件（**禁止修改**）
 crates/platform-contracts-macros/  契约测试宏（**禁止修改**）
 crates/platform-db/           平台数据访问层（租户作用域入口 + RLS 兜底）
+crates/platform-iam/          认证与账号体系（/api/iam/*）
+crates/platform-org/          用户与组织架构（/api/org/*）
+crates/platform-rbac/         角色与权限（/api/rbac/*、数据范围求值）
+crates/platform-server/       交付基线服务（base serve / migrate / tenant-policies）
 crates/xtask/                任务运行器（cargo xtask）
 modules/<name>/              业务模块（在这里写业务代码）
 packages/<name>/             前端占位包（@base/ui、@base/sdk、@base/auth …）
@@ -39,8 +44,15 @@ docs/contracts/              契约正文快照（**勿手改**，正本在 BA �
 
 1. **不得修改 `crates/platform-core/` 与 `crates/platform-contracts/`**；
    需要新能力 → 提扩展点需求，不要就地扩平台。
+   - **例外（仅限平台自身在已评审需求下的演进）**：平台 crate 可以在**已评审的需求**里演进
+     （例如 REQ-009 在 `platform-core` 里新增了 `extension/permission.rs`：
+     `PermissionChecker` / `DataScope` / `ScopeFilter` / `require_permission`）。
+     规则的意图是「**业务方 / AI 不许就地扩平台**」，不是「平台自己不许演进」。
+     走这条例外时：需求必须已评审，且要同步改本文件（引导文件必须与实际一致）。
 2. **业务模块只依赖扩展点 trait**，不反向依赖平台内部模块；
    `platform-contracts` 只能出现在 `[dev-dependencies]`。
+   - 鉴权能力走 `platform-core` 的 `require_permission` 与 `platform-db` 的
+     `TenantQuery::with_scope` —— **不要**依赖 `platform-rbac`（那是平台内部模块）。
 3. **数据访问必须走 `RequestContext`**，不要手写 `tenant_id` 过滤条件
    （租户只能从 `ctx` 取，漏传就编译不过）。
 4. **数据访问必须走 `platform-db` 的租户作用域入口**（`TenantDb`），
@@ -50,8 +62,13 @@ docs/contracts/              契约正文快照（**勿手改**，正本在 BA �
    **RLS 策略由平台统一生成**（开发期 `cargo xtask tenant-policies`，
    部署期 `base tenant-policies` —— 镜像里没有 cargo，但策略必须能落地），
    模块不手写 policy。
+   **数据范围过滤也由平台叠加**（`TenantQuery::with_scope`）——
+   业务模块不实现范围判定，平台**也没有**「跳过范围」的开关。
 5. **权限点必须在 `manifest.json` 声明**，不要硬编码角色名；
    编码固定为 `module:resource:action`（`api-conventions v1` C4）。
+   **每个已登记的权限点都必须有真实的鉴权调用点**
+   （`require_permission("<字面量>")`）—— 契约检查 C-5 会核对；
+   只定义常量、从不鉴权 = **假权限**。
 6. **错误响应只返回错误码 + 参数**，不要拼面向用户的中文句子
    （文案由前端 `@base/i18n` 渲染，`api-conventions v1` C6）。
 7. **时间存 UTC，金额用最小单位整数**（`api-conventions v1` C13）。
@@ -65,6 +82,34 @@ docs/contracts/              契约正文快照（**勿手改**，正本在 BA �
 
 > 规则 1 与 2 由 CI 机械检查：`cargo xtask check-deps` 扫 `cargo metadata` 的依赖图，
 > 平台 crate 一旦反向依赖业务模块即失败。
+
+## 鉴权怎么写（REQ-009 起）
+
+鉴权入口**只有一个**：`platform_core::extension::permission::require_permission`。
+
+```rust
+use platform_core::extension::permission::require_permission;
+
+// 一组路由一个权限点（`route_layer` 绑在子路由上）。
+let read = Router::new().route("/item", get(list_items));
+let write = Router::new().route("/item", post(create_item));
+
+Router::new()
+    .merge(read.route_layer(require_permission("order:item:read")))
+    .merge(write.route_layer(require_permission("order:item:write")))
+```
+
+- ⚠️ **参数必须是字面量**（不是常量）：契约检查 C-5 要能**静态确认**
+  「这个权限点真的有鉴权调用点」；参数是常量就没法确认 → 判为**失败**
+  （无法确认 = 不放行，fail closed）。
+- 判定实现由**平台**通过请求扩展注入（`Arc<dyn PermissionChecker>`），
+  业务模块**不实现**它、也不依赖 `platform-rbac`。
+- 数据范围：向平台要 `ScopeFilter`，交给 `TenantQuery::with_scope`
+  （条件在 **SQL 层**生效，值走参数绑定）。
+- 三种拒绝语义（契约 C5）：未认证 **401 `UNAUTHENTICATED`**；
+  缺权限点 **403 `INSUFFICIENT_PERMISSION`**；
+  记录不在数据范围内 **404 `NOT_FOUND`**（不泄露资源存在性）。
+
 
 ## 命令
 
@@ -119,7 +164,7 @@ bun run dev
 | `list_query` | ListQuery/SortSpec/FilterSpec 已定义游标分页（limit 默认 20、上限 200）与过滤算子白名单，勿自造分页参数 |
 | `module_registry` | register_platform_module! + discover()/discover_enabled() 做编译期模块注册，勿自建插件或动态加载 |
 | `manifest` | Manifest 解析与字段校验 + capabilities/schema/manifest.schema.json 已提供，勿手写 manifest 校验 |
-| `contract_suite` | #[platform_module_contract] 自动生成 C-1~C-4 四项契约测试，勿自写重复的契约检查 |
+| `contract_suite` | #[platform_module_contract] 自动生成 C-1~C-5 五项契约测试（C-5：已登记权限点必须有鉴权调用点、鉴权入口全仓库唯一），勿自写重复的契约检查 |
 | `audit_declaration` | Auditable + AuditEventSpec 提供审计事件声明面，平台据此自动埋点，勿自建审计表 |
 | `notification_sender` | NotificationSender + NotificationMessage/DeliveryResult 提供通知投递接缝，勿自建消息中心 |
 | `workflow_handler` | WorkflowHandler + TransitionEvent 提供工作流接入接缝，勿自建流程引擎 |
@@ -133,7 +178,8 @@ bun run dev
 | `auth_state` | @base/auth 的 isAuthenticated()/tenantId() 提供登录态形状，勿另造登录态模型 |
 | `hooks_toggle` | @base/hooks 的 createToggle() 提供通用布尔开关状态容器，勿另造状态容器 |
 | `iam_auth` | platform-iam 提供 /api/iam/* 认证接口（本地账号 + JWT access / 不透明 refresh + Argon2id + TOTP）与 /.well-known/jwks.json；业务模块要鉴权请用这些接口，勿自造认证 |
-| `org_structure` | platform-org 提供 /api/org/* 组织架构接口（组织树用邻接表 + 递归 CTE、用户↔节点成员关系、岗位与汇报关系）、SCIM 2.0 出站与 LDAP/AD 入站、字段级同步冲突队列与人工裁决；权限判定在 REQ-009，勿自造组织树或数据范围判定 |
+| `org_structure` | platform-org 提供 /api/org/* 组织架构接口（组织树用邻接表 + 递归 CTE、用户↔节点成员关系、岗位与汇报关系）、SCIM 2.0 出站与 LDAP/AD 入站、字段级同步冲突队列与人工裁决；数据范围的输入是它，勿自造组织树 |
+| `rbac_authorization` | platform-core 的 require_permission 是平台唯一鉴权入口，platform-rbac 提供 /api/rbac/* 角色授权接口、5 种数据范围与 DB epoch 主动失效；业务模块用 require_permission + TenantQuery::with_scope，勿自写鉴权或数据范围 |
 
 ## 尚未提供
 
@@ -143,7 +189,7 @@ key 与说明逐条相同）；行的顺序同样与索引不同（语义序 vs 
 | 能力 | 说明 |
 |---|---|
 | `ui_table_component` | @base/ui 尚无表格与分页组件，列表页要自己实现（REQ-012 补） |
-| `permission_can` | 前端 can() 与服务端鉴权中间件尚未落地（REQ-009 补），权限判定别自己写一套 |
+| `permission_can` | 前端 can() 尚未落地（REQ-011 补）；服务端鉴权中间件已在 REQ-009 提供（require_permission），前端别自己写一套 |
 | `http_api_layer` | HTTP 接口层尚未就绪（REQ-011/012 补），capabilities/api.json 目前为空 |
 | `crud_scaffolding` | 平台没有通用 CRUD/分页脚手架（模块的仓储要自己实现），但数据访问必须走 platform-db 的租户作用域入口 |
 | `audit_sink` | 审计只到事件声明面，落库与查询待 REQ-014 |
@@ -186,8 +232,8 @@ key 与说明逐条相同）；行的顺序同样与索引不同（语义序 vs 
 | 文档 | 位置 |
 |---|---|
 | API 约定（路径、错误码、分页、命名） | 快照 `docs/contracts/api-conventions/v1.md`；正本 `git show demand:contracts/api-conventions/v1.md` |
-| 扩展点契约（5 个 trait 的冻结签名） | 快照 `docs/contracts/extension-points/v1.md`；正本 `git show demand:contracts/extension-points/v1.md` |
-| 示例模块（扩展点实现的标准范例） | `modules/sandbox/` |
+| 扩展点契约（5 个 trait 的冻结签名 + C-5 鉴权调用点检查） | 快照 `docs/contracts/extension-points/v2.md`；正本 `git show demand:contracts/extension-points/v2.md`（v1 保留一个 Sprint） |
+| 示例模块（扩展点实现 + 鉴权接入的标准范例） | `modules/sandbox/`（`backend/src/http.rs` 是鉴权与数据范围的参考实现） |
 | 能力索引 | `capabilities/index.json` |
 
 > **契约正本在 BA 分支，不在代码仓库里** —— `BA/` 是 workspace 里 `demand` 分支的 worktree，

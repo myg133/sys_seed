@@ -18,6 +18,9 @@ thiserror.workspace = true
 uuid.workspace = true
 time.workspace = true
 anyhow.workspace = true
+# 鉴权层要实现 tower 的 `Layer` / `Service`（axum 的路由层）。
+# ⚠️ `tower` 已在锁文件里（axum 的传递依赖 + 工作区的测试依赖）—— 加它**不增长依赖树**。
+tower.workspace = true
 # 编译期注册（本期唯一新增的第三方依赖）
 inventory.workspace = true
 
@@ -28,3 +31,10 @@ path = "src/lib.rs"
 [[bin]]
 name = "platform-core"
 path = "src/bin/platform-core.rs"
+
+[dev-dependencies]
+# 鉴权入口的行为测试要驱动 axum 路由（`ServiceExt::oneshot`），不连网络。
+axum.workspace = true
+tower.workspace = true
+http-body-util.workspace = true
+serde_json.workspace = true

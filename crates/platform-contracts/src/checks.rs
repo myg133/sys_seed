@@ -1,4 +1,4 @@
-//! C-1 ~ C-4 四项契约检查。
+//! C-1 ~ C-5 五项契约检查。
 //!
 //! | 检查 | 判定 |
 //! |------|------|
@@ -6,6 +6,7 @@
 //! | C-2 | 代码里用到的权限点都在 manifest 里声明；manifest 多余的只警告 |
 //! | C-3 | 租户隔离生效：列不出别租户的数据，查不到别租户的记录 |
 //! | C-4 | 事务边界：单次写全有或全无；跨表写必须显式开平台事务 |
+//! | C-5 | 已登记权限点必须有**鉴权调用点**，且鉴权入口**全仓库唯一** |
 
 use std::collections::BTreeSet;
 
@@ -14,6 +15,7 @@ use anyhow::{Result, anyhow};
 use platform_core::context::RequestContext;
 use platform_core::extension::repository::{ListQuery, Repository};
 
+use crate::authz_scan::{self, PLATFORM_ENTRY_FILE};
 use crate::fixture::{ContractFixture, ContractSubject};
 use crate::manifest_scan::scan_permission_codes;
 use crate::suite::{ContractViolation, ContractWarning};
@@ -26,6 +28,8 @@ pub const C2: &str = "C-2";
 pub const C3: &str = "C-3";
 /// C-4 检查 ID。
 pub const C4: &str = "C-4";
+/// C-5 检查 ID。
+pub const C5: &str = "C-5";
 
 /// 一项检查的结果：违例（失败）与告警（不阻断）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -440,4 +444,108 @@ async fn check_delete<F: ContractFixture>(
         outcome.violation(C4, "the record is still readable after delete() succeeded");
     }
     Ok(())
+}
+
+/// C-5：已登记权限点必须有**鉴权调用点**，且鉴权入口**全仓库唯一**。
+///
+/// | 情况 | 判定 |
+/// |------|------|
+/// | 已登记，且有 `require_permission("字面量")` 调用点 | ✅ |
+/// | 已登记，但**没有任何**鉴权调用点 | ❌ **失败**（登记了却不执行 = 假权限） |
+/// | 调用点的参数**不是字面量** | ❌ **失败**（无法静态确认 → fail closed） |
+/// | 出现**第二个**鉴权入口（模块自己写一个） | ❌ **失败**（扫描会被绕过） |
+///
+/// ⚠️ **与 C-2 的分工**：C-2 扫「源码里出现的权限点**字面量**」，
+/// 分不出「常量」与「调用点」；C-5 扫的是**调用**
+/// （函数名 + 括号 + 字面量参数）—— 沿用 C-2 的逻辑会**假绿**。
+pub fn check_c5<F: ContractFixture>(subject: &ContractSubject<F>) -> Result<CheckOutcome> {
+    let mut outcome = CheckOutcome::default();
+    let manifest = subject.manifest()?;
+    let declared: BTreeSet<&str> = manifest.permission_codes().into_iter().collect();
+    let backend_dir = subject.fixture.backend_dir();
+
+    // 1) 鉴权入口的**定义处**必须全仓库唯一，且必须是平台那一个。
+    match authz_scan::find_repo_root(&backend_dir) {
+        Some(repo_root) => {
+            let definitions = authz_scan::scan_entry_definitions(&repo_root)?;
+            if definitions.len() != 1 {
+                outcome.violation(
+                    C5,
+                    format!(
+                        "the authorization entry point must be defined exactly once in the whole repository, found {}: {:?}",
+                        definitions.len(),
+                        definitions
+                    ),
+                );
+            } else if !definitions[0].ends_with(PLATFORM_ENTRY_FILE) {
+                outcome.violation(
+                    C5,
+                    format!(
+                        "the authorization entry point must be defined in {PLATFORM_ENTRY_FILE}, found {}",
+                        definitions[0].display()
+                    ),
+                );
+            }
+        }
+        None => {
+            outcome.violation(
+                C5,
+                format!(
+                    "the platform authorization entry point ({PLATFORM_ENTRY_FILE}) could not be located from {}",
+                    backend_dir.display()
+                ),
+            );
+        }
+    }
+
+    // 2) 扫描模块自己的鉴权调用点。
+    let scan = authz_scan::scan_auth_calls(&backend_dir)?;
+    let called: BTreeSet<&str> = scan.codes.iter().map(String::as_str).collect();
+
+    // 3) 已登记的权限点**必须**有调用点（登记了却不执行 = 假权限）。
+    for code in &declared {
+        if !called.contains(code) {
+            outcome.violation(
+                C5,
+                format!(
+                    "the permission point `{code}` is declared in manifest.json but has no authorization call site"
+                ),
+            );
+        }
+    }
+
+    // 4) 调用了但没登记 → 失败（C-2 也覆盖；这里给出更直接的提示）。
+    for code in &scan.codes {
+        if !declared.contains(code.as_str()) {
+            outcome.violation(
+                C5,
+                format!(
+                    "the authorization call site uses the permission point `{code}`, which is not declared in manifest.json"
+                ),
+            );
+        }
+    }
+
+    // 5) 参数不是字面量 → **失败**（无法静态确认 = 不放行）。
+    for call in &scan.non_literal_calls {
+        outcome.violation(
+            C5,
+            format!(
+                "the authorization call site at {call} does not use a string literal; it cannot be verified statically"
+            ),
+        );
+    }
+
+    // 6) 自定义鉴权入口 → **失败**（扫描会被绕过）。
+    for entry in &scan.custom_entries {
+        outcome.violation(
+            C5,
+            format!(
+                "the custom authorization entry point at {entry} bypasses the platform entry point `{}`",
+                authz_scan::AUTH_ENTRY_POINT
+            ),
+        );
+    }
+
+    Ok(outcome)
 }

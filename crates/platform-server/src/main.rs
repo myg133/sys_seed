@@ -298,6 +298,15 @@ async fn serve() -> Result<(), Failure> {
         let org_state = build_org_state(&config, iam_state.service.clone()).await?;
         app = app.nest("/api/org", platform_org::http::router(org_state));
         tracing::info!("用户与组织架构已启用：/api/org/*");
+
+        // 角色与权限（REQ-009）：`/api/rbac/*`。
+        //
+        // **启动时先对账**：manifest 与库里的权限点不一致 → **进程起不来**
+        // （退出码非 0，逐条列出差异）。不一致不是告警 —— 告警就是静默放行的一种。
+        let rbac_state = build_rbac_state(&config, iam_state.service.clone()).await?;
+        reconcile_permissions(&config, &rbac_state).await?;
+        app = app.nest("/api/rbac", platform_rbac::http::router(rbac_state));
+        tracing::info!("角色与权限已启用：/api/rbac/*");
     } else {
         tracing::warn!(
             "未检测到 IAM 环境变量（BASE_JWT_* / BASE_IAM_*）：平台不提供 /api/iam/* 与 /api/org/* 接口"
@@ -380,6 +389,56 @@ async fn build_org_state(
         service,
         tokens: std::sync::Arc::new(platform_org::http::IamTokenVerifier::new(iam)),
     }))
+}
+
+/// 构建角色与权限的状态（数据访问 + 服务 + 判定器 + 令牌校验）。
+async fn build_rbac_state(
+    config: &DeployConfig,
+    iam: Arc<platform_iam::service::IamService>,
+) -> Result<Arc<platform_rbac::http::RbacState>, Failure> {
+    // 数据访问走 `platform-db` 的租户作用域入口（**不得**直连池）。
+    let tenant_db =
+        platform_db::TenantDb::connect(&config.database_url, platform_db::DbOptions::default())
+            .await
+            .map_err(|err| Failure::Runtime(format!("数据库连接串非法：{err}")))?;
+
+    let service = Arc::new(platform_rbac::RbacService::new(
+        platform_rbac::RbacStore::new(tenant_db),
+        platform_rbac::ScopePolicy::default(),
+    ));
+    let checker = Arc::new(platform_rbac::RbacChecker::new(service.clone()));
+
+    Ok(Arc::new(platform_rbac::http::RbacState {
+        service,
+        checker,
+        tokens: Arc::new(platform_rbac::http::IamTokenVerifier::new(iam)),
+    }))
+}
+
+/// **权限点注册表的双向对账**：manifest ↔ 库。
+///
+/// 不一致 → **启动失败**（退出码非 0），逐条列出差异。
+///
+/// 为什么不是告警：权限点缺失时角色授了也判不出来，表现为「配了权限却不生效」——
+/// 排查成本极高，且容易被误判成业务 bug。告警 = 静默放行的一种。
+async fn reconcile_permissions(
+    config: &DeployConfig,
+    state: &Arc<platform_rbac::http::RbacState>,
+) -> Result<(), Failure> {
+    let manifest_permissions =
+        platform_rbac::collect_manifest_permissions(std::path::Path::new(&config.manifest_root))
+            .map_err(|err| Failure::Runtime(format!("权限点注册表对账失败：{err}")))?;
+
+    platform_rbac::registry::require_consistent(state.service.store(), &manifest_permissions)
+        .await
+        .map_err(|err| {
+            Failure::Runtime(format!(
+                "✗ 权限点注册表与数据库不一致，进程退出（fail-fast）：\n{err}\n  \
+                 提示：权限点由**迁移**写入（见 migrations/ 下的权限点种子迁移），\
+                 manifest 变更要同时改 manifest 与迁移。"
+            ))
+        })?;
+    Ok(())
 }
 
 /// 执行租户作用域策略的生成 / 校验。

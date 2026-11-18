@@ -105,6 +105,11 @@ pub struct PermissionSpec {
     /// 权限点类型。
     #[serde(rename = "type")]
     pub kind: PermissionType,
+    /// 属性级校验条件（RBAC + ABAC 混合）。
+    ///
+    /// **可选**：不填 = 无条件。语法见受限表达式 DSL（白名单字段 + 参数化 + 禁函数调用）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub condition: Option<String>,
 }
 
 /// 菜单声明。
@@ -262,6 +267,21 @@ impl Manifest {
                     &format!("permissions[{index}].name"),
                     "must not be empty",
                 ));
+            }
+            // 属性级校验条件：**可选**；填了就必须是能解析的表达式
+            // （白名单外的属性在**判定时** fail closed，这里只挡语法错）。
+            if let Some(condition) = &permission.condition {
+                if condition.trim().is_empty() {
+                    issues.push(field_error(
+                        &format!("permissions[{index}].condition"),
+                        "must not be empty when present",
+                    ));
+                } else if let Err(error) = crate::extension::expr::parse(condition) {
+                    issues.push(field_error(
+                        &format!("permissions[{index}].condition"),
+                        &format!("is not a valid condition expression: {}", error.reason),
+                    ));
+                }
             }
         }
 
