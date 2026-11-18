@@ -11,11 +11,21 @@
 //! - 后端只依赖 `platform-core`（扩展点 trait）；
 //! - `platform-contracts` 只在测试里依赖（`[dev-dependencies]`）；
 //! - 模块**不依赖**平台的任何内部模块。
+//!
+//! REQ-006 起，模块的数据访问走 **`platform-db`**（租户作用域入口）：
+//!
+//! ```text
+//! platform-core ← platform-db ← modules/<name>/backend
+//! ```
+//!
+//! `platform-db` 只暴露**带租户上下文**的入口，拿不到裸连接 ——
+//! 所以业务模块绕不过租户条件。
 
 pub mod entity;
 pub mod permission;
 pub mod repository;
 pub mod service;
+pub mod tenant_repository;
 
 use anyhow::Result;
 use platform_core::extension::platform_module::{ModuleContext, PlatformModule};

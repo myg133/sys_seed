@@ -17,7 +17,13 @@ path = "backend/src/mod.rs"
 anyhow.workspace = true
 # 业务模块只依赖平台核心（扩展点 trait），不依赖平台内部模块
 platform-core.workspace = true
+# REQ-006：数据访问走 platform-db 的租户作用域入口（拿不到裸连接）
+platform-db.workspace = true
 
 [dev-dependencies]
 # 契约测试套件随平台分发：业务模块只依赖 platform-contracts 即可获得契约测试
 platform-contracts.workspace = true
+# 真实库集成测试（REQ-006 的 C-3 真实库层）需要直接准备测试库：
+# 建表、跑迁移、按 manifest 生成 RLS 策略。**仅测试用**，运行期依赖不受影响。
+sqlx.workspace = true
+tokio.workspace = true
