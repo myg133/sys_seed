@@ -428,7 +428,45 @@ pnpm test:e2e -- --grep "登录|权限"
 
 ---
 
-## 9. 磁盘控制
+## 8.5 机器重启后的恢复（踩过的坑）
+
+**2026-11-18 断电重启后实测**：git 仓库与 worktree 拓扑**完好无损**，
+但**两个后台进程都没了**，而且不会有任何提示 —— 只会在你下一次发消息时才发现。
+
+### 必须手动恢复的两样东西
+
+```bash
+cd /home/myg133/Projects/system_seed
+
+# 1) bus watcher —— 不恢复的话，bus 消息无人投递，认领/消息链路静默失效
+export XDG_RUNTIME_DIR=/run/user/$(id -u)
+python /home/myg133/.agents/skills/agent-workspace/scripts/aw.py watch --ensure --interval 5 --wake-dir .aw/wake
+# → WATCH_STARTED pid=...；用 aw.py watch --status 确认
+
+# 2) 数据库容器 —— podman 不会随机器重启自动拉起容器
+cd code && podman-compose -f compose.yaml up -d
+podman ps                       # 两个都应 Up (healthy)
+```
+
+### 各中断点的恢复成本
+
+| 东西 | 会不会丢 | 怎么恢复 | 代价 |
+|---|---|---|---|
+| git 仓库 / worktree / 分支 | **不会** | 无需恢复 | 0 |
+| 已提交的工作 | **不会** | 无需恢复 | 0 |
+| **未提交的工作** | **不会**（在文件里），但**执行它的 Agent 会死** | 重新派 Agent 接管，复核它的半成品 | 一次额外的上下文成本 |
+| podman 容器 | 停了 | `podman-compose up -d` | 几秒 |
+| bus watcher | 没了 | `aw.py watch --ensure` | 几秒 |
+| `~/.cargo` 缓存 | 不会 | 无需恢复 | 0 |
+
+### 经验
+
+- **子 Agent 的工作产物不会丢，但进程会死** —— 派 Agent 时让它**小步提交**，
+  这样重启后最多损失最后一步
+- 恢复后的第一件事是 `git status`：它会告诉你上一个 Agent 改到哪了
+- 重启前跑一次 `aw.py doctor`，能提前看出 watcher / 认领 / 队列的状态
+
+---
 
 用户明确要求：**不要把硬盘跑满**。当前 /home 可用 126G，预算如下。
 
