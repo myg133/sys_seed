@@ -198,7 +198,7 @@ SQL 条件写成 `{tenant} IS NOT NULL`（恒真）。对**没有 RLS、没有�
 
 | 注意 | 说明 |
 |---|---|
-| **写入不能只靠 `{tenant} IS NOT NULL`** | 对 INSERT 而言这个条件毫无约束力。平台级配置的**写入控制必须来自表级权限**（只授予平台管理角色）+ **权限点**（`config:platform:write`），**不是**靠 SQL 条件 |
+| **写入不能只靠 `{tenant} IS NOT NULL`** | 对 INSERT 而言这个条件毫无约束力。写入控制来自 **§2.1.1 的 `REVOKE` + `SECURITY DEFINER` 函数**（D56）+ 权限点 `config:platform:write`；**不是**靠 SQL 条件，也**不是**靠「只授予平台管理角色」——⚠️ 那个角色**在本仓不存在**（QA 复核时指出本行与 §2.1.1 自相矛盾） |
 | 伪租户值 `"platform"` **不能与真实租户 id 撞车** | ⚠️ 初版这里写「租户 id 是 UUID 形态所以不会撞」——**与真实夹具不符**：本仓夹具是 `tenant-a` / `tenant-b`，不是 UUID。必须有**保留值校验**：真实租户 id 为 `"platform"` 时读写都报错（或拒绝以其建租户），并有测试守着（D72） |
 
 ---
