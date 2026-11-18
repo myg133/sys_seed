@@ -6,6 +6,7 @@
     "contract_suite": "#[platform_module_contract] 自动生成 C-1~C-4 四项契约测试，勿自写重复的契约检查",
     "error_code_i18n": "@base/i18n 的 translate()/hasMessage() 提供错误码到文案映射，勿在后端拼中文句子",
     "hooks_toggle": "@base/hooks 的 createToggle() 提供通用布尔开关状态容器，勿另造状态容器",
+    "iam_auth": "platform-iam 提供 /api/iam/* 认证接口（本地账号 + JWT access / 不透明 refresh + Argon2id + TOTP）与 /.well-known/jwks.json；业务模块要鉴权请用这些接口，勿自造认证",
     "list_query": "ListQuery/SortSpec/FilterSpec 已定义游标分页（limit 默认 20、上限 200）与过滤算子白名单，勿自造分页参数",
     "manifest": "Manifest 解析与字段校验 + capabilities/schema/manifest.schema.json 已提供，勿手写 manifest 校验",
     "module_registry": "register_platform_module! + discover()/discover_enabled() 做编译期模块注册，勿自建插件或动态加载",

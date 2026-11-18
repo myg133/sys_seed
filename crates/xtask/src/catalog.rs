@@ -103,6 +103,10 @@ pub const ALREADY_PROVIDED: &[ProvidedCapability] = &[
         key: "hooks_toggle",
         summary: "@base/hooks 的 createToggle() 提供通用布尔开关状态容器，勿另造状态容器",
     },
+    ProvidedCapability {
+        key: "iam_auth",
+        summary: "platform-iam 提供 /api/iam/* 认证接口（本地账号 + JWT access / 不透明 refresh + Argon2id + TOTP）与 /.well-known/jwks.json；业务模块要鉴权请用这些接口，勿自造认证",
+    },
 ];
 
 /// 底座**尚未**提供的能力 —— 别当成已有，别照着不存在的 API 写代码。

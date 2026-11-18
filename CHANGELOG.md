@@ -4,6 +4,46 @@
 
 ## Unreleased
 
+### REQ-007 认证与账号体系
+
+- **新建 `crates/platform-iam`**（平台 crate；依赖方向仍是
+  `platform-core ← platform-db ← platform-iam ← platform-server`）：
+  - **密码**：Argon2id + **PHC 标准串**存储（算法自描述，换算法 / 调参数不改表结构），
+    参数可配；本地常见口令词库（本期不做完整 HIBP k-anonymity 接入）
+  - **混合令牌**：access token = **JWT**（15 分钟，自包含，带 `kid`）；
+    refresh token = **不透明随机串**（30 天，**只存 hash**，可立即撤销）
+  - **refresh 轮换 + 重放检测**：旧的立即作废；同一 family 的 refresh 被重复使用
+    → 判定泄露 → **整个 family 全部作废**（`TOKEN_REUSE_DETECTED`）
+  - **JWT 密钥只从环境注入**（不入库不入 Git），带 `kid` 支持**轮换宽限期**
+    （当前 + 上一把同时有效）；**JWKS 只暴露公钥**
+  - **TOTP MFA**：绑定 / 校验 / **防重放**（同一时间步不可复用）/ 10 个一次性恢复码；
+    **WebAuthn 只留接口不实现**
+  - **设备会话**：列表 / 踢下线 / 登出全端；**每个会话一个 refresh family**
+  - **所有会话与令牌绑定 `tenant_id`** —— A 租户的令牌不能用于 B 租户
+  - **改密码 / 离职撤销全部 refresh family**
+- **防账号枚举**（设计摘要 §5.1 / D6）：「账号不存在」与「密码错误」返回
+  **完全相同**的错误码与响应体（`INVALID_CREDENTIALS`），且**耗时接近** ——
+  账号不存在时也执行一次**假哈希校验**（同参数 Argon2id）并走**同样的数据库工作量**
+- **防密码重置枚举**（D7）：`/api/iam/password/forgot` 对「已注册」与「未注册」邮箱
+  返回**完全相同**的成功响应
+- **登录限流 + 账号锁定**：按 IP 的滑动窗口（DB 计数）+ 按账号的失败次数锁定
+- **新增第一个真实 HTTP 业务路由**：`/api/iam/*`（12 个接口）+ `/.well-known/jwks.json`；
+  同时落地**租户上下文中间件**（`X-Tenant-Id` → `RequestContext`）——
+  闭环 REQ-006 留下的 AC-S-012
+- **错误体符合契约 C6**：统一 RFC 9457 Problem Details；**`detail` 必须是英文 ASCII**
+  （面向用户的中文文案由前端 i18n 按 `code` 渲染）；密码策略不满足时
+  **`params` 指出具体违反哪条规则**
+- **幂等键**（契约 C8）：写操作支持 `Idempotency-Key`（UUID），24 小时内重复请求
+  返回首次结果；幂等记录**随租户维度存储**
+- **平台迁移新增 9 张 IAM 表**（`platform_iam_*`）：全部带 `tenant_id` + RLS 策略
+  （fail closed + `WITH CHECK`）；密码哈希与令牌**只存 hash**，TOTP secret **静态加密**
+- **`platform-db` 扩展**：`BindValue` 新增 `Timestamp` / `NullableText` /
+  `NullableTimestamp`（`timestamptz` ↔ `time::OffsetDateTime`，契约 C13）
+- **防假绿护栏**：真实库层缺 `DATABASE_URL_TEST` 时**判为失败**（不是「跳过」），
+  另有子进程护栏断言「缺环境变量 → 非零退出 + 输出不含『N passed』」
+- **依赖**：新增 `argon2` / `jsonwebtoken`（**`rust_crypto` 后端，不引 ring / aws-lc-rs**）/
+  `totp-rs` / `chacha20poly1305` / `p256` / `base64` / `sha2` / `rand`
+
 ### REQ-006 多租户与隔离
 
 - **租户隔离双保险**：应用层每次查询都带租户条件，数据库层用 PostgreSQL RLS 再兜一遍

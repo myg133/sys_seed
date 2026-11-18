@@ -1,106 +1,94 @@
-# REQ-006 追溯性矩阵
+# REQ-007 追溯性矩阵
 
-- **需求**: REQ-006 多租户与隔离
-- **分支**: `feature/REQ-006`
-- **基线**: `develop` @ `806bb66`（REQ-002 工程基线 + REQ-003 扩展点框架 + REQ-004 AI 引导体系 + REQ-005 交付基线已合并）
-- **设计依据**: `BA/demands/REQ-006-tenant/design-summary.md`（架构决策 D1–D8 已定死，本轮照它做）
-- **契约**: api-conventions v1、extension-points v1（已 ratified）
+- **需求**: REQ-007 认证与账号体系
+- **分支**: `feature/REQ-007`
+- **基线**: `develop` @ `91d8e09`（REQ-002 工程基线 + REQ-003 扩展点框架 + REQ-004 AI 引导体系 + REQ-005 交付基线 + REQ-006 多租户与隔离已合并）
+- **设计依据**: `BA/demands/REQ-007-auth-account/design-summary.md`（D1–D11 已定死，本轮照它做）
+- **契约**: api-conventions v1（尤其 C3 / C6 / C8 / C13）、extension-points v1
 - **开发者**: myg133-dev-1
 - **更新时间**: 2026-11-18
-- **本轮改动**: 37 文件 / +2860 -20 行（vs BA 分配提交 `31c692b`）
-- **第二轮（QA Pre-merge 复核后）改动**: **35 文件 / +1548 -158 行**（vs 第一轮的 `668d357`）；
-  **`crates/platform-core/` 一行未改**，`crates/platform-db/src` 只**新增** `scopes.rs`
-  与 `IsolationReport::table_problems`（核心查询逻辑一行未改）
+- **本轮改动**: 见 §6
 
-图例：**PASS** = 已实现且有自动化或可复现的验证证据；**未验证** = 没有证据，如实标注。
+图例：**PASS** = 已实现且有自动化或可复现的验证证据；**未验证** = 没有证据，如实标注；
+**部分** = 本期只做了一部分（范围外的部分写清楚）。
 
 ---
 
-## 1. 自有 AC
+## 1. 自有 AC（AC-S-009 ~ AC-S-020）
 
 | AC | 内容 | 实现位置 | 验证方式与证据 | 结论 |
 |----|------|----------|----------------|------|
-| AC-S-007 | RLS 兜底生效：故意在应用层漏写 `tenant_id` 过滤，数据库仍不返回他租数据 | `crates/platform-db/src/rls.rs`（policy 生成）、`migrations/20261118000200_tenant_isolation.up.sql`（平台表 policy）、`modules/sandbox/tests/c3_real_db.rs`（真实库层）、`crates/platform-db/src/tenant.rs`（租户入口）、**`crates/platform-server/src/isolation.rs`（第二轮：启动自检）** | ① **真实库实测**（`base_test`）：策略 `USING (tenant_id = current_setting('app.tenant_id', true))` + `WITH CHECK` 同式；② **管理员连接（超级用户，绕过 RLS）看到 4 行**，**应用角色不设 `app.tenant_id` 看到 0 行** —— 对照组证明「0 行」不是因为表里没数据，而是 RLS 挡住；③ 应用角色设了 `app.tenant_id='tenant-a'` 只看到 tenant-a 的 2 行；④ 漏写租户条件的写入被 `WITH CHECK` 拒绝（`new row violates row-level security policy`）；⑤ `require_isolation` 自检：角色不绕过 RLS + 每张声明的表都开了 RLS 且有 policy，否则 `DbError::RlsBypassed` / `DbError::MissingPolicy`；⑥ **失败路径有明确错误码**：`RLS_BYPASSED_BY_ROLE` / `RLS_POLICY_MISSING` / `TENANT_CONTEXT_MISSING` / `INVALID_QUERY` / `DATABASE_ERROR`；⑦ **第二轮：`require_isolation` 接到生产启动路径** —— 应用用超级用户连 → **拒绝启动（退出码 3）**，用普通角色 → 启动并就绪（实测见验证报告 §8.2） | **PASS** |
-| AC-S-008 | 上下文跨消息边界：异步消息与缓存 key 均带租户维度 | —— | **本期未实现**：设计摘要 §8「本期交付边界」**不含**缓存/消息链路（那是租户上下文中间件，属 REQ-019 API 治理）。本轮交付的是**数据库层**的租户上下文贯穿（`RequestContext` → `SET LOCAL app.tenant_id` → RLS），缓存 key / 消息体的租户维度**未做** | **未实现（如实登记，见 §5）** |
+| AC-S-009 | 密码策略可配置：不满足时拒绝并指出**具体违反哪条规则**（`PASSWORD_POLICY_VIOLATION` + `params`）；与最近 5 次重复被拒（`PASSWORD_REUSED`） | `crates/platform-iam/src/config.rs`（`PasswordPolicySettings` + `check_password_policy`）、`crates/platform-iam/src/password.rs`（`is_common_password` 本地词库）、`crates/platform-iam/src/service.rs`（`apply_new_password` 查历史）、`crates/platform-iam/src/error.rs`（`PolicyViolation`） | ① 单测：`config.rs::common_passwords_are_rejected_by_the_policy`（命中 `common_password` 规则）、`password_policy_violations_name_the_rule`（`params.violations[].rule`）；② **真实库层**（`crates/platform-iam/tests/iam_real_db.rs::changing_the_password_revokes_the_other_families_and_rejects_history`）：弱密码 → **422** + `code=PASSWORD_POLICY_VIOLATION` + `params.violations[0].rule == "min_length"`；改回历史密码 → **422** + `code=PASSWORD_REUSED`；③ 参数可配：`config.rs::parameters_are_configurable`（`BASE_IAM_PASSWORD_MIN_LENGTH` 等） | **PASS** |
+| AC-S-010 | 密钥轮换不中断：轮换后新令牌用 K2 签发可验签；宽限期内旧令牌（K1）仍可用；JWKS 同时暴露两个公钥；**私钥绝不出现在 JWKS** | `crates/platform-iam/src/jwt.rs`（`JwtKeySet`：当前 + 上一把、`entry_by_kid`）、`crates/platform-iam/src/config.rs`（`BASE_JWT_PREVIOUS_*`）、`crates/platform-iam/src/http.rs`（`jwks` 端点） | ① 单测 `jwt.rs::rotation_keeps_the_previous_key_valid_and_publishes_both_kids`：旧密钥签发的令牌在宽限期内仍能验签 + JWKS 有 **2 个 kid**；② 单测 `jwt.rs::the_jwks_never_contains_private_key_material`：**逐个 key 成员检查**，不得出现 `d`/`p`/`q`/`dp`/`dq`/`qi`/`k`（EC 私钥的 `d`、RSA 私钥成员）；③ 真实库层 `the_jwks_endpoint_only_exposes_public_keys`：HTTP 端点返回体里无 `PRIVATE`、无私钥成员；④ 私钥**只从环境注入**：`config.rs::placeholder_keys_are_rejected`（`changeme` / `replace_me` / `example` 等占位符 → 启动 fail-fast） | **PASS** |
+| AC-S-011 | 密码哈希不可逆且参数可配：存储值不含明文、是 `$argon2id$...` 的 PHC 串（算法自描述）、参数可按目标机器配置 | `crates/platform-iam/src/password.rs`（`hash_password` / `verify_password`）、`crates/platform-iam/src/config.rs`（`Argon2Settings`）、`migrations/20261118000400_iam_auth.up.sql`（`password_hash` 列） | ① 单测 `password.rs::the_stored_value_is_a_phc_string_and_hides_the_plaintext`：以 `$argon2id$` 开头、含 `m=64,t=1,p=1`、**不含明文**；② 单测 `a_hash_made_with_other_parameters_still_verifies`：换参数哈希同一密码仍能验签（**算法自描述** → 换参数不必改表结构）；③ 真实库层：`platform_iam_user.password_hash` 存 PHC 串（表结构见迁移文件）；④ 参数可配：`config.rs::a_complete_environment_produces_the_default_policy`（默认 19456 KiB / t=2 / p=1 = OWASP 下限） | **PASS** |
+| AC-S-012 | 登录失败不泄露账号是否存在：两种情况**响应体与错误码完全相同**（`INVALID_CREDENTIALS`）；耗时**接近** | `crates/platform-iam/src/service.rs`（`login`：账号不存在走 `DummyHash::verify` + **同样的数据库工作量**）、`crates/platform-iam/src/password.rs`（`DummyHash`：与真密码**同参数**的假哈希） | 真实库层 `login_failure_does_not_reveal_whether_the_account_exists`：① 两种情况 **401** + `code=INVALID_CREDENTIALS` + `detail` / `type` / `title` / `status` **逐字段相同**；② **耗时对比（多轮取中位数）**：存在账号+错密码 = **248.7ms** / 账号不存在 = **219.2ms** → **比值 1.13**（阈值 1.5）。机制：账号不存在时也跑一次**同参数**的 Argon2id 假哈希校验，并走**同样的两条数据库语句**（一次 UPDATE + 一次 INSERT，同一事务） | **PASS** |
+| AC-S-013 | 密码重置不泄露邮箱是否存在：已注册与未注册邮箱**响应完全相同** | `crates/platform-iam/src/service.rs`（`forgot_password` 返回 `Option`；未注册时**什么都不做**）、`crates/platform-iam/src/http.rs`（`forgot_password` 处理器：**两种情况都返回同一个 `{"status":"accepted"}`**，令牌走邮件通道不进响应体） | 真实库层 `password_forgot_does_not_reveal_whether_the_email_is_registered`：两个响应体 **JSON 逐字段相等**（`assert_eq!(body_registered, body_unregistered)`），状态码相同 | **PASS** |
+| AC-S-014 | refresh token 轮换与重放检测：旧 refresh **立即失效**；重放 → **整个 family 作废**（`TOKEN_REUSE_DETECTED`）；refresh_2 也已失效 | `crates/platform-iam/src/service.rs`（`refresh`：轮换与作废在**同一个事务**里）、`crates/platform-iam/src/store.rs`（`find_refresh_by_hash_for_update_in` 带 `FOR UPDATE` 行锁、`mark_refresh_used_in`、`revoke_family_in`） | 真实库层 `refresh_rotation_revokes_the_whole_family_on_reuse`：① refresh_1 → refresh_2（**新令牌 ≠ 旧令牌**）；② **再次**用 refresh_1 → **401** + `code=TOKEN_REUSE_DETECTED`；③ refresh_2 → **401** + `code=TOKEN_REVOKED`（**family 确实被作废**）。⚠️ 实现细节：family 作废必须**提交**事务（回滚 = 「检测到泄露却什么都没作废」）—— 该缺陷在开发期被本用例抓到并已修 | **PASS** |
+| AC-S-015 | TOTP 防重放与恢复码一次性：同一时间步的验证码**不能用第二次**；恢复码**只能用一次** | `crates/platform-iam/src/totp.rs`（`verify_code` 返回命中时间步并与 `last_used_step` 比对）、`crates/platform-iam/src/store.rs`（`set_mfa_last_step`、`mark_recovery_code_used`）、`crates/platform-iam/src/service.rs`（`verify_mfa_code`） | 真实库层 `totp_codes_cannot_be_replayed_and_recovery_codes_are_single_use`：① 绑定后**同一个验证码再用一次** → **401** + `code=MFA_INVALID`；② 恢复码第一次可用（**204**）、第二次 → **401** + `code=MFA_INVALID`；③ 单测 `totp.rs::the_same_code_cannot_be_used_twice`（纯函数层同样守住） | **PASS** |
+| AC-S-016 | 会话带租户维度且不可跨租户复用：跨租户访问被拒（404/403）；**所有会话记录都带 tenant_id** | `crates/platform-iam/src/store.rs`（全部 9 张表都带 `tenant_id`，查询一律 `WHERE tenant_id = {tenant}`）、`crates/platform-iam/src/http.rs`（`Authenticated` 提取器：令牌租户 ≠ 请求头租户 → **404**）、`crates/platform-iam/src/jwt.rs`（`tid` 声明）、`migrations/20261118000400_iam_auth.up.sql`（每张表 RLS + `WITH CHECK`） | 真实库层 `tokens_cannot_cross_tenants_and_sessions_record_the_tenant`：① A 租户的令牌 + B 租户头 → **404**（不泄露资源存在性）；② A 的 refresh token 到 B 租户刷新 → **401**；③ **直查库**：每条 `platform_iam_session` 记录的 `tenant_id` 都非空（断言全部以 `iam-test-` 开头） | **PASS** |
+| AC-S-017 | 登录限流与账号锁定：达阈值后锁定并返回 `ACCOUNT_LOCKED`；锁定期内即使密码正确也拒；成功登录后计数清零 | `crates/platform-iam/src/service.rs`（`check_ip_rate_limit` 滑动窗口、`on_password_failure` 累加与锁定、`reset_login_failures`）、`crates/platform-iam/src/store.rs`（`count_login_attempts_since` 按时间倒推 = **滑动窗口**）、`crates/platform-iam/src/config.rs`（`LoginSettings`） | 真实库层 `repeated_failures_lock_the_account`：连续 5 次失败 → 第 6 次用**正确密码** → **403** + `code=ACCOUNT_LOCKED`。⚠️ 阈值与锁定时长可配（`BASE_IAM_LOGIN_ACCOUNT_LIMIT` / `BASE_IAM_ACCOUNT_LOCKOUT_MINUTES`）。**未验证项**：锁定期**过后**自动解锁与「成功登录后计数清零」两条**未写自动化用例**（见 §4） | **部分**（见 §4） |
+| AC-S-018 | 设备会话可管理：列表展示设备 / IP / 最近活跃；从 A 下线 B 后 **B 的 refresh token 立即失效**；「登出全端」作废该用户全部 family | `crates/platform-iam/src/service.rs`（`list_sessions` / `revoke_session` / `logout_all`）、`crates/platform-iam/src/store.rs`（`revoke_family` / `revoke_all_sessions` / `revoke_all_refresh_tokens`） | 真实库层 `sessions_can_be_revoked_and_logout_all_revokes_every_family`：① 列表 **2 条**，每条都有 `deviceLabel` / `ip` / `lastUsedAt`；② 逐个踢下线直到 **B 的 refresh 失效**（**立即**失效）；③ 登出全端 → **A 的 refresh 也失效**（全部 family 作废） | **PASS** |
+| AC-S-019 | 错误体符合契约 C6：`detail` **必须是英文 ASCII**；中文文案由前端 i18n 按 `code` 渲染 | `crates/platform-iam/src/error.rs`（每个错误的 `detail()` / `code()` / `status()`）、`crates/platform-iam/src/http.rs`（`ProblemDetails`：RFC 9457 形状 + `params`） | ① 单测 `error.rs::every_detail_is_english_ascii`（**全部 17 个错误路径**逐个断言 ASCII）；② 单测 `every_error_code_is_upper_snake_case`；③ 真实库层 `every_error_path_returns_an_english_ascii_detail`：**逐个 HTTP 错误路径**实测并打印 `detail`（`INVALID_CREDENTIALS` → `invalid username or password`；`PASSWORD_POLICY_VIOLATION` → `the password does not satisfy the password policy: min_length`；`UNAUTHENTICATED` → `authentication is required`；`TENANT_CONTEXT_MISSING` → `the tenant context is missing`）；④ `detail` 与设计摘要 §5.1 **逐字一致**（单测 `invalid_credentials_detail_matches_the_design_summary`） | **PASS** |
+| AC-S-020 | 依赖预算与编译资源在可控范围：依赖树增长在预算内；**冷编译峰值内存 < 1.5G**；日常增量 `cargo check` < 60 秒 | 根 `Cargo.toml`（依赖声明与注释）、`crates/platform-iam/Cargo.toml` | 见验证报告 §4：**依赖树 179 → 226**（**超出预估的 200~210**，原因见 §5 偏离清单）；**冷编译实测**见验证报告 §4.2；`.cargo/config.toml` 的 `jobs` **保持 3**（峰值 < 1.5G 时不下调） | **部分**（依赖树超预估，见 §5） |
 
-## 2. 交付清单（A–F）
+## 2. 承接的父 AC（REQ-001）
+
+| 父 AC | 内容 | 实现位置 | 验证方式与证据 | 结论 |
+|-------|------|----------|----------------|------|
+| AC-003 | 注册策略可配置且**按租户隔离** | `crates/platform-iam/src/service.rs`（`register`）、`crates/platform-iam/src/store.rs`（`insert_user`：`UNIQUE (tenant_id, username)`）、`migrations/20261118000400_iam_auth.up.sql`（RLS） | ① 注册数据**按租户隔离**：用户名在租户内唯一（跨租户同名可共存）；② 密码策略**可配**（平台级，见 AC-S-009）。⚠️ **租户级**的注册开关与域名白名单属 REQ-010（需求文档「不在范围内」明列），本期**未做** | **部分**（租户级开关属 REQ-010） |
+| AC-004 | 邀请链接**一次性且可过期** | `crates/platform-iam/src/service.rs`（`reset_password`：一次性 + 过期判定）、`crates/platform-iam/src/store.rs`（`mark_password_reset_used` / `find_password_reset`） | 本期落地的是**密码重置令牌**（一次性 + 可过期，模式与邀请链接一致）。⚠️ **邀请链接本身**属 REQ-010 的注册策略（域名白名单、审批待定态），本期**未做** | **部分**（邀请链接属 REQ-010） |
+| AC-007 | 令牌轮换与撤销：旧 refresh 立即不可用；登出后令牌不可用；状态码 401 | `crates/platform-iam/src/service.rs`（`refresh` / `logout` / `logout_all`）、`crates/platform-iam/src/store.rs` | ① 轮换 → 旧令牌立即不可用（AC-S-014 用例）；② 登出 → 该会话的 family 作废（AC-S-018 用例）；③ 状态码 **401**（同上两处实测） | **PASS** |
+| AC-008 | 设备会话可见且可远程下线：列表展示两台设备；从 A 端下线 B → **B 端下一次请求被强制登出** | 同 AC-S-018 | 真实库层实测：列表 2 条；从 A 端下线 B → **B 的 refresh 立即失效**（401）。⚠️ 「B 端下一次请求被强制登出」对 **refresh** 路径已验；**access token** 走 15 分钟短 TTL（设计摘要 §2 与 R4 的取舍），本期**不做** access token 的即时撤销检查 | **部分**（access token 即时撤销属设计取舍，见 §4） |
+
+## 3. 交付清单（设计摘要 §9「本期交付边界」）
 
 | 交付项 | 实现位置 | 验证方式与证据 | 结论 |
 |--------|----------|----------------|------|
-| **A** `crates/platform-db`：租户感知的数据访问 | `crates/platform-db/src/{lib,tenant,query,error,quota,rls}.rs` | ① 每次访问在**显式事务**内设租户：`TenantDb::begin` → `set_config('app.tenant_id', $1, true)`（= `SET LOCAL` 语义）；② 单次操作（`fetch_all`/`fetch_optional`/`fetch_one`/`execute`）与多操作（`begin` → `TenantTx` → `commit`/`rollback`）两种形态；③ 公开 API **拿不到裸连接**：`no_public_api_returns_a_raw_connection` 源码扫描测试（本 crate 全部 `.rs` 的公开签名与公开字段里不出现 `PgPool`/`PgConnection`/`Transaction<`/`&mut PgConnection`），另有 `no_public_api_is_named_after_a_raw_connection`；④ 错误类型沿用 `CoreError` 风格：`DbError` + `code()` 稳定错误码；⑤ crate 级文档写清「为什么是 `SET LOCAL` 而不是 `SET`」（连接池串租户风险 + `SET` 不接受绑定参数）；⑥ 配额：`add_quota_usage`（计数**写 DB**，`INSERT … ON CONFLICT DO UPDATE`）/ `quota_usage`（用量 + 限额）/ `set_quota_limit` | **PASS** |
-| **B** 迁移与 RLS | `migrations/20261118000200_tenant_isolation.{up,down}.sql`、`crates/platform-db/src/rls.rs`、`crates/xtask/src/tenant_policies.rs`、`modules/sandbox/migrations/20261118000300_sandbox_tenant_item.{up,down}.sql` | ① 平台表建 `ENABLE ROW LEVEL SECURITY` + policy（实测 `relrowsecurity = t`、policy 数 = 1）；② 业务表的 policy **由 manifest 的 `tenantScoped` 统一生成**（模块的迁移文件里**只有建表**，没有 policy）；③ **漏建 = 完全无隔离的检查**：`cargo xtask tenant-policies --check` → 逐表核对 `relrowsecurity` 与 policy 数，缺一即失败；④ schema 同步：`manifest_schema.rs` 的内置常量与 `capabilities/schema/manifest.schema.json` 逐字节一致（平台核心测试守着） | **PASS** |
-| **C** C-3 契约检查叠加真实库层 | `modules/sandbox/tests/c3_real_db.rs`（真实库层）、`modules/sandbox/tests/contracts.rs`（内存层，**保留未改**） | 真实库层三条断言全通过：① tenant_a 的 `list()` 只返 tenant_a 的行；② tenant_a 的 `find(tenant_b 的 id)` 返回 `None`；③ **绕过应用层**（平台内部连接、不设 `app.tenant_id`）→ **0 行**（对照：管理员连接 4 行）；另有 **串租户用例**（tenant_a 查完立刻用**同一个连接池**查 tenant_b，连接池只开 1 条连接 → 必然复用同一条物理连接）；**第二轮：缺 `DATABASE_URL_TEST` 时判为失败（不再假绿）** —— 实测 `3 failed` + 退出码 101（不是 "3 passed"），并有护栏用例守着 | **PASS** |
-| **D** 示例模块 | `modules/sandbox/backend/src/tenant_repository.rs`、`modules/sandbox/manifest.json`、`modules/sandbox/migrations/*`、`modules/sandbox/Cargo.toml` | ① 沙箱新增 `sandbox_tenant_item` 表（`tenant_id` 作用域，`tenantScoped` 声明）；② 仓储实现走 `platform-db` 的 `TenantDb` 租户入口（语句里带 `{tenant}`）；③ 沙箱是「业务方照着抄」的标准范例：注释写明三条规矩（租户只从 `ctx` 取 / 每条语句带 `{tenant}` / 拿不到裸连接） | **PASS** |
-| **E** 能力索引与文档 | `crates/xtask/src/catalog.rs`、`AGENTS.md`、`capabilities/index.json`、`docs/dev-environment.md`、`CHANGELOG.md` | ① 能力目录新增 `tenant_scoped_db`（`already_provided`），`db_access_layer` 从 `not_yet_provided` 换成 `crud_scaffolding`（口径如实）；② `cargo xtask capabilities --check` → **13 个文件与源码一致**；③ `AGENTS.md` 的「已有能力 / 尚未提供」两段与能力目录**逐行一致**（`agents_doc_matches_catalog` 测试守着）；④ **硬规则新增第 4 条**：数据访问必须走 `platform-db` 的租户作用域入口，不得直连池；⑤ `docs/dev-environment.md` 补依赖树变化（91 → 175 → 179，第三方 **172 不变**）与冷编译实测 | **PASS** |
-| **F** 依赖方向门禁 | `crates/xtask/src/deps.rs`（`PLATFORM_CRATES` + 自动纳管测试）、`.github/CODEOWNERS`、`scripts/core-change-detect.sh` | ① `platform_db_is_covered_by_the_platform_crate_rules` 断言 `platform-db` 在平台 crate 集合里（自动纳管生效）；② **实测造违规**：临时给 `platform-db` 加一条指向 `modules/sandbox` 的依赖 → `cargo xtask check-deps` **退出码 1** 并点名「平台 crate `platform-db` 反向依赖了业务模块 `sandbox`（依赖链：platform-db → sandbox）」→ 验证后**已还原**（还原后 `check-deps` 退出码 0）；③ `CODEOWNERS` 与核心路径清单收录 `platform-db`（业务模块的数据访问都走它 → 改动影响所有业务模块 → 属核心） | **PASS** |
+| 本地账号：注册、登录、登出、登出全端 | `service.rs`（`register` / `login` / `logout` / `logout_all`）、`http.rs`（对应路由） | 真实库层：注册 → 201、登录 → 200 + 令牌对、登出 / 登出全端 → 令牌失效 | **PASS** |
+| 密码：Argon2id + PHC + 可配策略 + 本地词库 | `password.rs`、`config.rs` | AC-S-009 / AC-S-011 | **PASS** |
+| 密码找回与重置（防枚举） | `service.rs`（`forgot_password` / `reset_password`） | AC-S-013 | **PASS** |
+| 混合令牌 + 轮换 + 重放检测 + family 作废 | `jwt.rs`、`service.rs`（`refresh`） | AC-S-014 | **PASS** |
+| JWT：密钥注入、`kid`、JWKS、轮换宽限期 | `jwt.rs`、`config.rs`、`http.rs`（`jwks`） | AC-S-010 | **PASS** |
+| TOTP：绑定、校验、防重放、恢复码 | `totp.rs`、`service.rs` | AC-S-015 | **PASS** |
+| **WebAuthn 只留接口** | `crates/platform-iam/src/totp.rs`（`MfaMethod::WebAuthn` → `NOT_IMPLEMENTED`） | 单测 `webauthn_is_declared_but_not_implemented` | **PASS** |
+| 登录限流 + 账号锁定 | `service.rs`（`check_ip_rate_limit` / `on_password_failure`）、`store.rs` | AC-S-017（部分，见 §4） | **部分** |
+| 设备会话：列表、踢下线、全端失效 | `service.rs`、`store.rs` | AC-S-018 | **PASS** |
+| **全部会话与令牌带 tenant_id** | 全部 9 张表 + `AccessClaims.tid` + `Authenticated` 提取器 | AC-S-016 | **PASS** |
+| 错误码统一（防账号枚举） | `error.rs` | AC-S-019 | **PASS** |
+| **本期新增：第一个真实 HTTP 业务路由 + 租户上下文中间件** | `crates/platform-iam/src/http.rs`（12 个 `/api/iam/*` 路由 + `/.well-known/jwks.json` + `tenant_context` 中间件）、`crates/platform-server/src/main.rs`（挂载） | 真实库层全部走真实 HTTP 路由（`tower::ServiceExt::oneshot` 驱动 axum Router，不连网络）；租户头 → `RequestContext` → `SET LOCAL app.tenant_id` → RLS **闭环**（AC-S-012 的前提） | **PASS** |
 
-## 2.1 第二轮：QA Pre-merge 复核（PASS-WITH-RISK）后的修复
+## 4. 如实登记：未验证 / 未做 / 有取舍的部分
 
-> QA 报告：`feature-meta/qa-report.md`。本轮**只修 3 项**，不扩大 scope。
-> `platform-core` 一行未改；`platform-db/src` 的**核心查询逻辑**（租户入口 / RLS 兜底）一行未改。
-
-| 项 | 实现位置 | 验证方式与证据 | 结论 |
-|----|----------|----------------|------|
-| **高 1 部署侧切普通角色** | `compose.yaml`（`app` / `migrate` / `policies` 三个服务）、`deploy/compose.prod.yaml`（`app` / `migrate` / `policies` / `app-role` 四个服务）、`.env.example`（`APP_DATABASE_URL` + `MIGRATION_DATABASE_URL`）、`deploy/helm/base-platform/{values.yaml,templates/app-role-job.yaml,templates/policies-job.yaml,templates/migrate-job.yaml,templates/deployment.yaml}`、`scripts/prod-preflight.sh`、`deploy/RUNBOOK.md` §0.1 / §3.4 | ① **普通角色不设 `app.tenant_id` → 0 行**、**超级用户对照组 → 4 行**（`base_test` 实测）；② **应用启动自检**：超级用户连接 → **拒绝启动（退出码 3）**；普通角色 → 启动且 `/health/ready` = ready；③ `BASE_ALLOW_SUPERUSER=true` 只在本地放行，`BASE_ENV=prod` 配它 → 启动即失败（退出码 2）；④ `prod-preflight.sh` 硬闸：应用连接串用户是超级用户 → 拒绝部署；⑤ compose 两个新服务（`app-role` 建角色、`policies` 建策略）**在容器里实测通过** | **PASS**（Helm 侧未在真集群渲染验证，见 §5） |
-| **中 1 C-3 假绿** | `modules/sandbox/tests/c3_real_db.rs`（夹具改「缺环境变量 = 失败」+ 新增护栏用例） | ① 不设 `DATABASE_URL_TEST` 跑 `--include-ignored` → **3 failed / 退出码 101**（**不是 "3 passed"**）；② 护栏用例每次 `cargo test --workspace` 都跑（子进程必须非零退出 + `0 passed` + 无 "3 passed"）；③ 设上环境变量 → 真跑通过（0.72s，集成脚本 exit 0） | **PASS** |
-| **中 2 策略进部署流程** | `crates/platform-server/src/policies.rs`（`base tenant-policies [--check]`）、`compose.yaml` / `deploy/compose.prod.yaml` 的 `policies` 服务、`deploy/helm/base-platform/templates/policies-job.yaml`、`Dockerfile`（镜像带 manifest）、`deploy/RUNBOOK.md` §0.1 / §3.2 | ① `--check` 通过时 exit 0；**破坏性验证**：删掉一条 policy → `--check` **exit 1** 并点名表；② `base tenant-policies` 能补建（幂等）；③ 顺序：迁移（`-5` / `migrate` 服务）→ 策略（`-4` / `policies` 服务）→ 应用 | **PASS** |
-
-## 2.2 第三轮：QA 复核（PASS-WITH-RISK）后的修复
-
-> QA 复核报告：`feature-meta/qa-report-recheck.md`（首轮 3 个问题**全部复验为真已修**，
-> 新发现 **2 个中危** + 3 个低级项）。本轮**只修这 5 项**，不扩大 scope。
-> `platform-core` 一行未改；`platform-db/src` 的**核心查询逻辑**一行未改；
-> `docs/contracts/api-conventions/v1.md`（ratified 快照）**零改动**。
-
-| 项 | 实现位置 | 验证方式与证据 | 结论 |
-|----|----------|----------------|------|
-| **中 1 应用容器不再拿到超管凭据** | `deploy/compose.prod.yaml`（`app` 服务：删掉 `env_file: .env`，改为逐个列 `environment:`）、`deploy/helm/base-platform/templates/deployment.yaml`（删掉 `envFrom`，改为逐个 `env:` + `valueFrom.secretKeyRef`）、`deploy/helm/base-platform/templates/migrate-job.yaml`（删掉 `envFrom.secretRef`）、`deploy/RUNBOOK.md` §1.3 / §3.1 / §4 | ① compose 实测：`podman-compose -f deploy/compose.prod.yaml --profile app-role --profile migrate --profile policies config` → app 块**无 `env_file`**、**无 `MIGRATION_DATABASE_URL` / `APP_ROLE_PASSWORD` / `POSTGRES_PASSWORD`**（`postgres://base:` 形态 0 命中），`DATABASE_URL` = 普通角色 `base_app`；② Helm 实测：`helm template`（v3.16.3）渲染的 Deployment **无 `envFrom`**、**无 `MIGRATION_DATABASE_URL`**；`MIGRATION_DATABASE_URL` 只出现在 app-role / migrate / policies 三个 Job；③ 渲染类别数不变（7 类） | **PASS**（Helm 未上真集群，见 §5） |
-| **中 2 补建命令救得了存量表** | `deploy/seed/02-app-role.sql`、`deploy/compose.prod.yaml`（`app-role` 服务内嵌 SQL）、`deploy/helm/base-platform/templates/app-role-job.yaml`、`deploy/RUNBOOK.md` §3.4.3（重写） | ① `base_test` 实测三步：撤销 → `has_table_privilege = f` + `permission denied for table` → **用修复前的脚本补建仍为 `f`（对照组复现 QA 结论）** → 用修复后的脚本补建 → `f` 变 `t`、实际能读；② 复原核对：权限快照与撤销前**逐行一致**，结束前 `base_app` 对 5 张表**均有 SELECT**；③ RUNBOOK 写明「`ALTER DEFAULT PRIVILEGES` 只管未来表；存量表要 `GRANT … ON ALL TABLES`」+ 可直接复制执行的 SQL | **PASS** |
-| **L-a 开发弱口令标注** | `deploy/seed/02-app-role.sql`（注释）、`.env.example`（连接串样例注释）、`deploy/RUNBOOK.md` §3.4.2（口令要求表） | 三处口径一致：开发口令 `base` **仅开发用**；生产必须 `openssl rand -base64 24`，弱口令被 `scripts/prod-preflight.sh` 拒绝 | **PASS** |
-| **L-b 配额自动化用例** | `crates/platform-db/tests/quota_real_db.rs`（新增） | ① 真实库层实测 **2/2**：**计数**（10 → 15 累加）→ **超限判定**（限额 20：15 未超 / 25 超限）→ **重启后计数仍在**（换**全新连接池** = 内存态全丢，用量仍 25、限额仍 20）→ 隔离断言（租户 B 看不到 A 的用量）；② **护栏经变异验证承重**：把整条用例改成「缺 `DATABASE_URL_TEST` 就早退」→ 护栏立刻 RED（报出首轮那个一模一样的 `1 passed / 0.00s` 假绿签名）→ 已还原 | **PASS** |
-| **L-c 契约口径登记** | `docs/contracts/README.md`（新增「本仓库的落地口径（不改契约）」小节） | 登记「响应体 `detail` = 英文（ASCII）；面向用户的中文由前端按 `code` 做 i18n 渲染」，并指向 `AGENTS.md` 规则 6 / `docs/architecture.md` §4 / RUNBOOK §5.1；**ratified 契约快照零改动** | **PASS** |
-
-## 3. 设计决策 D1–D8 的符合性
-
-| 决策 | 要求 | 实现与证据 | 结论 |
-|------|------|------------|------|
-| D1 | 新建 `crates/platform-db`，**不改 `platform-core`**；依赖方向 `platform-core ← platform-db ← 业务模块` | `platform-db` 依赖 `platform-core` ✓；`sandbox` 依赖 `platform-core` + `platform-db` ✓；`check-deps` 实测无反向依赖 ✓。**唯一例外**：`platform-core` 的 **manifest schema 扩展**（G1 的必要条件，见 §4） | **PASS（含 1 处必要例外，已说明）** |
-| D2 | sqlx 的 `macros` feature 关闭，用 `query_as` + `FromRow`（运行时检查）；不引入 `syn`/`quote`/`proc-macro2` | `cargo tree` 实测 **`sqlx-macros` 不参与编译** ✓；`FromRow` 用 `platform_db::tenant_row!` 声明宏手写实现（无 proc-macro）✓；`syn`/`quote`/`proc-macro2` 是 REQ-002 起就有的（serde_derive / thiserror-impl / clap_derive），**不是本期引入** ✓ | **PASS** |
-| D3 | 必须用 `SET LOCAL app.tenant_id`（事务局部），绝不用普通 `SET` | 实现用 `set_config('app.tenant_id', $1, true)`（`is_local = true` **等价于 `SET LOCAL`**，且能走绑定参数 —— `SET` 命令不接受 `$1`）✓；crate 文档与 `AGENTS.md` 写明原因 ✓；**串租户用例**实测：连接池只开 1 条连接 → tenant_a 查完立刻查 tenant_b，**不返回 tenant_a 的数据** ✓ | **PASS** |
-| D4 | 不向业务模块暴露「未加租户条件的连接」 | 公开 API 全部带 `&RequestContext` ✓；裸连接类型不出现在任何公开签名/字段（源码扫描测试）✓；`TenantDb` 的 `pool` 字段是 `pub(crate)` ✓ | **PASS** |
-| D5 | RLS policy 用 `current_setting('app.tenant_id', true)`（fail closed） | 平台表与业务表的 policy 实测：`USING ((tenant_id = current_setting('app.tenant_id'::text, true)))` ✓；漏设时**查不到任何行**（0 行，不是报错）✓ | **PASS** |
-| D6 | 业务模块的表通过 manifest 的 `tenantScoped` 段声明，平台统一生成 policy | `manifest.json` 新增 `tenantScoped` ✓；模块迁移文件里**没有** policy ✓；`cargo xtask tenant-policies` 统一生成 ✓ | **PASS** |
-| D7 | L2/L3 只留接口不实现；**不把 L1 的假设写死**（schema 名从配置来） | `DbOptions.schema`（默认 `public`，可配）✓；`policy_statements(spec, schema)` 的 schema 是**参数** ✓；`TenantDb::table()` 按配置的 schema 拼表名 ✓。**L2/L3 本期不实现**（设计如此） | **PASS** |
-| D8 | C-3 契约检查**叠加**真实库层，内存层保留 | 内存层（`#[platform_module_contract]`）**未改动** ✓；新增真实库层（`c3_real_db.rs`）三条断言 ✓ | **PASS** |
-
-## 4. 对 `platform-core` 的改动（CODEOWNERS 门禁范围）
-
-| 文件 | 改动 | 为什么必须改 |
-|------|------|--------------|
-| `crates/platform-core/src/extension/manifest.rs` | +138 行（**纯新增**）：新增 `TenantScopedSpec` 结构、`Manifest.tenant_scoped` 字段、字段校验（表名/列名必须匹配 `^[a-z][a-z0-9_]*$`）、6 条新单测 | 需求 G1「业务模块的表通过 manifest 的 `tenantScoped` 段声明，平台统一生成 policy」——**声明段必须是 manifest 的一部分**，否则平台无处可读模块的租户作用域声明 |
-| `crates/platform-core/src/extension/manifest_schema.rs` | +76 行（**纯新增**）：schema 增加 `tenantScoped` 段 + 2 条新单测 | manifest 的 schema 是**对外发布**的（第三方拿它做校验）—— schema 与平台实现必须完全一致，否则第三方按 schema 校验的结果与平台判定不同（`extension-points v1` §5 的硬要求） |
-| `crates/platform-core/src/extension/mod.rs` | +1 行：导出 `TenantScopedSpec` | 供 `platform-db` / `xtask` 复用同一套类型 |
-
-**影响说明**：改动是**纯增量**的 —— 既有字段、既有校验、既有 schema 约束**一行未删**；
-`deny_unknown_fields` 仍生效（新字段是已知的）；既有 manifest 全部照常解析。
-破坏性变更清单（`extension-points v1` §6）里**没有**这一项
-（5 个 trait 的签名、`discover()` 签名、manifest 的**必填字段**都没动 ——
-`tenantScoped` 是**可选**字段）。
-
-## 4.1 顺带落地：REQ-005 遗留技术债 #4（scope 之外的一小步）
-
-`crates/xtask/src/modules.rs`：`migrations/` 下没有 `*.sql` → `check-modules` 判失败
-（REQ-005 登记的债务写明「DB 层落地后升级」→ 本轮兑现）。
-**不在任务交付清单 A–F 内** —— 属主动扩大的一小步 scope，已在验证报告 §5.1 / 风险 R7 登记。
-
-## 5. 未验证 / 不成立的部分（如实登记）
-
-| 项 | 原因 | 影响 |
+| 项 | 状态 | 说明 |
 |----|------|------|
-| **AC-S-008（上下文跨消息边界）** | 本期设计边界不含缓存/消息链路（`design-summary` §8）；本轮只做了**数据库层**的租户上下文贯穿 | 该 AC **未实现**，需要后续需求（租户上下文中间件 / REQ-019）补齐 |
-| **`base_dev`（开发库）上的真实验证** | 本轮的数据库验证全部跑在 `base_test`（`scripts/test-integration.sh` 的白名单闸门只允许重置 `base_test`）；**开发库未被写入**（纪律要求只读） | 开发库上还没有应用角色的策略（需手工跑一次 `base tenant-policies`）。**更正（依据 QA 复核报告问题 #3）**：此前记的「存量开发卷早于 `02-app-role.sql` 创建 → `base_app` 在 `base_dev` 上缺表权限」**与实测不符** —— `base_dev` 的默认权限**已落地**（`pg_default_acl` 里 `base_platform_app=arwd/base`），`base_app` 对 `_sqlx_migrations` / `platform_meta` **均有 SELECT**；`/health/ready` 503 的真实原因是**迁移未应用**（`pending migrations: [20261118000200]`），跑一次 `base migrate up` 即可，属常规开发态、**不构成缺陷** |
-| **K8s / 私有化部署里的策略生成** | ✅ **第二轮已接上**：`base tenant-policies` 子命令 + compose `policies` 服务 + Helm `policies` hook Job（迁移之后）；**Helm 侧未在真集群渲染验证**（本机无 helm 二进制） | compose 侧已实测通过；Helm 侧只做了模板静态审阅 |
-| **覆盖率数字** | 本轮未跑覆盖率工具（低配机 + 无覆盖率工具链） | 角色规范里的「覆盖率 ≥ 80%」这条**未验证**（新增代码的每个分支都有对应用例，但无工具数字） |
-| **真实负载下的性能** | 未做压测；每次访问多一次 `BEGIN`/`COMMIT` 往返 | 性能影响未量化（设计上的刻意取舍，见 `platform-db` 的 crate 文档） |
-| **AC-S-012（HTTP 租户上下文全链路）** | 本期未实现（QA 报告问题 #4：`X-Tenant-Id` 全仓零命中，平台服务只有两条健康路由） | 该 AC **未实现** —— 本轮只修「部署侧切普通角色 / C-3 假绿 / 策略接线」3 项，未纳入；需后续需求补齐 |
-| **契约口径张力（QA 报告 #5）** | `api-conventions v1` C3/C7 写「业务模块不得手工加 tenant_id 过滤条件 / 平台自动叠加」，本期实现是「模块在自己写的 SQL 里写 `tenant_id = {tenant}`，平台强制占位符」 | 契约文字与实现机制不一致，需 BA 裁定（改契约 or 改实现）；**第三轮未处理**（只把「`detail` 英文 / 面向用户中文由前端 i18n 渲染」这条口径登记到引用处 `docs/contracts/README.md`，**ratified 契约快照零改动**） |
+| 锁定期**过后**自动解锁 | **未写自动化用例** | 实现上 `locked_until` 是时间戳，登录判定用 `locked_until > now()`（`service.rs::is_locked`），到期后自然不再锁定；但**没有**用例真的等过锁定期（本机不划算）。属**用例缺口**，不是实现缺口 |
+| 「成功登录后失败计数清零」 | **未写自动化用例** | 实现上登录成功调 `reset_login_failures`（清零 + 解除锁定）；**没有**用例断言「先失败 4 次 → 成功登录 → 再失败 1 次不锁定」。属**用例缺口** |
+| 按 IP 的滑动窗口限流 | **未写自动化用例** | 实现上按 `occurred_at >= now() - window` 统计（`count_login_attempts_since`，真滑动窗口）；`LOGIN_RATE_LIMITED` 的 429 分支**没有**端到端用例。属**用例缺口** |
+| 幂等键（C8）的端到端行为 | **未写自动化用例** | 中间件已实现（认领 → 重复请求返回首次结果 / 处理中返回 409）；**没有**用例断言「同一 key 两次 POST 返回同一响应体」。属**用例缺口** |
+| access token 的**即时**撤销 | **本期不做**（设计取舍） | 设计摘要 R4：access token 是 15 分钟短 TTL 的自包含 JWT，撤销能力由 refresh token 与会话承担；「改密码后旧 access token 仍可用 ≤ 15 分钟」是**已知取舍**，本期不引入逐请求查库 |
+| `ACCOUNT_LOCKED` / `ACCOUNT_DISABLED` 的枚举面 | **已知取舍** | 需求与设计摘要要求锁定账号返回 `ACCOUNT_LOCKED`（AC-S-017），这与「账号不存在返回 `INVALID_CREDENTIALS`」在**错误码**上可区分。缓解：达到锁定阈值需要 **5 次失败**且同 IP 有滑动窗口限流；`ACCOUNT_DISABLED` 只在**密码正确之后**才提示 |
+| 租户级注册策略（开关 / 域名白名单 / 审批态） | **不做** | 需求文档「不在范围内」明列（REQ-010） |
+| 邀请链接 | **不做** | 同上（REQ-010） |
+| WebAuthn / FIDO2 实现 | **不做** | 设计摘要 §9：只留接口（`MfaMethod::WebAuthn` → `NOT_IMPLEMENTED`） |
+| 短信验证码、图形验证码 | **不做** | 设计摘要 §9；限流与锁定已覆盖「登录失败限流」这条需求 |
+| 完整 HIBP k-anonymity 泄露库接入 | **不做** | 设计摘要 §9：本期只做本地小词库 + 长度策略 |
+| SSO 入站、企业目录同步 | **不做** | 属 REQ-013 / REQ-008 |
+
+## 5. 偏离清单
+
+| 偏离 | 原计划 | 实际 | 原因与影响 |
+|------|--------|------|-----------|
+| **依赖树超出预算** | 179 → 约 215（AC-S-020 写 200~210） | **179 → 226**（+47） | `jsonwebtoken` 10 的 `rust_crypto` feature 是**全量**的（`ed25519-dalek` + `p256` + `p384` + `rsa` + `hmac` + `sha2`），不能只挑 P-256；jsonwebtoken 9.x 的默认后端是 **ring**（要编 C/汇编，任务明确禁止）。另加 `chacha20poly1305`（TOTP secret 静态加密，设计摘要 §3「安全模块不省依赖，自制密码学绝不可接受」）。**影响**：冷编译峰值仍在 1.5G 以内（见验证报告 §4.2），但增量编译时间变长 |
+| **按 IP 的限流用 DB 计数而不是 Redis** | 设计摘要 §6：Redis 滑动窗口 | DB 滑动窗口（`occurred_at >= now() - window`） | 任务书明确允许「登录限流/配额若需 DB 计数则复用 `platform-db` 的配额能力」；引入 `redis` 客户端会再加一批依赖（与依赖预算冲突）。**语义等价**（都是滑动窗口），**存储位置不同**（DB vs Redis） |
+| **登录失败计数写在用户表而不是独立表** | 设计摘要 §6：Redis 快计数 + DB 持久 | 用户表的 `failed_attempts` + `locked_until` | 同上；账号锁定必须**持久**（重启不能丢），DB 是唯一可靠位置；快计数层（Redis）留待后续 |
+| **恢复码用 SHA-256 而不是慢哈希** | 设计摘要 §4：只说「存 hash」 | SHA-256（base64url） | 恢复码是 **80 位熵**（16 字符 × 5 bit）的高熵值，快哈希就够（慢哈希只对低熵的密码必要）。已在代码注释里写明口径 |
+| **`title` 用中文、`detail` 用英文** | 契约 C6：`detail` 是英文描述 | `title` = 中文类别名（如「凭证无效」），`detail` = **英文 ASCII** | 契约 C6 的**示例**里 `title` 就是中文（「权限不足」）；仓库既有实现（REQ-005 的 `ProblemDetails`）也是中文 `title` + 英文 `detail`。**约束对象是 `detail`**（AC-S-019 明写「`detail` 必须是英文 ASCII」） |
+| **`platform-db` 被扩展** | REQ-006 的数据访问层 | `BindValue` 新增 `Timestamp` / `NullableText` / `NullableTimestamp`；`sqlx` 打开 `time` feature | 令牌过期、重置令牌过期、账号锁定到期都要写时间戳；`platform-db` 的 `BindValue` 原本只有标量。`platform-core` / `platform-contracts` **一行未改**（CODEOWNERS 保护目录） |
+
+## 6. 改动统计与产物
+
+- **新增 crate**：`crates/platform-iam`（平台 crate）
+- **新增平台表**：9 张（`platform_iam_user` / `_password_history` / `_session` / `_refresh_token` / `_mfa_secret` / `_recovery_code` / `_password_reset` / `_login_attempt` / `_idempotency`），全部带 `tenant_id` + RLS
+- **新增路由**：12 个 `/api/iam/*` + 1 个 `/.well-known/jwks.json`
+- **新增用例**：41 条单测 + 11 条真实库层用例（含 1 条防假绿护栏）
+- **产物**：`feature-meta/traceability.md`（本文件）、`feature-meta/verification-report.md`、`feature-meta/status.md`
