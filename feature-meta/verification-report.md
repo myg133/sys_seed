@@ -7,7 +7,7 @@
 - **契约**: api-conventions v1、extension-points v1（已 ratified）
 - **开发者**: myg133-dev-1
 - **日期**: 2026-11-18
-- **轮次**: 第一轮（开发完成 → 待验证）
+- **轮次**: 第二轮（QA Pre-merge 复核 PASS-WITH-RISK → 修 1 高 2 中，见 §8）
 
 ---
 
@@ -20,13 +20,13 @@
 | 新增第三方依赖 | **无**（`sqlx` 沿用 REQ-005 引入的 0.8，**不开 `macros` feature**；`cargo tree` 实测 `sqlx-macros` 不参与编译） |
 | 依赖树 | **175 → 179 个 crate**（工作区成员 6 → 7；**第三方 crate 172 个，+0**） |
 | 冷编译实测 | **63.7s / 66.0s**（两次）· 峰值内存 **925 MB / 940 MB** → **峰值 < 1.5G，`.cargo/config.toml` 的 `jobs` 保持 3** |
-| Rust 测试 | **172/172 通过**（REQ-005 基线 142 个全绿，**+30 只增不减**）；**8 个 ignored**：3 个是真实库用例（默认 `#[ignore]`，由集成脚本 `--include-ignored` 跑到，实测 3/3 通过）、5 个是文档里的 `ignore` 代码块（其中 2 个是本期新增） |
+| Rust 测试 | **172/172 通过**（REQ-005 基线 142 个全绿，**+30 只增不减**）；**8 个 ignored**：3 个是真实库用例（默认 `#[ignore]`，由集成脚本 `--include-ignored` 跑到，实测 3/3 通过）、5 个是文档里的 `ignore` 代码块（其中 2 个是本期新增）。**第二轮后为 182/182**（新增 10 条，见 §8.6） |
 | 前端测试 | **23/23**（`pnpm -r test`） |
 | E2E | **1/1**（`bun run test:e2e`，chromium） |
 | lint | `cargo fmt --all --check` ✅ / `cargo clippy --workspace --all-targets -- -D warnings` ✅ **0 告警** |
 | xtask 门禁 | `capabilities --check` ✅ 13 文件一致 / `check-deps` ✅ / `check-modules` ✅ / `tenant-policies --check` ✅ |
 | ★ 租户隔离三层 | **应用层 ✅ / RLS fail closed ✅ / 串租户 ✅**（实测数字见 §3） |
-| ★ 未验证 | 缓存/消息链路（AC-S-008，本期设计边界外）、**部署流程尚未接 `tenant-policies`**、覆盖率数字、真实负载性能 |
+| ★ 未验证 | 缓存/消息链路（AC-S-008，本期设计边界外）、覆盖率数字、真实负载性能。**第二轮已接上**：`tenant-policies` 进部署流程 + 应用连接切普通角色 + 启动自检（见 §8） |
 
 ---
 
@@ -257,3 +257,212 @@ REQ-005 的验证报告里登记过一条债务：「`migrations/` 占位即可�
    （平台核心自带测试比对内置常量与导出文件）。
 5. **部署流程的缺口（R2）**：`tenant-policies` 还没挂进 compose / Helm 的迁移流程 ——
    本期按「不扩大 scope」处理，请确认这个取舍可接受。
+
+---
+
+## 8. 第二轮：QA Pre-merge 复核（PASS-WITH-RISK）后的修复
+
+> QA 报告：`feature-meta/qa-report.md`（结论 **PASS-WITH-RISK**：核心实现复验为真，
+> 但**部署侧从未切到普通角色** → RLS 在部署里等于没开；另有两个中等问题）。
+> 本轮**只修这 3 项**，不扩大 scope；`platform-core` 一行未改，
+> `platform-db/src` 的**核心查询逻辑**（租户作用域入口、RLS 兜底）一行未改。
+
+### 8.1 高危 1 —— 部署侧切到普通角色（逐处对照）
+
+| 位置 | 改前 | 改后 |
+|---|---|---|
+| `compose.yaml`（开发） | 应用连接串 = 超级用户 `base`（无 app 服务） | 新增 `app` 服务 → `postgres://base_app:base@postgres:5432/base_dev`；`migrate` / `policies` **保持**超级用户；seed 挂载补上「只在数据卷首次创建时执行」的注释 |
+| `deploy/compose.prod.yaml` | `app` 服务走 `env_file` → 拿到超级用户 `DATABASE_URL` | `app` 服务显式 `DATABASE_URL: ${APP_DATABASE_URL:?}`（**普通角色**）；`migrate` / `policies` 用 `${MIGRATION_DATABASE_URL:?}`（超级用户）；**新增 `app-role` 服务**（幂等建角色 + GRANT） |
+| `.env.example` | 只有 `DATABASE_URL`（超级用户） | 拆成 `APP_DATABASE_URL`（普通角色）+ `MIGRATION_DATABASE_URL`（超级用户），补 `APP_ROLE_NAME` / `APP_ROLE_PASSWORD` / `BASE_ALLOW_SUPERUSER` / `BASE_MANIFEST_ROOT`，并写清「迁移用超级用户、应用用普通角色」 |
+| `deploy/helm/base-platform/values.yaml` | Secret 只有 `DATABASE_URL` | 新增 `appRole.name` / `appRole.passwordSecret` / `appRole.passwordKey` / `appRole.psqlImage`，`tenantPolicies.enabled`；Secret 增加 `MIGRATION_DATABASE_URL` 键 |
+| `deploy/helm/base-platform/templates/app-role-job.yaml` | **不存在** | **新建**：`pre-install,pre-upgrade` hook Job（weight `-10`，**先于**迁移）建应用角色 |
+| `deploy/helm/base-platform/templates/policies-job.yaml` | **不存在** | **新建**：`pre-install,pre-upgrade` hook Job（weight `-4`，**在**迁移之后）跑策略 |
+| `deploy/helm/base-platform/templates/migrate-job.yaml` | 用 `DATABASE_URL`（普通角色 → 没有 DDL 权限） | 改用 `MIGRATION_DATABASE_URL`（超级用户） |
+| `deploy/helm/base-platform/templates/deployment.yaml` | `DATABASE_URL`（普通角色） | 保持普通角色 + 注释说明「超级用户会绕过 RLS，应用会拒绝启动」 |
+| **`require_isolation` 生产调用点** | **无**（只在测试里被调） | **有**：`crates/platform-server/src/isolation.rs` → `serve()` 启动路径调用平台的 `require_isolation`；绕过 RLS → **拒绝启动（退出码 3）**；`BASE_ALLOW_SUPERUSER=true` 可临时放行（`BASE_ENV=prod` 时配它 → 启动即失败，退出码 2） |
+| `scripts/prod-preflight.sh` | 只校验 `DATABASE_URL` 存在 + 弱口令 | 改校验 `APP_DATABASE_URL` / `MIGRATION_DATABASE_URL`，并加**硬闸**：应用连接串的用户名**是超级用户就拒绝部署** |
+| `deploy/RUNBOOK.md` | 无角色相关章节 | 新增 **§0.1 发布链路四步**、**§3.4 应用角色与 RLS**（为什么 / 怎么建 / **角色缺失怎么补建** / 怎么验证 RLS 生效）、§3.1~3.2 流程、§4 Helm 三个 hook Job 顺序、§7 故障排查 |
+| `Dockerfile` | 镜像里没有 manifest | builder 阶段只摘 `modules/*/manifest.json` → `/app/modules/`；`BASE_MANIFEST_ROOT=/app` |
+
+**角色分工（落进文档与代码）**：
+
+| 角色 | 属性 | 用途 |
+|---|---|---|
+| `base`（`POSTGRES_USER`） | 超级用户 | 建库 / 迁移（DDL）/ 建 RLS 策略 |
+| `base_platform_app` | 组角色 NOLOGIN | 持有租户作用域表的权限 |
+| `base_app`（`APP_ROLE_NAME`） | **普通角色**（`rolsuper=f` / `rolbypassrls=f`） | **应用连接** |
+
+### 8.2 ★ 高危 1 实测（`base_test` 库）
+
+**① 普通角色不设 `app.tenant_id` → 0 行；超级用户对照组 → 4 行**
+
+```console
+$ podman exec base-postgres psql -U base_app -d base_test -c "select count(*) from sandbox_tenant_item;"
+ visible_rows
+--------------
+            0
+$ podman exec base-postgres psql -U base -d base_test -c "select count(*) from sandbox_tenant_item;"
+ visible_rows
+--------------
+            4
+$ podman exec base-postgres psql -U base_app -d base_test \
+    -c "begin; select set_config('app.tenant_id','tenant-a',true); select count(*), string_agg(distinct tenant_id,',') from sandbox_tenant_item; commit;"
+ visible_rows | tenants
+--------------+----------
+            2 | tenant-a
+```
+
+**② `require_isolation` 对超级用户连接 → 拒绝启动（退出码 3）**
+
+```console
+$ DATABASE_URL='postgres://base:base@127.0.0.1:5432/base_test' BASE_MIGRATIONS_DIR=./migrations ./target/debug/base serve
+✗ 租户隔离前提不成立，进程退出（fail-fast）：
+连接角色 `base` 绕过 RLS（超级用户或 BYPASSRLS）—— 租户隔离会 fail open，数据库层兜底完全失效，拒绝启动。
+应用连接必须用**普通角色**（base_platform_app 组的成员）；见 deploy/RUNBOOK.md「应用角色与 RLS」。
+仅本地开发可用 BASE_ALLOW_SUPERUSER=true 临时放行（生产严禁）。
+$ echo $?
+3
+```
+
+**③ 应用真的用普通角色起来了（`base_test`）**
+
+```console
+$ DATABASE_URL='postgres://base_app:base@127.0.0.1:5432/base_test' BASE_MIGRATIONS_DIR=./migrations ./target/debug/base serve
+ INFO base: 租户隔离前提自检通过：连接角色不绕过 RLS role=base_app
+ INFO base: 底座服务已启动 addr=0.0.0.0:18080 environment=dev
+$ curl -s http://127.0.0.1:18080/health/ready
+{"appliedMigrations":[20261118000100,20261118000200],"environment":"dev","status":"ready","traceId":"…","version":"0.1.0"}
+```
+
+**④ 逃生开关只对本地开发生效**
+
+```console
+$ BASE_ALLOW_SUPERUSER=true DATABASE_URL='postgres://base:base@…/base_test' ./target/debug/base serve
+ WARN base: BASE_ALLOW_SUPERUSER=true：放行了绕过 RLS 的连接角色 —— 租户隔离会 fail open（仅限本地开发） role=base
+$ BASE_ENV=prod BASE_ALLOW_SUPERUSER=true DATABASE_URL='postgres://base:base@…/base_test' ./target/debug/base serve
+✗ 配置校验失败，进程退出（fail-fast）：
+  - [CONFIG_FORBIDDEN_COMBINATION] BASE_ALLOW_SUPERUSER：生产环境禁止放行绕过 RLS 的角色（租户隔离会 fail open）
+$ echo $?
+2
+```
+
+### 8.3 中危 1 —— C-3 缺 `DATABASE_URL_TEST` 的假绿（已修）
+
+**做法 (a)：缺环境变量 → 测试失败**（不是「跳过」）。
+`modules/sandbox/tests/c3_real_db.rs` 的夹具改成「缺 `DATABASE_URL_TEST` 直接 panic」，
+不再「安静地返回 `None`」。
+
+```console
+$ env -u DATABASE_URL_TEST cargo test -p sandbox --test c3_real_db -- --include-ignored --test-threads=2
+---- c3_real_db_isolates_tenants stdout ----
+thread 'c3_real_db_isolates_tenants' panicked at modules/sandbox/tests/c3_real_db.rs:71:13:
+缺少 DATABASE_URL_TEST：真实库用例必须真的连库跑，不能静默跳过。
+  本地开发：先起库（bun run db:up），再跑 scripts/test-integration.sh。
+  库名必须恰好是 base_test（base_dev 是开发库，测试绝不能碰）。
+failures:
+    c3_real_db_isolates_tenants
+    tenant_context_does_not_leak_through_the_connection_pool
+    the_application_role_does_not_bypass_rls
+test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+$ echo $?
+101
+```
+
+→ **不再是 "3 passed"**，而是 **3 failed + 退出码 101**。（那 1 条 passed 是新增的
+防假绿护栏本身，它断言的正是「子进程必须非零退出」。）
+
+**护栏用例**（`missing_database_url_test_does_not_report_success`）：
+把自己这个测试二进制再拉起一个子进程（**去掉** `DATABASE_URL_TEST`、`--include-ignored`、
+`--skip` 掉自己），断言 ① 子进程退出码非 0 ② 输出含 `0 passed`（一个都没报通过）
+③ 输出不含 `3 passed`。这条护栏**每次** `cargo test --workspace` 都会跑。
+
+**真跑仍然通过**（有环境变量时）：
+
+```console
+$ bash scripts/test-integration.sh
+重置测试库：postgres://base:base@127.0.0.1:5432/base_test（库 base_test）
+test c3_real_db_isolates_tenants ... ok
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.72s
+容器数量比对通过：2 → 2（未新建容器）
+$ echo $?
+0
+```
+
+（0.72s = 真连库跑过，不是 0.00s 的空跑。）
+
+### 8.4 中危 2 —— `tenant-policies` 接进部署流程
+
+**① 交付二进制**：`base tenant-policies [--check]`（`crates/platform-server/src/policies.rs`）
+—— 镜像里没有 cargo，但策略必须能在部署期落地。它与 `cargo xtask tenant-policies`
+读**同一份** manifest（收集逻辑在 `platform-db::collect_scopes`，两边不会漂移）。
+
+**② compose**：`policies` 服务（`profiles: ['policies']`），在 `migrate` 之后手动跑；
+开发 compose 同样加了 `policies` 服务。
+
+**③ Helm**：`policies-job.yaml` —— `pre-upgrade,pre-install` hook Job，
+hook-weight `-4`（迁移是 `-5`，**迁移先跑**）。
+
+**④ 顺序**：迁移（建表）→ 策略（建 policy）→ 应用。RUNBOOK §0.1 写死这四步。
+
+**实测（`base_test`）**：
+
+```console
+$ DATABASE_URL='postgres://base:base@127.0.0.1:5432/base_test' BASE_MANIFEST_ROOT=. ./target/debug/base tenant-policies --check
+警告：当前连接角色 `base` 绕过 RLS（超级用户或 BYPASSRLS）…请用应用角色再自检一次。
+租户隔离前提校验通过：1 个模块声明的表都开了 RLS 且有策略
+$ echo $?   # 0
+
+# 破坏性验证：删掉一条 policy → --check 必须失败（exit 1）
+$ podman exec base-postgres psql -U base -d base_test -c "DROP POLICY sandbox_tenant_item_tenant_isolation ON public.sandbox_tenant_item;"
+$ DATABASE_URL='postgres://base:base@127.0.0.1:5432/base_test' BASE_MANIFEST_ROOT=. ./target/debug/base tenant-policies --check
+✗ 租户隔离前提不成立：
+  - table `sandbox_tenant_item` has no isolation policy
+$ echo $?   # 1
+
+# 补建
+$ DATABASE_URL='postgres://base:base@127.0.0.1:5432/base_test' BASE_MANIFEST_ROOT=. ./target/debug/base tenant-policies
+已为 1 个模块生成 RLS 策略：
+  ✓ sandbox：sandbox_tenant_item
+```
+
+### 8.5 回归
+
+| 检查 | 结果 |
+|---|---|
+| `cargo check --workspace --all-targets` | ✅ 通过 |
+| `cargo test --workspace -- --test-threads=2` | ✅ **182 passed / 0 failed / 8 ignored**（第一轮 172，**+10 只增不减**） |
+| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ **0 告警** |
+| `cargo fmt --all --check` | ✅ 通过 |
+| `bash scripts/test-integration.sh` | ✅ exit 0（容器数量 2 → 2） |
+| `podman-compose -f compose.yaml config` | ✅ 通过（`--profile migrate --profile policies --profile app` 也通过） |
+| `podman-compose -f deploy/compose.prod.yaml config` | ✅ 通过（三个 profile 都渲染正常） |
+| `cargo xtask tenant-policies --check` | ✅ 通过 |
+| `cargo xtask capabilities --check` / `check-deps` / `check-modules` | ✅ 全过 |
+| 依赖树 | ✅ **179 个 crate（与第一轮一致，第三方 +0）**；`cargo tree -i sqlx-macros` → `nothing to print` |
+| `pnpm -r test` | ✅ **23/23** |
+| `bun run test:e2e` | ✅ **1/1** |
+
+**新增的 10 条 Rust 用例**：`platform-db` 的 scope 收集 3 条 · `platform-server` 的隔离判定 3 条 ·
+`platform-server` 的配置（逃生开关 / 生产禁用）3 条 · C-3 防假绿护栏 1 条。
+
+### 8.6 本轮如实登记（不藏问题）
+
+1. **开发库 `base_dev` 的表权限缺口（存量卷）**：本机的 `base_dev` 数据卷**早于**
+   `deploy/seed/02-app-role.sql` 创建 → 脚本没在那里跑过 → `ALTER DEFAULT PRIVILEGES`
+   没落到 `base_dev` → `base_app` 对 `base_dev` 的表**没有权限**。
+   实测：应用用 `base_app` 连 `base_dev` **能启动**（`/health/live` → 200，启动自检通过），
+   但 `/health/ready` → 503 `MIGRATIONS_PENDING`（detail：`permission denied for table _sqlx_migrations`）。
+   **修法就是 §3.4.3 的补建命令**（对 `base_dev` 重跑角色脚本）；
+   **新建的卷没有这个问题**（initdb 时脚本就会跑）。
+   ⚠️ 本轮**没有**对 `base_dev` 执行任何写操作（纪律要求：只读查询）。
+2. **Helm Chart 未在真集群渲染验证**：本机**没有 helm 二进制**，
+   `app-role-job.yaml` / `policies-job.yaml` 只做了**模板静态审阅**
+   （hook-weight、Secret 键名、命令转义），**未** `helm template` / 未上真集群。
+   compose 侧的两个新步骤（`app-role` / `policies`）**已**在容器里实测通过。
+3. **镜像未构建**：本机内存不够，`Dockerfile` 的「摘 manifest 到 `/app/modules`」这一步
+   **未实跑**（逻辑是 4 行 shell，可用 `helm`/`docker build` 在 CI 复核）。
+4. **QA 报告的 #4（AC-S-012 未登记）、#5（契约口径）、#6（配额无自动化用例）、#7（契约滞后）、
+   #8（弱口令）** 本轮**未处理** —— #4/#5/#6/#7 超出本轮「修 3 项」的范围，
+   #8 的生产侧已由本轮的 `app-role` 步骤解决（口令由 `APP_ROLE_PASSWORD` 注入），
+   但 `deploy/seed/02-app-role.sql` 里**开发用的弱口令仍在**（开发环境专用）。
+5. **AC-S-008（缓存 / 消息链路的租户维度）** 仍然未实现（本期边界外）。

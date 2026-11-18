@@ -1,6 +1,6 @@
 # 交付基线运维手册（RUNBOOK）
 
-- **适用**: REQ-005 交付基线 —— 镜像、compose 私有化部署、Helm 部署、迁移、备份恢复
+- **适用**: REQ-005 交付基线 —— 镜像、compose 私有化部署、Helm 部署、迁移、备份恢复；REQ-006 多租户 —— 应用角色与 RLS、租户作用域策略
 - **基线**: `develop` @ `37a93c5`（REQ-002 / 003 / 004 已合并）
 - **契约**: `api-conventions v1`（探针与错误码）、`extension-points v1`
 - **更新时间**: 2026-11-18
@@ -17,6 +17,18 @@
 
 **同一套镜像、同一套配置**，靠环境变量切分 dev / staging / prod，不重新构建。
 
+### 0.1 发布链路的四个步骤（顺序不能换）
+
+| # | 步骤 | 做什么 | 用什么连接 | 漏了会怎样 |
+|---|---|---|---|---|
+| 1 | **应用角色** | 建普通角色（`base_app`）+ 组角色 `base_platform_app` | 超级用户 | 应用**连不上**（角色不存在） |
+| 2 | **迁移** | 建表（`base migrate up`） | 超级用户（要 DDL） | 表不存在 → 策略步骤失败 |
+| 3 | **策略** | 按 manifest 生成 RLS policy（`base tenant-policies`） | 超级用户（要表属主权限） | 租户作用域表**完全没有隔离** |
+| 4 | **应用** | 起服务 | **普通角色**（`base_app`） | 用超级用户起 → **直接拒绝启动**（退出码 3） |
+
+> 步骤 2 与 3 的顺序是硬约束：策略是对**已建好的表**做的，先建表再建策略。
+> 详见 §3.4「应用角色与 RLS」。
+
 ---
 
 ## 1. 配置外置（AC-S-005）
@@ -25,7 +37,9 @@
 
 | 变量 | 必填 | 默认值 | 说明 |
 |---|---|---|---|
-| `DATABASE_URL` | ✅ | — | 缺失则**启动即失败**（退出码 2，错误码 `CONFIG_MISSING_REQUIRED`） |
+| `DATABASE_URL` | ✅ | — | 缺失则**启动即失败**（退出码 2，错误码 `CONFIG_MISSING_REQUIRED`）。⚠️ **必须是普通角色的连接串** —— 超级用户会绕过 RLS，应用会**拒绝启动**（退出码 3，见 §3.4） |
+| `BASE_ALLOW_SUPERUSER` | | `false` | 是否放行「绕过 RLS 的角色」启动。**仅本地开发**用；`BASE_ENV=prod` 时配 `true` 直接**启动即失败**（`CONFIG_FORBIDDEN_COMBINATION`） |
+| `BASE_MANIFEST_ROOT` | | `.` | 租户作用域声明的根目录（其下是 `modules/<模块>/manifest.json`）；`base tenant-policies` 按它生成策略。镜像内 `/app` |
 | `REDIS_URL` | | — | 不配则不使用缓存 |
 | `HOST` | | `0.0.0.0` | 监听地址 |
 | `SERVER_PORT` | | `8080` | 监听端口 |
@@ -61,9 +75,22 @@ $ echo $?
 ```bash
 # K8s Secret 创建（Chart 只引用它）
 kubectl create secret generic base-platform-secret \
-  --from-literal=DATABASE_URL='postgres://base:***@postgres:5432/base' \
+  --from-literal=DATABASE_URL='postgres://base_app:***@postgres:5432/base' \
+  --from-literal=MIGRATION_DATABASE_URL='postgres://base:***@postgres:5432/base' \
+  --from-literal=APP_ROLE_PASSWORD='***' \
   --from-literal=REDIS_URL='redis://redis:6379'
 ```
+
+| 键 | 用途 | 必须是 |
+|---|---|---|
+| `DATABASE_URL` | **应用**连接 | **普通角色**（`base_app`）—— 超级用户会绕过 RLS，应用拒绝启动 |
+| `MIGRATION_DATABASE_URL` | 迁移 / 建策略连接 | **超级用户**（要 DDL 权限） |
+| `APP_ROLE_PASSWORD` | 应用角色口令 | 与 `DATABASE_URL` 里的口令一致 |
+| `REDIS_URL` | 缓存 | 可选 |
+
+> `APP_ROLE_PASSWORD` 与 `DATABASE_URL` 里的口令**必须一致**：`app-role` hook Job 用
+> `APP_ROLE_PASSWORD` 建角色，应用用 `DATABASE_URL` 连 —— 不一致就认证失败。
+> 两处都由运维在集群外填入，Chart 不生成 Secret。
 
 ---
 
@@ -155,20 +182,26 @@ runtime 阶段非 root 运行（uid 10001），只装 `ca-certificates`，时区
 
 ```bash
 cd deploy
-cp ../.env.example .env      # 编辑 .env：改 DATABASE_URL、BASE_ENV=prod
+cp ../.env.example .env      # 编辑 .env：改 APP_DATABASE_URL / MIGRATION_DATABASE_URL、BASE_ENV=prod
 
 # ⚠️ 生产口令**没有默认值**：POSTGRES_PASSWORD 必须显式注入，
 #    缺失时 compose 直接报错退出（弱口令另由 preflight 拒绝）。
 #    生成：openssl rand -base64 24
 #    .env 里至少要有：
 #      POSTGRES_PASSWORD=<随机口令>
+#      APP_ROLE_PASSWORD=<随机口令（与 APP_DATABASE_URL 里的一致）>
 #      POSTGRES_DB=base
-#      DATABASE_URL=postgres://base:<同一个口令>@postgres:5432/base   ← 库名必须与 POSTGRES_DB 一致
+#      APP_DATABASE_URL=postgres://base_app:<APP_ROLE_PASSWORD>@postgres:5432/base   ← **普通角色**
+#      MIGRATION_DATABASE_URL=postgres://base:<POSTGRES_PASSWORD>@postgres:5432/base ← 超级用户
+#    ⚠️ 口令含 / @ : # 等 URL 保留字符时必须百分号编码（%2F、%40 …）
 
 ../scripts/prod-preflight.sh   # 口令 / 库名 / 连接串前置校验，不通过就不许 up
 
-docker compose -f compose.prod.yaml up -d
-docker compose -f compose.prod.yaml --profile migrate run --rm migrate
+docker compose -f compose.prod.yaml up -d postgres redis
+docker compose -f compose.prod.yaml --profile app-role run --rm app-role   # ① 建应用角色
+docker compose -f compose.prod.yaml --profile migrate run --rm migrate     # ② 迁移（建表）
+docker compose -f compose.prod.yaml --profile policies run --rm policies   # ③ 策略（建 policy）
+docker compose -f compose.prod.yaml up -d --no-deps app                     # ④ 起应用
 docker compose -f compose.prod.yaml ps
 curl -fsS http://127.0.0.1:8080/health/ready
 ```
@@ -176,28 +209,35 @@ curl -fsS http://127.0.0.1:8080/health/ready
 > **交付给客户**：`compose.prod.yaml` + `.env` + `scripts/prod-preflight.sh`
 > 放在同一套目录里（脚本放同级 `scripts/` 子目录），命令改成 `./scripts/prod-preflight.sh`。
 
-> 迁移是**独立步骤**：`up -d` **不会**自动跑迁移（`migrate` 服务带 `profiles: ["migrate"]`）。
-> 必须先迁移、再滚 app —— 多副本并发迁移会冲突。
+> 迁移 / 策略是**独立步骤**：`up -d` **不会**自动跑它们（`migrate` / `policies` 服务带
+> `profiles: ["migrate"]` / `["policies"]`）。必须按 ①②③④ 的顺序手动跑 ——
+> 多副本并发迁移会冲突，而策略必须建在**已存在的表**上。
 
-**私有化 compose 的三个要点**：
+**私有化 compose 的四个要点**：
 
 | 项 | 规则 |
 |---|---|
 | `POSTGRES_PASSWORD` | **无默认值**。`${POSTGRES_PASSWORD:?...}` —— 缺失或为空时 compose 解析阶段就报错退出，不会静默用弱口令建库；弱口令（`base` / `postgres` / `password` …）由 `scripts/prod-preflight.sh` 拒绝 |
 | `POSTGRES_IMAGE` / `REDIS_IMAGE` | 默认**官方地址**（`docker.io/library/postgres:17-alpine` / `docker.io/library/redis:7-alpine`）。客户内网请指向自己的仓库：`POSTGRES_IMAGE=registry.internal/library/postgres:17-alpine`。国内加速是**开发环境**的事（仓库根 `compose.yaml` 才用 daocloud 前缀） |
-| 库名 | `POSTGRES_DB`（默认 `base`）必须与 `DATABASE_URL` 里的库名一致，否则应用连到不存在的库 —— `prod-preflight.sh` 会比对 |
+| 库名 | `POSTGRES_DB`（默认 `base`）必须与 `APP_DATABASE_URL` 里的库名一致，否则应用连到不存在的库 —— `prod-preflight.sh` 会比对 |
+| **角色** | `APP_DATABASE_URL` **必须用普通角色**。`prod-preflight.sh` 会比对连接串里的用户名与 `POSTGRES_USER`（默认 `base`）：**是超级用户就直接拒绝部署** |
 
 ### 3.2 发布流程（备份 → 迁移 → 滚动 → 健康检查 → 回滚）
 
 ```bash
 # 1. 备份（自动轮转，只留最近 5 份）
+#    备份 / 恢复是**管理操作**，要用**超级用户**连接
 DATABASE_URL='postgres://base:***@127.0.0.1:5432/base' ./scripts/backup.sh
 
 # 2. 拉新镜像
 docker compose -f deploy/compose.prod.yaml pull
 
-# 3. 迁移（失败就停在这里，不要滚 app）
+# 3. 迁移（失败就停在这里，不要往下走）
 docker compose -f deploy/compose.prod.yaml --profile migrate run --rm migrate
+
+# 3.5 租户作用域策略（**必须**在迁移之后；失败就停在这里）
+#     漏跑 = 租户作用域表完全没有隔离
+docker compose -f deploy/compose.prod.yaml --profile policies run --rm policies
 
 # 4. 滚动重启 app
 docker compose -f deploy/compose.prod.yaml up -d --no-deps app
@@ -209,6 +249,13 @@ curl -fsS http://127.0.0.1:8080/health/ready
 ./scripts/rollback.sh 0                       # 迁移回滚到版本 0
 TAG=0.1.0 docker compose -f deploy/compose.prod.yaml up -d --no-deps app
 ```
+
+> **策略步骤为什么单独一步**：业务模块的 RLS policy 由**平台**按 manifest 统一生成
+> （模块不手写 —— 手写迟早会漏，漏一张表 = 该表完全无隔离）。
+> 迁移只建表、不建 policy，所以策略必须**单独**跑，且必须**在迁移之后**。
+> 生产重放策略时**建议放在低峰期**：它对表加 `ACCESS EXCLUSIVE` 锁，
+> 并发读会短暂阻塞（不会读到「空表」，策略应用在一个事务里完成）。
+> 校验（不改库、失败即让部署失败）：`base tenant-policies --check`。
 
 ### 3.3 回滚迁移
 
@@ -226,6 +273,98 @@ MIGRATE_CMD="docker compose -f deploy/compose.prod.yaml --profile migrate run --
 
 不可逆迁移（没有配套 `down.sql`）会被**拒绝回滚**，脚本明确报错，不会做半截数据破坏。
 
+### 3.4 应用角色与 RLS（租户隔离的前提）
+
+#### 3.4.1 为什么应用必须用普通角色
+
+PostgreSQL 的 RLS（行级安全）对**超级用户**与带 `BYPASSRLS` 属性的角色**不生效**：
+
+| 连接角色 | RLS 是否生效 | 后果 |
+|---|---|---|
+| 超级用户（`base`，`rolsuper=t`） | ❌ 不生效 | 租户隔离 **fail open** —— 数据库层的兜底**完全失效** |
+| `BYPASSRLS` 角色 | ❌ 不生效 | 同上 |
+| **普通角色**（`base_app`，`rolsuper=f` / `rolbypassrls=f`） | ✅ 生效 | 不设 `app.tenant_id` → **0 行**（fail closed） |
+
+所以：**超级用户只用来建库、迁移、建策略；应用连接必须用普通角色。**
+
+> 这不是「建议」而是**强制**：应用启动时会自检连接角色，绕过 RLS 就**拒绝启动**
+> （退出码 3，见 §7.2）。`BASE_ALLOW_SUPERUSER=true` 只在本地开发用，
+> `BASE_ENV=prod` 时配它会直接**启动即失败**（退出码 2）。
+
+角色的分工：
+
+| 角色 | 属性 | 用途 |
+|---|---|---|
+| `base`（`POSTGRES_USER`） | 超级用户 | 建库、迁移（DDL）、建 RLS 策略 |
+| `base_platform_app` | 组角色，NOLOGIN | 持有各租户作用域表的权限 |
+| `base_app`（`APP_ROLE_NAME`） | 登录角色，**普通角色** | **应用连接**（组角色的成员） |
+
+#### 3.4.2 怎么建角色
+
+| 形态 | 命令 |
+|---|---|
+| 私有化 compose | `docker compose -f compose.prod.yaml --profile app-role run --rm app-role`（幂等，可重复跑） |
+| K8s / Helm | `app-role` hook Job 自动跑（`pre-install,pre-upgrade`，hook-weight `-10`，**先于**迁移） |
+| 开发环境（首次建卷时） | `deploy/seed/02-app-role.sql` 由 compose 挂到 `docker-entrypoint-initdb.d` 自动执行 |
+| **已有卷 / 角色缺失** | 见 §3.4.3 |
+
+#### 3.4.3 角色缺失时怎么补建（数据卷已存在的情况）
+
+⚠️ `deploy/seed/*.sql` **只在数据卷首次创建时执行**（PostgreSQL 官方镜像的
+`docker-entrypoint-initdb.d` 约定）。**已有卷的环境升级后不会重跑** —— 角色可能缺失，
+或者表权限（`ALTER DEFAULT PRIVILEGES`）没落到目标库上。
+
+补建命令（**幂等**，可重复执行）：
+
+```bash
+# 开发库（base_dev）：重跑角色脚本
+podman exec -i base-postgres psql -U base -d base_dev < deploy/seed/02-app-role.sql
+
+# 私有化生产库：重跑 app-role 步骤（用生产口令）
+docker compose -f deploy/compose.prod.yaml --profile app-role run --rm app-role
+
+# K8s：重新触发 hook（删掉旧 Job 再 upgrade）
+kubectl delete job base-platform-app-role -n base-platform
+helm upgrade base-platform deploy/helm/base-platform -n base-platform
+```
+
+> `02-app-role.sql` 里的口令是**开发用的弱口令**（`base`），生产上由 `app-role`
+> 步骤用 `APP_ROLE_PASSWORD` 建角色（见 §3.4.2）。
+
+**症状对照**：
+
+| 现象 | 原因 | 处置 |
+|---|---|---|
+| 应用启动报 `role "base_app" does not exist` | 角色没建 | 跑 §3.4.3 的补建命令 |
+| 应用连得上，但 `permission denied for table <表>` | 角色存在但**没表权限**（`ALTER DEFAULT PRIVILEGES` 没落到这个库） | 同上：重跑角色脚本 / app-role 步骤（`ALTER DEFAULT PRIVILEGES` 是**按库**生效的） |
+| readiness 503 + `MIGRATIONS_PENDING`（detail 是 `permission denied for table _sqlx_migrations`） | 同上 | 同上 |
+
+#### 3.4.4 怎么确认 RLS 真的生效
+
+```bash
+# 1. 角色属性：应用角色必须不是超管、没有 BYPASSRLS
+podman exec base-postgres psql -U base -d base -c \
+  "select rolname, rolsuper, rolbypassrls from pg_roles where rolname in ('base','base_app','base_platform_app');"
+# 期望：base|t|t ；base_app|f|f ；base_platform_app|f|f
+
+# 2. 表确实开了 RLS 且有 policy
+podman exec base-postgres psql -U base -d base -c \
+  "select c.relname, c.relrowsecurity, (select count(*) from pg_policy p where p.polrelid=c.oid) as policies
+     from pg_class c join pg_namespace n on n.oid=c.relnamespace
+    where n.nspname='public' and c.relkind='r' and c.relrowsecurity;"
+
+# 3. 策略齐全（平台统一校验；失败即非 0）
+base tenant-policies --check        # 交付二进制
+cargo xtask tenant-policies --check # 开发期
+
+# 4. 行为验证：不设 app.tenant_id，普通角色 0 行；超级用户能看到行（对照组）
+podman exec base-postgres psql -U base_app -d base -c "select count(*) from <租户作用域表>;"  # 期望 0
+podman exec base-postgres psql -U base     -d base -c "select count(*) from <租户作用域表>;"  # 对照组：> 0
+```
+
+> 第 4 步的对照组很关键：普通角色看到 0 行，必须**同时**确认超级用户能看到行 ——
+> 否则「0 行」可能只是因为表里没数据。
+
 ---
 
 ## 4. 云上部署（K8s / Helm）
@@ -233,10 +372,12 @@ MIGRATE_CMD="docker compose -f deploy/compose.prod.yaml --profile migrate run --
 ```bash
 # 1. Secret（Chart 只引用，不生成）
 kubectl create secret generic base-platform-secret \
-  --from-literal=DATABASE_URL='postgres://base:***@postgres:5432/base' \
+  --from-literal=DATABASE_URL='postgres://base_app:***@postgres:5432/base' \
+  --from-literal=MIGRATION_DATABASE_URL='postgres://base:***@postgres:5432/base' \
+  --from-literal=APP_ROLE_PASSWORD='***' \
   --from-literal=REDIS_URL='redis://redis:6379'
 
-# 2. 安装（迁移 Job 作为 pre-install / pre-upgrade hook 自动跑）
+# 2. 安装（hook Job 自动跑：应用角色 → 迁移 → 租户作用域策略）
 helm upgrade --install base-platform deploy/helm/base-platform \
   --namespace base-platform --create-namespace \
   --set image.repository=registry.internal/base-platform \
@@ -246,21 +387,35 @@ helm upgrade --install base-platform deploy/helm/base-platform \
 
 # 3. 看结果
 kubectl rollout status deployment/base-platform -n base-platform
+kubectl get job base-platform-app-role -n base-platform
 kubectl get job base-platform-migrate -n base-platform
+kubectl get job base-platform-policies -n base-platform
 
 # 4. 回滚（Helm 自带）
 helm rollback base-platform <revision> -n base-platform
 ```
 
+**三个 hook Job 的顺序**（`helm.sh/hook-weight` 决定，数字小的先跑）：
+
+| Job | hook-weight | 做什么 | 用什么连接 |
+|---|---|---|---|
+| `base-platform-app-role` | `-10` | 建应用角色（普通角色）+ 组角色 | 超级用户（`MIGRATION_DATABASE_URL`） |
+| `base-platform-migrate` | `-5` | 建表 | 超级用户 |
+| `base-platform-policies` | `-4` | 按 manifest 生成 RLS policy | 超级用户 |
+
+> **策略 Job 必须在迁移之后**（`-4` > `-5`）：策略是对已建好的表做的。
+> 应用（Deployment）用 `DATABASE_URL` = **普通角色**连接；超级用户连接串只出现在
+> 这三个 Job 里。
+
 模板渲染自检（本机无 helm 时用）：
 
 ```bash
 helm template base-platform deploy/helm/base-platform | grep -E '^kind:'
-# 默认渲染 5 类：ServiceAccount / ConfigMap / Service / Deployment / Job
+# 默认渲染 7 类：ServiceAccount / ConfigMap / Service / Deployment / Job(app-role) / Job(migrate) / Job(policies)
 # **不含 Ingress** —— values.yaml 里 ingress.enabled 默认 false
 
 helm template base-platform deploy/helm/base-platform --set ingress.enabled=true | grep -E '^kind:'
-# 加 --set ingress.enabled=true 后才有 6 类：上面 5 类 + Ingress
+# 加 --set ingress.enabled=true 后才有 8 类：上面 7 类 + Ingress
 ```
 
 > `ingress.enabled` 默认 **false**（Chart 默认不接管入口，暴露方式由集群决定）。
@@ -422,7 +577,7 @@ DATABASE_URL='postgres://base:***@127.0.0.1:5432/base' ./scripts/backup.sh
 
 ## 7. 故障排查
 
-### 7.1 迁移失败
+### 7.1 迁移 / 策略步骤失败
 
 ```bash
 # 看当前状态
@@ -435,6 +590,9 @@ DATABASE_URL='postgres://base:***@127.0.0.1:5432/base' cargo run -p platform-ser
 | 报 `目标版本 N 之上存在不可逆迁移` | 该迁移没有 `down.sql` | 不可逆迁移按「加列 → 双写 → 切读 → 删列」四步拆版本发布，别硬回滚 |
 | 报 `数据库访问失败：...` | 连接失败 | `podman exec base-postgres psql -U base -d base -c 'select 1'` 验证 |
 | `dirty` 状态（`MIGRATION_DIRTY`） | 迁移执行到一半失败 | 手工修完后 `UPDATE _sqlx_migrations SET success = true WHERE version = <版本>`，再重跑 |
+| 策略步骤报 `must be owner of table` | 用了**应用角色**跑策略 | 策略要用**超级用户**连接（`MIGRATION_DATABASE_URL`） |
+| 策略步骤报 `relation "xxx" does not exist` | **没先跑迁移**（策略是对已建好的表做的） | 先跑迁移，再跑策略 |
+| 策略步骤报 `租户隔离前提不成立：table ... has no isolation policy` | 校验模式发现漏建的表 | 跑 `base tenant-policies`（不带 `--check`）补建 |
 
 ### 7.2 容器起不来
 
@@ -448,6 +606,8 @@ docker compose -f deploy/compose.prod.yaml logs app
 |---|---|---|
 | 退出码 2，日志有 `CONFIG_MISSING_REQUIRED` | 缺 `DATABASE_URL` | 补配置（compose 检查 `env_file` 路径、K8s 检查 Secret 里的键名） |
 | 退出码 2，`CONFIG_INVALID_VALUE` | 环境变量取值非法 | 按 §1.1 的取值范围改 |
+| **退出码 3，日志有「租户隔离前提不成立」** | **连接角色绕过 RLS**（用了超级用户 / BYPASSRLS 角色） | **把 `DATABASE_URL` 换成普通角色**（`base_app`）—— 见 §3.4.1；本地开发临时可用 `BASE_ALLOW_SUPERUSER=true` |
+| 退出码 2，`CONFIG_FORBIDDEN_COMBINATION` + `BASE_ALLOW_SUPERUSER` | 生产环境开了逃生开关 | 去掉它，改用普通角色连接 |
 | `监听 0.0.0.0:8080 失败` | 端口被占 | `ss -ltnp | grep 8080` 找占用进程 |
 | 镜像拉不到 | 国内直连 docker.io 超时 | 用 `--build-arg`/环境变量换镜像源（见 §2.1） |
 

@@ -34,6 +34,21 @@
 - **应用角色是 RLS 的前提**：超级用户与 `BYPASSRLS` 角色会**绕过 RLS**
   （租户隔离 fail open）—— 新增 `deploy/seed/02-app-role.sql`，
   应用连接必须用普通角色（组 `base_platform_app` 的成员）
+- **部署侧切到普通角色**（QA Pre-merge 复核后的修复）：
+  - **角色分工写清楚**：`POSTGRES_USER`（超级用户）只用来建库 / 迁移 / 建策略；
+    **应用连接串一律用普通角色**（`APP_DATABASE_URL`）；迁移 / 策略用 `MIGRATION_DATABASE_URL`
+  - 开发 compose、私有化 compose、Helm Chart、`.env.example` 全部改成普通角色连接；
+    生产新增 `app-role` 步骤（幂等）建角色 —— 生产库不挂 `deploy/seed`（弱口令）
+  - **应用启动自检连接角色**：绕过 RLS 就**拒绝启动**（退出码 3）；
+    `BASE_ALLOW_SUPERUSER=true` 只在本地开发用（生产环境配它直接启动失败）
+  - `prod-preflight.sh` 增加硬闸：应用连接串的用户名**是超级用户就直接拒绝部署**
+- **部署流程跑租户作用域策略**：新增 `base tenant-policies`（交付二进制，
+  镜像里没有 cargo 也能按 manifest 生成 RLS 策略）；compose 加 `policies` 服务，
+  Helm 加 `policies` hook Job（**排在迁移之后**）—— 漏跑这一步 = 租户作用域表
+  **完全没有隔离**
+- **C-3 真实库层不再假绿**：缺 `DATABASE_URL_TEST` 时**判为失败**（不是「跳过」）
+  —— 以前「安静地跳过」会让框架报 "3 passed"，断言一条没跑却被当成通过；
+  新增护栏用例：缺环境变量时子进程**必须非零退出**且不得报 "3 passed"
 - **沙箱模块升级为标准范例**：新增 `tenant_id` 作用域表（`tenantScoped` 声明）
   与走 `platform-db` 租户入口的仓储实现
 - **能力索引与门禁**：能力目录新增 `tenant_scoped_db`；

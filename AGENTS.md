@@ -47,7 +47,9 @@ docs/contracts/              契约正文快照（**勿手改**，正本在 BA �
    **不得直连连接池、不得自己建连接池、不得绕过 `{tenant}` 占位符** ——
    `platform-db` 的公开 API 拿不到裸连接，就是为了让这件事在编译期做不到。
    租户作用域表在 `manifest.json` 的 `tenantScoped` 段声明，
-   **RLS 策略由平台统一生成**（`cargo xtask tenant-policies`），模块不手写 policy。
+   **RLS 策略由平台统一生成**（开发期 `cargo xtask tenant-policies`，
+   部署期 `base tenant-policies` —— 镜像里没有 cargo，但策略必须能落地），
+   模块不手写 policy。
 5. **权限点必须在 `manifest.json` 声明**，不要硬编码角色名；
    编码固定为 `module:resource:action`（`api-conventions v1` C4）。
 6. **错误响应只返回错误码 + 参数**，不要拼面向用户的中文句子

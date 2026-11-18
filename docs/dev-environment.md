@@ -262,11 +262,18 @@ CI 在境外，直接用官方地址 `postgres:17-alpine`，不需要国内镜�
 | `base_app` | 登录角色（开发环境）：`base_app` 是 `base_platform_app` 的成员 |
 
 初始化：`deploy/seed/02-app-role.sql`（幂等；容器首次初始化时自动执行，
-存量环境手工执行一次即可）。生产环境由部署流程创建自己的登录角色，
+存量环境手工执行一次即可 —— **只在数据卷首次创建时跑**，已有卷要补建，
+命令见 `deploy/RUNBOOK.md` §3.4.3）。生产环境由部署流程创建自己的登录角色，
 并 `GRANT base_platform_app TO <角色>`。
 
 > **应用连接角色的权限来源**：组角色 + `ALTER DEFAULT PRIVILEGES`
 > （之后由 `base` 创建的表自动授权）+ 平台按 manifest 生成的策略里附带的 `GRANT`。
+>
+> ⚠️ `ALTER DEFAULT PRIVILEGES` 是**按库**生效的：脚本在哪个库执行，权限就落在哪个库。
+> 存量环境补建时**要对着目标库执行**（开发库是 `base_dev`），否则应用角色会缺表权限。
+
+**应用启动会自检连接角色**：绕过 RLS（超级用户 / `BYPASSRLS`）就**拒绝启动**
+（退出码 3）。本地临时用超级用户调试时加 `BASE_ALLOW_SUPERUSER=true`。
 
 ### 4.2 租户作用域策略的生成
 
@@ -276,7 +283,14 @@ DATABASE_URL=postgres://... cargo xtask tenant-policies
 
 # 只校验：有表漏建 policy 就失败（漏建 = 该表完全无隔离）
 DATABASE_URL=postgres://... cargo xtask tenant-policies --check
+
+# 部署期（镜像里没有 cargo）：交付二进制能做同样的事
+base tenant-policies
+base tenant-policies --check
 ```
+
+> 策略要用**超级用户**连接（建策略需要表的属主权限）；应用连接用**普通角色**。
+> 部署流程里它是**独立于迁移的一步**，且**必须排在迁移之后**（见 `deploy/RUNBOOK.md` §0.1）。
 
 ⚠️ 策略应用在**一个事务**里完成：`DROP POLICY` + `CREATE POLICY` 分两条语句执行时，
 中间有一个「表上没有 policy」的窗口 —— 那一瞬间 RLS 变成**全部拒绝**

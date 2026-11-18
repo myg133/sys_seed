@@ -3,7 +3,7 @@
 - **需求**: REQ-006 多租户与隔离
 - **分支**: `feature/REQ-006`
 - **基线**: `develop` @ `806bb66`（REQ-002 + REQ-003 + REQ-004 + REQ-005 已合并）
-- **状态**: **待验证**（开发完成 → 等待 QA 复核；本状态由 Dev 按任务要求置位，**最终状态机由 BA 推进**）
+- **状态**: **待验证**（QA Pre-merge 复核 **PASS-WITH-RISK** → 第二轮修复完成 → 等待复核；本状态由 Dev 按任务要求置位，**最终状态机由 BA 推进**）
 - **开发者**: myg133-dev-1
 - **完成时间**: 2026-11-18
 - **产物**: `feature-meta/traceability.md`、`feature-meta/verification-report.md`
@@ -54,13 +54,29 @@
 ## 未验证 / 未完成（如实登记）
 
 1. **AC-S-008（缓存 / 消息链路的租户维度）未实现** —— 本期设计边界不含（`design-summary` §8）
-2. **部署流程（compose / Helm）尚未调用 `cargo xtask tenant-policies`** —— 命令已就绪但未接线（避免扩大 scope）
-3. **覆盖率未测** —— 低配机无覆盖率工具链
-4. **`base_dev` 上的真实验证未做** —— 本轮数据库验证全部跑在 `base_test`（开发库未被触碰）
-5. **真实负载下的性能未量化** —— 每次访问多一次 `BEGIN`/`COMMIT`（设计取舍）
-6. **应用连接角色（普通角色）在生产部署里的接入未验证** —— 需部署流程落实
+2. **AC-S-012（HTTP 租户上下文全链路）未实现** —— QA 报告问题 #4；本轮只修 3 项，未纳入
+3. **Helm Chart 未在真集群渲染验证** —— 本机无 helm 二进制；`app-role-job.yaml` / `policies-job.yaml`
+   只做了模板静态审阅（compose 侧的两个新步骤**已**在容器里实测通过）
+4. **镜像未构建** —— 本机内存不够；`Dockerfile` 里「摘 manifest 到 `/app/modules`」那步未实跑
+5. **覆盖率未测** —— 低配机无覆盖率工具链
+6. **`base_dev` 的表权限缺口（存量卷）** —— 本机开发卷早于 `02-app-role.sql` 创建 → `base_app` 在
+   `base_dev` 上缺表权限（应用能起、`/health/live` 200，但 `/health/ready` 503）；
+   **本轮未对 `base_dev` 做任何写操作**，补建命令见 RUNBOOK §3.4.3
+7. **真实负载下的性能未量化** —— 每次访问多一次 `BEGIN`/`COMMIT`（设计取舍）
+8. **契约口径张力（QA 报告 #5）与配额无自动化用例（#6）** —— 本轮未处理
+
+## 第二轮修复（QA Pre-merge 复核 PASS-WITH-RISK 后）
+
+| 项 | 结果 |
+|----|------|
+| **高 1 部署侧切普通角色** | ✅ compose（开发 / 私有化）、Helm、`.env.example`、`prod-preflight.sh`、RUNBOOK 全部改成**普通角色**连接；`migrate` / `policies` 保留超级用户；**`require_isolation` 接到应用启动路径**（超级用户 → 拒绝启动，退出码 3；`BASE_ALLOW_SUPERUSER` 仅本地放行） |
+| **中 1 C-3 假绿** | ✅ 缺 `DATABASE_URL_TEST` → **3 failed / 退出码 101**（不再是 "3 passed"），并加护栏用例 |
+| **中 2 策略进部署流程** | ✅ 新增 `base tenant-policies`；compose `policies` 服务 + Helm `policies` hook Job（**迁移之后**） |
+| 回归 | Rust **182/182**（+10）/ 前端 **23/23** / E2E **1/1** / clippy 0 / fmt 通过 / xtask 全过 / 依赖树 **179（+0）** |
+
+详见验证报告 §8。
 
 ## 请派 QA 复核
 
-重点看验证报告 §7 的 5 条：RLS fail closed 的对照组、串租户用例的强度、
-策略应用窗口的修法、`platform-core` 的 schema 扩展、部署流程缺口（R2）。
+重点看验证报告 §7 的 5 条（第一轮）与 **§8**（本轮修复）：逐处对照表、
+★ 实测输出（0 行 / 4 行 / 退出码 3）、C-3 假绿修复的实际表现、策略接线的位置与顺序。
