@@ -851,6 +851,46 @@ impl OrgStore {
         Ok(())
     }
 
+    /// 记录一次**同步失败**（错误计数递增 + 写入错误摘要）。
+    ///
+    /// `last_sync_at`（上次**成功**同步的时间）**保持不变** ——
+    /// 它是增量同步的起点（`service.rs::sync_ldap` 拿它拼过滤器），
+    /// 失败时往前挪会**漏掉**失败期间变更的条目。
+    ///
+    /// 成功路径走 [`OrgStore::upsert_sync_state`]：计数**清零**、错误摘要**清空**。
+    pub async fn record_sync_failure(
+        &self,
+        ctx: &RequestContext,
+        source: &str,
+        reason: &str,
+    ) -> DbResult<()> {
+        let mut tx = self.db.begin(ctx).await?;
+        Self::record_sync_failure_in(&mut tx, source, reason).await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// 在既有事务里记录一次同步失败。
+    pub async fn record_sync_failure_in(
+        tx: &mut TenantTx,
+        source: &str,
+        reason: &str,
+    ) -> DbResult<()> {
+        let query = TenantQuery::new(format!(
+            "INSERT INTO {table} \
+             (tenant_id, source, last_sync_at, last_error, error_count) \
+             VALUES ({{tenant}}, ?, NULL, ?, 1) \
+             ON CONFLICT (tenant_id, source) \
+             DO UPDATE SET last_error = EXCLUDED.last_error, \
+                           error_count = {table}.error_count + 1",
+            table = tx_table(tx, SYNC_SOURCE_STATE_TABLE)
+        ))
+        .bind(source.to_string())
+        .bind(reason.to_string());
+        tx.execute(&query).await?;
+        Ok(())
+    }
+
     /// 在既有事务里写入同步状态。
     pub async fn upsert_sync_state_in(tx: &mut TenantTx, item: &SyncSourceState) -> DbResult<()> {
         let query = TenantQuery::new(format!(

@@ -24,11 +24,13 @@ use std::sync::Arc;
 use platform_core::RequestContext;
 use platform_core::extension::manifest::Manifest;
 use platform_core::extension::notification::{DeliveryResult, NotificationMessage};
-use platform_db::{DbOptions, TenantDb, apply_policies, require_isolation, unscoped_row_count};
+use platform_db::{
+    DbOptions, TenantDb, TenantQuery, apply_policies, require_isolation, unscoped_row_count,
+};
 use platform_iam::store::{IamStore, RefreshRecord, STATUS_ACTIVE, SessionRecord};
 use platform_org::audit::RecordingAuditRecorder;
 use platform_org::entity::NodeType;
-use platform_org::ldap::{InMemoryLdapSource, LdapEntry, LdapSourceConfig};
+use platform_org::ldap::{InMemoryLdapSource, LdapEntry, LdapError, LdapSource, LdapSourceConfig};
 use platform_org::notify::Notifier;
 use platform_org::service::{NewMembership, NewNode, OrgService};
 use platform_org::store::OrgStore;
@@ -1030,6 +1032,171 @@ async fn two_consecutive_full_syncs_do_not_duplicate_entries() {
         groups_after_first,
         "连续两次全量同步不应产生重复条目"
     );
+}
+
+/// 永远连不上的 LDAP 源（用来制造同步失败）。
+struct UnreachableLdapSource;
+
+impl LdapSource for UnreachableLdapSource {
+    fn search(
+        &self,
+        _base_dn: &str,
+        _filter: &str,
+        _attributes: &[String],
+        _since: Option<time::OffsetDateTime>,
+    ) -> platform_org::ldap::BoxFuture<'_, Result<Vec<LdapEntry>, LdapError>> {
+        Box::pin(async {
+            Err(LdapError::Connection(
+                "the directory server is unreachable".to_string(),
+            ))
+        })
+    }
+}
+
+/// 直接往 `user_org` 插一行（**绕过服务层** —— 证明拒绝发生在**数据库层**）。
+///
+/// 用**应用角色**（`base_app`，不绕过 RLS）连接，与生产路径同权。
+async fn insert_membership_directly(
+    fixture: &Fixture,
+    ctx: &RequestContext,
+    id: &str,
+    user_id: &str,
+    org_node_id: &str,
+) -> Result<u64, platform_db::DbError> {
+    let query = TenantQuery::new(
+        "INSERT INTO public.user_org (tenant_id, id, user_id, org_node_id) \
+         VALUES ({tenant}, ?, ?, ?)",
+    )
+    .bind(id.to_string())
+    .bind(user_id.to_string())
+    .bind(org_node_id.to_string());
+    fixture.app_db.execute(ctx, &query).await
+}
+
+/// 中 1：同步失败必须**留痕**（错误计数递增 + 错误摘要），成功一次则**清零**。
+///
+/// 这是「同步状态的可见性（上次同步时间、**同步错误计数**）」的承重用例：
+/// 修复前 `upsert_sync_state` **只有成功路径**一个调用点，写的是字面量 `error_count: 0`，
+/// 于是运维侧永远看不到同步失败。
+#[tokio::test]
+#[ignore = "需要 base_test 库：scripts/test-integration.sh 会用 --include-ignored 跑到"]
+async fn a_failed_sync_records_the_error_and_a_successful_one_clears_it() {
+    let fixture = setup().await;
+    let ctx = RequestContext::new().with_tenant(TENANT_A);
+    let service = fixture.service();
+
+    let source_name = format!("ldap-src-{}", unique());
+    let config = LdapSourceConfig::from_json(&format!(
+        r#"{{
+          "source": "{source_name}",
+          "baseDn": "DC=corp,DC=example,DC=com",
+          "filter": "(objectClass=user)",
+          "attributes": {{}}
+        }}"#
+    ))
+    .expect("配置应能解析");
+
+    // 1) 同步失败 → 错误计数递增、错误摘要写入、上次**成功**同步时间不动。
+    let error = service
+        .sync_ldap(
+            &ctx,
+            &config,
+            &UnreachableLdapSource,
+            ConflictStrategy::Manual,
+        )
+        .await
+        .expect_err("目录不可达时同步应失败");
+    assert!(
+        error.to_string().contains("unreachable"),
+        "错误摘要应带根因：{error}"
+    );
+
+    let failed = service
+        .sync_state(&ctx, &source_name)
+        .await
+        .expect("应能读同步状态")
+        .expect("失败也必须留下同步状态");
+    assert!(failed.error_count > 0, "错误计数应递增：{failed:?}");
+    assert!(
+        failed.last_error.is_some(),
+        "错误摘要应写入 last_error：{failed:?}"
+    );
+    assert!(
+        failed.last_sync_at.is_none(),
+        "失败时上次成功同步时间不应被改动：{failed:?}"
+    );
+
+    // 2) 再成功一次 → 计数清零、错误摘要清空、上次同步时间更新。
+    service
+        .sync_ldap(
+            &ctx,
+            &config,
+            &InMemoryLdapSource::default(),
+            ConflictStrategy::Manual,
+        )
+        .await
+        .expect("目录可达时同步应成功");
+
+    let ok = service
+        .sync_state(&ctx, &source_name)
+        .await
+        .expect("应能读同步状态")
+        .expect("成功后同步状态必须存在");
+    assert_eq!(ok.error_count, 0, "成功后错误计数应清零：{ok:?}");
+    assert!(ok.last_error.is_none(), "成功后错误摘要应清空：{ok:?}");
+    assert!(
+        ok.last_sync_at.is_some(),
+        "成功后上次同步时间应更新：{ok:?}"
+    );
+}
+
+/// 中 2：**幽灵 user_id** 必须被**数据库层**拒绝（不是服务层报错）。
+#[tokio::test]
+#[ignore = "需要 base_test 库：scripts/test-integration.sh 会用 --include-ignored 跑到"]
+async fn the_database_refuses_a_ghost_user_id() {
+    let fixture = setup().await;
+    let ctx = RequestContext::new().with_tenant(TENANT_A);
+    let service = fixture.service();
+    let (_company, _dept, team) = seed_tree(&service, &ctx).await;
+
+    let ghost = format!("ghost-user-{}", unique());
+    let error =
+        insert_membership_directly(&fixture, &ctx, &format!("m-{}", unique()), &ghost, &team)
+            .await
+            .expect_err("幽灵 user_id 必须被数据库拒绝");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("user_org_user_fk"),
+        "应指出是哪条外键违约：{message}"
+    );
+    assert!(message.contains("foreign key"), "应是外键违约：{message}");
+}
+
+/// 中 2：**跨租户 user_id** 必须被**数据库层**拒绝。
+#[tokio::test]
+#[ignore = "需要 base_test 库：scripts/test-integration.sh 会用 --include-ignored 跑到"]
+async fn the_database_refuses_a_cross_tenant_user_id() {
+    let fixture = setup().await;
+    let ctx_a = RequestContext::new().with_tenant(TENANT_A);
+    let ctx_b = RequestContext::new().with_tenant(TENANT_B);
+    let service = fixture.service();
+    let (_company, _dept, team) = seed_tree(&service, &ctx_a).await;
+
+    // 租户 B 的**真实**账号（存在，但不属于租户 A）。
+    let (user_b, _username_b) = seed_user(&fixture, &ctx_b, "u-other-tenant", "bob-other").await;
+
+    let error =
+        insert_membership_directly(&fixture, &ctx_a, &format!("m-{}", unique()), &user_b, &team)
+            .await
+            .expect_err("跨租户 user_id 必须被数据库拒绝");
+
+    let message = error.to_string();
+    assert!(
+        message.contains("user_org_user_fk"),
+        "应指出是哪条外键违约：{message}"
+    );
+    assert!(message.contains("foreign key"), "应是外键违约：{message}");
 }
 
 /// 防假绿护栏：缺 `DATABASE_URL_TEST` 时**不得**报 "N passed"。

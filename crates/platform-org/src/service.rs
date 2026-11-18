@@ -797,7 +797,34 @@ impl OrgService {
     /// 入站同步：拉取目录条目 → 与本地比对 → 产出冲突 / 更新 / 离职。
     ///
     /// 冲突策略默认 [`ConflictStrategy::Manual`]（D8）：**绝不静默覆盖**。
+    ///
+    /// **失败也会留痕**（§9「同步状态的可见性」）：
+    /// 任何一条失败路径都会写 `sync_source_state` —— 错误计数**递增**、
+    /// 错误摘要写入 `last_error`、上次**成功**同步时间保持不变。
+    /// 成功一次则计数**清零**、错误摘要**清空**。
     pub async fn sync_ldap(
+        &self,
+        ctx: &RequestContext,
+        config: &LdapSourceConfig,
+        source: &dyn LdapSource,
+        strategy: ConflictStrategy,
+    ) -> Result<SyncSummary, OrgError> {
+        let outcome = self.sync_ldap_inner(ctx, config, source, strategy).await;
+        match outcome {
+            Ok(summary) => Ok(summary),
+            Err(error) => {
+                // 留痕失败**不掩盖**真正的同步错误（那才是根因）。
+                let _ = self
+                    .store
+                    .record_sync_failure(ctx, &config.source, &error.to_string())
+                    .await;
+                Err(error)
+            }
+        }
+    }
+
+    /// 同步本体（成功路径写同步状态；失败路径由 [`OrgService::sync_ldap`] 留痕）。
+    async fn sync_ldap_inner(
         &self,
         ctx: &RequestContext,
         config: &LdapSourceConfig,
@@ -812,9 +839,7 @@ impl OrgService {
         let entries = source
             .search(&config.base_dn, &filter, &attributes, since)
             .await
-            .map_err(|error: LdapError| OrgError::Internal {
-                reason: error.to_string(),
-            })?;
+            .map_err(map_ldap_error)?;
 
         let mut summary = SyncSummary {
             fetched: entries.len(),
@@ -839,7 +864,8 @@ impl OrgService {
             summary.skipped += outcome.skipped;
         }
 
-        // 同步状态可见性（上次同步时间、错误计数）。
+        // 同步状态可见性（上次**成功**同步时间、错误计数）。
+        // 成功 → 计数**清零**、错误摘要**清空**、时间更新。
         let now = time::OffsetDateTime::now_utc();
         self.store
             .upsert_sync_state(
@@ -1362,6 +1388,23 @@ impl OrgService {
             );
         }
         Ok(())
+    }
+}
+
+/// 把 LDAP 错误映射成组织架构的错误。
+///
+/// * **配置类**（URL 的 scheme 不支持等）→ `INVALID_ARGUMENT`（422）——
+///   调用方改配置就能解决，不是服务端故障；
+/// * 其余（连不上 / 绑定失败 / 查询失败）→ `INTERNAL_ERROR`（500）。
+fn map_ldap_error(error: LdapError) -> OrgError {
+    match error {
+        LdapError::Config(reason) => OrgError::InvalidArgument {
+            field: "url",
+            reason,
+        },
+        other => OrgError::Internal {
+            reason: other.to_string(),
+        },
     }
 }
 

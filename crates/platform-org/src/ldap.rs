@@ -417,6 +417,35 @@ pub struct Ldap3Source {
     pub bind_password: Option<String>,
 }
 
+/// 本期唯一支持的 LDAP scheme（**明文**）。
+pub const LDAP_PLAIN_SCHEME: &str = "ldap://";
+
+/// 校验 LDAP 连接串的 scheme（**连接前**）。
+///
+/// 本期只支持**明文** `ldap://`（TLS 会拉进 `native-tls` / `rustls`，超出依赖预算 —— 见模块文档）：
+///
+/// * `ldap://` → 放行；
+/// * `ldaps://` → **明确报错**（说明本期只支持明文、TLS 留后续需求）；
+/// * 其它 scheme → **明确报错**（并写清实际用的什么 scheme）。
+///
+/// 不等 `ldap3` 底层抛 `UnknownScheme` —— 那句错误不告诉调用方**该怎么办**。
+pub fn validate_ldap_url(url: &str) -> Result<(), LdapError> {
+    if url.starts_with(LDAP_PLAIN_SCHEME) {
+        return Ok(());
+    }
+    if url.starts_with("ldaps://") {
+        return Err(LdapError::Config(
+            "the ldap url uses ldaps:// but only plaintext ldap:// is supported in this release \
+             (ldap over tls is planned for a later requirement)"
+                .to_string(),
+        ));
+    }
+    let scheme = url.split("://").next().unwrap_or_default();
+    Err(LdapError::Config(format!(
+        "the ldap url must start with {LDAP_PLAIN_SCHEME} (unsupported scheme: {scheme})"
+    )))
+}
+
 impl Ldap3Source {
     /// 造一个连接配置。
     pub fn new(url: impl Into<String>) -> Self {
@@ -434,8 +463,15 @@ impl Ldap3Source {
         self
     }
 
+    /// 校验连接串（**连接前**调用 —— 见 [`validate_ldap_url`]）。
+    pub fn validate(&self) -> Result<(), LdapError> {
+        validate_ldap_url(&self.url)
+    }
+
     /// 连接并绑定，返回可用的 `Ldap` 客户端。
     async fn connect(&self) -> Result<ldap3::Ldap, LdapError> {
+        // 连接**前**先校验 scheme：明确报错，别让底层抛 `UnknownScheme`。
+        self.validate()?;
         let (conn, ldap) = ldap3::LdapConnAsync::new(&self.url)
             .await
             .map_err(|err| LdapError::Connection(err.to_string()))?;
@@ -740,5 +776,56 @@ mod tests {
     fn hexadecimal_attribute_values_are_understood() {
         let entry = LdapEntry::new("CN=a", &[("userAccountControl", vec!["0x202"])]);
         assert_eq!(entry.first_int("userAccountControl"), Some(0x202));
+    }
+
+    // -----------------------------------------------------------------------
+    // scheme 校验（连接**前**明确报错，不落到底层的 UnknownScheme）
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn the_plaintext_scheme_is_accepted() {
+        assert!(validate_ldap_url("ldap://127.0.0.1:389").is_ok());
+        assert!(Ldap3Source::new("ldap://127.0.0.1:389").validate().is_ok());
+    }
+
+    #[test]
+    fn the_ldaps_scheme_is_rejected_with_a_clear_message() {
+        let error = validate_ldap_url("ldaps://127.0.0.1:636").expect_err("ldaps:// 应被拒绝");
+        assert!(matches!(error, LdapError::Config(_)));
+        let message = error.to_string();
+        assert!(message.contains("ldaps://"), "{message}");
+        assert!(message.contains("plaintext"), "{message}");
+        assert!(message.contains("tls"), "{message}");
+        assert!(!message.contains("UnknownScheme"), "{message}");
+    }
+
+    #[test]
+    fn any_other_scheme_is_rejected_with_a_clear_message() {
+        for url in [
+            "https://dir.example.com",
+            "ldap:/127.0.0.1:389",
+            "127.0.0.1:389",
+        ] {
+            let error = validate_ldap_url(url).expect_err("非 ldap:// 应被拒绝");
+            assert!(matches!(error, LdapError::Config(_)));
+            let message = error.to_string();
+            assert!(message.contains("ldap://"), "{message}");
+            assert!(!message.contains("UnknownScheme"), "{message}");
+        }
+    }
+
+    /// 校验必须发生在**连接之前**（`ldaps://` 指向一个没人监听的端口，
+    /// 若先去连接，报的会是「连接被拒」而不是「scheme 不支持」）。
+    #[tokio::test]
+    async fn the_ldap_source_rejects_an_unsupported_scheme_before_connecting() {
+        let source = Ldap3Source::new("ldaps://127.0.0.1:636");
+        let error = source
+            .search("dc=x", "(objectClass=user)", &[], None)
+            .await
+            .expect_err("ldaps:// 应被拒绝");
+        assert!(matches!(error, LdapError::Config(_)));
+        let message = error.to_string();
+        assert!(message.contains("plaintext"), "{message}");
+        assert!(!message.contains("UnknownScheme"), "{message}");
     }
 }
