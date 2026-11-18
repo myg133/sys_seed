@@ -1,221 +1,204 @@
-# 验证报告 —— 修复复核（Recheck）
+# 修复轮复核报告 —— REQ-009（轻量）
 
-- **需求**: REQ-008 用户与组织架构
-- **分支**: `feature/REQ-008` @ `07bdd23`（首轮复核基点 `19cd1a7`；基线 `develop` @ `a0a8d7a`）
-- **首轮报告**: `feature-meta/qa-report.md`（结论 **PASS-WITH-RISK**；2 中 / 3 低 / 3 信息）
-- **复核范围**: **5 个改动点 + 一次回归**（不重做全量验证）
-- **验证者**: QA Agent（独立复现；**未采信 Dev 报告里的任何数字与结论**，全部自己重跑、自己造违规数据、自己复算口径）
+- **需求**: REQ-009「RBAC 权限与数据范围」
+- **被验提交**: `cd65640`（修复轮）· 上一轮 HEAD `05bc6bd`
+- **首轮报告**: [`qa-report.md`](./qa-report.md)（结论 PASS-WITH-RISK，HIGH 0 / MEDIUM 2 / LOW 2 / INFO 3）
+- **验证者**: QA Agent（**独立复跑；Dev 自报数字一律不采信**）
 - **日期**: 2026-11-18
-- **结论**: **PASS-WITH-RISK**
+- **结论**: **PASS** —— 首轮 2 项 MEDIUM 均已消解，2 项 LOW 均已修好，无回归。
+  字面要求上只剩 1 条「异常路径用 RAII 装回」未按字面实现（风险已被 schema 隔离消除，见 LOW-1）。
 
-> 5 个改动点 **全部复现为真**：中 1、中 2 的功能目标已达成（同步错误计数真的会递增并在成功后清零；幽灵 / 跨租户 `user_id` 确实被**数据库层**拒绝），低 1/低 2/低 3 的说明与口径逐条对得上。
->
-> ★ 唯一新登记的问题是 **低 1 级**：**全量含 ignored 回归不稳定** —— Dev 声称的 `336/336` 在我的 **4 次全量运行中只达成 2 次**，另 2 次因 `deadlock detected` 失败（详见 §仍存在的问题 #1）。该失败**与被测逻辑无关**（是**既有**测试夹具的锁序竞态），**不阻塞合并**。
-
----
-
-## 逐项复核
-
-| # | 问题 | Dev 声称 | 复核结果 | 证据 |
-|---|------|---------|---------|------|
-| **中 1** | 同步错误计数不再是死代码 | 新增 `record_sync_failure`：`ON CONFLICT` 时 `error_count = error_count + 1`、写 `last_error`、**`last_sync_at` 不动**；成功路径写 `error_count=0` / `last_error=NULL` / `last_sync_at=now` | ✅ **PASS** | 我用**独立探针**（`/tmp/qa008-probe`，临时工程，**不在仓库内**）驱动**真实** `OrgService::sync_ldap`：失败→`error_count=1`；**连续第二次失败→`error_count=2`（递增，不是覆盖）**；成功→`0` / `last_error=None` / `last_sync_at` 更新；成功后再失败→`1` 且 `last_sync_at` **保持成功时的时间**。§同步错误计数实测 |
-| **中 2** | `user_org.user_id` 侧的引用完整性 | 新迁移 `20261118000800_org_user_fk.up.sql`：给 `platform_iam_user` 补 `UNIQUE (tenant_id, id)`；`user_org` / `user_position` / `external_identity` 各加 `(tenant_id, user_id) → platform_iam_user (tenant_id, id)` | ✅ **PASS** | 我用**应用角色 `base_app`**（非超管、`rolbypassrls=f`）**直插** 6 个违规场景 → **全部被数据库拒绝**，报错原文见 §外键拒绝实测；正向对照（同租户合法成员关系）**写入成功**；`pg_constraint` 直查确认 3 条新 FK 均已落库 |
-| **低 1** | 依赖归属说明准确 | ldap3 = 8（`ldap3`/`lber`/`nom`/`minimal-lexical`/`futures`/`futures-macro`/`async-trait`/`tokio-util`）；SCIM 出站 = 2（`want`/`try-lock`） | ✅ **PASS** | `git show a0a8d7a:Cargo.lock \| grep -cE 'name = "(want\|try-lock)"'` → **0**（基线确实没有）；当前 lockfile → **2**；`cargo tree --workspace -e features -i want` → `want ← hyper(feature "client") ← hyper-util("client") ← hyper-util("client-legacy") ← platform-org`；`cargo tree -p ldap3` 闭包与 10 个新增名的交集**恰为 8 个** |
-| **低 2** | 计数口径写清 | 4 种口径 + 逐字命令：去重名 263→273 / package 条目 272→284 / 构建图去重 `name vX` 239→253 / tree 原始行数 607→682 | ✅ **PASS** | 4 个数字**全部自己复算一致**（基线用 `git archive a0a8d7a \| tar -x -C /tmp/qa008-baseline` 取出，不注册 worktree）；**+14 的逐项构成也复算一致**（10 新名 + `platform-org` + 3 个新版本节点，无删除项）；「去掉工作区成员 = 244 / 231」也复算一致 |
-| **低 3** | LDAP scheme 前置校验 | 新增 `ldap.rs::validate_ldap_url` + `Ldap3Source::validate`，**连接前**校验，三种 scheme 都有清晰错误；`LdapError::Config → INVALID_ARGUMENT`(422) | ✅ **PASS** | 三种 scheme 的**真实错误原文**见 §依赖与口径复核后的小节；**不含**底层 `UnknownScheme`；**校验在连接之前**（`ldaps://127.0.0.1:636` 报 scheme 错误，而 `ldap://127.0.0.1:1` 报「Connection refused」→ 证明 `ldap://` 走了真实连接、`ldaps://` 在建连前就被拒）；`sync_ldap` 层实测 `code=INVALID_ARGUMENT status=422` |
+> **本轮只做修复轮复核**，不是全量重验：16 条 AC 的逐条证据沿用首轮；本轮只查首轮 4 个问题 + 回归。
 
 ---
 
-## 同步错误计数实测
+## 1. 逐条结论
 
-**方法**：独立临时工程 `/tmp/qa008-probe`（path 依赖仓库内的 `crates/platform-org`，**不修改仓库任何文件**），
-以**普通角色 `base_app`** 连 `base_test`，调用**真实**的 `OrgService::sync_ldap`；
-失败源 = `Ldap3Source::new("ldap://127.0.0.1:1")`（连接被拒），成功源 = `InMemoryLdapSource::default()`。
+| # | 首轮问题 | 本轮结论 | 一句话证据 |
+|---|---|---|---|
+| **M1** | trait 文档与 D40 相反（非法条件返回 `None`） | **PASS** | 文档改成两值语义 + 明写「非法不得返回 `None`」；实现**一字未改**（仍是 `Some(1 = 0)`）；真库用例断言 `is_some()` 且端到端 0 行 |
+| **M2** | 全局摘唯一索引 + 跨租通配 DELETE | **PASS**（1 条字面要求由隔离替代，见 LOW-1） | 测试侧已无全局 DDL（唯一 DROP 带 schema 限定）；DELETE 带 `tenant_id`；用例改在探针 schema 跑；收尾断言**探针 + public** 两个索引都在 |
+| **L3** | 违例位置是字符偏移，文档写「文件:行」 | **PASS** | 自造夹具实测报 `lib.rs:22:4` / `:23:27`，与真实行列一致（首轮报的是 `:96`） |
+| **L4** | 同角色多 grant 的胜者靠排序副产物 | **PASS** | `contributions_for` 显式按具体度选；独立探针 9 例全过（含原随机的继承方向）；变异回旧实现→测试变红 |
+| **回归** | —— | **PASS** | 完整集成套件 **3 轮 × 461/461**（EXIT=0） |
 
-| 阶段 | error_count | last_error | last_sync_at |
-|------|------------|------------|--------------|
-| 初始（无行） | — | — | — |
-| **失败 #1** | **1** | `Some("[INTERNAL_ERROR] an internal error occurred: ldap connection failed: I/O error: Connection refused (os error 111)")` | `None`（**未变**） |
-| **失败 #2（连续）** | **2** ← 递增，非覆盖 | 同上 | `None`（**仍未变**） |
-| **成功一次** | **0** ← 清零 | `None` ← 清空 | `Some(2026-11-18 10:15:29.679556 +00:00:00)` ← 更新 |
-| **成功后再失败** | **1**（从 0 起算） | `Some("[INTERNAL_ERROR] …")` | `Some(2026-11-18 10:15:29.679556 +00:00:00)` ← **成功时间保持不动** |
+---
 
-- 第二次独立运行（起始行已存在 `error_count=1`）：**1 → 2 → 3 → 成功归 0 → 再失败 1**，递增规律一致。
-- `ldaps://` 配置类失败同样留痕：`last_error = Some("[INVALID_ARGUMENT] invalid \`url\`: the ldap url uses ldaps:// but only plaintext ldap:// is supported in this release (ldap over tls is planned for a later requirement)")`。
-- **独立复核**（不走服务层，直接 `podman exec … psql` 直查同一行）：
+## 2. M1 —— trait 文档 vs D40
+
+**修好了，且只动文档。**
+
+1. **两值语义写清了**（`crates/platform-core/src/extension/permission.rs:180-193`）：
+   一张表分别写 `None` = 「根本没有条件」→ **直接放行**；`Some(永不匹配)` = 「条件非法」→ **判不通过**。
+2. **明确警示**（`:189`）：「⚠️ **非法条件不得返回 `None`**」—— 并把「误拒全部」与「静默放行」两种后果都写了。
+   `crates/platform-rbac/src/checker.rs:361-369` 同步补了同义文档（指向调用方 `if let Some(c) = ...` 的陷阱）。
+3. **实现未改**（这是关键，改文档不能顺手改实现）：
+   - `checker.rs:42-46` `never_match()` 仍返回 `sql = "1 = 0"`、`values` 为空；
+   - `checker.rs:53-55` `compile_condition` 仍是 `compile(...).unwrap_or_else(|_| never_match())`；
+   - `git diff 05bc6bd..cd65640 -- crates/platform-rbac/src/checker.rs` **只有 +5 行文档**，无代码行变化。
+4. **「引用白名单外属性 → `Some` 且永不匹配」有用例锁住**：
+   `crates/platform-rbac/tests/rbac_real_db.rs:1902` `a_condition_outside_the_whitelist_never_grants_access`
+   —— 用**去掉 `record.amount` 的白名单**重建判定器，让注册表里的条件变成非法，然后断言
+   `condition(...)` **`is_some()`** → `sql == "1 = 0"` → `values.is_empty()` → 端到端可见行 **0**。
+   两轮日志均 `... ok`。
+
+**残留**：首轮那句错误措辞仍出现在 `feature-meta/verification-report.md` 与首轮 `qa-report.md` 里 —— 那是**历史报告**，不是代码契约，不影响判定。
+
+---
+
+## 3. M2 —— 测试夹具污染
+
+**修好了，隔离做法比要求的更彻底。**
+
+### 3.1 静态核对
+
+| 判据 | 实测 |
+|---|---|
+| **① 全局索引还有没有被 DROP/CREATE** | **没有**。全仓 `DROP INDEX` 只有两处：`migrations/...down.sql:8`（迁移回滚，正常）与 `crates/platform-rbac/tests/rbac_real_db.rs:827` 的 **`DROP INDEX IF EXISTS {schema}.user_org_one_primary_idx`**（schema 限定，不是全局）。测试侧的 `CREATE UNIQUE INDEX`（`:845`）是 `ON {schema}.user_org` —— PostgreSQL 把索引建在**表所在 schema**。`public` 的索引不再被测试碰。 |
+| **② DELETE 是否带租户条件** | **带了**。`:839` 与 `:907` 都是 `DELETE FROM user_org WHERE tenant_id = $1 AND user_id LIKE 'u-dual-primary-%'` + `.bind(tenant)`。全文件只有这两条 `DELETE FROM user_org`。 |
+| **③ 有没有 RAII/guard** | **没有 guard**（见 LOW-1）；但**不再需要**：被摘的索引在**一次性 schema** 里。 |
+| **④ 收尾有没有断言索引存在** | **有，且断言两条**：`:996`「用例结束时探针的部分唯一索引必须在位」+ `:1000`「**全局**的部分唯一索引必须仍在（这条用例**不许**动它）」。之后 `:1004` 才 drop 探针 schema。 |
+
+### 3.2 独立 schema 的实现
+
+`crates/platform-rbac/tests/common/mod.rs:359 create_probe_fixture`：
+建 `rbac_probe_<8hex>`（`run_id()` 每进程唯一）→ `CREATE TABLE ... (LIKE public.x INCLUDING ALL)` + 拷数据
+→ 把复制来的部分唯一索引改名为规范名 → 授权给 `base_platform_app` → 用 `DbOptions.schema` + `search_path` 建池。
+删除侧 `drop_probe_schema:495` + 过期清理 `drop_stale_probe_schemas:507`（TTL 1 小时，只清别人的）。
+
+### 3.3 实测（不是读代码）
+
+| 检查 | 结果 |
+|---|---|
+| 完整套件 × 3 轮后 `pg_indexes` 查 `user_org_one_primary_idx` | **`public.user_org_one_primary_idx` 三轮都在** |
+| 探针 schema 残留 | `SELECT count(*) FROM pg_namespace WHERE nspname LIKE 'rbac_probe%'` → **0** |
+| 用例确实跑到了 | 每轮日志都有 `test a_missing_or_ambiguous_primary_department_falls_back_to_self ... ok` |
+
+**一个反证**：如果这条用例其实还在 `public` 上跑，那么 `DROP {probe}.user_org_one_primary_idx` 根本解不开 `public` 的唯一约束，
+第 3 步「造两个主部门」会直接被 DB 拒绝 → 用例必红。它连续 3 轮绿 ⇒ 确实走的是探针 schema。
+
+---
+
+## 4. L3 —— C-5 违例位置
+
+**修好了：现在是真正的 `文件:行:列`。**
+
+- `crates/platform-contracts/src/authz_scan.rs:145 line_and_column` / `:160 position`；三处报错点（`:116`、`:132`、以及 non-literal 分支）统一走 `position()`。
+- **自造夹具**（`/tmp/qa-req009/fakerepo/modules/v7_line_probe`，与首轮同一套 `check_c5` 探针）：第 22 行 `fn check_perm(...)`、第 23 行 `pub fn other() -> usize { require_permission(PERM) }`。实测输出：
   ```
-  tenant_id  |      source       | error_count |                  last_error                  |         last_sync_at
-  qa-sync-t1 | qa-probe-ldap-src |           2 | [INVALID_ARGUMENT] invalid `url`: the ldap…  | 2026-11-18 10:15:42.224061+00
+  VIOLATION[C-5] ... lib.rs:23:27 does not use a string literal ...
+  VIOLATION[C-5] ... lib.rs:22:4 bypasses the platform entry point `require_permission`
   ```
-- **代码路径覆盖**：`record_sync_failure` 的**唯一**调用点是 `service.rs:819`（`sync_ldap` 外壳的失败分支）→
-  **任何**经 `sync_ldap` 的失败都会被记录；成功路径 `service.rs:867-877` 写 `error_count: 0` / `last_error: None` / `last_sync_at: now`。
-- ⚠️ **留痕失败不掩盖根因**：`service.rs:818` 用 `let _ = …` 吞掉留痕失败（库本身挂了时记不下来）——**设计取舍，可接受**。
+  22 行 / 23 行**完全对得上**，列号 4 / 27 也正是标识符在行内的起始列。首轮同一条夹具报的是 `lib.rs:96`（文件只有 2 行）。
+- 两个新单测（`a_violation_points_at_the_line_it_is_on`、`a_non_literal_call_points_at_the_line_it_is_on`）在套件里 **ok**。
+- 格式变化的兼容性：唯二消费方 `checks.rs:530/540` 只是把字符串插进错误消息，**没有解析**，不会被打断。
+
+**已知小瑕疵（已在代码注释里声明，非缺陷）**：同一行存在**块注释**时列号会偏小（`strip_comments` 会抹掉块注释内容但保留换行）；**行号始终精确**。
 
 ---
 
-## 外键拒绝实测
+## 5. L4 —— 同角色多 grant 的胜者（D43）
 
-**方法**：`podman exec base-postgres psql -U base_app -d base_test`（**应用角色**，`rolsuper=f`、`rolbypassrls=f`），
-先 `set app.tenant_id='qa-fk-t1'`，再**直插**（绕过服务层）。
-种子：`platform_iam_user('qa-fk-user-a1','qa-fk-t1')`、`platform_iam_user('qa-fk-user-b1','qa-fk-t2')`、`org_node('qa-fk-node-1','qa-fk-t1')`。
+**修好了：胜负由具体度显式决定，不再是遍历顺序的副产物。**
 
-| 场景 | 报错原文 |
-|------|---------|
-| **正向对照**：同租户合法成员关系 | `INSERT 0 1`（**exit 0**）—— FK 没有误伤正常写入 |
-| **幽灵 user_id**（用户不存在） | `ERROR:  insert or update on table "user_org" violates foreign key constraint "user_org_user_fk"` / `DETAIL:  Key is not present in table "platform_iam_user".` |
-| **跨租户 user_id**（租户 B 的真实用户） | `ERROR:  insert or update on table "user_org" violates foreign key constraint "user_org_user_fk"` / `DETAIL:  Key is not present in table "platform_iam_user".` |
-| `user_position` 幽灵 user_id | `ERROR:  insert or update on table "user_position" violates foreign key constraint "user_position_user_fk"` / `DETAIL:  Key is not present in table "platform_iam_user".` |
-| `user_position` 跨租户 user_id | `ERROR:  insert or update on table "user_position" violates foreign key constraint "user_position_user_fk"` / `DETAIL:  Key is not present in table "platform_iam_user".` |
-| `external_identity` 幽灵 user_id | `ERROR:  insert or update on table "external_identity" violates foreign key constraint "external_identity_user_fk"` / `DETAIL:  Key is not present in table "platform_iam_user".` |
-| `external_identity` 跨租户 user_id | `ERROR:  insert or update on table "external_identity" violates foreign key constraint "external_identity_user_fk"` / `DETAIL:  Key is not present in table "platform_iam_user".` |
+- `crates/platform-rbac/src/service.rs:884 contributions_for`：每条 grant 变成 `MatchedGrant { specificity, override_scope }`；
+  `:964 pattern_specificity` 给 **精确=3 / `module:resource:*`=2 / `module:*`=1**；
+  `:991 stricter` 在同具体度时按 **`ALL` < `OWN_ORG_AND_BELOW` < `OWN_ORG` < `SELF`** 取更严；`:975 containment_strictness` 对 `CUSTOM` 返回 `None`（**不参与**比较）。
+- 角色级 scope 先算好（`role_scope`），「grant 无覆盖」时按角色级参与比较，最终仍 `override > 角色级`。
 
-**补充证据**
+### 5.1 独立探针（自造夹具，直接调 `contributions_for`，不经 Dev 的测试）
 
-- 跨租户那一例**确属"用户真实存在但不属于本租户"**：管理员直查 → `(qa-fk-t2, qa-fk-user-b1)` 存在；同一条语句以 `app.tenant_id='qa-fk-t1'` 的应用角色查 → **0 行**（RLS 隐藏）。
-  → 拒绝**不是** RLS 顺带挡的，而是**复合键匹配不上**（结构上杜绝）。
-- 落库确认（`pg_constraint` 直查）：
-  ```
-  user_org_node_fk        FOREIGN KEY (tenant_id, org_node_id) REFERENCES org_node(tenant_id, id)          ← 第一轮就有
-  user_org_user_fk        FOREIGN KEY (tenant_id, user_id)      REFERENCES platform_iam_user(tenant_id, id)  ← 本轮新增
-  user_position_user_fk   FOREIGN KEY (tenant_id, user_id)      REFERENCES platform_iam_user(tenant_id, id)  ← 本轮新增
-  external_identity_user_fk FOREIGN KEY (tenant_id, user_id)    REFERENCES platform_iam_user(tenant_id, id)  ← 本轮新增
-  platform_iam_user_tenant_id_uq UNIQUE CONSTRAINT (tenant_id, id)                                              ← 本轮新增（复合 FK 的必要前提）
-  ```
-- **REQ-007 既有行为未破坏**：`platform_iam_user` 只是**加**了一个唯一约束（不删不改既有列/约束），
-  `iam_real_db` 全套（含 refresh 轮换/重放、TOTP、限流、会话）在本轮回归中 **全绿**。
-- **迁移可重入 / 重置库后自动生效**：`scripts/test-integration.sh` 重置 `public` schema 后重跑，
-  两条 FK 仍在（`user_org_node_fk` + `user_org_user_fk`）→ 迁移挂在 `migrations/` 目录、被 `sqlx::migrate` 自动应用。
+`/tmp/qa-req009/l4probe`（独立 crate，path 依赖真实 `platform-rbac`）。9 例**全 PASS**：
 
----
+| 场景 | 期望 | 实测 |
+|---|---|---|
+| 同角色 `sandbox:*`(ALL) + 精确 `sandbox:scope-item:read`(SELF) | SELF | **SELF** |
+| 父角色上同时有这两条，子角色继承 | SELF | **SELF** |
+| 父=精确 / 子=通配，**角色 ID 字典序两个方向**都跑 | SELF | **两个方向都 SELF** ← 首轮「等同随机」的场景 |
+| **具体度 vs 严格度**：通配(SELF) + 精确(ALL) | **ALL**（精确赢，不是「总取更严」） | **ALL** ✓ 证明不是靠「取最严」蒙对 |
+| `sandbox:scope-item:*`(ALL) vs `sandbox:*`(SELF) | 资源通配赢 → ALL | **ALL** |
+| 同具体度重复 grant：`sandbox:*`(ALL) + `sandbox:*`(SELF) | 更严 → SELF | **SELF** |
+| 同具体度含 `CUSTOM` + `OWN_ORG_AND_BELOW` | CUSTOM 不参与 → OWN_ORG_AND_BELOW | **OWN_ORG_AND_BELOW** |
+| **跨角色仍并集**（D37 回归）：A=精确 SELF、B=通配 ALL | 两条贡献都在 | **{SELF, ALL}** |
 
-## 依赖与口径复核
+### 5.2 变异验证（证明测试不是摆设）
 
-### 1. 归属（低 1）
-
-```bash
-$ git show a0a8d7a:Cargo.lock | grep -cE 'name = "(want|try-lock)"'   →  0    # 基线确实没有
-$ grep -cE 'name = "(want|try-lock)"' Cargo.lock                       →  2    # 现在都在
-$ cargo tree --workspace -e features -i want
-want v0.3.2
-└── want feature "default"
-    └── hyper v1.12.0
-        ├── hyper feature "client"
-        │   └── hyper-util feature "client"
-        │       └── hyper-util feature "client-legacy"
-        │           └── platform-org v0.1.0 (crates/platform-org)
-```
-→ `want` / `try-lock` 由 **SCIM 出站**（`platform-org` 打开 `hyper-util` 的 `client-legacy` → `hyper` 的 http1 **客户端**）引入，**Dev 的归属更正正确**。
-
-`cargo tree -p ldap3 --edges normal,build` 闭包 ∩ 10 个新增 crate 名 = **恰好 8 个**
-（`async-trait` / `futures` / `futures-macro` / `lber` / `ldap3` / `minimal-lexical` / `nom` / `tokio-util`），
-`want` / `try-lock` **不在** ldap3 闭包内 → **ldap3 = 8、SCIM 出站 = 2** ✅。
-
-### 2. 四个口径（低 2）—— 全部自己复算
-
-| 口径 | 基线 `a0a8d7a` | HEAD `07bdd23` | 增量 | Dev 声称 | 判定 |
-|------|---------------|---------------|------|---------|------|
-| A 第三方 crate **去重名** | **263** | **273** | +10 | 263→273 | ✅ |
-| B 第三方 **package 条目** | **272** | **284** | +12 | 272→284 | ✅ |
-| C 构建图去重 `name vX` | **239** | **253** | +14 | 239→253 | ✅ |
-| D `cargo tree` **原始行数** | **607** | **682** | +75 行 | 607→682 | ✅ |
-| C 去掉工作区成员 | **231** | **244** | +13 | 244/231 | ✅ |
-
-- A 与 B 差 2 的根因（`thiserror` / `thiserror-impl` 的 **v1 线**：crate 名基线已有、版本新增）—— **成立**。
-- **+14 的逐项构成也复算一致**（`comm -13` 无删除项）：
-  `async-trait v0.1.92` / `futures v0.3.34` / `futures-macro v0.3.34` / `futures-executor v0.3.34` /
-  `lber v0.4.2` / `ldap3 v0.11.5` / `minimal-lexical v0.2.1` / `nom v7.1.3` / `tokio-util v0.7.20` /
-  `try-lock v0.2.5` / `want v0.3.2` / `thiserror v1.0.69` / `thiserror-impl v1.0.69` / `platform-org v0.1.0`
-  → **10 新 crate 名 + 1 新工作区成员 + 3 个新版本节点**，与 Dev §3.1.3 一致。
-- 「绝对值差 1」的根因（第一轮没写死命令 → 两次数法不同）—— **成立**：口径 C 的绝对值取决于是否含工作区成员、是否把 `name vX` 正则写死。
-
-### 3. 本轮依赖增量 = **0**
-
-```bash
-$ git diff 19cd1a7..HEAD -- Cargo.toml Cargo.lock .cargo/ | wc -c   →  0     # 完全为空
-```
-`crates/platform-core/`、`crates/platform-contracts/`（CODEOWNERS 保护目录）：`git diff 19cd1a7..HEAD` **0 字节**。
-
-### 4. LDAP scheme 三种错误原文（低 3）
-
-```
-ldap://127.0.0.1:389     => Ok(放行)
-ldaps://127.0.0.1:636   => Err: ldap configuration is invalid: the ldap url uses ldaps:// but only plaintext
-                            ldap:// is supported in this release (ldap over tls is planned for a later requirement)
-https://dir.example.com => Err: ldap configuration is invalid: the ldap url must start with ldap:// (unsupported scheme: https)
-ldap:/127.0.0.1:389     => Err: ldap configuration is invalid: the ldap url must start with ldap:// (unsupported scheme: ldap:/127.0.0.1:389)
-127.0.0.1:389           => Err: ldap configuration is invalid: the ldap url must start with ldap:// (unsupported scheme: 127.0.0.1:389)
-```
-
-- **全部不含**底层 `UnknownScheme`（首轮实测的 `ERROR: unknown LDAP URL scheme: ldaps` 已消失）。
-- **连接前**的证据：`Ldap3Source::search("ldaps://127.0.0.1:636")` → 报 **scheme 错误**；
-  而 `Ldap3Source::search("ldap://127.0.0.1:1")` → `ldap connection failed: I/O error: Connection refused (os error 111)`
-  → 说明 `ldap://` 真的去建连了（端口 1 无人监听），`ldaps://` 在建连前就被拦下（代码上 `ldap.rs:468` `connect()` 首行 `self.validate()?`）。
-- **422 映射**：把 `ldaps://` 的源喂给 `sync_ldap` → `code=INVALID_ARGUMENT status=422`，
-  `display=[INVALID_ARGUMENT] invalid \`url\`: the ldap url uses ldaps:// but only plaintext ldap:// is supported…`
-  → 与 SCIM 的 `baseUrl` 校验**对称**（`error.rs:142/162` → `UNPROCESSABLE_ENTITY`）。
+把 `contributions_for` 的选取临时改回旧语义「**取最后一条匹配的**」（`matched = Some(candidate)`），
+`crates/platform-rbac/src/service.rs` 净变 3 增 14 删：
+- 单测 `an_exact_grant_on_a_parent_role_wins_over_a_wildcard_grant_on_the_child_role` **FAILED**（`left: All / right: OnlySelf`）
+- 真库 `an_exact_grant_on_the_parent_role_wins_over_a_wildcard_grant_on_the_child_role` **FAILED**（看到 11 条，期望 1 条）
+- 还原：`git checkout --` + **sha256 与变异前逐字节一致**（`1d330fce…3ec3fa`）；复跑 D43 子集 **4+3 全绿**。
 
 ---
 
-## 回归
+## 6. 回归
 
-| 项 | 结果 |
-|----|------|
-| **Rust（非 ignored）** `cargo test --workspace -- --test-threads=2` | ✅ **299 passed / 0 failed / 37 ignored**（首轮 295 → +4） |
-| **Rust（含 ignored）** `cargo test --workspace -- --include-ignored --test-threads=2` | ⚠️ **4 次全量运行：2 次 336/336 绿、2 次 335+1 红**（`deadlock detected`，见 §仍存在的问题 #1）→ **Dev 的 336/336 只达成 2/4** |
-| 同一套件**跳过 2 个新增 FK 用例** | ✅ **4/4 绿（334 passed / 0 failed）** → 定位到触发点 |
-| `scripts/test-integration.sh` | ✅ **exit 0**；该脚本 `--tests` 口径 **331 passed / 0 failed**；**容器数量比对通过：2 → 2** |
-| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ **0 告警**（exit 0） |
-| `cargo fmt --all --check` | ✅ exit 0 |
-| `cargo xtask capabilities --check` | ✅ exit 0（13 个文件与源码一致） |
-| `cargo xtask check-deps` | ✅ exit 0（平台 crate 未反向依赖业务模块） |
-| `cargo xtask check-modules` | ✅ exit 0（1 个模块） |
-| `cargo xtask tenant-policies --check`（重置库**之后**跑） | ✅ exit 0（2 个模块声明的表都开了 RLS 且有策略） |
-| **前端** `pnpm -r test` | ✅ **23/23**（i18n 3 / auth 3 / schema 3 / hooks 3 / sdk 2 / theme 2 / ui 3 / shell 4） |
-| **E2E** `bun run test:e2e` | ✅ **1/1**（chromium，「底座壳渲染并可过滤菜单」） |
-| **依赖增量** | ✅ **0**（`Cargo.toml` / `Cargo.lock` / `.cargo/` 的 `19cd1a7..HEAD` diff = **0 字节**） |
-| **CODEOWNERS 保护目录** | ✅ `crates/platform-core/`、`crates/platform-contracts/` **0 行改动** |
+| 跑法 | 结果 |
+|---|---|
+| `bash scripts/test-integration.sh` 第 1 轮（未变异树） | **461 passed / 0 failed / 0 ignored**，23 个二进制，EXIT=0 |
+| 同上 第 2 轮（未变异树） | **461 passed / 0 failed / 0 ignored**，EXIT=0 |
+| 同上 第 3 轮（**变异还原之后**） | **461 passed / 0 failed / 0 ignored**，EXIT=0 |
 
-> ⚠️ **命令形式**：全部真实库用例都用**只有一个 `--`** 的写法
-> （`cargo test --workspace -- --include-ignored --test-threads=2`）。
-> 我**实测确认**写错时（第二个 `--`）libtest 会把 `--test-threads=2` 当过滤串 → 假绿，Dev 的提示属实。
->
-> ℹ️ 另有一次 `iam_real_db::the_three_failure_paths_have_similar_latency`（REQ-007 的**耗时比**用例，阈值 ratio < 1.5）
-> 在**我并发跑探针时**失败（ratio 2.31）；**独占重跑即通过**。属**负载敏感**用例，与 REQ-008 无关（首轮同样通过）。
+- 每轮都 `--include-ignored` + **只有一个 `--`**；只碰 `base_test`（脚本自带白名单重置）。
+- **数字自洽**：首轮基线 452 + 本修复轮新增 **9** 个测试（`platform-rbac` lib 3 + `rbac_real_db` 4 + `authz_scan` 2）= **461** ⇒ 没有测试被删/被忽略。
+- Dev 自报的 461/461 与「提交后 1 轮全绿」：**我只把它当参考**；上述 3 轮是我自己跑的。
 
 ---
 
-## 仍存在的问题
+## 7. 契约与基建（复跑）
 
-| # | 级别 | 描述 | 证据 | 建议 |
-|---|------|------|------|------|
-| **1** | **低** | ★ **全量含 ignored 回归不稳定：Dev 声称的 `336/336` 只在我 4 次运行中达成 2 次**，另 2 次失败于新增用例 `the_database_refuses_a_cross_tenant_user_id`（`deadlock detected`）。**根因不在被测逻辑**，而在**既有**测试夹具的锁序反转：`setup()` 里的 `apply_policies`（`ALTER TABLE public.user_org ENABLE ROW LEVEL SECURITY`，要 `AccessExclusiveLock` on `user_org` 且锁住被引用表 `org_node`）与**并发**的 `INSERT INTO user_org`（FK 检查要 `RowShareLock` on `org_node`）互相等待 → 死锁。锁环里**只有 `user_org` ↔ `org_node`**（第一轮就有的 `user_org_node_fk`），**不含**本轮新增的用户侧 FK → **不是新外键引入的**；但**新增用例是第一个在用例体里早期直插 `user_org` 的**，把这条既有竞态变成了可见的随机失败。 | postgres 容器日志原文：`Process 8803 waits for RowShareLock on relation 24320 … blocked by process 8804` / `Process 8804 waits for AccessExclusiveLock on relation 24337 … blocked by process 8803` / `Process 8803: INSERT INTO public.user_org` / `Process 8804: ALTER TABLE public.user_org ENABLE ROW LEVEL SECURITY`；OID 对照：`24320=org_node`、`24337=user_org`；失败用例 panic：`应指出是哪条外键违约：数据库访问失败：error returned from database: deadlock detected`（`crates/platform-org/tests/org_real_db.rs:1195`）。**隔离实验**：含该用例 4 次全量 → 2 红 2 绿；`--skip the_database_refuses_a_cross_tenant_user_id --skip the_database_refuses_a_ghost_user_id` → **4/4 绿（334/334）** | ① 把 policy 应用移出并发窗口（如 `setup()` 里先统一应用策略再放开用例体，或真实库层用 `--test-threads=1`）；② 退一步：让新增用例在插入前**自持 advisory lock**，与 `setup()` 的 policy 应用互斥。**不影响功能正确性**（FK 拒绝已独立验证），但**「336/336 绿灯」当前不可复现**，合并前建议把这条登记进项目已知问题 |
-| **2** | **信息** | `add_member` 传入**不存在的 user_id** 现在被数据库拒绝 → 服务层表现为 **`500 INTERNAL_ERROR` / `DATABASE_ERROR`**，而不是能指名道姓的 404/422（首轮 QA 曾建议「或退一步：在 `add_member` 里校验用户存在并返回 404」）。**Dev 已在 `status.md` #16 如实登记**，本轮只做结构保证。 | 探针实测：`code=INTERNAL_ERROR status=500 display=[INTERNAL_ERROR] an internal error occurred: DATABASE_ERROR`（`DbError::Database` → `OrgError::Internal`，`crates/platform-db/src/error.rs:12`） | 留 REQ-009 一并处理（服务层加用户存在性校验 → 404） |
-| **3** | **信息** | 新迁移在**已有悬空成员行**的库上会失败（刻意的：把脏数据暴露出来）。**Dev 已在 `status.md` #18 登记**。`base_test` 实测无悬空行（3 张表各 0 条）→ 本轮无影响；但**部署到存量环境前需先清理**。 | `migrations/20261118000800_org_user_fk.up.sql:21-22`（注释原文）+ `pg_constraint`/`pg_class` 实测 | 部署清单里加一步「迁移前校验悬空行并清理」 |
-| **4** | **信息** | `sync_ldap`（LDAP 入站同步）**没有 HTTP 触发路由**：全仓库 `sync_ldap` 的调用点只有 `service.rs` 自身与测试；HTTP 侧只有 `GET /api/org/sync-state`（**只读**，会返回 `errorCount` / `lastError` / `lastSyncAt`）与 `POST /api/org/scim/full-sync`（SCIM 出站入队）。→ 中 1 修好的「失败留痕」要被人看到，**前提是有人在程序里调 `sync_ldap`**（本期靠外部调度/嵌入调用）。**属既有范围**（首轮未列为缺陷），非本轮引入。 | `grep -rn "sync_ldap" crates modules --include=*.rs` → 只有 `service.rs:805/812/827` 与测试；`crates/platform-org/src/http.rs:312`（`/sync-state` 路由） | 后续需求补 LDAP 同步的触发入口或在文档里写明调用方 |
-| **5** | **信息** | `sync_conflict` **无 `user_id` 列**（按 `(source, external_id, field)` 定位远端条目）→ 本轮**未**给它加用户侧 FK。核对 Dev 的说明：**成立**（表结构确实没有该列），不构成缺口。 | `migrations/20261118000700_org_schema.up.sql` 的 `sync_conflict` 列清单 | 无需处理，已核实 |
-
----
-
-## 未覆盖 / 无法验证
-
-| 项 | 状态 | 判定与理由 |
-|----|------|-----------|
-| **LDAP 真实服务端到端**（`Ldap3Source::connect()` / `search()` 的真连接与检索） | **未验证**（本机无 LDAP/AD 服务器） | 与首轮同项，**不阻塞**。本轮新增的只是**连接前**的 scheme 校验，其行为已由探针实测（`ldap://` 走到真实建连、`ldaps://` 在建连前被拒）。`ldap://` 之后的绑定/检索仍**未跑过真服务器** |
-| **`/api/org/*` 真机 HTTP 冒烟** | **未验证** | 与首轮同项；`/api/org/sync-state` 的响应形状由代码读出（`errorCount` / `lastError` / `lastSyncAt`），**未起服务实打** |
-| **迁移在「有悬空行」的存量库上的行为** | **未验证**（构造会污染 `base_test`，未做） | 由迁移注释与 Dev 的登记推定；`base_test` 当前无悬空行 |
-| **`add_member` 的 404 语义** | **未实现**（Dev 明确留后续需求） | 已实测当前实际行为 = 500（见 §仍存在的问题 #2） |
-| **并发压力下的 FK 拒绝稳定性** | **部分验证** | 6 个违规场景各验证 1 次（DB 层）；并发下的表现由全量回归间接覆盖（无 FK 相关失败） |
-| 冷编译峰值内存、链接耗时 | **未复测**（本轮未改依赖，增量为 0） | 首轮实测 1471–1763 MB；本轮 `Cargo.lock` **0 字节**变化 → 结论不变 |
+| 检查 | 命令 | 结果 |
+|---|---|---|
+| 依赖预算 | `Cargo.lock` 计数（核 diff，不看 `Cargo.toml`） | **294 包**（第三方 registry **284**）；**修复轮 `Cargo.lock` 零改动** |
+| Lint | `cargo clippy --workspace --all-targets -- -D warnings` | **EXIT=0 / 0 告警**（首次命中了缓存，`touch` 6 个改动文件后**强制重建**，9 个 unit 真正重新检查） |
+| 格式 | `cargo fmt --all --check` | EXIT=0 |
+| 契约门禁 | `bash scripts/sync-contracts.sh` | **EXIT=0**（两份快照一致） |
+| 能力索引 | `cargo xtask capabilities --check` | 通过（13 个文件） |
+| 依赖方向 | `cargo xtask check-deps` | 通过 |
+| 模块目录 | `cargo xtask check-modules` | 通过（1 个模块 sandbox） |
+| 工作树 | `git status --short` | 仅两个 QA 报告：` M feature-meta/qa-report.md`、` M feature-meta/qa-report-recheck.md`（**QA 产物，未提交属正常**）；**无实现文件改动**。⚠️ 说明：`qa-report-recheck.md` 在本分支 HEAD 里**原本是 REQ-008 的归档版**（`qa-report.md` 同理），按本仓「每个需求覆盖同名报告、由 BA 归档」的惯例（见 `1110c00`/`5f426ee`）本次写入 REQ-009 版本；首轮 `qa-report.md` 未被改动。 |
 
 ---
 
-## 验证者留痕
+## 8. 残留问题
 
-- **工作树**：本轮结束时 `git status --short` 仅有 `feature-meta/qa-report.md`（**首轮报告，未提交 —— 我进入时就是这个状态，我没有改它**）与本文件 `feature-meta/qa-report-recheck.md`（本轮唯一交付物）；**仓库源码、测试、迁移、配置零改动**。
-- **临时物**：探针工程 `/tmp/qa008-probe`（+ `/tmp/qa008-probe-target`）与基线副本 `/tmp/qa008-baseline` 均在 **/tmp**（仓库外），复核结束后已删除；**未在仓库内新增/修改任何文件**。
-- **`base_test`**：我造的全部临时数据（租户 `qa-fk-t1` / `qa-fk-t2` / `qa-sync-t1` 的用户、节点、成员、岗位、外部身份、同步状态）**已删除**
-  —— 复核后直查 `org_node` / `user_org` / `user_position` / `external_identity` / `sync_source_state` / `platform_iam_user` 中 `tenant_id LIKE 'qa-%'` 的计数**均为 0**；
-  `base_app` 的**直接表授权数 = 0**（与初始一致，我没有额外 GRANT）；RLS policy 未改动。
-- **容器**：`base-postgres` / `base-redis` 均 healthy，**数量 2 → 2 未变**。
-- **未触碰**：`base_dev`（开发库）全程未连接；`feature-meta/` 下的 `status.md` / `verification-report.md` / `traceability.md` 未改动。
-- **本文件覆盖说明**：`feature-meta/qa-report-recheck.md` 在本轮之前存的是 **REQ-007 的修复复核报告**（19768 字节，已归档于提交 `5f426ee`）。按本仓库逐需求归档惯例（每轮覆盖同名报告、旧内容留在 git 历史），本文件被本轮 REQ-008 的复核报告覆盖；**REQ-007 原件在 git 历史中完好可取**（`git show 5f426ee:feature-meta/qa-report-recheck.md`）。首轮报告 `feature-meta/qa-report.md` 同理（存的是 REQ-007 的首轮报告，本轮之前已被 REQ-008 首轮报告覆盖并保留在历史里）。
+### LOW-1（低）M2 的「异常路径也保证装回」是**用隔离实现**的，不是 RAII guard
+
+- **事实**：`drop_probe_primary_index` 与 `restore_probe_primary_index` 之间**没有 Drop guard**。若断言在此之间 panic，**探针 schema 里的索引**会保持被摘状态，该 schema 残留到 `drop_stale_probe_schemas` 的 1 小时 TTL 才被清。
+- **影响**：**不影响任何其它用例** —— 被摘的是 `rbac_probe_*` 里的一次性索引，`public` 的预防层从未被触碰（3 轮实测索引均在位）。首轮 MEDIUM 的实质危害（全局预防层留在关闭状态）已**结构性消除**。
+- **为什么仍要记**：交付说明里写的是「异常路径也保证装回」，字面上**没有实现**。若要按字面达标，加一个 `Drop` guard 即可；不加也可接受。
+
+### INFO-1 D43 的回归灵敏度集中在**一条**用例
+
+- 变异回「取最后一条匹配」后：3 条单测里**只有 1 条红**，4 条真库里**只有 1 条红**。
+- 原因：同角色内 grant 的**插入/排序顺序**恰好是「通配在前、精确在后」（`'*' < 小写字母`），旧实现**碰巧**也选到精确；只有「父角色精确 + 子角色通配且子角色 ID 排序在后」才暴露。
+- **不是缺陷**（至少有一条能红），但要知道护栏只有一道：**别删** `an_exact_grant_on_the_parent_role_wins_over_a_wildcard_grant_on_the_child_role`（单测 + 真库各一条）。
+
+### INFO-2 L3 的列号在「同一行有块注释」时偏小
+
+- `line_and_column` 在**剥注释后**的源码上算列；块注释内容被抹掉但换行保留 ⇒ **行号精确**，列号可能偏小。代码注释（`authz_scan.rs:141-143`）已声明。
+
+### INFO-3 探针 schema 每次复制 `public` 全表
+
+- `CREATE TABLE ... (LIKE ... INCLUDING ALL)` + `INSERT SELECT *` 覆盖 public 所有表。当前测试库很小（该二进制 ~10s 内跑完），未成瓶颈。数据量变大后这里会变慢（不影响正确性）。
+
+---
+
+## 9. 未覆盖（如实列）
+
+| 项 | 状态 | 原因 |
+|---|---|---|
+| 真实多实例部署的 epoch 收敛 / Redis 形态 / CI 真跑 / 前端 E2E | **未覆盖** | 同首轮，属部署侧或本需求范围外（修复轮也没改前端，`git diff` 无前端文件） |
+| **panic 路径**下探针 schema 的残留与 TTL 清理 | **未实测** | 需要故意让用例 panic；只做了代码级核对（`drop_stale_probe_schemas` 的 `created_at` 注释解析分支未用**真正过期**的 schema 跑过） |
+| `pnpm -r test` | **未重跑** | 修复轮无前端改动（已核 `git diff --name-only`），首轮 23/23 仍有效 |
+| 首轮其余 AC 的端到端复跑 | **未重做** | 本轮定位是轻量复核；完整套件 461 条已覆盖对应断言 |
+
+---
+
+## 10. 结论
+
+- **VERDICT: PASS**
+- **问题计数**：HIGH **0** / MEDIUM **0**（首轮 2 项已消解）/ LOW **1**（新增，见 LOW-1，不阻塞）/ INFO **3**
+- **实际 passed**：完整集成套件 **461/461 × 3 轮**（含 ignored，23 个二进制，EXIT=0）；`rbac_real_db` 单二进制 22 条；`platform-rbac` lib 42 条
+- **建议**：可直接进入合并；LOW-1 与 INFO-1 交给 BA/Dev 决定是否顺手处理。
+- **纪律**：本轮**未改实现、未改规格、未 commit**；报告只写了 `feature-meta/qa-report-recheck.md`（该路径在本分支原有 REQ-008 归档内容，按既有惯例替换为 REQ-009 版本；首轮 `qa-report.md` 未动）；只做过 1 处临时变异（`service.rs`），已 `git checkout` 还原并**逐字节校验**；`touch` 6 个文件仅改 mtime（内容 sha256 校验未变）；夹具与探针全部落在 `/tmp/qa-req009/`。
