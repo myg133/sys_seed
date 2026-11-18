@@ -31,10 +31,19 @@ REQ-009 交付：角色与权限点模型、数据范围求值、鉴权中间件
 pub trait PermissionChecker: Send + Sync + 'static {
     /// 当前用户在 ctx 指定的租户下是否拥有该权限点
     fn has(&self, ctx: &RequestContext, permission: &str) -> bool;
-    /// 数据范围：把 scope 解析成可执行的过滤条件
+    /// 数据范围：把一种 scope 解析成可执行的过滤条件
     fn scope(&self, ctx: &RequestContext, scope: DataScope) -> ScopeFilter;
+    /// 某个权限点的**有效**数据范围（多角色取并集；权限点级 scope 覆盖角色级）
+    fn effective_scope(&self, ctx: &RequestContext, permission: &str) -> ScopeFilter;
+    /// 某个权限点携带的属性条件（ABAC）；没有则 `None`
+    fn condition(&self, ctx: &RequestContext, permission: &str) -> Option<CompiledCondition>;
 }
 ```
+
+> 初版只写了 2 个方法（`has` / `scope`）。Dev 实现时发现**少两个通道**：
+> 「权限点级 scope 覆盖角色级」需要 `effective_scope`，
+> 「属性级校验（ABAC）」需要 `condition`。**已接受扩展**（D38）。
+> 4 个方法**全部同步** → trait 仍**dyn 兼容**，`Arc<dyn PermissionChecker>` 成立。
 
 **它不是「第 6 个扩展点」，但与扩展点同目录**：
 
@@ -196,20 +205,35 @@ CREATE UNIQUE INDEX user_org_one_primary_idx
 - 多个角色的 scope **取最宽松的**（并集语义）—— 与权限点「任一满足即通过」一致
 - **兼岗取并集的开关是角色级的**：`platform_role.use_all_memberships`（默认 `false`）
 
-### 4.4 「最宽松」的序：需要**全序**，不能靠感觉
+### 4.4 多角色合并：**取过滤条件的并集**，不比较「宽松度」
 
-五种 scope 不是天然有序（`CUSTOM` 与 `ALL` 之间无法比较）。本需求规定**比较规则**：
+初版这里写的是「`CUSTOM` 不参与宽松比较：取 `CUSTOM` 的那一路」，
+**这条是错的**（Dev 忠实实现后发现并上报，BA 已裁定修订）——
+「取 CUSTOM 那一路」**既不是并集也不是交集**：
+用户同时有「本部门」角色和「CUSTOM 条件」角色时，
+**本部门里不满足 CUSTOM 条件的记录反而看不见了** → 加一个角色**缩小**了可见范围，
+与 §4.3「多角色取最宽松（并集语义）」直接矛盾。
 
-| 规则 | 说明 |
+**正确的语义**：每个角色给一份授权（权限 + 一份可见范围过滤条件），
+**多角色的可见范围 = 这些过滤条件的并集** —— 与权限点「任一满足即通过」完全一致。
+
+| 情况 | 结果 |
 |---|---|
-| `ALL` 最宽松 | 任何含 `ALL` 的角色组合 → 结果 `ALL` |
-| `SELF` 最严格 | 只有 `SELF` → 结果 `SELF` |
-| `OWN_ORG` ⊂ `OWN_ORG_AND_BELOW` | 同为「本部门」时，后者更宽松 |
-| `CUSTOM` | **不参与宽松比较**：与其它 scope 同时出现时，**取 `CUSTOM` 的那一路**（并集无法用单一序表达），且必须在响应里标明「使用了自定义范围」 |
-| 多角色无交集判定 | 两个 `CUSTOM` 条件不同 → 两者**都要满足**（交集），因为「最宽松」在自定义条件下没有定义 |
+| 任一角色是 `ALL` | **`ALL`** |
+| 否则有 `CUSTOM` | **CUSTOM 的条件 OR 其它角色的最宽松范围** |
+| 否则有 `OWN_ORG_AND_BELOW` | `OWN_ORG_AND_BELOW` |
+| 否则有 `OWN_ORG` | `OWN_ORG` |
+| 否则 | `SELF` |
 
-> `CUSTOM` 的这一条是**故意不做全序** —— 强行给 `CUSTOM` 排序会造出「看起来有顺序、实际可能放大可见范围」的假象。
-> 本期把 `CUSTOM` 限定为**单一路由生效**（见 AC-S-041），并把多 `CUSTOM` 的组合显式判为交集。
+- **多个 `CUSTOM` 角色：条件之间取 OR**（并集）。
+  初版「两个 CUSTOM 条件不同 → 两者都要满足（交集）」**一并作废** —— 同样与并集原则矛盾。
+- 「最宽松」这个说法只适用于**包含型** scope（`ALL` / `OWN_ORG_AND_BELOW` / `OWN_ORG` / `SELF`），
+  它们构成一条包含链，取最宽的那个即可；`CUSTOM` 不在这条链上，
+  所以**不能靠比较宽松度来合并它**，只能靠 OR。
+
+> ⚠️ **管理员须知**：`CUSTOM` 条件可以让可见范围**宽于**任何内置 scope
+> （例如 `$record.amount <= 10000` 会命中本部门之外的记录）。
+> 这是管理员配置的责任 —— 平台**不阻止**，但**必须在响应里标明「使用了自定义范围」**。
 
 ---
 

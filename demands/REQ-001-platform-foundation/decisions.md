@@ -40,6 +40,9 @@
 | D34 | 2026-11-18 | **REQ-009 的夹具落在 `modules/sandbox`**：新增 `sandbox_scope_item` 表（含 `org_node_id` / `created_by`）+ sandbox 的 HTTP 层接上 `require_permission` | ① 现有 `sandbox_tenant_item` 只有 `title` / `revision`，**表达不了数据范围**；② **不新建业务模块**（`modules/demo` / `modules/order` 是凭空发明的），sandbox 本就是官方的参考模块；③ sandbox 现有权限点只定义常量、**从不鉴权**，C-5 落地后它必须接上 —— 一举两得 | 是（设计修订） | Planner 周检 |
 | D35 | 2026-11-18 | **权限点级 scope 存 `platform_role_permission.data_scope`（可空）；`CUSTOM` 表达式存 `platform_role.custom_filter`；兼岗并集开关 `platform_role.use_all_memberships`** | 初版设计只说了「权限点可覆盖角色的 scope」，**没说存在哪** —— Dev 会自己猜，猜错就得返工。存储位置属于 BA 该拍板的细节 | 是（设计修订） | Planner 周检 |
 | D36 | 2026-11-18 | **改 `platform-core` / `platform-contracts` 时必须同步改 `AGENTS.md`**（硬规则 1 的例外说明 + 新 crate + C-5） | AGENTS.md 硬规则 1 写「不得修改 platform-core / platform-contracts」，其**意图**是「业务方 / AI 不许就地扩平台」，不是「平台自己不许演进」——REQ-009 是已评审的平台演进。但不改 AGENTS.md，引导文件就与实际脱节（父 AC-035 违规），AI 会以为 C-1~C-4 就是全部检查 | 是（引导文件修订） | Planner 周检 |
+| D37 | 2026-11-18 | **多角色数据范围 = 过滤条件的并集**；`CUSTOM` 条件之间取 **OR**，且 `CUSTOM` 与包含型 scope 也是 **OR** | 初版 §4.4 写「`CUSTOM` 取那一路」，**是笔误**：那个结果既不是并集也不是交集 —— 本部门里不满足 CUSTOM 的记录会**看不见**，即「加一个角色反而缩小可见范围」，与 §4.3 的并集原则矛盾。**Dev 忠实实现后发现并上报**，BA 裁定改为真并集。教训：**规格里的「多 X 怎么合并」一定要写成可判定的真值表**，否则实现者只会照抄字面 | 否（核心语义，改了就是漏洞） | Planner 周检 |
+| D38 | 2026-11-18 | **接受 `PermissionChecker` 从 2 个方法扩到 4 个**（新增 `effective_scope` / `condition`） | 属性级校验（ABAC）与「权限点级 scope 覆盖角色级」确实需要这两个通道；4 个方法**全同步** → 仍 dyn 兼容，`Arc<dyn PermissionChecker>` 成立。trait 是平台能力（非冻结的扩展点），加方法不涉及契约升版 | 是（可再加） | Planner 周检 |
+| D39 | 2026-11-18 | **`CUSTOM` 条件可以让可见范围宽于任何内置 scope，平台不阻止，但必须在响应里标明「使用了自定义范围」** | 这是管理员配置的责任，不是平台该拦的东西。但**必须可观测** —— 否则管理员配置了一个过宽的条件时没有任何提示 | 是（可加限制） | Planner 周检 |
 
 ## 升级给用户的事项
 
