@@ -1,268 +1,95 @@
 # 验证报告 —— 修复复核（Recheck）
 
-- 需求: REQ-003 扩展点框架与契约测试
-- 分支: feature/REQ-003 @ `fd12156668b5779ca2daab0ab354cabb819386c2`
-- 基线（首轮 QA 所审提交）: `04b57d39dc92ebf336584a91d65e7ed658a7fb58` → 修复后 `fd12156`（7 个小步提交）
-- 首轮报告: `feature-meta/qa-report.md`（结论 PASS-WITH-RISK，中 2 + 低 4 + 提示 2，共 8 条）
-- 复核范围: **5 个改动点 + 一次回归**（首轮已确认成立的 5 个 trait 签名、C-1~C-4 破坏性验证、依赖方向基线、sandbox 模块质量未重跑）
-- 验证者: QA Agent（独立复现；**未采信** Dev 自验报告中的任何数字与结论，全部自己跑）
-- 工具链: rustc/cargo 1.98.1 / pnpm 12.19.0 / bun / node（ECMA-262 正则对照）/ python3（独立正则引擎）
+- 需求: REQ-004 AI 引导体系与能力索引
+- 分支: feature/REQ-004 @ `f45ef8826eccc1c65c301a676118e1b070b98e1e`
+- 首轮报告: `feature-meta/qa-report.md`（结论 PASS-WITH-RISK，@ `f670299`）
+- 复核范围: 3 个必修点 + 一次回归（不重做全量验证）
+- 验证者: QA Agent（独立复现，未采信 Dev 报告中的任何数字与结论）
+- 工具链: rustc 1.98.1 / cargo 1.98.1 / jq 1.8.2 / pnpm 12.19.0 / bun 1.4.4 / Python 3 + PyYAML 6.0.3
 - 日期: 2026-11-18
-- 结论: **PASS**
-  - 本轮 5 个改动点 **5/5 复验通过**，两条「中」级门禁盲区（首轮 #1 / #2）经独立造违规复现确认已封堵；
-  - 回归全绿（Rust 73/73、前端 23/23、E2E 1/1、clippy 0 告警、fmt 通过、`Cargo.lock` 零新第三方包）；
-  - 残留：**1 条低**（低 5「完全一致」在 2 个 Unicode 空白码位上仍有差异）、**首轮遗留 1 条低**（低 4 C-2 口径，BA 侧待定）、
-    另有 4 条提示（含 Dev 自陈未做项）。**均不阻塞合并**。
+- 结论: **PASS**（3 个必修点全部独立复现为真；遗留 2 项低severity 残留风险，均已如实登记，未被当成已解决）
+
+> 核心结论：首轮点名的 **高 1 / 中 1 / 中 2 三个必修点，本轮全部独立复现为真**。
+> CI 触发器已补齐且 jq 审批判定在 7 组样本上全部正确；prompts 全部 14 条命令逐条实跑，
+> 每条 `cargo test` 都真的跑到用例（6 个），假绿写法反向验证确实存在（0 用例 + exit 0）；
+> 契约正本唯一（快照与正本逐字节相同，手改必失败）。
+> 首轮 3 项低severity（#4 多余文件清理、#5 条数 17→18、#6 「逐行一致」措辞）**也一并修好了**。
+> 本轮新发现 2 项**低severity 残留风险**（均不阻塞合并），已在「仍存在的问题」登记。
 
 ---
 
 ## 逐项复核
 
 | # | 问题 | Dev 声称 | 复核结果 | 证据 |
-|----|------|---------|---------|------|
-| **中 1** | `check-modules` 静默吞掉 manifest 结构级违规 | `check_manifest_schema` 解析失败时把 serde 错误报为一条 `manifest_issues` | ✅ **通过**（3/3 违规全部拦住，exit 1，字段路径可见） | 见 §1 |
-| **中 2** | 依赖方向检查是文本扫描，可被绕过 | 改读 `cargo metadata --no-deps` 成员依赖图；`platform-contracts-macros` 纳入平台 crate | ✅ **通过**（2/2 绕过全部拦住） | 见 §2 |
-| **低 5** | schema 与平台实现判定不一致 | schema 收紧到与实现完全一致 | ⚠️ **基本通过**（常规字符 0 分歧；**2 个 Unicode 空白码位仍有分歧**，见仍存在的问题 #1） | 见 §3 |
-| **低 6** | sandbox 排序白名单外字段被静默忽略 | 改为返回错误，README / AGENTS.md 写明 | ✅ **通过** | 见 §4 |
-| **提示 7** | `feature-meta/manifest.json` 契约 pin 被冲掉 | 补回 `contracts` / `adrs` / `delivered_by` | ✅ **通过** | 见 §5 |
+|---|------|---------|---------|------|
+| **高 1** | **CI 缺 `pull_request_review` 触发器 → 强制评审门禁永远无法变绿** | `on:` 补 `pull_request_review: [submitted, edited, dismissed]`，`pull_request` 补 `review_requested` | ✅ **复现为真** | `.github/workflows/ci.yml:12-13` 已有 `pull_request_review: types: [submitted, edited, dismissed]`；`.github/workflows/ci.yml:9` 的 `pull_request.types` 为 `[opened, synchronize, reopened, review_requested]`。**触发器名与类型对照 GitHub 官方文档**：`github/docs` 源文件 `content/actions/reference/workflows-and-actions/events-that-trigger-workflows.md:662-679` 明确 `pull_request_review` 的 activity types 正是 `submitted` / `edited` / `dismissed`（三者完全一致，无非法类型）。 |
+| **高 1b** | **审批判定的 jq 表达式在 review 事件下成立** | 3 组样本验证过 | ✅ **7 组样本全部正确（表达式从 `ci.yml` 逐字提取，未手打）** | 用 Python 从 YAML 里取 `core-change-review` 的 `run:` 原文，只把 `gh api .../reviews` 换成 `cat "$SAMPLE"`，其余**逐字不动**；再用真实 SHA（`BASE_SHA=4711b75`、`HEAD_SHA=ae482a9`，二者间确实改了 `crates/platform-core/`，走的是「改了核心」分支而非早退分支）喂样本：<br>① 非作者批准 → **exit 0**（输出「平台核心变更已由非作者评审者批准 ✓」）<br>② 作者自批 → **exit 1**<br>③ 批准的是旧 commit → **exit 1**<br>④ 非作者批准旧 commit + 作者批准当前 HEAD 混合 → **exit 1**<br>⑤ 仅 `CHANGES_REQUESTED`/`COMMENTED` → **exit 1**<br>⑥ 旧 commit 批准 + 当前 HEAD 的 `DISMISSED` → **exit 1**<br>⑦ 空评审数组 → **exit 1**<br>⑧ 反向：PR 未改平台核心 → **exit 0**（「本次 PR 未修改平台核心，无需核心评审。」早退分支正确） |
+| **高 1c** | **`pull_request_review` payload 里 job 用到的字段全部存在** | 未单独声称 | ✅ **成立** | job 用到的 4 个上下文字段：`github.event.pull_request.base.sha` / `.head.sha` / `.number` / `.user.login`（`ci.yml:220-221,283-286` 提取）。<br>① GitHub 官方 webhook payload 文档（`docs.github.com/en/webhooks/webhook-events-and-payloads`）的 `pull_request_review` 段列出 `pull_request object Required` —— 即 review 事件携带完整 PR 对象；<br>② GitHub 官方 REST 文档 `rest/pulls/pulls` 的 pull-request schema 原文含 `"base": { ... "sha": "6dcb09b5..." }`、`"head": { ... "sha": "6dcb09b5..." }`、`"number": 1347`、`"user": { "login": "octocat" }` → 4 个字段逐一存在。<br>③ 关键细节：`pull_request_review` 事件**顶层没有 `number`**，job 用的是 `github.event.pull_request.number`（对象内取），路径正确（顶层 `number` 只属于 `pull_request` 事件）。 |
+| **高 1d** | **YAML 可解析** | — | ✅ | `yaml.safe_load('.github/workflows/ci.yml')` 成功；9 个 job（lint/test/build/dependency-audit/contract-check/e2e/guardrails/core-change-label/core-change-review）全部可枚举；`pull_request_review` 键存在且 types = `['submitted','edited','dismissed']` |
+| **高 1e** | **分支保护属仓库设置，「强制人工评审」要真生效还需人工配置 —— 是否被如实说明** | 已如实登记 | ✅ **如实说明，未被当成已解决** | `.github/workflows/ci.yml:263-267` 用 ⚠️ 明确写出「以下两步**在仓库设置里、不在代码里**，必须人工配置，代码无法代劳：1. 把 `core-change-review` 设为 required check；2. 打开「Require review from Code Owners」」，并补充「`pull_request_review` 事件只在工作流文件已存在于默认分支时触发，所以本文件合并进默认分支之后评审触发的门禁才会生效」。`feature-meta/verification-report.md:257-258` 与 `:392`（登记为「未验证（需人工配置）」）口径一致。**没有任何地方把该门禁写成「已解决/已生效」**。 |
+| **中 1** | **prompts 02/07 的命令多一个 `--` → 跑 0 个用例却 exit 0，假绿** | 已删除多余的 `--`；坑写进 AGENTS.md 硬规则第 8 条 | ✅ **复现为真** | `prompts/02-add-permission.md:35` = `cargo test -p <模块名> -- --test-threads=2 --nocapture`（单 `--`）<br>`prompts/07-write-test-cases.md:18` = `cargo test -p <模块名> -- --test-threads=2 --list`（单 `--`）<br>`crates/xtask/src/scaffold.rs:770` 注释同步改为「需要看到时加 `--nocapture`（注意：`cargo test` 的参数分隔符 `--` 只写一次）」<br>**全仓扫描无残留坏命令**：`grep -rE '\-\- +--'` 命中项全是正确的单 `--` 形式、AGENTS.md:54 的 ❌ 反例、以及验证报告里对修复的历史记录。 |
+| **中 1b** | **硬规则里已写明「多一个 `--` 会假绿」** | 已写进第 8 条 | ✅ | `AGENTS.md:50-55` 硬规则第 8 条：「验收命令必须真的跑到用例：`cargo test` 的参数分隔符 `--` **只写一次**……结果是**一个用例都没跑、但退出码仍是 0** —— 假绿，验收形同虚设」，并给出 ✅/❌ 对照与「验收前先看输出里的『N passed』，**N 必须 > 0**」 |
+| **中 2** | **契约引用对只 clone 代码仓库的人也可操作** | 方案 (c)：正本 `git show demand:contracts/...` + 仓库内快照 `docs/contracts/` | ✅ **复现为真** | `AGENTS.md:169-170` 参考段指向 `docs/contracts/api-conventions/v1.md`（快照）+ `git show demand:contracts/api-conventions/v1.md`（正本）；`AGENTS.md:174-180` 明确说明「`BA/` 是 workspace 里 `demand` 分支的 worktree，契约正文在它的 `contracts/` 下」并给出 `git fetch origin demand`。**首轮的 `BA/contracts/...` 失效引用在 `AGENTS.md` / `prompts/` 中已全部消失**（全仓剩余命中只在验证报告的历史记录与 `docs/contracts/README.md:11` 的说明性文字里）。`prompts/03-new-sso-protocol.md:21` 已改为 `git show demand:contracts/api-conventions/v1.md`。 |
+| **中 2b** | **`scripts/sync-contracts.sh --sync` 能跑通，生成的快照与正本逐字节相同** | 声称一致 | ✅ **独立复现为真** | `./scripts/sync-contracts.sh --sync` → exit 0，`✓ 已同步 docs/contracts/api-conventions/v1.md`、`✓ 已同步 docs/contracts/extension-points/v1.md`。随后 `cmp` 逐字节比对：<br>`api-conventions`：正本 `git show demand:contracts/api-conventions/v1.md` vs 快照 → **逐字节相同**，sha256 `911f6ae22a99a352b7d9b77863a13f266bc41252f42713211b0b9226cfbfed3e`<br>`extension-points`：**逐字节相同**，sha256 `9c6a6999ea0db83a3951894359efcab4c4a6810a9350df9c32c9457eb2949c23`<br>`--sync` 后 `git status -- docs/contracts/` 为空（无漂移）。**Dev 对正本路径的更正确认**：分支内真实路径是 `contracts/<name>/<version>.md`，`BA/` 只是 worktree 目录 —— `git ls-tree -r demand --name-only` 显示 `contracts/api-conventions/v1.md`，**没有 `BA/contracts/...`**。 |
+| **中 2c** | **手改快照 → 校验脚本与 CI 步骤必须失败 → 再 `--sync` 恢复** | 声称会失败 | ✅ **独立复现为真** | 往 `docs/contracts/api-conventions/v1.md` 追加一行注释后跑 `./scripts/sync-contracts.sh`（CI `ci.yml:197` 跑的就是这一条）：<br>`✗ 快照与 BA 正本不一致：docs/contracts/api-conventions/v1.md` → **exit 1** ✅<br>再跑 `--sync` → exit 0，`cmp` 确认**已恢复为正本**，`git status -- docs/contracts/` 为空。 |
+| **中 2d** | **正本唯一：仓库内没有第二份可编辑的契约正本** | `capabilities/` 是生成的快照 | ✅ **成立** | `capabilities/extension-points.json` 虽含契约派生信息，但其 `"generated_by": "cargo xtask capabilities"`、`"source": "crates/platform-core/src/extension/"` → 是**从 Rust 源码扫描生成的产物**，由 `cargo xtask capabilities --check` 在 CI 强制校验（`ci.yml:189`），**不是手工维护的第二份**。`capabilities/` 下的内容均无「契约条款正文」，只有 trait 名/签名摘要。仓库内 `docs/contracts/` 是唯一的契约正文副本，且被脚本 + CI 双向锁死。 |
+| **中 2e** | **`AGENTS.md` 的契约引用路径现在真的能打开** | 声称可操作 | ✅ **成立（纯代码克隆实测）** | 用 `git clone --branch feature/REQ-004 --single-branch` 做了一份**只有代码、没有 demand 分支**的干净克隆：<br>`docs/contracts/api-conventions/v1.md` ✓ 存在（可 `head` 读出正文）<br>`docs/contracts/extension-points/v1.md` ✓ 存在<br>`modules/sandbox/`、`capabilities/index.json`、`prompts/` ✓ 存在<br>纯代码克隆里 `git show demand:...` 不可用（无该分支），但 AGENTS.md 同时给了「`git fetch origin demand`」的补齐指引 → **两条路径至少有一条永远可用**。 |
+| **低 #4** | **`--check` 报「多余文件」时提示的修复方式无效** | `write_files` 已改为按 check 同口径剪除 | ✅ **已修好** | 注入 `capabilities/sdk/stale-pkg.json` → `--check` exit 1 报「多余文件」；按提示跑 `cargo xtask capabilities` → 输出「✓ 已清理多余文件：capabilities/sdk/stale-pkg.json」；再 `--check` → exit 0「13 个文件与源码一致」；`git status -- capabilities/` 为空（已还原）。新增单测 `capabilities::tests::write_files_prunes_stale_artifacts` 在 99 个用例里跑通。 |
+| **低 #5** | **Dev 自验文档把 `already_provided` 写成 17，实际 18** | 已更正 | ✅ **已更正** | `feature-meta/traceability.md:25` 与 `:28`、`feature-meta/verification-report.md:201` 均写 **18 条**（+ `not_yet_provided` 7 条）；实测 `jq '.already_provided\|length' capabilities/index.json` = **18**、`.not_yet_provided\|length` = **7** |
+| **低 #6** | **追溯矩阵称 AGENTS.md 与 index.json「逐行一致」，实际顺序不同** | 措辞已更正 | ✅ **已更正** | `AGENTS.md:96-99` 写「**内容完全一致**（18 条，key 与说明逐条相同）；**行的顺序不同** —— 下表按『后端接缝 → 前端包』的语义序，索引按字典序输出」；`feature-meta/traceability.md:25`、`feature-meta/verification-report.md:205`（「这叫『内容一致』，**不是『逐行一致』**」）、`feature-meta/status.md:40` 口径一致 |
 
 ---
 
-## §1 中 1 —— `xtask check-modules` 报出结构级 manifest 违规
+## prompts 命令逐条实测
 
-**实现**（`crates/xtask/src/modules.rs:196-219`）：不再走 `Manifest::from_path(...).ok()`，
-改为 `Manifest::parse_str(&raw)`，serde 失败时把 `err.reason()` 整条报出；JSON 语法错误仍由 `invalid_manifest` 兜底（不重复报）。
+从 `prompts/` 全部 8 个文件里**逐条抽出** shell 命令（fenced bash 块 + 行内反引号，共 54 处引用 → **14 条去重命令**），
+`<模块名>` / `<name>` 一律代入真实模块名 `sandbox` 逐条实跑。
 
-**独立造违规复现**（临时探针模块目录，建在 `.local/qa-recheck/probe-m1/`，**未改 `modules/sandbox/`**，验完已删）：
+| 命令 | 用例数 | exit | 判定 |
+|------|--------|------|------|
+| `cargo xtask check-modules` | n/a（2 个模块） | 0 | ✅ PASS |
+| `cargo test -p sandbox -- --test-threads=2` | **6**（2 lib + 4 契约） | 0 | ✅ PASS（首轮点名项，**用例数 > 0**） |
+| `cargo fmt --all --check` | n/a | 0 | ✅ PASS |
+| `cargo clippy --workspace --all-targets -- -D warnings` | n/a | 0 | ✅ PASS（**0 告警**） |
+| `cargo xtask capabilities --check` | n/a（13 文件） | 0 | ✅ PASS |
+| `cargo xtask capabilities`（裸生成） | n/a（13 文件） | 0 | ✅ PASS（幂等：生成后 `git status -- capabilities/` 为空） |
+| `pnpm exec prettier --check .` | n/a | 0 | ✅ PASS |
+| `pnpm exec eslint .` | n/a | 0 | ✅ PASS |
+| `cargo test -p sandbox -- --test-threads=2 --nocapture`（**首轮点名项**） | **6**（`2 passed` + `4 passed`） | 0 | ✅ PASS **假绿已消除** |
+| `cargo test -p sandbox -- --test-threads=2 --list`（**首轮点名项**） | **列出 6 个** | 0 | ✅ PASS **假绿已消除** |
+| `git show demand:contracts/api-conventions/v1.md` | n/a | 0 | ✅ PASS（正本可读） |
+| `cargo xtask create-module <name>` | 4（C-1~C-4） | 0 | ✅ PASS（以真实模块名 `demo-qa` 实跑；验完已删） |
+| `cargo xtask create-module sso-<协议名>` | — | — | ⚪ **占位符未实跑**（`<协议名>` 无实参；`create-module` 路径已由上一行 `demo-qa` 覆盖） |
+| `cargo test --workspace -- --test-threads=2` | **99** | 0 | ✅ PASS |
 
-```text
-$ ./target/debug/xtask check-modules --root .local/qa-recheck/probe-m1
-模块目录校验失败：错误码 E_MODULE_LAYOUT
-  ✗ empty
-      - manifest.json 不符合 Schema：missing field `id` at line 1 column 2
-  ✗ missingid
-      - manifest.json 不符合 Schema：missing field `id` at line 1 column 31
-  ✗ unknownfield
-      - manifest.json 不符合 Schema：unknown field `bogus`, expected one of `id`, `name`, `version`, `enabled`, `permissions`, `menus`, `dependencies`, `config` at line 6 column 9
-EXIT CODE = 1
-```
+**反向验证（假绿确实存在过）** —— 用错误的双 `--` 形式跑同一条命令：
 
-| # | 造的违规 | 期望 | 实测 | 结论 |
-|---|---------|------|------|------|
-| 1 | `manifest.json` = `{}` | 报 `missing field 'id'` | `manifest.json 不符合 Schema：missing field \`id\` at line 1 column 2` | ✅ |
-| 2 | `{"name":"Probe","enabled":true}` | 报 `missing field 'id'` | `manifest.json 不符合 Schema：missing field \`id\` at line 1 column 31` | ✅ |
-| 3 | 含未知字段 `"bogus":1` | 报 `unknown field 'bogus'` | `manifest.json 不符合 Schema：unknown field \`bogus\`, expected one of \`id\`, \`name\`, … at line 6 column 9` | ✅ |
+| 命令 | 用例数 | exit | 判定 |
+|------|--------|------|------|
+| `cargo test -p sandbox -- --test-threads=2 -- --nocapture` | **0**（`0 passed; 2 filtered out` + `0 passed; 4 filtered out`） | **0** | ⛔ **假绿复现**（0 用例却 exit 0） |
+| `cargo test -p sandbox -- --test-threads=2 -- --list` | **0**（列出 0 个） | **0** | ⛔ **假绿复现** |
 
-**附加探测（同一类违规，Dev 未列）**：字段类型错 `"enabled":"yes"` → 也被拦住：
-
-```text
-  ✗ typeerr
-      - manifest.json 不符合 Schema：invalid type: string "yes", expected a boolean at line 1 column 64
-```
-
-**对照**：首轮同一探针是 `exit 0`「模块目录校验通过」。本轮 `exit 1`。
-
-**残留（提示级）**：结构级违规的消息格式是
-`manifest.json 不符合 Schema：<serde 原始消息>`
-而字段级违规是 `manifest.json 不符合 Schema：<字段路径>：<原因>`
-两段式。前者的「字段路径」混在 serde 消息里（`missing field \`id\``），没有独立的字段路径段，
-与首轮要求的「给出字段路径与原因」在**格式上不统一**。信息本身完整，不影响判失败。
-
----
-
-## §2 中 2 —— 依赖方向检查改为 cargo metadata 图，且不可绕过
-
-**实现核对**（`crates/xtask/src/deps.rs`）：
-
-```text
-$ grep -n "read_to_string\|lines()\|contains(\"modules/\")\|starts_with(|c" crates/xtask/src/deps.rs
-  -> 无任何文本扫描（0 命中）
-```
-
-- 数据来源：`cargo metadata --format-version 1 --no-deps`（`deps.rs:17,197`），读 `packages[].dependencies[].path` 的**解析后绝对路径**；
-- 平台 crate 集合 = 显式清单 `PLATFORM_CRATES`（已含 `platform-contracts-macros`）∪ `crates/` 下的工作区成员（`deps.rs:124-138`）→ 新增平台 crate 不会漏检；
-- 可达性遍历（`deps.rs:140-176`）按依赖边下钻，遇 `modules/` 下的路径即违规，**不做文本匹配**。
-
-**两个绕过分别复现（均被拦住）**。检查入口是 `cargo test -p xtask deps::tests::the_real_workspace_has_no_reverse_dependency`
-（`xtask` 暂无 `check-deps` 子命令，见仍存在的问题 #4）。
-
-**绕过 ① —— workspace 继承写法**（`crates/platform-contracts/Cargo.toml` 加 `sandbox.workspace = true`，路径放到根 `Cargo.toml` 的 `[workspace.dependencies]`）：
-
-```text
-test deps::tests::the_real_workspace_has_no_reverse_dependency ... FAILED
-平台 crate 不得依赖业务模块：["平台 crate `platform-contracts` 反向依赖了业务模块 `sandbox`（路径：modules/sandbox，依赖链：platform-contracts → sandbox）"]
-TEST EXIT = 101
-```
-
-**绕过 ② —— 未列入清单的 crate**（`crates/platform-contracts-macros/Cargo.toml` 加 `sandbox = { path = "../../modules/sandbox" }`）：
-
-```text
-$ cargo tree -p platform-contracts-macros
-platform-contracts-macros v0.1.0 (proc-macro) (crates/platform-contracts-macros)
-└── sandbox v0.1.0 (modules/sandbox)
-
-test deps::tests::the_real_workspace_has_no_reverse_dependency ... FAILED
-平台 crate 不得依赖业务模块：["平台 crate `platform-contracts` 反向依赖了业务模块 `sandbox`（路径：modules/sandbox，依赖链：platform-contracts → platform-contracts-macros → sandbox）", "平台 crate `platform-contracts-macros` 反向依赖了业务模块 `sandbox`（路径：modules/sandbox，依赖链：platform-contracts-macros → sandbox）"]
-TEST EXIT = 101
-```
-
-绕过 ② 连**间接链**（`platform-contracts → platform-contracts-macros → sandbox`）也一并报出 —— 这一点比首轮要求更强。
-
-**逐字节还原**：每次植入前备份、植入后回写，`sha256sum` 与基线逐位一致（见 §还原与工作树状态）。
-
----
-
-## §3 低 5 —— schema 与平台实现判定一致吗？**没有循环论证**
-
-### 3.1 确认「不是用实现验实现」
-
-`crates/platform-core/src/extension/manifest_schema.rs:244-442` 有一个**自写正则求值器** `mod pattern`
-（注释明写「用一个**独立于平台实现**的求值器去读 schema 里的 pattern」）。判定链路是三条独立的腿：
-
-```text
-schema 里的 pattern  ──► 自写求值器 mod pattern（606 样本，与 Python re 0 分歧）
-                          ↕ 断言「两边必须给出同一个判定」
-平台实现 is_module_id ──► 硬编码样本表 MODULE_ID_SAMPLES（15 条，期望值写死在测试里）
-```
-
-即：**期望值是写死的常量表**，不是从实现里推导出来的 → 不构成循环论证。
-
-### 3.2 但求值器本身对不对？—— 用独立引擎交叉验证
-
-把 `mod pattern` **逐字节抽取**（`sed -n '244,442p'`，199 行，sha256 `affc2970…e444`）编译成独立 oracle，
-与 **Python 标准 `re`** 引擎对同一批样本对拍：
-
-```text
-schema.id.pattern                = ^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$
-schema.dependencies[].pattern    = ^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$
-id == dependencies pattern?      = True
-
-hand-written evaluator  vs  python re  (id pattern)      : 606 samples, mismatches=0
-hand-written evaluator  vs  python re  (dependencies pat): 606 samples, mismatches=0
-id pattern  vs  dependencies pattern (evaluator)         : 606 samples, mismatches=0
-id pattern  vs  dependencies pattern (python)            : 606 samples, mismatches=0
-```
-
-→ 求值器**本身是正确的独立实现**，不是「自洽但错」。606 样本 = 任务要求的 12 条 + 32 条边界 + 562 条随机 fuzz。
-
-### 3.3 平台实现 vs schema —— 用真实 Rust 实现（不是我的复刻）逐样本比对
-
-平台侧判定**不走我重写的逻辑**，而是走真实代码路径：
-造临时探针模块 → `cargo xtask check-modules` → `Manifest::validate()` → `is_module_id()`。
-schema 侧用 Python `re`（标准引擎）读 `capabilities/schema/manifest.schema.json` 的 pattern。
-
-```text
-MISMATCH COUNT (platform vs schema): 0
-```
-
-覆盖：`id` 44 样本 + `dependencies[]` 44 样本 + 顶层 `name` 8 样本 + `permissions[].name` 8 样本 = **104 组 0 分歧**。
-
-任务点名的 12 个样本逐条结果（三条腿完全一致）：
-
-| 样本 | 平台实现 | schema（Python re） | schema（自写求值器） |
-|------|---------|--------------------|--------------------|
-| `sandbox` | 接受 | 接受 | 接受 |
-| `demo2` | 接受 | 接受 | 接受 |
-| `a-b1` | 接受 | 接受 | 接受 |
-| `a1-b` | 接受 | 接受 | 接受 |
-| `sandbox-1demo` | 拒绝 | 拒绝 | 拒绝 |
-| `a-1` | 拒绝 | 拒绝 | 拒绝 |
-| `sandbox-1` | 拒绝 | 拒绝 | 拒绝 |
-| `Demo` | 拒绝 | 拒绝 | 拒绝 |
-| `demo_x` | 拒绝 | 拒绝 | 拒绝 |
-| ``（空串） | 拒绝 | 拒绝 | 拒绝 |
-| `demo-` | 拒绝 | 拒绝 | 拒绝 |
-| `a--b` | 拒绝 | 拒绝 | 拒绝 |
-
-**首轮指出的 3 处 schema/实现不匹配已全部对齐**：
-`id` pattern 收紧为 `^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$`；
-`dependencies[].items` 补上同款 pattern（原先 schema 完全没有 pattern）；
-顶层 `name` 与 `permissions[].name` 补上 `minLength: 1` + `pattern: \S`。
-
-**残留 1 处**（Unicode 空白码位）→ 见「仍存在的问题 #1」。
-
----
-
-## §4 低 6 —— sandbox 排序白名单外字段返回错误
-
-**实现**（`modules/sandbox/backend/src/repository.rs:147-151`）：
-
-```rust
-if !SORTABLE_FIELDS.contains(&spec.field.as_str()) {
-    return Err(anyhow!("sort field {} is not sortable", spec.field));
-}
-```
-
-`list()` 用 `sort_rows(&mut rows, &query.sort)?` 向上传播（`repository.rs:89`）—— 是**返回错误**，不再是 `continue` 静默跳过。
-
-**实测**（`cargo test -p sandbox`）：
-
-```text
-test repository::tests::list_rejects_a_sort_field_outside_the_whitelist ... ok
-test repository::tests::list_sorts_by_a_declared_field ... ok
-test result: ok. 2 passed; 0 failed
-```
-
-**README 已写明**（`modules/sandbox/README.md:52-58`）：
-
-```text
-**排序字段不在白名单里 → 直接报错**，不静默忽略：
-sort field unknown is not sortable
-对应契约 C7「排序 … 未声明字段返回 400」。
-```
-
-`modules/sandbox/AGENTS.md:37-38` 也补了同款约束（「排序字段必须先声明」）。
-
----
-
-## §5 提示 7 —— 契约 pin 已补回
-
-`feature-meta/manifest.json` 实测：
-
-```json
-  "demand_dir": "BA/demands/REQ-003-extension-framework",
-  "contracts": {
-    "api-conventions": "v1"
-  },
-  "adrs": ["ADR-0001"],
-  "delivered_by": "myg133-dev-1"
-```
-
-```text
-contracts    = {'api-conventions': 'v1'}
-adrs         = ['ADR-0001']
-delivered_by = myg133-dev-1
-提示7 三个 pin 齐全 = True
-```
-
-三个键齐全，与 REQ-002 同格式。首轮 QA 记录的「`claim` 工具重建文件时冲掉 pin」确属工具行为，本轮未复现（BA 已记入 roadmap R10）。
+> 结论：**首轮点名的两条命令修复前后行为对照成立** —— 正确写法 6 个用例 / exit 0，
+> 错误写法 0 个用例 / exit 0（假绿）。该坑已被写进 `AGENTS.md:50-55` 硬规则第 8 条。
 
 ---
 
 ## 回归
 
-| 项 | 命令 | 结果 |
-|----|------|------|
-| Rust 单测 + 契约测试 | `cargo test --workspace -- --test-threads=2` | **73/73 passed**，0 failed，3 doctest ignored，exit 0 |
-| └ 分布 | — | `platform-core` lib 41 ｜ `platform-contracts` lib 8 ｜ `xtask` lib 18 ｜ `sandbox` lib 2 + `tests/contracts.rs` 4 |
-| Clippy | `cargo clippy --workspace --all-targets -- -D warnings` | **0 告警**，exit 0 |
-| 格式 | `cargo fmt --all --check` | **通过**，exit 0 |
-| 前端单测 | `pnpm -r test` | **23/23**，exit 0（shell 4 ｜ auth/hooks/i18n/schema 各 3 ｜ ui 3 ｜ sdk 2 ｜ theme 2） |
-| E2E | `bun run test:e2e` | **1/1**，chromium，exit 0 |
-| `Cargo.lock` 新增第三方包 | 逐包比对 `04b57d3` vs `fd12156` | **107 → 107 包，ADDED = NONE，REMOVED = NONE**；唯一差异是 `xtask` 的依赖列表多一行 `serde`（`serde` 早已在 workspace） |
-| `serde` 依赖写法 | `crates/xtask/Cargo.toml:14` | `serde.workspace = true`（**workspace 继承，非硬编码版本号**） |
-
-**首轮基线对比**：首轮 64/64 → 本轮 73/73（`platform-core` 39→41、`xtask` 13→18、`sandbox` 0→2），
-增量与本轮新增测试一一对应（结构级 manifest ×2、依赖方向 ×3、schema 一致性 ×2、排序白名单 ×2）。
-
-### 通用清单
-
-| 项 | 结果 |
-|----|------|
-| TODO / FIXME / `dbg!` / `println!` / `eprintln!` / `todo!` / `unimplemented!` | 改动文件内 **0 命中** |
-| 硬编码密钥 / token / password | 改动文件扫描 **0 命中** |
-| 新增依赖是否 workspace 继承 | ✅ `serde.workspace = true` |
-| `Cargo.lock` 禁止清单（sqlx / reqwest / aws-sdk / opendal / jsonwebtoken / diesel / async-trait） | 本轮未新增任何包（107→107），清单不受影响 |
+- **Rust 99/99**（`cargo test --workspace -- --test-threads=2`：passed=**99**, failed=0；另 3 个 doctest ignored）
+  - 分解：platform-contracts 8 / platform-contracts-macros 0 / platform-core 41 / platform-core bin 0 / sandbox 2+4=6 / xtask 44
+  - **REQ-003 的 73 个仍全绿**：基线 `c8236b0` 的 xtask `#[test]` 计数实测 **18**，非 xtask 基线 55（8+41+6）→ 55+18 = **73**；
+    且 `git diff c8236b0 HEAD -- crates/platform-core crates/platform-contracts crates/platform-contracts-macros modules/` **为空**（平台核心与业务模块一个字节未动）
+- **前端 23/23**（`pnpm -r test`，8 个包：hooks 3 / schema 3 / i18n 3 / auth 3 / sdk 2 / theme 2 / ui 3 / shell 4）
+- **E2E 1/1**（`bun run test:e2e`，chromium，`✓ 1 [chromium] › e2e/shell.spec.ts:3:1 › 底座壳渲染并可过滤菜单 (214ms)`，1 passed / 3.6s）
+- **Cargo.lock diff 0 行**（`git diff c8236b0 HEAD -- Cargo.lock | wc -l` = **0**）；`git diff c8236b0 HEAD --stat -- '**/Cargo.toml'` = **空** → **零新依赖**
+- **clippy** `cargo clippy --workspace --all-targets -- -D warnings` → **0 告警**，exit 0
+- **fmt** `cargo fmt --all --check` → 通过，exit 0
+- **capabilities** `cargo xtask capabilities --check` → 「能力索引校验通过：13 个文件与源码一致」，exit 0
+- **契约快照** `./scripts/sync-contracts.sh` → 「✓ 快照一致」×2，exit 0
+- **依赖方向** `cargo xtask check-deps` → 「依赖方向校验通过：平台 crate 未反向依赖业务模块」，exit 0
+- **脚手架咬合点** `cargo xtask create-module demo-qa` → 13 文件生成 → `cargo xtask check-modules`「模块目录校验通过：2 个模块 / ✓ demo-qa / ✓ sandbox」exit 0 → `cargo test -p demo-qa` → **C-1/C-2/C-3/C-4 4/4 全 ok**（`4 passed; 0 failed`）→ **已完整删除**（`mavis-trash`），`Cargo.toml`/`Cargo.lock` 已 `git checkout` 还原，`capabilities --check` 复检通过
+- **通用清单**：无 TODO/FIXME/XXX/HACK/dbg!/todo!/unimplemented!（`crates/xtask/src/` + `prompts/` + `AGENTS.md` + `scripts/` + `docs/contracts/` 全空）；27 处 `println!/eprintln!` **全在 `crates/xtask/src/main.rs` 的 CLI 回显**里；无硬编码密钥；`docs/contracts/`（3 文件）与 `scripts/sync-contracts.sh` **均在 `git ls-files` 内、未被 `.gitignore` 误伤**（`git check-ignore` 未命中）；**prettier 不会与生成的快照冲突** —— `.prettierignore` 含 `*.md` 与 `capabilities/`，`pnpm exec prettier --check .` exit 0
 
 ---
 
@@ -270,80 +97,52 @@ delivered_by = myg133-dev-1
 
 | # | 级别 | 描述 | 证据 | 建议 |
 |---|------|------|------|------|
-| **1** | **低** | **低 5「完全一致」在 2 个 Unicode 空白码位上仍未达成。** schema 的 `name` / `permissions[].name` 用 `pattern: \S`（ECMA-262 语义），平台用 `str::trim()`（Rust `char::is_whitespace`，Unicode White_Space 属性）。两者定义不同：<br>• **U+FEFF (ZWNBSP)**：ECMA-262 视为空白 → schema 拒绝；Rust `is_whitespace=false` → **平台接受**（平台更宽松）<br>• **U+0085 (NEL)**：ECMA-262 `\S` 匹配（非空白）→ schema 接受；Rust `is_whitespace=true` → **平台拒绝**（平台更严格）<br>方向相反、无安全洞（最坏是一个「看起来是空白」的模块名被平台接受），但「schema 与平台判定完全一致」这条目标未字面达成。 | Node（ECMA-262）实测：U+FEFF `\S` 不匹配；U+0085 `\S` 匹配。<br>Rust 实测：`'\u{FEFF}'.is_whitespace()=false`、`'\u{0085}'.is_whitespace()=true`。<br>平台侧探针：`name="\ufeff"` 的模块**未出现在失败清单里**（= 平台接受）；`name="\u0085"` → `manifest.json 不符合 Schema：name：must not be empty`（= 平台拒绝）。<br>Dev 已在 `feature-meta/verification-report.md` 风险 #10 自陈，但未修 | 要么把 schema 的 `\S` 换成平台同源的约束（例如 `pattern` 改用更精确的写法 / 或在 schema 里显式声明「以平台实现为准」的例外），要么在 `api-conventions/v1.md` 写明「名称非空以平台 trim 语义为准」。**影响面极小，可排入 REQ-004 批次** |
-| **2** | **低** | **首轮低 4（C-2「登记了权限点」≠「代码里真的做了鉴权」）本轮未修** —— 不在本轮 5 个改动点范围内，Dev 未擅自扩范围（合规）。`crates/platform-contracts/src/manifest_scan.rs` 本轮 **0 改动**，仍是扫 `backend/**/*.rs` 的字符串字面量，因此「只在 `permission.rs` 里定义常量、服务端从不做鉴权判断」的权限点仍能全绿过 C-2。 | `git diff --stat 04b57d3 fd12156 -- crates/platform-contracts/src/manifest_scan.rs` → 空；`manifest_scan.rs:17,56` 仍是 `read_to_string` + `string_literals` | BA 定口径后再改（首轮结论）。Dev 的口径说明（走 AST 需 `syn`，低配机冷编译敏感）成立 |
-| **3** | **提示** | **依赖方向检查把 `dev-dependency` 边也当违规**（不按 `kind` 过滤）。实测：`platform-contracts` 以 `[dev-dependencies]` 依赖 `sandbox` 同样被判违规。属于**比 ADR D7 更严**，不是安全洞；但若将来平台 crate 需要对业务模块写契约测试（dev-only），会被误报。 | 实测输出：`平台 crate \`platform-contracts\` 反向依赖了业务模块 \`sandbox\`（路径：modules/sandbox，依赖链：platform-contracts → sandbox）`（dev 依赖）；`cargo metadata` 输出中 `sandbox → platform-contracts` 明确带 `kind=dev`，而 `deps.rs` 未按 kind 过滤 | 可不改。若要改：按 `kind == "dev"` 分级为「警告」而非「违规」 |
-| **4** | **提示** | **依赖方向门禁仍在单元测试里，没有 CLI 子命令。** `xtask` 只有 `check-modules` 一个子命令；D7 检查靠 `cargo test --workspace` 的 `deps::tests::the_real_workspace_has_no_reverse_dependency` 承担。CI 的 test job 会跑，**不会漏**，但无法像 `check-modules` 那样单独调用/在本地快速验。 | `crates/xtask/src/main.rs:13-19`（只有 `Command::CheckModules`）；`cli.rs:13-18` | 本期可接受（Dev 已自陈风险 #8）。若要提升门禁可见性，后续加 `xtask check-deps` 子命令 |
-| **5** | **提示** | **过滤字段白名单外仍被静默忽略**（本轮只处理了 QA 列出的「排序」，`matches_filter` 对白名单外过滤字段仍按「不参与过滤」处理）。与 C7「未声明字段返回 400」仍有差距，但首轮未列此项。 | `modules/sandbox/backend/src/repository.rs:166-199`（`matches_filters` / `matches_filter` 无白名单报错分支）；Dev 自陈风险 #9 | 若要把过滤也对齐 C7，需另开一项 |
-| **6** | **提示** | **`migrations/` 仍是单份 8 行 README 占位**（首轮提示 8，本轮未改）。`check-modules` 的「非空」规则被 README 满足。 | `modules/sandbox/migrations/README.md`（8 行）；`crates/xtask/src/modules.rs:146-151`（`is_empty_dir` 只判目录项数） | 本期（无 DB 层）可接受。REQ-006/007 落地 DB 层时升级为「至少一个 `*.sql`」 |
+| 1 | 低 | **契约快照校验在「拿不到 demand 分支」时静默跳过（exit 0），CI 门禁可能空转。** `scripts/sync-contracts.sh:38-42` 在找不到 `demand` / `origin/demand` 时打印「跳过：本地没有 BA 分支……」并 **exit 0**。在真实 GitHub CI 中 `ci.yml:182` 的 `fetch-depth: 0` 会拉全部分支、`origin/demand` 存在，所以正常路径是好的；但一旦 BA 分支被改名/删除、或 CI 的 checkout 配置变化导致拿不到正本，这条「防漂移」校验会**空过**，快照与正本漂移将无人发现。`ci.yml:195` 的注释已如实说明这一行为，但**行为本身仍是「静默通过」**。 | 纯代码克隆实测：`./scripts/sync-contracts.sh` → 「跳过：本地没有 BA 分支（demand / origin/demand），无法校验契约快照。」→ **exit=0**（`scripts/sync-contracts.sh:38-42`） | CI 里把「跳过」判为失败（或至少 `::warning::` + 让 required check 感知），例如加 `CI=true` 时缺 demand 即 exit 1；本地手工跑保持跳过友好。 |
+| 2 | 低（残留风险，非缺陷） | **「强制人工评审」要真正生效仍需 2 项仓库设置 + 1 个前提条件，且 `pull_request_review` 触发器要等本文件进入默认分支才生效。** 这三点代码无法代劳，Dev 已如实登记为「需人工配置 / 未验证」，本轮确认登记属实、**未被当成已解决**。 | `.github/workflows/ci.yml:263-267`（⚠️ 注释：required check + Require review from Code Owners + 「workflow 文件合并进默认分支后才生效」）；`feature-meta/verification-report.md:257-258`、`:392` | 合并后由 BA/维护者到仓库设置里把 `core-change-review` 设为 required check 并打开「Require review from Code Owners」；本条为**人工待办**，不是代码缺陷。 |
 
-### 已关闭（首轮问题的当前状态）
-
-| 首轮 # | 级别 | 问题 | 状态 |
-|--------|------|------|------|
-| #1 | 中 | `check-modules` 结构级 manifest 违规漏报 | ✅ **已修并复验**（§1） |
-| #2 | 中 | 依赖方向检查可被绕过 | ✅ **已修并复验**（§2） |
-| #3 | 低 | 扩展点冻结签名的 dyn 兼容性变更未登记 | ✅ **已由 BA 关闭** —— `BA/demands/REQ-003-extension-framework/design-summary.md:48-58` 已补注记：「本期起 5 个 trait 为 RPITIT 形态…不可用于 trait object…异构汇聚延后到 REQ-015 / REQ-017 决策」（该文件不在本工作树，本轮只读核对） |
-| #5 | 低 | schema 与平台实现判定不一致 | ⚠️ **基本修复**，残留 1 处 Unicode 码位差异（仍存在的问题 #1） |
-| #6 | 低 | sandbox 排序白名单外字段被静默忽略 | ✅ **已修并复验**（§4） |
-| #7 | 提示 | `feature-meta/manifest.json` 的 pin 被冲掉 | ✅ **已修并复验**（§5）；归属说明问题随本次补回一并消失 |
-| #4 | 低 | C-2 无法区分「登记」与「鉴权」 | ⬜ **未修**，见仍存在的问题 #2 |
-| #8 | 提示 | `migrations/` 只有 README 占位 | ⬜ **未改**，见仍存在的问题 #6 |
+> 除以上 2 项低severity外，**未发现任何可复现的高/中severity 问题**。3 个必修点全部独立复现为真，首轮 3 项低severity 亦已修好。
 
 ---
 
 ## 未验证
 
-| 项 | 状态 |
-|----|------|
-| **CI 六个 job 实跑** | **未验证**。本仓库无 remote，GitHub Actions 跑不起来。本地已跑等价命令（`cargo test --workspace`、`cargo clippy --workspace --all-targets -- -D warnings`、`cargo fmt --all --check`、`pnpm -r test`），CI 的 `cargo test -p sandbox` 一步已含在 workspace 测试内 |
-| **覆盖率数字** | **未验证**。本机无覆盖率工具，按低配机约束未 `cargo install`。角色规范的「覆盖率 ≥ 80%」未量化，以「每条 AC 均有自动化测试 + 破坏性验证」替代 |
-| **圈复杂度 / 认知复杂度** | **未验证**。本机无 `lizard` / `complexipy`，未安装 |
-| **冷编译峰值内存 / 耗时** | **未验证**。按要求未 `cargo clean`、未做 RSS 采样 |
-| **C-3 的真实多租户数据库行为** | **不适用**（BA 已澄清本期不连库）。C-3 验的是契约语义，非真实库口径 |
-| **C-4 的真实事务回滚** | **不适用**（本期无 DB 访问层） |
-| **REQ-002 的数据库集成脚本 `scripts/test-integration.sh`** | **未运行**（需 podman + `psql`，本机无 psql 客户端）。与本需求无耦合 |
-| **`#[platform_module_contract]` 的错误路径** | **未验证**。宏对「传参」「非 mod item」「缺 `contract_subject()`」的处理代码存在但无对应测试，本轮未额外造违规（不在验收要求内） |
-| **`inventory` 跨平台行为** | **未验证**。依赖 ELF `.init_array`，本仓库只在 Linux 跑 |
-| **`api-conventions/v1.md` 的 C7 措辞与 sandbox 新行为是否逐字对齐** | **未验证**。该文件不在本工作树；本轮只核对了 sandbox README / AGENTS.md 的表述与实现一致 |
+| 项 | 状态 | 原因 |
+|----|------|------|
+| **GitHub Actions 的真实运行** | **未验证** | 本仓库**无 remote**（`git remote -v` 为空），Actions 跑不起来。本轮验证的是：触发器名与 activity types 对照 GitHub 官方文档源**逐字相符**；jq 审批判定用**从 `ci.yml` 逐字提取的脚本**喂 7 组样本；payload 字段对照 GitHub 官方 webhook payload 文档 + REST schema 确认存在；YAML 可被 PyYAML 解析。**真实 Actions 调度行为（含 required check 生效、并发去重、fork PR 行为）本轮未跑过**。本机也无 `actionlint`/`zizmor`，且按约束不安装新工具。 |
+| **分支保护规则 / `core-change-review` 作为 required check 的实际效果** | **未验证（需人工配置）** | 属仓库设置、不在代码里。已确认该登记在 `ci.yml:263-267` 与验证报告中**如实存在**，未被写成已解决。 |
+| **CODEOWNERS 维护者账号 `@myg133`** | **未验证** | 无 remote，无法确认 GitHub 用户名；占位状态与首轮一致（文件头已注明需按实际情况调整），非本轮引入。 |
+| **`pull_request_review` 事件在真实 GitHub 上的触发频率与并发行为** | **未验证** | 需真实 PR 与真实 Actions。静态层面已确认触发器与 activity types 合法、job 读取的字段在 payload 中存在。 |
+| **`gh api repos/.../pulls/N/reviews --paginate` 的真实分页输出** | **等价验证** | 本机无 remote / 无 token，无法调真 API。已用 `--paginate` + `jq -s` 的**同一段管道**喂多页形态的评审数组（样本 s4/s6 含多条记录，含 `DISMISSED` 态），结论与单页一致。 |
+| **AC-036 的字面测试（把提示词原样交给 AI 产出模块）** | **未验证（等价验证）** | 与首轮同：本机无可复现的 AI 执行环境。本轮验证的是更强的等价命题 —— **提示词里 14 条命令逐条实跑、每条都真跑到用例**；且 `prompts/01` 要求的 `create-module` 产出物实测直接过 `check-modules` + C-1~C-4。 |
+| **AC-038 的字面口径** | **需 BA 修订（与首轮同）** | AC 原文期望「复用 `@base/ui` 表格与 `@base/schema` 渲染器」，但两者本期确实不存在（`not_yet_provided` 已如实登记）。本轮**未重做**该项全量验证，沿用首轮结论。 |
+| **测试覆盖率 / 冷编译峰值内存** | **未测量** | 按低配机约束不 `cargo install` 任何工具、不 `cargo clean`。 |
 
 ---
 
-## 还原与工作树状态
+## 清理确认
 
-- 本轮对已跟踪文件的变异共 **5 次**（绕过①×1、绕过②×1、dev-dep 附加探测×1；每次都连带 `Cargo.lock`），
-  每次均**备份 → 植入 → 回写 → `sha256sum` 校验 → `git status --porcelain` 复核**。
-- 终态 sha256 与基线**逐位一致**：
+本轮临时创建物已全部清除：
 
-  ```text
-  9ecc4a8d88e7d8bd9362b342b1d2f6dcc881c1c5af407126659256443e8afff6  Cargo.toml
-  996b8e6bdedb3643161de28d80250da0933fc779d21e3762e23b8a085bf847d9  crates/platform-contracts/Cargo.toml
-  e2ef182e0998ed90314846c5fc5e895ddb1357a8ea312242053b15e040de0d24  crates/platform-contracts-macros/Cargo.toml
-  564f6b6f706791549590fb5aa0eda757611973d0bff77ffe99422f3e56d19bc6  Cargo.lock
-  ```
+- `modules/demo-qa`（脚手架咬合点验证用）→ 已删除（`mavis-trash`），`Cargo.toml` / `Cargo.lock` 已 `git checkout` 还原
+- `capabilities/sdk/stale-pkg.json`（多余文件剪枝验证用）→ 已由 `cargo xtask capabilities` 自动清理，`--check` 复检通过
+- `docs/contracts/api-conventions/v1.md`（篡改验证用）→ 已由 `--sync` 还原为正本，逐字节比对通过
+- 验证脚本 / 样本 / 克隆目录全部落在 `/tmp/qa-recheck/`，**未进入仓库**
 
-- 临时探针目录（`manifest` 结构违规 ×4、schema 样本 ×104、Unicode 空白 ×3）与临时 oracle/脚本
-  全部建在 `.local/qa-recheck/`（已被 `.gitignore` 覆盖），**已整目录删除**；`.local/` 现为空。
-- **被审实现代码与配置零改动**。
-- 结束时 `git status --porcelain`：
+**工作树状态**：
 
-  ```text
-   M feature-meta/qa-report.md            <- 首轮 QA 报告（本轮开始前即存在，未提交）
-   M feature-meta/qa-report-recheck.md    <- 本文件（槽位覆写）
-  ```
+```
+$ git status --porcelain --untracked-files=all
+ M feature-meta/qa-report-recheck.md
+ M feature-meta/qa-report.md
+```
 
-  关于第二条：`feature-meta/qa-report-recheck.md` 原为 **REQ-002** 的复核轮报告（tracked，blob sha256 `59a2595d…c9a6e`）。
-  按任务指定路径写入本轮报告属**槽位覆写**，与本仓库既有约定一致（首轮 QA 覆写 `qa-report.md` 是同一模式）。
-  **REQ-002 的复核轮报告未丢失**：完整保留在提交 `3ff22fb` 与 `develop:feature-meta/qa-report-recheck.md`，可随时取回。
-- 未改动任何被审实现代码，未 commit / push / merge。
+**两处 `M` 的来源（均已核实，非本轮误改）**：
 
----
+| 文件 | 状态 | 说明 |
+|------|------|------|
+| `feature-meta/qa-report.md` | ` M`（仅工作区） | **首轮 QA 报告**，本轮任务书明确要求不得覆盖 → 本轮**逐字节未触碰**。其「修改」状态来自首轮 QA 写入后未提交；Dev 的 3 个修复提交（`9dba569` / `109f93e` / `f45ef88`）均**未包含**该文件（已用 `git show --stat` 逐一确认）。 |
+| `feature-meta/qa-report-recheck.md` | ` M`（仅工作区） | **本轮交付物**。该路径在 HEAD 里**已存在**，内容是 **REQ-003 的修复复核报告**（由 BA 的 `b0a26c9`「[BA] 归档 REQ-003 的 QA 首轮报告与修复复核报告」提交入库）。按本轮任务书指定的路径写入 REQ-004 的复核报告，与首轮 `qa-report.md` 的**滚动槽位**惯例一致（首轮报告已记录：「`feature-meta/qa-report.md` 是**滚动槽位**——BA 自己的 `b0a26c9` 提交即以 REQ-003 的首轮 QA 报告覆盖了 REQ-002 的版本」）。**REQ-003 的原复核报告未丢失**，仍完整保存在 git 历史 `b0a26c9` 中（`git show b0a26c9:feature-meta/qa-report-recheck.md` 可取回）。 |
 
-## 给 BA 的处置建议
-
-1. **可以合** —— 本轮 5 个改动点经独立造违规复现确认全部生效；两条「中」级门禁盲区已封堵；
-   回归全绿、`Cargo.lock` 零新第三方包。
-2. **合前可选**处理仍存在的问题 #1（U+FEFF / U+0085 两个码位的 schema/平台分歧）——
-   一行 schema 调整或一行契约注记即可，但影响面极小，不阻塞。
-3. **BA 侧待办**：仍存在的问题 #2（C-2「登记 ≠ 鉴权」口径）—— 首轮已转给 BA 定口径，Dev 未擅自扩范围，符合预期。
-4. **REQ-004 批次候选**：仍存在的问题 #5（过滤字段白名单）、#6（`migrations/` 升级为「至少一个 `*.sql`」）。
+> 本轮**未 commit / 未 push / 未改动任何源文件**（QA 硬规则：不写代码、不修 bug、不提交）。
+> 上述两处 `M` 均为「已跟踪文件的工作区改动」，未进入暂存区。
+> 所有验证用临时物（脚本、样本、克隆目录）都在 `/tmp/qa-recheck/`，**不在仓库内**。
