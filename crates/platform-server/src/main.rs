@@ -22,6 +22,10 @@ use axum::routing::get;
 use axum::{Json, Router};
 use clap::{Parser, Subcommand};
 use platform_core::RequestContext;
+use platform_iam::config::IamConfig;
+use platform_iam::http::IamState;
+use platform_iam::service::IamService;
+use platform_iam::store::IamStore;
 use platform_server::config::{ConfigError, DeployConfig, Environment};
 use platform_server::{db, health, isolation, migrate, policies, probe, static_files};
 use serde::Serialize;
@@ -272,11 +276,28 @@ async fn serve() -> Result<(), Failure> {
         static_root: config.static_dir.as_ref().map(PathBuf::from),
     });
 
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/health/live", get(live))
-        .route("/health/ready", get(ready))
-        .fallback(static_fallback)
-        .with_state(state);
+        .route("/health/ready", get(ready));
+
+    // 认证与账号体系（REQ-007）：`/api/iam/*` + JWKS。
+    //
+    // **配了就必须配对**：环境变量里只要出现过一个 IAM 相关变量，就要求整套配置
+    // 完整有效 —— 半配置上线（密钥缺失 / 是占位符）一律 fail-fast。
+    // 一个都没配 → 平台**不提供**认证接口（服务照常起）。
+    if IamConfig::is_configured(|key| std::env::var(key).ok()) {
+        let iam_state = build_iam_state(&config).await?;
+        app = app
+            .nest("/api/iam", platform_iam::http::router(iam_state.clone()))
+            .merge(platform_iam::http::jwks_router(iam_state));
+        tracing::info!("认证与账号体系已启用：/api/iam/* 与 /.well-known/jwks.json");
+    } else {
+        tracing::warn!(
+            "未检测到 IAM 环境变量（BASE_JWT_* / BASE_IAM_*）：平台不提供 /api/iam/* 认证接口"
+        );
+    }
+
+    let app = app.fallback(static_fallback).with_state(state);
 
     let addr = config.socket_addr();
     let listener = tokio::net::TcpListener::bind(addr)
@@ -293,6 +314,35 @@ async fn serve() -> Result<(), Failure> {
         .await
         .map_err(|err| Failure::Runtime(format!("HTTP 服务退出：{err}")))?;
     Ok(())
+}
+
+/// 构建认证与账号体系的状态（配置 + 数据访问 + 服务）。
+///
+/// 失败即 fail-fast（退出码 2 / 1）：**密钥配错了绝不能带着半套配置上线**。
+async fn build_iam_state(config: &DeployConfig) -> Result<Arc<IamState>, Failure> {
+    let iam_config = IamConfig::from_env().map_err(|err| {
+        Failure::Config(ConfigError {
+            problems: err
+                .problems
+                .into_iter()
+                .map(|problem| platform_server::config::ConfigProblem {
+                    code: problem.code,
+                    key: problem.key,
+                    detail: problem.detail,
+                })
+                .collect(),
+        })
+    })?;
+
+    // 数据访问走 `platform-db` 的租户作用域入口（**不得**直连池）。
+    let tenant_db =
+        platform_db::TenantDb::connect(&config.database_url, platform_db::DbOptions::default())
+            .await
+            .map_err(|err| Failure::Runtime(format!("数据库连接串非法：{err}")))?;
+
+    let service = IamService::new(IamStore::new(tenant_db), iam_config)
+        .map_err(|err| Failure::Runtime(format!("认证与账号体系初始化失败：{err}")))?;
+    Ok(Arc::new(IamState { service }))
 }
 
 /// 执行租户作用域策略的生成 / 校验。

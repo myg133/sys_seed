@@ -1,0 +1,54 @@
+[package]
+name = "platform-iam"
+description = "认证与账号体系：本地账号 + 混合令牌（JWT access + 不透明 refresh）+ Argon2id + TOTP"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# 平台核心：RequestContext（租户的唯一来源）
+platform-core.workspace = true
+# 平台数据访问层：租户作用域入口（**不得**直连连接池）
+platform-db.workspace = true
+# HTTP 层：路由与中间件
+axum.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+uuid.workspace = true
+time.workspace = true
+# 密码哈希：Argon2id（PHC 标准串），纯 Rust
+argon2.workspace = true
+# JWT：签发 / 验签 / JWKS。
+# ⚠️ 必须关掉默认 feature 并选 `rust_crypto` 后端 —— ring / aws-lc-rs 要编 C/汇编，
+#    在低配机上又慢又吃内存（见 design-summary §8）。
+jsonwebtoken.workspace = true
+# TOTP：HMAC-SHA1 + base32，纯 Rust
+totp-rs.workspace = true
+# 随机数：refresh token / 恢复码 / TOTP secret 的熵源
+rand.workspace = true
+# 高熵值摘要：refresh token / 重置令牌 / 恢复码的**哈希存储**
+sha2.workspace = true
+# P-256：JWT 签名密钥的生成与公钥坐标（JWKS 需要 x/y）
+p256.workspace = true
+# base64url：refresh token / JWKS 坐标的编码
+base64.workspace = true
+# AEAD：TOTP secret 的静态加密（密钥只从环境注入）
+chacha20poly1305.workspace = true
+
+[dev-dependencies]
+# 直接驱动 axum Router（不连网络）：`ServiceExt::oneshot`
+tower = { workspace = true }
+# 读响应体
+http-body-util.workspace = true
+# 真实库集成测试：跑迁移、清夹具、查会话记录的租户维度。**仅测试用**。
+sqlx.workspace = true
+uuid.workspace = true
+time.workspace = true
+base64.workspace = true
+totp-rs.workspace = true

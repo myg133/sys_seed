@@ -132,6 +132,7 @@ bun run dev
 | `sdk_client` | @base/sdk 的 createApiClient() 提供 baseUrl 规范化与 URL 拼接，勿另造 HTTP 基类 |
 | `auth_state` | @base/auth 的 isAuthenticated()/tenantId() 提供登录态形状，勿另造登录态模型 |
 | `hooks_toggle` | @base/hooks 的 createToggle() 提供通用布尔开关状态容器，勿另造状态容器 |
+| `iam_auth` | platform-iam 提供 /api/iam/* 认证接口（本地账号 + JWT access / 不透明 refresh + Argon2id + TOTP）与 /.well-known/jwks.json；业务模块要鉴权请用这些接口，勿自造认证 |
 
 ## 尚未提供
 
