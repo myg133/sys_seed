@@ -3,6 +3,9 @@
 # 与开发 compose.yaml 的差别：
 #   - 用发布镜像（base-platform:${TAG}），不本地构建
 #   - 配置从 .env 注入（.env 不入库）
+#   - **应用容器只拿它需要的变量**（逐个列在 `app.environment` 里）：
+#     不整包注入 .env —— 整包 = 应用进程里躺着超管连接串与角色口令，
+#     应用被拿下就等于超管被拿下（RLS 被绕过）。见下面 app 服务的注释。
 #   - **迁移是独立服务**：走 profile，手动触发，`up -d` 不会自动跑迁移
 #   - **策略是独立服务**：走 profile，必须在迁移**之后**跑
 #   - **口令没有默认值**：POSTGRES_PASSWORD 必须由 .env / Secret 显式注入，
@@ -152,6 +155,12 @@ services:
          WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'role_name')
         \gexec
         GRANT base_platform_app TO :"role_name";
+        -- **存量对象**显式授权：ALTER DEFAULT PRIVILEGES 只影响**之后**创建的表，
+        -- 对已存在的表无效 —— 而补建场景恰恰是「表早就建好了」。
+        -- 两套都要有：这几句管存量，下面的默认权限管增量。
+        GRANT USAGE ON SCHEMA public TO base_platform_app;
+        GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO base_platform_app;
+        GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO base_platform_app;
         ALTER DEFAULT PRIVILEGES IN SCHEMA public
           GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO base_platform_app;
         SQL
@@ -164,16 +173,29 @@ services:
     image: base-platform:${TAG:-latest}
     container_name: base-app
     restart: unless-stopped
-    env_file:
-      - ${ENV_FILE:-.env}
+    # ⚠️ **不整包注入 .env**（不用 `env_file`）：.env 里含
+    #    `MIGRATION_DATABASE_URL`（超级用户连接串）与 `APP_ROLE_PASSWORD`，
+    #    整包注入 = 应用进程里躺着超管凭据 —— 应用一旦被拿下（环境变量泄露 /
+    #    崩溃转储 / 某个依赖读环境变量），攻击者就能拿超管连库，
+    #    **RLS 被绕过 → 跨租户全量可读**（等于把「应用用普通角色」这层白做）。
+    #    所以这里**逐个列出**应用真正需要的变量，其余一概不进容器。
     environment:
       # **普通角色**连接：超级用户会绕过 RLS，租户隔离会 fail open。
       # 应用启动时自检连接角色：绕过 RLS 就**拒绝启动**（退出码 3）。
       DATABASE_URL: ${APP_DATABASE_URL:?APP_DATABASE_URL is required - the application connection must use a NORMAL role (not the superuser); see deploy/RUNBOOK.md 3.1}
+      # 缓存：不配（空）则不使用缓存
+      REDIS_URL: ${REDIS_URL:-}
+      HOST: ${HOST:-0.0.0.0}
+      SERVER_PORT: ${SERVER_PORT:-8080}
+      BASE_ENV: ${BASE_ENV:-prod}
+      BASE_TENANT_MODE: ${BASE_TENANT_MODE:-shared}
+      BASE_LOG_LEVEL: ${BASE_LOG_LEVEL:-info}
+      BASE_AUTH_MODE: ${BASE_AUTH_MODE:-local}
+      BASE_SEED_ON_START: ${BASE_SEED_ON_START:-false}
       BASE_MIGRATIONS_DIR: /app/migrations
       BASE_STATIC_DIR: /app/static
-      HOST: 0.0.0.0
-      SERVER_PORT: '8080'
+      # ⚠️ `BASE_ALLOW_SUPERUSER` **故意不给**：生产只允许普通角色连接，
+      #    放行开关留在本地开发用（见 deploy/RUNBOOK.md §3.4.1）。
     depends_on:
       postgres:
         condition: service_healthy

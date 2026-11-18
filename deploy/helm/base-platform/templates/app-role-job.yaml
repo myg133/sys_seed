@@ -75,6 +75,12 @@ spec:
                WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'role_name')
               \gexec
               GRANT base_platform_app TO :"role_name";
+              -- **存量对象**显式授权：ALTER DEFAULT PRIVILEGES 只影响**之后**创建的表，
+              -- 对已存在的表无效 —— 而补建场景恰恰是「表早就建好了」。
+              -- 两套都要有：这几句管存量，下面的默认权限管增量。
+              GRANT USAGE ON SCHEMA public TO base_platform_app;
+              GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO base_platform_app;
+              GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO base_platform_app;
               ALTER DEFAULT PRIVILEGES IN SCHEMA public
                 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO base_platform_app;
               SQL

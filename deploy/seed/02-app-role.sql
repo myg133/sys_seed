@@ -23,6 +23,11 @@ END
 $$;
 
 -- 开发环境登录角色
+--
+-- ⚠️ 口令 `base` 是**开发环境专用弱口令**：只用于本机 base_dev / base_test。
+--    生产环境**不得**用它 —— 生产角色由部署流程用 `APP_ROLE_PASSWORD` 建
+--    （compose 的 `app-role` 步骤 / Helm 的 `app-role` hook Job），
+--    口令要求见 deploy/RUNBOOK.md §3.4.2。
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'base_app') THEN
@@ -34,7 +39,18 @@ $$;
 -- 登录角色加入组角色
 GRANT base_platform_app TO base_app;
 
--- 之后由本角色（base）创建的表自动授权给应用角色组（省掉逐表 GRANT）
+-- **存量对象**的显式授权（补建场景的关键）。
+--
+-- ⚠️ `ALTER DEFAULT PRIVILEGES` **只影响之后创建的表** —— 对**已经存在**的表无效。
+--    而「数据卷已存在、角色/权限要补建」的场景恰恰是「表早就建好了」：
+--    只跑默认权限的话，存量表的权限仍然是 `f`（应用报 permission denied）。
+--    所以下面这几句与后面的 `ALTER DEFAULT PRIVILEGES` **都要有**：
+--    这里管存量，那边管增量。
+GRANT USAGE ON SCHEMA public TO base_platform_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO base_platform_app;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO base_platform_app;
+
+-- **增量**：之后由本角色（base）创建的表自动授权给应用角色组（省掉逐表 GRANT）
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO base_platform_app;
 

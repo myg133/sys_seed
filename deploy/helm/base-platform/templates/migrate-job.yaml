@@ -40,10 +40,12 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           command: ['migrate', 'up']
           envFrom:
+            # 只整包引用 **ConfigMap**（非敏感运行配置）。
+            # Secret **不整包引用**：这个 Job 只需要超管连接串，
+            # 逐个点名即可（多给的应用连接串与角色口令对这个 Job 没有用，
+            # 少给反而更安全 —— 见 deployment.yaml 的同类说明）。
             - configMapRef:
                 name: {{ include "base-platform.fullname" . }}
-            - secretRef:
-                name: {{ .Values.secret.existingSecret }}
           env:
             # 迁移用**超级用户**连接：建表 / 建 policy 需要 DDL 权限。
             # （应用连接用的是普通角色，见 deployment.yaml）

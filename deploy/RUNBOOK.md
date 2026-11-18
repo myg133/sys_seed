@@ -81,16 +81,30 @@ kubectl create secret generic base-platform-secret \
   --from-literal=REDIS_URL='redis://redis:6379'
 ```
 
-| 键 | 用途 | 必须是 |
-|---|---|---|
-| `DATABASE_URL` | **应用**连接 | **普通角色**（`base_app`）—— 超级用户会绕过 RLS，应用拒绝启动 |
-| `MIGRATION_DATABASE_URL` | 迁移 / 建策略连接 | **超级用户**（要 DDL 权限） |
-| `APP_ROLE_PASSWORD` | 应用角色口令 | 与 `DATABASE_URL` 里的口令一致 |
-| `REDIS_URL` | 缓存 | 可选 |
+| 键 | 用途 | 必须是 | 谁引用它 |
+|---|---|---|---|
+| `DATABASE_URL` | **应用**连接 | **普通角色**（`base_app`）—— 超级用户会绕过 RLS，应用拒绝启动 | app Deployment |
+| `MIGRATION_DATABASE_URL` | 迁移 / 建策略连接 | **超级用户**（要 DDL 权限） | migrate / policies / app-role 三个 hook Job |
+| `APP_ROLE_PASSWORD` | 应用角色口令 | 与 `DATABASE_URL` 里的口令一致 | app-role hook Job |
+| `REDIS_URL` | 缓存 | 可选 | app Deployment（`optional: true`：没这个键也不影响启动） |
 
 > `APP_ROLE_PASSWORD` 与 `DATABASE_URL` 里的口令**必须一致**：`app-role` hook Job 用
 > `APP_ROLE_PASSWORD` 建角色，应用用 `DATABASE_URL` 连 —— 不一致就认证失败。
 > 两处都由运维在集群外填入，Chart 不生成 Secret。
+
+⚠️ **应用 Pod 只引用它需要的键，不整包引用 Secret**：
+
+| 工作负载 | 引用的 Secret 键 |
+|---|---|
+| app Deployment | `DATABASE_URL`（+ 可选的 `REDIS_URL`） |
+| migrate / policies / app-role 三个 hook Job | `MIGRATION_DATABASE_URL`（+ app-role 另有 `APP_ROLE_PASSWORD`） |
+
+**为什么不能整包 `envFrom`**：Secret 里躺着超管连接串 —— 整包注入 = 应用 Pod 的
+环境变量里就有超管凭据。应用一旦被拿下（环境变量泄露 / 崩溃转储 / 某个依赖读环境变量），
+攻击者就能拿超管连库，**RLS 被绕过 → 跨租户全量可读** —— 等于把「应用用普通角色」
+这层白做。compose 的 `app` 服务同理：**不用 `env_file: .env`**，只逐个列变量
+（见 §3.1）。
+
 
 ---
 
@@ -196,6 +210,11 @@ cp ../.env.example .env      # 编辑 .env：改 APP_DATABASE_URL / MIGRATION_DA
 #    ⚠️ 口令含 / @ : # 等 URL 保留字符时必须百分号编码（%2F、%40 …）
 
 ../scripts/prod-preflight.sh   # 口令 / 库名 / 连接串前置校验，不通过就不许 up
+
+# ⚠️ 应用容器**只拿它需要的变量**（compose.prod.yaml 的 app 服务逐个列 environment，
+#    不用 env_file 整包注入 .env）：.env 里的 MIGRATION_DATABASE_URL（超管连接串）
+#    与 APP_ROLE_PASSWORD **不进应用容器**。应用被拿下 ≠ 超管被拿下。
+#    .env 里其余变量仍会经 compose 插值进 app 的 environment（BASE_ENV / BASE_LOG_LEVEL …）。
 
 docker compose -f compose.prod.yaml up -d postgres redis
 docker compose -f compose.prod.yaml --profile app-role run --rm app-role   # ① 建应用角色
@@ -308,19 +327,49 @@ PostgreSQL 的 RLS（行级安全）对**超级用户**与带 `BYPASSRLS` 属性
 | 开发环境（首次建卷时） | `deploy/seed/02-app-role.sql` 由 compose 挂到 `docker-entrypoint-initdb.d` 自动执行 |
 | **已有卷 / 角色缺失** | 见 §3.4.3 |
 
+**应用角色的口令要求**：
+
+| 环境 | 口令 | 从哪来 |
+|---|---|---|
+| 开发（本机 `base_dev` / `base_test`） | `base`（**弱口令，仅开发用**） | `deploy/seed/02-app-role.sql` 里写死 |
+| 私有化生产 | **不得**用弱口令 | `APP_ROLE_PASSWORD`，`openssl rand -base64 24` 生成 |
+| K8s 生产 | **不得**用弱口令 | Secret 的 `APP_ROLE_PASSWORD` 键 |
+
+> `deploy/seed/02-app-role.sql` 里的 `base` 是**开发环境专用**的弱口令 ——
+> 它只用于本机开发库与测试库。**生产库不要靠这个脚本建角色**：生产角色由
+> `app-role` 步骤（compose）或 `app-role` hook Job（Helm）用 `APP_ROLE_PASSWORD` 建，
+> 口令要求见上表。弱口令（`base` / `postgres` / `password` …）会被
+> `scripts/prod-preflight.sh` 直接拒绝。
+
 #### 3.4.3 角色缺失时怎么补建（数据卷已存在的情况）
 
 ⚠️ `deploy/seed/*.sql` **只在数据卷首次创建时执行**（PostgreSQL 官方镜像的
 `docker-entrypoint-initdb.d` 约定）。**已有卷的环境升级后不会重跑** —— 角色可能缺失，
-或者表权限（`ALTER DEFAULT PRIVILEGES`）没落到目标库上。
+或者表权限没落到目标库上。
+
+⚠️ **两套授权机制都要有，缺一不可**：
+
+| 语句 | 管哪一段对象 | 少了会怎样 |
+|---|---|---|
+| `GRANT … ON ALL TABLES IN SCHEMA public` | **存量**表（早就建好的那些） | 存量表权限仍是 `f` → 应用报 `permission denied for table …` |
+| `ALTER DEFAULT PRIVILEGES IN SCHEMA public` | **之后**新建的表 | 新表建出来就没权限 → 应用报 `permission denied for table …` |
+
+> **`ALTER DEFAULT PRIVILEGES` 只管「未来表」** —— 它只影响**执行之后创建**的对象，
+> 对**已经存在**的表**完全无效**。而补建场景恰恰是「表早就建好了」：
+> 只重跑默认权限，存量表的权限仍然是 `f`（实测：`has_table_privilege` 仍是 `f`，
+> 应用照样 `permission denied for table`）。
+>
+> 所以存量表必须靠 `GRANT … ON ALL TABLES IN SCHEMA public` 补 ——
+> 下面三个建角色的地方（`deploy/seed/02-app-role.sql`、compose 的 `app-role` 服务、
+> Helm 的 `app-role` hook Job）**都已经带上这句**。
 
 补建命令（**幂等**，可重复执行）：
 
 ```bash
-# 开发库（base_dev）：重跑角色脚本
-podman exec -i base-postgres psql -U base -d base_dev < deploy/seed/02-app-role.sql
+# 开发库（base_dev）：重跑角色脚本（存量授权 + 默认权限两套都在里面）
+podman exec -i base-postgres psql -v ON_ERROR_STOP=1 -U base -d base_dev < deploy/seed/02-app-role.sql
 
-# 私有化生产库：重跑 app-role 步骤（用生产口令）
+# 私有化生产库：重跑 app-role 步骤（用生产口令；同样含存量 + 增量两套授权）
 docker compose -f deploy/compose.prod.yaml --profile app-role run --rm app-role
 
 # K8s：重新触发 hook（删掉旧 Job 再 upgrade）
@@ -328,16 +377,42 @@ kubectl delete job base-platform-app-role -n base-platform
 helm upgrade base-platform deploy/helm/base-platform -n base-platform
 ```
 
-> `02-app-role.sql` 里的口令是**开发用的弱口令**（`base`），生产上由 `app-role`
-> 步骤用 `APP_ROLE_PASSWORD` 建角色（见 §3.4.2）。
+**手工补存量授权**（上面任一条跑完权限仍不对时，用**超级用户**连接直接执行）：
+
+```sql
+GRANT USAGE ON SCHEMA public TO base_platform_app;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO base_platform_app;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO base_platform_app;
+```
+
+> ⚠️ 这三句**只影响执行当时已存在的表**；之后再建的表靠
+> `ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO base_platform_app;`
+> （上面三个建角色的地方都有这句）。
+>
+> ⚠️ `GRANT … ON ALL TABLES IN SCHEMA public` 会把 **public schema 下所有表**
+> 都授权给应用角色组 —— 私有化单机的 public schema 里只有平台表与模块表，
+> 这正是要授权的范围。若库里有**不该给应用**的表，把它挪出 public schema
+> 或单独 `REVOKE`。
 
 **症状对照**：
 
 | 现象 | 原因 | 处置 |
 |---|---|---|
 | 应用启动报 `role "base_app" does not exist` | 角色没建 | 跑 §3.4.3 的补建命令 |
-| 应用连得上，但 `permission denied for table <表>` | 角色存在但**没表权限**（`ALTER DEFAULT PRIVILEGES` 没落到这个库） | 同上：重跑角色脚本 / app-role 步骤（`ALTER DEFAULT PRIVILEGES` 是**按库**生效的） |
+| 应用连得上，但 `permission denied for table <表>` | 角色存在但**没表权限**（存量表没被授权，或默认权限没落到这个库） | 同上：重跑角色脚本 / app-role 步骤（**存量授权 + 默认权限两套都跑**；`ALTER DEFAULT PRIVILEGES` 是**按库**生效的，且只管未来表） |
 | readiness 503 + `MIGRATIONS_PENDING`（detail 是 `permission denied for table _sqlx_migrations`） | 同上 | 同上 |
+
+> 确认补建是否真的生效（两条都要看）：
+>
+> ```bash
+> # ① 权限位：期望 t
+> podman exec -i base-postgres psql -U base -d base_test -c \
+>   "select has_table_privilege('base_app','public.platform_tenant_quota','SELECT') as quota_select;"
+> # ② 实际能读：期望能出结果行（不报 permission denied）
+> podman exec -i base-postgres psql -U base_app -d base_test -c \
+>   "select count(*) from platform_tenant_quota;"
+> ```
+
 
 #### 3.4.4 怎么确认 RLS 真的生效
 
@@ -406,6 +481,14 @@ helm rollback base-platform <revision> -n base-platform
 > **策略 Job 必须在迁移之后**（`-4` > `-5`）：策略是对已建好的表做的。
 > 应用（Deployment）用 `DATABASE_URL` = **普通角色**连接；超级用户连接串只出现在
 > 这三个 Job 里。
+>
+> ⚠️ **不整包引用 Secret**：Deployment 逐个 `valueFrom.secretKeyRef` 点名
+> `DATABASE_URL`（+ 可选的 `REDIS_URL`），三个 hook Job 各自只点名自己要用的键
+> （`MIGRATION_DATABASE_URL`；app-role 另有 `APP_ROLE_PASSWORD`）。
+> 整包 `envFrom: secretRef` = 应用 Pod 的环境变量里躺着超管连接串 ——
+> Pod 一旦被拿下就等于超管被拿下（RLS 被绕过 → 跨租户全量可读）。
+> 自检：`helm template base-platform deploy/helm/base-platform` 渲染出的
+> **Deployment 块里不应出现 `envFrom`，也不应出现 `MIGRATION_DATABASE_URL`**。
 
 模板渲染自检（本机无 helm 时用）：
 
