@@ -237,13 +237,14 @@
   1. 读 `bad\nINJECTED`（含换行）
   2. 读 1024 个 `a` 组成的名字
   3. 取捕获日志，确认这两个请求**没有**产生任何 `flag=` 的 WARN 事件
-  4. 读 `new-invoice`（kebab 写法的**未登记**名字）
+  4. 读 `newinvoice`（**全小写、符合字符集**、但 ≠ 登记的 `newInvoice`）
   5. 对照读 `newInvoice`
 - **预期结果**:
   1. **400**；`code == "FLAG_NAME_INVALID"`（**不是** 200 + false）。
   2. **400**；同码（超长）。
   3. 步骤 1/2 **没有**产生日志事件 —— 非法名**不进日志**，因此无法伪造日志行/刷爆告警。
-  4. **200**；`enabled == false`；`source == "default"` —— `new-invoice` 与 `newInvoice` 是**两个不同** flag，**不做归一化**。
+  4. **200**；`enabled == false`；`source == "default"` —— `newinvoice` 与 `newInvoice` 是**两个不同** flag，**不做归一化**。
+     另：kebab 写法 `new-invoice` 含连字符 → 按 D77 是**非法名**，应得 **400 `FLAG_NAME_INVALID`**（不是 200）。
   5. **200**；`enabled == true`（对照：拼写不同的合法名得到不同结果）。
   6. 全程不得 500、不得 panic。
 - **类型**: 安全

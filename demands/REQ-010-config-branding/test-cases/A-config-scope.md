@@ -124,7 +124,8 @@
   5. A：`{"scope":"tenant","entries":[{"key":"logo","value":"/branding/tenant-a-new.svg"}]}`
   6. A：`{"scope":"space","entries":[{"key":"logo","value":"/branding/space-s1-new.svg"}]}` + S1
   7. P：`PUT /api/config/platform-entries` `{"scope":"platform","entries":[{"key":"conflictStrategy","value":"local_wins"}]}`
-  8. 管理员连接查三张表里 `key='conflictStrategy'` 的行
+  8. 管理员连接对**租户级与空间级**两张表里 `key='conflictStrategy'` 的行取**写前/写后快照**
+     （`count` + `max(value)`；平台级表由第 7 步正对照故意改写，不纳入比对）
 - **预期结果**:
   1. **400**；`code == "CONFIG_SCOPE_NOT_ALLOWED"`；`params.allowedScope == "platform"`；`params.attemptedScope == "tenant"`。**不得** 403（A 有写权限点，拒绝原因是作用域）。
   2. **400**；同码；`attemptedScope == "space"`。
@@ -133,7 +134,10 @@
   5. **200**；读回 T1 `logo` = `/branding/tenant-a-new.svg`、`source="tenant"`。
   6. **200**；读 T1+S1 `logo` = `/branding/space-s1-new.svg`、`source="space"`。
   7. **200**；平台 `conflictStrategy == "local_wins"`、`source="platform"`（正对照：接口不是恒拒）。
-  8. `platform_config` 中该值 = `local_wins`；另外两张表里 `key='conflictStrategy'` 的行数 **均为 0**（越级写没有留下任何行）。
+  8. `platform_config` 中该值 = `local_wins`；**租户级与空间级两张表的快照与写前完全一致**
+     —— 既没多行、也没改值（D84：**快照比对**优于行数断言。
+     夹具里本来就有 `(tenant-a, space-sales-1, conflictStrategy='remote_wins')`，
+     若越级写被放行并覆盖这一行，**行数断言抓不到**）。
 - **类型**: 安全
 - **优先级**: P0
 - **自动化**: 可自动化

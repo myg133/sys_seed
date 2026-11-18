@@ -53,7 +53,9 @@
   1. `GET /api/config/branding` + `X-Tenant-Id: tenant-a`，取出响应里**全部**键名，记为集合 K
   2. 断言 K ⊆ 白名单（11 个具体键）
   3. 断言 `conflictStrategy`、`scimBaseUrl`、`cacheTtlSeconds` 均不在 K
-  4. 以 P 调 `GET /api/config/entries?keys=conflictStrategy,scimBaseUrl,cacheTtlSeconds`（T1）
+  4. 以 P 调 **`GET /api/config/platform-entries?keys=conflictStrategy,scimBaseUrl,cacheTtlSeconds`**（T1）
+     —— ⚠️ 按 AC-S-063 / D78：平台级键走**独立读路由**；用通用路由 `GET /api/config/entries`
+     会得到整请求 **403**（rev 2 时此处写的是通用路由期望 200，已过时）
   5. 断言 `logo`、`primaryColor`、`theme.radius` 在 K 中
 - **预期结果**:
   1. K 逐条列出；K 至少含 `logo`、`primaryColor`、`title`、`favicon`。
