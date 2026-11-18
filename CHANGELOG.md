@@ -54,6 +54,19 @@
   - **Helm 口径**：RUNBOOK 与验证产物改为「默认渲染 **5 类资源，不含 Ingress**」
     （`ingress.enabled` 默认 false），并给出 `--set ingress.enabled=true` 的开法
   - **`core-change-detect.sh`**：「平台 crate 必须登记」的检查并进 `--self-test` 入口
+- **微修轮（QA 复核新发现 2 项低问题）**：
+  - **日志过滤器**：`BASE_LOG_LEVEL` 此前**完全无效** —— 过滤器只写
+    `platform_server={level}`，而日志事件实际来自 **bin target `base`**，
+    默认配置下一行日志都不输出（RUNBOOK「运维中文说明在日志里」这条兜底通道是死的）。
+    现在过滤器同时覆盖 **bin target `base`** 与 **lib target `platform_server`**，
+    `info` / `warn` / `error` 三档实测符合预期，**+4 条单测**守着。
+    契约 C6 未动：响应体 `detail` 仍是纯 ASCII 英文，中文只在日志里；
+    RUNBOOK §5.1 补了「`detail` 英文 / 日志中文」的语言边界表，§5.3 补日志级别说明
+  - **RUNBOOK §3.1 的 `env_file` 口径**：此前把 `podman-compose` 的解析基准**说反了**
+    （写成按当前目录，实际按 **compose 文件所在目录**），
+    且给出的 `ENV_FILE=deploy/.env` 备选写法实测报 `deploy/deploy/.env does not exist`。
+    本轮按实测改正（两种 compose 实现一致，附官方文档与源码佐证）、删掉坏的备选写法，
+    推荐用法统一为**在 `deploy/` 目录里执行**并实跑通过
 
 ### REQ-004 AI 引导体系与能力索引
 

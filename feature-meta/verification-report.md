@@ -7,8 +7,8 @@
 - **契约**: api-conventions v1、extension-points v1（已 ratified，已在 `feature-meta/manifest.json` pin）
 - **开发者**: myg133-dev-1
 - **日期**: 2026-11-18
-- **轮次**: 第二轮（QA 退回后的**修复轮** —— 接管上一轮未提交的改动，复核 + 补漏 + 实测 + 提交）
-- **本轮修复依据**: `feature-meta/qa-report.md`（QA Pre-merge 结论 PASS-WITH-RISK，登记 5 项问题）
+- **轮次**: 第三轮（QA 复核 **PASS-WITH-RISK** 后的**微修轮** —— 只修复核新发现的 2 个低问题）
+- **本轮修复依据**: `feature-meta/qa-report-recheck.md`（QA 复核：首轮 1 中 + 4 低全部复现为已修复，新发现 **2 个低**）
 
 ---
 
@@ -16,14 +16,16 @@
 
 | 项 | 结果 |
 |----|------|
-| 改动 | **48 文件 / +5126 -575 行**（基线 `31ca87a` → 本轮；删除行主要来自 REQ-004 的 `feature-meta/*.md` 被本轮文档替换） |
+| 改动 | **49 文件 / +6080 -560 行**（基线 `31ca87a` → 本轮微修后；**不含** QA 自己写的 `feature-meta/qa-report.md` / `qa-report-recheck.md` 两份报告）。其中**本轮微修 7 文件 / +381 -33 行**（删除行主要来自 REQ-004 的 `feature-meta/*.md` 被本轮文档替换） |
 | 新增第三方依赖 | **`sqlx` 0.8**（`runtime-tokio` + `postgres` + `migrate`，**关闭** `macros` / `json` / TLS 特性）；锁文件 107 → 234 个 crate，其中 `sqlx-macros` / `sqlx-mysql` / `sqlx-sqlite` 只进锁文件**不参与编译**（`cargo tree` 实测 0 处引用） |
 | 新增 crate | `crates/platform-server`（交付基线服务：`base` 二进制）——**未改动** `platform-core` / `platform-contracts` |
-| Rust 测试 | **138/138 通过**（上一轮 132 个全绿，**只增不减**；本轮修复轮 **+6**：`health.rs` 5 个 + `db.rs` 1 个） |
+| Rust 测试 | **142/142 通过**（上一轮 138 个全绿，**只增不减**；本轮微修轮 **+4**：日志过滤器 4 个） |
 | 前端测试 | **23/23**（`pnpm -r test`） |
 | E2E | **1/1**（Playwright chromium） |
 | lint | `cargo fmt --all --check` ✅ / `cargo clippy --workspace --all-targets -- -D warnings` ✅ 0 告警 / `pnpm exec eslint .` ✅ / `pnpm exec prettier --check .` ✅ |
 | compose 校验 | `podman-compose -f compose.yaml config` ✅ / `podman-compose -f deploy/compose.prod.yaml config` ✅；**`up -d` 不会自动跑迁移**（profile 验证通过）；**缺 `POSTGRES_PASSWORD` → 报错 + 退出码 1**（本轮实测，见 §3.5） |
+| **日志过滤器** | `BASE_LOG_LEVEL` **真的生效**：过滤器覆盖 bin target `base` + lib target `platform_server`；实测 `info` / `warn` / `error` 三档符合预期（§3.7） |
+| **compose `env_file` 基准** | 服务级 `env_file` 按 **compose 文件所在目录**解析（`podman-compose` 1.6.0 **实测** + `docker compose` 官方文档口径一致）；RUNBOOK §3.1 已按实测改正并实跑通过（§3.8） |
 | Helm | `helm lint` ✅（0 failed）/ `helm template` ✅ 默认渲染 **5 类资源**（ServiceAccount / ConfigMap / Service / Deployment / Job，**不含 Ingress**）；`--set ingress.enabled=true` 才渲染出 Ingress（共 6 类） |
 | 健康检查 | live **200** / ready **200**（正常）；停库后 ready **503**（`DATABASE_UNAVAILABLE`，**实测 2.002s**）/ live 仍 **200**；三个错误路径的 `detail` **全部为英文**（本轮实测，见 §3.2） |
 | 配置 fail-fast | 缺 `DATABASE_URL` → 打印 `CONFIG_MISSING_REQUIRED` 并 **退出码 2** |
@@ -298,6 +300,108 @@ $ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18081/assets/nope.js
 404
 ```
 
+### 3.7 日志过滤器与 `BASE_LOG_LEVEL`（本轮**实测**，2026-11-18 10:31）
+
+**问题**：过滤器只写 `platform_server={level}`，而日志事件写在 `main.rs` 里 →
+tracing 的 target 是 **bin crate 名 `base`** → **一条都匹配不上** → 默认配置下
+**一行日志都不输出**（`BASE_LOG_LEVEL` 形同虚设）。连带后果：RUNBOOK §5.1
+「运维视角的中文说明在日志里」这条兜底通道是**死的**。
+
+**修法**：`crates/platform-server/src/main.rs` 的 `log_filter()` 同时覆盖
+**bin target `base`** 与 **lib target `platform_server`**。
+
+**正常路径**（PG 正常）：
+
+```console
+$ DATABASE_URL='postgres://base:base@127.0.0.1:5432/base_dev' BASE_LOG_LEVEL=info \
+  SERVER_PORT=18090 ./target/debug/base serve > /tmp/base-info.log 2>&1 &
+$ curl -s -w '\nHTTP %{http_code} time=%{time_total}s\n' http://127.0.0.1:18090/health/ready
+{"appliedMigrations":[20261118000100],"environment":"dev","status":"ready","traceId":"b1febc56-df96-48f6-ba9c-056b66b93b50","version":"0.1.0"}
+HTTP 200 time=0.150874s
+$ cat /tmp/base-info.log
+2026-11-18T02:31:01.975086Z  INFO base: 底座服务已启动 addr=0.0.0.0:18090 environment="dev" tenant_mode="shared" auth_mode="local"
+```
+
+> 修复前，同样的命令 → 日志文件 **0 字节**（连启动 INFO 都没有）。
+
+**未就绪路径**（数据库不可达 → readiness 503）：**日志里是中文运维说明，
+响应体 `detail` 仍是英文**（契约 C6 未动）：
+
+```console
+$ curl -s -w '\nHTTP %{http_code} time=%{time_total}s\n' http://127.0.0.1:18091/health/ready
+{"type":"https://errors.base.example/service-not-ready","title":"服务未就绪","status":503,"detail":"database is unreachable: pool timed out while waiting for an open connection","instance":"/health/ready","code":"DATABASE_UNAVAILABLE","trace_id":"b8dbc46d-9d97-48a5-9a4a-5c1b94b26330"}
+HTTP 503 time=2.002222s
+$ cat /tmp/base-warn.log
+2026-11-18T02:31:08.362324Z  INFO base: 底座服务已启动 addr=0.0.0.0:18091 environment="dev" tenant_mode="shared" auth_mode="local"
+2026-11-18T02:31:12.369953Z  WARN base: readiness 未通过：数据库不可达或迁移未应用（面向用户的中文文案由前端按 code 渲染） code="DATABASE_UNAVAILABLE" detail=database is unreachable: pool timed out while waiting for an open connection pending=[20261118000100] dirty=None
+```
+
+**级别开关真的生效**（同一场景，三档）：
+
+| `BASE_LOG_LEVEL` | 日志 | 内容 |
+|---|---|---|
+| `info` | 2 行 | `INFO base: 底座服务已启动 …` + `WARN base: readiness 未通过：…` |
+| `warn` | 1 行 | 只有 `WARN base: readiness 未通过：…` |
+| `error` | 0 行（0 字节） | 无（没有 error 级事件） |
+
+**单测**（`crates/platform-server/src/main.rs`，本轮 **+4**）：
+`log_filter_captures_events_from_the_bin_target`（显式 `target: "base"`）/
+`log_filter_captures_events_without_an_explicit_target`（默认 target `base::…`）/
+`log_filter_captures_events_from_the_lib_target`（`target: "platform_server"`）/
+`log_filter_respects_the_configured_level`（`error` 档挡掉 info、留下 error）。
+
+### 3.8 compose `env_file` 解析基准（本轮**实测**，2026-11-18 10:26）
+
+**问题**：RUNBOOK §3.1 说「`podman-compose` 按**当前目录**解析服务级 `env_file`」——
+**说反了**；它给的备选写法 `ENV_FILE=deploy/.env` 实测直接报错。
+
+**实测矩阵**（`podman-compose` 1.6.0 + 真实 `deploy/compose.prod.yaml` + 仓库式目录布局；
+用 `--dry-run` 触发容器参数构造路径 —— `config` 子命令**不读**服务级 `env_file`，
+所以必须走 `up` / `run` 路径才会解析它）：
+
+| # | 执行目录 | `ENV_FILE` | 结果 |
+|---|---|---|---|
+| A | 仓库根 | 默认（`.env`） | **EXIT=0** —— 解析到 `deploy/.env`（compose 文件目录），**不是**仓库根的 `.env` |
+| B | 仓库根 | `./prod.env` | **EXIT=0** —— 相对 compose 文件目录 ✓ |
+| C | 仓库根 | 绝对路径 | **EXIT=0** ✓ |
+| D | 仓库根 | `deploy/.env`（旧 RUNBOOK 的备选写法） | **EXIT=1**：`ValueError: Env file at <仓库根>/deploy/deploy/.env does not exist` |
+| E | `deploy/` | 默认（`.env`） | **EXIT=0** ✓ |
+
+**关键对照（A 的反面）**：把 `deploy/.env` 挪走、只在**仓库根**放 `.env` → 仍报
+`ValueError: Env file at <仓库根>/deploy/.env does not exist`
+⇒ 基准是 **compose 文件所在目录**，不是当前目录。
+
+源码佐证（`podman_compose.py` 1.6.0）：服务级 `env_file` 走
+`os.path.realpath(os.path.join(dirname, path))`，`dirname` = compose 文件目录；
+项目级 `.env`（供 `${VAR}` 插值）同样取 `dirname`（`--env-file` 的默认值就是 `".env"`）。
+
+**`docker compose` v2 的对照**：官方文档 *「Relative paths are resolved from the
+Compose file's parent folder.」*
+（<https://docs.docker.com/reference/compose-file/services/#env_file>）；
+项目级 `.env` 取「项目目录」（`--project-directory`，否则第一个 `-f` 指定文件的目录）
+—— **与 `podman-compose` 1.6.0 一致**。
+⚠️ **本机没有 `docker compose` 插件**（`docker compose` → `not a docker command`），
+这一条是**文档口径**，**未在本机实测**。
+
+**RUNBOOK §3.1 的推荐用法（方案 A：在 `deploy/` 里执行）实跑通过**：
+
+```console
+$ cd deploy
+$ cp ../.env.example .env      # 编辑：POSTGRES_PASSWORD / POSTGRES_DB=base / DATABASE_URL
+$ ../scripts/prod-preflight.sh
+✓ 生产部署前置校验通过：口令已显式注入且非弱口令，库名 'base' 与 DATABASE_URL 一致
+$ echo $?
+0
+$ podman-compose -f compose.prod.yaml config > /dev/null; echo $?
+0
+```
+
+**`ENV_FILE` 在两个工具里基准不同**（RUNBOOK 已写明）：
+compose 的服务级 `env_file` 按 **compose 文件目录**；
+`scripts/prod-preflight.sh` 是普通 shell 脚本，按 **当前工作目录**。
+在 `deploy/` 里执行时两者一致；从仓库根执行时 preflight 要 `ENV_FILE=deploy/.env`、
+compose 那边要 `ENV_FILE=./.env` —— **绝对路径最省事**（两个工具都认）。
+
 ---
 
 ## 4. 4 项遗留技术债（QA 前几轮登记，归属本需求）
@@ -334,11 +438,30 @@ $ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18081/assets/nope.js
 
 ---
 
+## 4.2 本轮微修轮：QA 复核新发现的 2 个低问题
+
+QA 复核结论 **PASS-WITH-RISK**：首轮登记的 **1 中 + 4 低全部复现为已修复**，
+新发现 **2 个低**问题。本轮**只修这 2 项**，范围极窄。
+
+| # | QA 登记的问题 | 本轮复核结论 | 落地位置 |
+|---|--------------|--------------|---------|
+| **低 1** | `BASE_LOG_LEVEL` **完全无效**：过滤器只匹配 lib crate 的 target `platform_server`，而日志事件实际来自 **bin target `base`** → 默认配置下**一行日志都不输出**；RUNBOOK §5.1「运维视角的中文说明在日志里」这条兜底通道是**死的** | **已修完并复验**：过滤器改为同时覆盖 `base` 与 `platform_server`（`log_filter()`）；**实测 `BASE_LOG_LEVEL=info` 真的有日志输出**（§3.7），`warn` / `error` 两档也符合预期；**+4 条单测**守着；RUNBOOK §5.1 补了**语言边界表**（响应体 `detail` 永远是英文 / 运维中文说明永远在日志里），§5.3 补了日志级别与 target 的说明 | `crates/platform-server/src/main.rs`、`deploy/RUNBOOK.md` §5.1 / §5.3 |
+| **低 2** | RUNBOOK §3.1 把 `podman-compose` 的 `env_file` 解析基准**说反了**（说按当前目录，实际按 compose 文件目录），且它给的备选写法 `ENV_FILE=deploy/.env` 实测直接报错（`deploy/deploy/.env does not exist`） | **已修完并复验**：§3.1 按**实测**改正（两种实现都按 **compose 文件所在目录**解析，附 `docker compose` 官方文档口径与 `podman-compose` 源码佐证）；**删掉坏的备选写法**；推荐用法统一为**方案 A：在 `deploy/` 目录里执行**并**实跑通过**（§3.8）；compose 文件头部的用法示例同步加了 `env_file` 基准说明 | `deploy/RUNBOOK.md` §3.1、`deploy/compose.prod.yaml` 头部 |
+
+> ⚠️ **契约 C6 未动**：本轮**没有**把 `detail` 改回中文 —— 响应体 `detail` 仍是纯 ASCII 英文
+> （中 1 的修复保留），中文只在日志里（§3.7 的实测响应体与日志行并列给出）。
+>
+> ⚠️ **`docker compose` v2 未在本机实测**：本机 `docker compose` 插件缺失
+> （`docker compose` → `not a docker command`），该实现的口径来自官方文档，
+> 本轮只实测了 `podman-compose` 1.6.0。
+
+---
+
 ## 5. 回归
 
 | 套件 | 命令 | 结果 |
 |------|------|------|
-| Rust 单测 + 契约测试 | `cargo test --workspace -- --test-threads=2` | **138/138**（platform-core 41 / platform-contracts 8 / platform-server 32+5 / sandbox 2+4 / xtask 46；上一轮 132 个全绿，本轮 **+6** 只增不减） |
+| Rust 单测 + 契约测试 | `cargo test --workspace -- --test-threads=2` | **142/142**（platform-core 41 / platform-contracts 8 / platform-server 32+9 / sandbox 2+4 / xtask 46；上一轮 138 个全绿，本轮 **+4** 只增不减） |
 | Rust lint | `cargo clippy --workspace --all-targets -- -D warnings` | 0 告警 |
 | Rust 格式 | `cargo fmt --all --check` | 通过 |
 | 静态检查 | `cargo check --workspace --all-targets` | 通过 |
@@ -364,6 +487,7 @@ $ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:18081/assets/nope.js
 | **真实 K8s 集群部署** | 本机无集群 | `helm install` 到测试集群（Chart 已经过 `helm template` 渲染校验） |
 | **Trivy 扫描结果** | 需要联网拉扫描器与漏洞库 | CI `image-scan` job |
 | **数据库 TLS** | `sqlx` 未开 TLS 特性（`tls-none`）：带 `sslmode=require` 的连接串会失败 | 随 REQ-006/007 的 DB 层一并处理；当前私有化部署走内网/本地 socket |
+| **`docker compose` v2 的 `env_file` 解析基准未在本机实测** | 本机 docker CLI 27.2.1 **没有 compose 插件**（`docker compose` → `not a docker command`），只有 `podman-compose` 1.6.0 | 本轮实测的是 `podman-compose` 1.6.0（§3.8）；`docker compose` v2 的口径来自官方文档（*"Relative paths are resolved from the Compose file's parent folder."*），客户侧用 `docker compose` 时以该文档为准；两者结论一致 |
 
 ### 6.2 偏离
 

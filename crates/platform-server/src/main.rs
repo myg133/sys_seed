@@ -173,11 +173,34 @@ fn load_config() -> Result<DeployConfig, Failure> {
     DeployConfig::from_env().map_err(Failure::from)
 }
 
+/// 日志事件的 target：**bin crate `base`** 与 lib crate `platform_server`。
+///
+/// 本服务的日志事件都写在 `main.rs` 里 → tracing 的 target 是 **bin crate 名 `base`**，
+/// 不是 lib crate 名。过滤器只写 `platform_server=…` 时**一条都匹配不上**，
+/// 日志会被静默丢弃（历史 bug：`BASE_LOG_LEVEL` 形同虚设，默认配置下一行日志都不输出）。
+/// 两个 target 都要写进过滤器。
+const LOG_TARGETS: [&str; 2] = ["base", "platform_server"];
+
+/// 生成日志过滤器：`RUST_LOG` 优先，否则按 `BASE_LOG_LEVEL` 生成。
+///
+/// `BASE_LOG_LEVEL` 的值会套到**每一个** target 上（见 [`LOG_TARGETS`]），
+/// 保证「级别开关」与「事件所在 target」两件事都覆盖到。
+fn log_filter(level: &str) -> EnvFilter {
+    EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        let mut directives = LOG_TARGETS
+            .iter()
+            .map(|target| format!("{target}={level}"))
+            .collect::<Vec<_>>();
+        directives.push("tower_http=info".to_string());
+        EnvFilter::new(directives.join(","))
+    })
+}
+
 /// 初始化日志。
 fn init_tracing(level: &str) {
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(format!("platform_server={level},tower_http=info")));
-    tracing_subscriber::fmt().with_env_filter(filter).init();
+    tracing_subscriber::fmt()
+        .with_env_filter(log_filter(level))
+        .init();
 }
 
 /// 加载迁移目录；目录不存在时 fail-fast（readiness 依赖它）。
@@ -329,6 +352,43 @@ async fn static_fallback(State(state): State<Arc<AppState>>, uri: Uri) -> Respon
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    /// 把格式化后的日志写进内存缓冲（用来断言过滤器有没有命中）。
+    #[derive(Clone, Default)]
+    struct BufWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for BufWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("日志缓冲锁 poisoned").write(buf)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.0.lock().expect("日志缓冲锁 poisoned").flush()
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufWriter {
+        type Writer = BufWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// 用给定过滤器捕获 `emit` 产生的日志，返回格式化后的文本。
+    fn capture_logs(filter: EnvFilter, emit: impl FnOnce()) -> String {
+        let buf = BufWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_ansi(false)
+            .with_writer(buf.clone())
+            .finish();
+        tracing::subscriber::with_default(subscriber, emit);
+        let bytes = buf.0.lock().expect("日志缓冲锁 poisoned").clone();
+        String::from_utf8(bytes).expect("日志是 UTF-8")
+    }
 
     #[test]
     fn cli_defaults_to_serve() {
@@ -373,5 +433,56 @@ mod tests {
     #[test]
     fn migrate_down_without_target_is_rejected() {
         assert!(Cli::try_parse_from(["base", "migrate", "down"]).is_err());
+    }
+
+    #[test]
+    fn log_filter_captures_events_from_the_bin_target() {
+        // 本服务的日志事件写在 main.rs 里 → target 是 bin crate 名 `base`。
+        // 过滤器只写 `platform_server=…` 时这条会被丢掉（`BASE_LOG_LEVEL` 形同虚设）。
+        let out = capture_logs(log_filter("info"), || {
+            tracing::warn!(target: "base", code = "MIGRATIONS_PENDING", "运维冒烟：readiness 未通过");
+        });
+        assert!(
+            out.contains("运维冒烟：readiness 未通过"),
+            "过滤器没命中 bin target 的日志：{out}"
+        );
+    }
+
+    #[test]
+    fn log_filter_captures_events_without_an_explicit_target() {
+        // 不写 `target:` 时 tracing 用模块路径（`base::…`）当 target —— 也要能命中。
+        let out = capture_logs(log_filter("info"), || {
+            tracing::info!("底座服务已启动");
+        });
+        assert!(
+            out.contains("底座服务已启动"),
+            "过滤器没命中默认 target 的日志：{out}"
+        );
+    }
+
+    #[test]
+    fn log_filter_captures_events_from_the_lib_target() {
+        // lib crate `platform_server` 侧的日志同样要能被命中。
+        let out = capture_logs(log_filter("info"), || {
+            tracing::warn!(target: "platform_server", "lib 侧日志冒烟");
+        });
+        assert!(
+            out.contains("lib 侧日志冒烟"),
+            "过滤器没命中 lib target 的日志：{out}"
+        );
+    }
+
+    #[test]
+    fn log_filter_respects_the_configured_level() {
+        // `BASE_LOG_LEVEL=error` 时，info 事件要被挡掉，error 事件要留下。
+        let out = capture_logs(log_filter("error"), || {
+            tracing::info!(target: "base", "不该出现的 info 日志");
+            tracing::error!(target: "base", "该出现的 error 日志");
+        });
+        assert!(!out.contains("不该出现的 info 日志"), "级别没生效：{out}");
+        assert!(
+            out.contains("该出现的 error 日志"),
+            "error 日志被丢了：{out}"
+        );
     }
 }

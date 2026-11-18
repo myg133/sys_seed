@@ -3,11 +3,11 @@
 - **需求**: REQ-005 交付基线与发布
 - **分支**: `feature/REQ-005`
 - **基线**: `develop` @ `37a93c5`（REQ-002 工程基线 + REQ-003 扩展点框架 + REQ-004 AI 引导体系已合并）
-- **状态**: **待验证**（修复轮完成：接管上一轮未提交的改动 → 复核 → 补漏 → 复验 → 提交，等待 QA 复验）
+- **状态**: **待验证**（微修轮完成：QA 复核 PASS-WITH-RISK 后，只修复核新发现的 2 个低问题 → 实测 → 提交，等待 QA 复核）
 - **开发者**: myg133-dev-1
 - **完成时间**: 2026-11-18
 - **产物**: `feature-meta/traceability.md`、`feature-meta/verification-report.md`
-- **本轮依据**: `feature-meta/qa-report.md`（QA Pre-merge 退回 5 项：健康检查 `detail` 中文违反 C6 / Helm Ingress 口径 / 探针与连接池超时相撞 / 自检未覆盖 crate 登记 / prod 弱口令与第三方镜像源）
+- **本轮依据**: `feature-meta/qa-report-recheck.md`（QA 复核结论 PASS-WITH-RISK：首轮 1 中 + 4 低**全部复现为已修复**，新发现 **2 个低**：`BASE_LOG_LEVEL` 完全无效 / RUNBOOK §3.1 把 `podman-compose` 的 `env_file` 基准说反了）
 
 ## 本轮交付
 
@@ -29,7 +29,7 @@
 ## 自验结论
 
 - `cargo check --workspace --all-targets` ✅
-- `cargo test --workspace -- --test-threads=2` ✅ **138/138**（上一轮 132 个全绿，本轮修复轮 **+6** 只增不减）
+- `cargo test --workspace -- --test-threads=2` ✅ **142/142**（上一轮 138 个全绿，本轮微修轮 **+4** 只增不减）
 - `cargo clippy --workspace --all-targets -- -D warnings` ✅ 0 告警
 - `cargo fmt --all --check` ✅
 - `pnpm -r test` ✅ 23/23 / `bun run test:e2e` ✅ 1/1 / `pnpm exec eslint .` ✅ / `pnpm exec prettier --check .` ✅
@@ -59,6 +59,18 @@
 
 本轮补的漏：RUNBOOK §3.1 与 compose 头部的 `./scripts/prod-preflight.sh` **路径不存在**（该段已 `cd deploy`）→ 改 `../scripts/prod-preflight.sh`，compose 头部用法统一成「在 `deploy/` 目录里执行」。
 
+## 本轮微修轮（QA 复核新发现的 2 个低问题）
+
+QA 复核结论 **PASS-WITH-RISK**：首轮登记的 **1 中 + 4 低全部复现为已修复**，新发现 **2 个低**。本轮只修这 2 项。
+
+| # | QA 登记的问题 | 复核结论 | 落地位置 |
+|---|--------------|---------|---------|
+| 低 1 | `BASE_LOG_LEVEL` **完全无效**：过滤器只匹配 lib crate 的 target `platform_server`，而日志事件实际来自 **bin target `base`** → 默认配置下**一行日志都不输出**，RUNBOOK §5.1「运维中文说明在日志里」这条兜底通道是**死的** | ✅ **已修完并复验**：过滤器同时覆盖 `base` 与 `platform_server`（`log_filter()`）；**实测 `BASE_LOG_LEVEL=info` 真的有日志输出**（`INFO base: 底座服务已启动 …`），`warn` / `error` 两档也符合预期；**+4 条单测**守着；RUNBOOK §5.1 补**语言边界表**（响应体 `detail` 永远英文 / 运维中文说明永远在日志里），§5.3 补日志级别与 target 说明 | `crates/platform-server/src/main.rs`、`deploy/RUNBOOK.md` §5.1 / §5.3 |
+| 低 2 | RUNBOOK §3.1 把 `podman-compose` 的 `env_file` 解析基准**说反了**，且备选写法 `ENV_FILE=deploy/.env` 实测报 `deploy/deploy/.env does not exist` | ✅ **已修完并复验**：按**实测**改正（两种实现都按 **compose 文件所在目录**解析，附 `docker compose` 官方文档口径与 `podman-compose` 源码佐证）；**删掉坏的备选写法**；推荐用法统一为**方案 A：在 `deploy/` 目录里执行**并**实跑通过**；compose 头部同步加了 `env_file` 基准说明 | `deploy/RUNBOOK.md` §3.1、`deploy/compose.prod.yaml` 头部 |
+
+⚠️ **契约 C6 未动**：本轮**没有**把 `detail` 改回中文 —— 响应体 `detail` 仍是纯 ASCII 英文，中文只在日志里。
+⚠️ **`docker compose` v2 未在本机实测**：本机无 compose 插件（只有 `podman-compose` 1.6.0），该实现口径来自官方文档（见验证报告 §3.8）。
+
 ## 顺带修的 4 项遗留技术债
 
 | # | 债务 | 结果 |
@@ -84,10 +96,8 @@
 
 ## 请派 QA 复验
 
-本轮是**修复轮**：5 项 QA 退回问题已逐项复核并复验（结论见上表与 `feature-meta/verification-report.md` §4.1），
-请 QA 按 `feature-meta/qa-report.md` 的 5 项逐条复验，重点看：
-① 三条 readiness 错误路径的 `detail` 是否真为英文；
-② 停库后 ready 返回 503 的耗时是否显著小于 5s 探针超时；
-③ prod compose 缺 `POSTGRES_PASSWORD` 时是否**报错且非 0 退出**；
-④ `core-change-detect.sh --self-test` 是否覆盖「未登记平台 crate」；
-⑤ Helm 默认渲染是否确实不含 Ingress。
+本轮是**微修轮**：只修复核新发现的 2 个低问题（结论见上表与 `feature-meta/verification-report.md` §4.2），
+请 QA 按 `feature-meta/qa-report-recheck.md` 的 2 项逐条复验，重点看：
+① `BASE_LOG_LEVEL=info` 时后端**是否真的有日志输出**（且 `warn` / `error` 两档是否符合预期）；
+② RUNBOOK §3.1 的 `env_file` 口径是否与实测一致、**推荐用法（在 `deploy/` 里执行）是否真的能跑通**；
+③ 顺带确认：响应体 `detail` **仍是纯 ASCII 英文**（C6 未动），中文只在日志里。

@@ -31,7 +31,7 @@
 | `SERVER_PORT` | | `8080` | 监听端口 |
 | `BASE_ENV` | | `dev` | `dev` / `staging` / `prod` |
 | `BASE_TENANT_MODE` | | `shared` | `shared` / `schema` / `database` |
-| `BASE_LOG_LEVEL` | | `info` | `error` / `warn` / `info` / `debug` / `trace` |
+| `BASE_LOG_LEVEL` | | `info` | `error` / `warn` / `info` / `debug` / `trace`；**真的生效**（过滤器同时覆盖 bin target `base` 与 lib target `platform_server`，见 §5.3） |
 | `BASE_AUTH_MODE` | | `local` | `local` / `sso` / `hybrid` |
 | `BASE_SEED_ON_START` | | `false` | `BASE_ENV=prod` 时配 `true` 会**启动即失败**（`CONFIG_FORBIDDEN_COMBINATION`） |
 | `BASE_MIGRATIONS_DIR` | | `./migrations` | 镜像内 `/app/migrations` |
@@ -108,14 +108,50 @@ runtime 阶段非 root 运行（uid 10001），只装 `ca-certificates`，时区
 
 ### 3.1 首次部署
 
-> 以下命令**在 `deploy/` 目录里执行**（`.env` 与 `compose.prod.yaml` 同目录 ——
-> `docker compose` 与 `podman-compose` 都从**compose 文件所在目录**读 `.env`）。
+> **在 `deploy/` 目录里执行**（推荐，也是本手册唯一推荐的写法）：`.env` 与
+> `compose.prod.yaml` 同目录，于是 compose 的项目级 `.env`、服务级 `env_file`、
+> `scripts/prod-preflight.sh` 的 `ENV_FILE` **三者解析到同一个文件**，不会串。
 >
-> §3.2 / §3.3 的示例从**仓库根目录**执行（用 `-f deploy/compose.prod.yaml`）。
-> 两种 compose 实现解析服务级 `env_file` 的基准不同：`docker compose` 按
-> **compose 文件所在目录**解析（哪里执行都行），`podman-compose` 按**当前目录**解析 ——
-> 用 `podman-compose` 时请在 `deploy/` 目录里执行，或显式指定
-> `ENV_FILE=deploy/.env`。
+> §3.2 / §3.3 的示例从**仓库根目录**执行（用 `-f deploy/compose.prod.yaml`）——
+> 这也没问题：`.env` 仍然按**compose 文件所在目录**找（见下方「`env_file` 解析基准」）。
+>
+> **服务级 `env_file` 的解析基准**（2026-11-18 实测更正 —— 本节此前把
+> `podman-compose` 的基准写反了）：
+> 相对路径**按 compose 文件所在目录**解析，两种 compose 实现**一致**：
+>
+> | 实现 | 服务级 `env_file` 相对路径基准 | 项目级 `.env`（供 `${VAR}` 插值） |
+> |---|---|---|
+> | `docker compose` v2 | **compose 文件所在目录** | **compose 文件所在目录**（`--project-directory` 可改） |
+> | `podman-compose` 1.6.0 | **compose 文件所在目录** | **compose 文件所在目录** |
+>
+> - `docker compose` v2 的依据是官方文档：*"Relative paths are resolved from the
+>   Compose file's parent folder."*（<https://docs.docker.com/reference/compose-file/services/#env_file>）
+> - `podman-compose` 1.6.0 的依据是**实测**（见 `feature-meta/verification-report.md` §3.8）
+>   与源码：服务级 `env_file` 用 `os.path.realpath(os.path.join(dirname, path))` 拼接，
+>   `dirname` 就是 compose 文件所在目录。
+>
+> ⚠️ **不要再用 `ENV_FILE=deploy/.env`**（本节此前的备选写法是**错的**）：
+> 那是按**当前目录**写的相对路径，compose 会把它拼到 compose 文件所在目录 →
+> 变成 `deploy/deploy/.env` → 直接报错退出：
+>
+> ```console
+> $ cd <仓库根> && ENV_FILE=deploy/.env podman-compose -f deploy/compose.prod.yaml up app
+> ValueError: Env file at <仓库根>/deploy/deploy/.env does not exist
+> ```
+>
+> 要换 env 文件，值必须是**相对 compose 文件所在目录**的路径（如 `./prod.env`）
+> 或**绝对路径**。
+>
+> ⚠️ **`ENV_FILE` 在两个工具里基准不同**（易踩坑）：
+> `scripts/prod-preflight.sh` 是普通 shell 脚本，它的 `ENV_FILE` 按**当前工作目录**解析；
+> compose 的服务级 `env_file` 按**compose 文件所在目录**解析。
+> 在 `deploy/` 里执行时两者基准相同（都是 `deploy/`）→ 没差异；
+> 从仓库根执行时，preflight 要 `ENV_FILE=deploy/.env`、compose 那边要 `ENV_FILE=./.env`
+> —— **用绝对路径最省事**（两个工具都认同一份）。
+>
+> 报错风格差异：`podman-compose` 缺必填变量时抛 **Python traceback**
+> （看最后一行 `ValueError: required variable POSTGRES_PASSWORD is missing a value: …` 即可），
+> `docker compose` 是一行 `error: …`。
 
 ```bash
 cd deploy
@@ -262,8 +298,29 @@ curl -s http://127.0.0.1:8080/health/ready
 | `MIGRATIONS_PENDING` | 连上了但迁移没跑 / 迁移表读不出来 | `pending migrations: [...]` / `migration state is unreadable, ...` |
 | `MIGRATION_DIRTY` | 迁移执行到一半失败，需人工处理 | `migration <版本> is in a dirty state and needs manual recovery` |
 
+**语言边界（两条通道各管各的，别越界）**：
+
+| 通道 | 语言 | 给谁看 | 规则 |
+|---|---|---|---|
+| 响应体 `detail` | **英文（ASCII）** | 开发者 / 前端 / 监控系统 | 契约 C6：**不得**出现中文句子；后端只保证 `code` 稳定 + `detail` 是英文 |
+| 响应体 `title` | 中文短句 | 人 | 允许（如 `服务未就绪`）—— C6 只约束 `detail`，不约束 `title` |
+| 日志（`tracing::warn!` / `info!`） | **中文运维说明** | 运维 | 运维视角友好，**允许**中文；日志里的中文**不进任何响应体** |
+
+> **一句话**：**响应体 `detail` 永远是英文；给运维看的中文说明永远在日志里。**
+> 别把中文写进 `detail`（违反 C6），也别把日志里的中文搬进响应体。
+
 运维视角的中文说明在**日志**里（`tracing::warn!` 记 `code` + `detail` + `pending` + `dirty`），
-不进响应体。
+不进响应体。实测（`BASE_LOG_LEVEL=info`，数据库不可达）：
+
+```console
+2026-11-18T02:31:12Z  WARN base: readiness 未通过：数据库不可达或迁移未应用（面向用户的中文文案由前端按 code 渲染） code="DATABASE_UNAVAILABLE" detail=database is unreachable: pool timed out while waiting for an open connection pending=[20261118000100] dirty=None
+```
+
+同一次请求的**响应体**（`detail` 是英文，`title` 是中文短句，两条通道互不串味）：
+
+```json
+{"type":"https://errors.base.example/service-not-ready","title":"服务未就绪","status":503,"detail":"database is unreachable: pool timed out while waiting for an open connection","instance":"/health/ready","code":"DATABASE_UNAVAILABLE","trace_id":"b8dbc46d-…"}
+```
 
 ### 5.2 探针超时与连接池超时（改一个必须同时改另一个）
 
@@ -277,6 +334,34 @@ curl -s http://127.0.0.1:8080/health/ready
 **探针超时必须大于 `acquire_timeout`**，否则 kubelet / docker 会先掐断请求，
 那个语义清晰的 `503 / DATABASE_UNAVAILABLE` 就拿不到（只会看到探针超时）。
 `crates/platform-server/src/db.rs` 有一条单测守着这个关系。
+
+### 5.3 日志级别（`BASE_LOG_LEVEL`）
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `BASE_LOG_LEVEL` | `info` | `error` / `warn` / `info` / `debug` / `trace`；**真的生效**（见下） |
+| `RUST_LOG` | — | 设了就用它（标准 tracing 过滤语法），优先级高于 `BASE_LOG_LEVEL` |
+
+**过滤器必须覆盖事件所在的 target，否则日志被静默丢弃**（一行都不打，还不报错）。
+本服务的日志事件写在 `crates/platform-server/src/main.rs` 里 → tracing 的 target 是
+**bin crate 名 `base`**（不是 lib crate 名 `platform_server`）。
+过滤器同时覆盖 **bin target `base`** 与 **lib target `platform_server`**
+（`main.rs` 的 `log_filter()`，4 条单测守着，见 `feature-meta/verification-report.md` §3.7）。
+
+```console
+$ cd deploy
+$ docker compose -f compose.prod.yaml logs app | tail -20     # 看日志
+# 改级别：编辑 deploy/.env 里的 BASE_LOG_LEVEL=warn（默认 info），改完 up -d 生效
+# K8s：改 deploy/helm/base-platform/values.yaml 里的 BASE_LOG_LEVEL
+```
+
+实测三档（`base serve`，数据库不可达）：
+
+| `BASE_LOG_LEVEL` | 日志行数 | 内容 |
+|---|---|---|
+| `info` | 2 | `INFO base: 底座服务已启动 …` + `WARN base: readiness 未通过：…` |
+| `warn` | 1 | 只有 `WARN base: readiness 未通过：…` |
+| `error` | 0 | 无（没有 error 级事件） |
 
 ---
 

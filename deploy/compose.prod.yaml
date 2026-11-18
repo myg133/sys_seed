@@ -20,6 +20,11 @@
 #   docker compose -f compose.prod.yaml --profile migrate run --rm migrate
 #   docker compose -f compose.prod.yaml up -d --no-deps app   # 迁移成功后滚 app
 #
+# ⚠️ 服务级 env_file 的**相对路径按本文件所在目录**解析（docker compose v2 与
+#    podman-compose 1.6.0 一致）。要换 env 文件：ENV_FILE=./别的.env（相对本目录）
+#    或 ENV_FILE=/绝对/path/.env；**不要**写 ENV_FILE=deploy/.env（会变成
+#    deploy/deploy/.env）。详见 deploy/RUNBOOK.md 3.1。
+#
 # 完整发布流程（备份 → 迁移 → 滚动 → 健康检查 → 回滚）见 deploy/RUNBOOK.md。
 name: base-platform-prod
 
