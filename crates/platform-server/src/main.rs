@@ -766,8 +766,12 @@ mod tests {
     /// `platform_config::*` 的 WARN 被静默丢弃 —— 旧过滤器只给
     /// `["base", "platform_server"]` 生成 directive。
     ///
-    /// ⚠️ 这里调用的是 `init_tracing` 用的**同一个** `log_filter`（`platform_core::log_filter`），
-    /// 不是自定义 `EnvFilter` —— 本 bug 正是靠「测试自己放行」藏住的。
+    /// ⚠️ 这里用的是 `log_filter_ignoring_env` —— 它构造的 directive 集合与
+    /// **没有 `RUST_LOG` 时** `init_tracing` 走的 `log_filter` **完全相同**
+    /// （生产入口 `log_filter` 会优先读 `RUST_LOG`；本测试断言的是「默认部署形态」，
+    /// 所以必须用不受环境影响的入口，见 [D91]）。
+    ///
+    /// 关键点是**不再是自定义 `EnvFilter`** —— 本 bug 正是靠「测试自己放行」藏住的。
     #[test]
     fn log_filter_captures_platform_config_warn() {
         let out = capture_logs(log_filter_ignoring_env("info"), || {

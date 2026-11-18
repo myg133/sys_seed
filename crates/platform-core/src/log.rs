@@ -16,8 +16,11 @@
 //! # 形态：全局默认级别 + 逐 target 降级
 //!
 //! ```text
-//! {level},tower_http=info,hyper=info,sqlx=info
+//! {level},sqlx=info
 //! ```
+//!
+//! （噪音清单见 [`NOISY_TARGETS`] —— 它**只含核实过有噪音的库**，
+//! 不写「将来可能会噪音」的库，见 [D90]。）
 //!
 //! 第一条是**无 target 的全局默认** —— tracing 对任何没有更具体 directive 的 target 都用它。
 //!
@@ -49,8 +52,14 @@ use tracing_subscriber::EnvFilter;
 /// |---|---|
 /// | `sqlx` | 每次查询打 `query=` 与耗时；`debug` 下一屏全是 SQL |
 ///
-/// 今后发现新的噪音源**加进来即可**（`hyper` / `hyper_util` 若哪天开了 tracing feature，
-/// 就该在这里加一条）。
+/// 今后发现新的噪音源**加进来即可**。
+///
+/// ⚠️ **不要在注释里写「某库还没开 tracing、所以不用压」** —— 这正是本清单一度写错的地方：
+/// `hyper_util` **当下就依赖 `tracing`**（`Cargo.toml` 的 `client-legacy` 含 `dep:tracing`，
+/// `cargo tree -p hyper-util` 可见 `tracing v0.1.44`），它的 `debug!("connecting to …")`
+/// 确实会输出。**没把它列进来是「出站请求低频、暂不压」这个取舍**，不是「它不会输出」。
+///
+/// （`hyper` 本身未启用 `tracing` feature —— 这一条是核过的。）
 pub const NOISY_TARGETS: [&str; 1] = ["sqlx"];
 
 /// 生成日志过滤器：`RUST_LOG` 优先，否则按级别生成「全局默认 + 噪音库降级」。

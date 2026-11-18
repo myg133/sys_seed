@@ -362,7 +362,8 @@ async fn scope_escalation_is_rejected_and_leaves_no_rows() {
     );
 }
 
-/// **租户级与空间级**两张表里 `conflictStrategy` 的快照：`(表, tenant, space, count, max(value))`。
+/// **租户级与空间级**两张表里 `conflictStrategy` 的快照：
+/// `(表, tenant, space, count, max(value), max(updated_at))`。
 ///
 /// 只看这两层，因为「越级写」的落点就是它们 —— 平台级表由步骤 7 的**正对照**故意改写，
 /// 把它纳入比对会与本用例自己的正对照冲突（这正是快照型断言要处理好的边界）。
