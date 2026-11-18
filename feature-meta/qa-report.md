@@ -1,18 +1,22 @@
 # 验证报告 —— Pre-merge
 
-- 需求: REQ-004 AI 引导体系与能力索引
-- 分支: feature/REQ-004 @ `f67029944fef29a54253eafd01b302317093df67`
-- 基线: develop @ `c8236b0`（REQ-002 工程基线 + REQ-003 扩展点框架）
-- 验证者: QA Agent（独立复现，未采信 Dev 自验报告的数字与结论）
-- 工具链: rustc 1.98.1 / cargo 1.98.1 / pnpm 12.19.0 / bun 1.4.4
+- 需求: REQ-005 交付基线与发布
+- 分支: `feature/REQ-005` @ `266dfa94ca17df631e654efd303e8dd7aa16cc7e`
+- 基线: `develop` @ `37a93c56eb2bbc7729595f292069a41a5282bebc`
+- 验证者: QA Agent（独立复现，未采信 Dev 自验报告中的任何数字与结论）
+- 工具链: rustc/cargo 1.98.1 / podman + podman-compose 1.6.0 / helm v3.16.3（临时下载到 `/tmp` 校验，未装进系统）/ pnpm 12.19.0 / bun 1.4.4 / jq 1.8.2
 - 日期: 2026-11-18
-- 结论: **PASS-WITH-RISK**（问题 #1 高severity 建议合并前修复；#2/#3 中severity）
+- 结论: **PASS-WITH-RISK**
 
-> 核心结论：Dev 的**关键数字与结论全部复现为真** —— 咬合点、索引不可手改、索引两段真实性、
-> 零新增依赖、回归数字，逐条独立跑通。扣分项不在核心功能，而在**门禁与提示词里的命令**：
-> CI 的「强制人工评审」门禁缺一个触发器导致它无法变绿（#1），
-> 两份提示词里的测试命令多一个 `--` 会**跑 0 个用例却 exit 0**（#2），
-> AGENTS.md 指向仓库里不存在的契约路径（#3）。
+> 核心结论：12 项核心检查 **11 项 PASS**，1 项 PASS-with-finding（Helm 渲染口径）。
+> Dev 的**关键数字与结论全部独立复现为真** —— 健康检查异常路径（ready 503 / live 200）、
+> 迁移不随 `up -d` 跑、备份恢复闭环（我自测 311/783/1769ms，与 RUNBOOK §6.2 的 307/704/1509ms 同量级）、
+> 迁移可回滚（含无 `down.sql` 被拒绝回滚）、sync-contracts 不再静默跳过、配置 fail-fast、
+> sqlx 克制引入、回归 132/132 + 23/23 + 1/1 —— 逐条自己跑通。
+> 扣分项不在核心功能：**① 健康检查 2/3 条错误路径把中文句子塞进 `detail`，违反契约 C6**
+> （且 Dev 的自验报告与追溯矩阵都把这一项写成「符合 C6 / detail 为英文」，属**不实结论**）；
+> ② RUNBOOK 与 Dev 报告里的 Helm 渲染自检口径错误（默认渲染**不含 Ingress**）；
+> ③ K8s readinessProbe 超时与连接池超时同值（5s），真实集群里探针会超时而非拿到 503。
 
 ---
 
@@ -20,11 +24,22 @@
 
 | AC | 实现 | 测试 | 结论 |
 |----|------|------|------|
-| **AC-S-004** 索引自动生成不可手改 | `crates/xtask/src/capabilities.rs`（`generate`/`check`/`write_files`）、`crates/xtask/src/main.rs:89-119`（`capabilities --check`）、`.github/workflows/ci.yml:169-183`（`guardrails` job） | 4 种篡改场景全部检出（改 summary / 改 `source_fingerprint` / 多余文件 / 缺失文件），均 exit 1 + `E_CAPABILITIES_OUTDATED`；连续两次生成 13 文件 sha256 逐一相同；重新生成后 `git status` 为空（入库产物 == 生成产物） | **PASS** |
-| **AC-035** 引导文件完整且与实际一致 | `AGENTS.md`（157 行）、`prompts/`（8 套）、`capabilities/`（13 文件）、`crates/xtask/src/scaffold.rs::AGENTS_MD` | AGENTS.md「已有能力 / 尚未提供」两段与 `index.json` 的 `already_provided`/`not_yet_provided` **内容集合完全相等**（18 + 7 条，key 与 value 逐条相等），机器守卫 `catalog::tests::agents_doc_matches_catalog` 实测 ok；AGENTS.md 内 13 条命令逐条实跑通过 | **PASS-WITH-RISK**（见 #3：`BA/contracts/...` 路径在仓库内不存在） |
-| **AC-036** 提示词可直接产出合规代码 | `prompts/01..08-*.md` | 8 套文件名与设计摘要 §2 完全一致；结构统一（目标/输入/步骤/约束/验收）；步骤引用的命令/目录/包名/API 抽查 15+ 处全部真实存在；提示词第 2 步的脚手架产出实测直接过 `check-modules` + C-1~C-4 | **PASS-WITH-RISK**（等价验证；字面 AI 生成未做，且 #2 的命令会假绿） |
-| **AC-037** 脚手架开箱即用 | `crates/xtask/src/scaffold.rs`、`crates/xtask/src/cli.rs:53-64` | `create-module demo-qa-check` 与 `create-module order-management`（长连字符名）**两个名字各自**：13 文件生成 → `check-modules` exit 0 → C-1~C-4 **4/4 全绿** → `cargo fmt --all --check` 通过 → `cargo clippy -p <name> --all-targets -- -D warnings` 0 告警；`--perm-prefix` 分支生成 `shared:item:read/write` 并如实告警前缀不一致，两道关卡仍通过 | **PASS** |
-| **AC-038** 能力索引防重造 | `capabilities/index.json`（`already_provided` 18 条 + `not_yet_provided` 7 条）、`permissions.json`、`extension-points.json`、`sdk/*.json` | `already_provided` **18 条逐条 grep 到真实源码**（`RequestContext`/`Repository`/`ListQuery`/`register_platform_module!`/`Manifest`/`Auditable`/`NotificationSender`/`WorkflowHandler`/`TransactionalWrite`/`ConfigScope`/`translate`/`mergeTheme`/`toneClass`/`FieldMeta`/`createApiClient`/`isAuthenticated`/`createToggle`/`platform_module_contract`）；`not_yet_provided` **7 条逐条确认真未实现**（`@base/ui` 仅 Tone/TONES/toneClass/RadiusTokens/defaultRadius，**无 Table/分页**；`@base/auth` **无 can()**；`@base/schema` **无渲染器**；无 HTTP 层 / DB 层）—— 索引**没有把未实现的能力写成已有** | **PASS（口径修正，见 #5）** |
+| **AC-S-005** 配置与代码分离：同一镜像靠环境变量切分 dev/staging/prod，缺必填则 fail-fast | `crates/platform-server/src/config.rs`（`DeployConfig::from_env` / `from_lookup`，三个稳定错误码）、`crates/platform-server/src/main.rs:101-119`（启动前校验 → 退出码 2）、`.env.example`、`deploy/compose.prod.yaml`（env_file 注入）、`deploy/helm/base-platform/templates/configmap.yaml` + `deployment.yaml`（ConfigMap / Secret 引用） | ① 同一二进制 `BASE_ENV=dev/staging/prod` 行为不同；② **实测**缺 `DATABASE_URL` → 打印 `[CONFIG_MISSING_REQUIRED]` + **退出码 2**（未监听端口）；③ 空串 `DATABASE_URL="   "` 同判缺失；④ 4 个非法值（`BASE_ENV=pro` / `SERVER_PORT=not-a-port` / `BASE_AUTH_MODE=ldap` / `BASE_TENANT_MODE=row`）**一次报全**、错误码 `CONFIG_INVALID_VALUE`、退出码 2；⑤ `prod` + `BASE_SEED_ON_START=true` → `CONFIG_FORBIDDEN_COMBINATION`、退出码 2；⑥ 迁移目录不存在 → 监听前退出（码 1） | **PASS**（C6 细节见问题 #1） |
+| **AC-S-006** 迁移可回滚：能恢复到迁移前状态，且恢复过程有演练记录 | `crates/platform-server/src/migrate.rs`、`migrations/20261118000100_platform_meta.{up,down}.sql`、`scripts/rollback.sh`、`scripts/backup.sh` / `restore.sh` / `backup-verify.sh`、`deploy/RUNBOOK.md` §6.2 | ① 干净库 `up` → 建出 `platform_meta`；`down --target 0` → **只剩 `_sqlx_migrations`**（业务表清空）→ 再 `up` 可重复；② **无 `down.sql` 的版本被拒绝回滚**（临时目录造 `20261118000200_irreversible_probe.up.sql`，`migrate down` 退出码 1 + 「拒绝回滚」，**表未被动过**）；③ `scripts/rollback.sh 0` 实跑（先自动备份 → 再 down → 打印被撤销版本）；④ **备份恢复闭环**自己跑通并计时（见核心检查项 #3），RUNBOOK §6.2 演练记录为**真实结果** | **PASS** |
+
+### 设计摘要 §7 交付清单追溯（摘要）
+
+| 交付项 | 复核结论 |
+|--------|----------|
+| 多阶段 Dockerfile（<100MB） | PASS（配置层）；镜像实构建**未验证**（见「未覆盖」） |
+| `compose.yaml` + `deploy/compose.prod.yaml` | PASS |
+| `deploy/helm/base-platform/` | PASS-with-finding（见问题 #2） |
+| 配置外置 + 启动校验 + `.env.example` | PASS |
+| 迁移作为独立步骤（compose profile + Helm hook） | PASS |
+| `scripts/backup.sh` / `restore.sh` / `rollback.sh` | PASS |
+| `deploy/RUNBOOK.md` + 恢复演练记录 | PASS |
+| 健康检查端点 | PASS（异常路径全绿；C6 细节见问题 #1） |
+| CI 构建镜像与扫描 job | PASS（配置层）；Actions **未实跑**（见「未覆盖」） |
 
 ---
 
@@ -32,34 +47,30 @@
 
 | # | 检查项 | Dev 声称 | 复核结果 | 证据 |
 |---|--------|---------|---------|------|
-| 1 | **create-module 咬合点** | `create-module demo-test` → `check-modules` ✅ + 契约测试 C-1~C-4 4/4 ✅ | **✅ 复现为真**（用 `demo-qa-check` 与 `order-management` 两个名字各跑一遍） | `模块目录校验通过：2 个模块 / ✓ demo-qa-check / ✓ sandbox` exit 0；`contract_c1_manifest_matches_implementation ... ok`、`c2 ... ok`、`c3 ... ok`、`c4 ... ok` → `4 passed; 0 failed`；`cargo fmt --all --check` exit 0；`cargo clippy -p order-management --all-targets -- -D warnings` exit 0 |
-| 1b | 契约测试**非空跑**（本轮自加的失效路径抽查） | 未声称 | **✅ 会咬人** | 删掉 manifest 里 `demo-qa-check:item:write` → `contract_c2 ... FAILED`、`3 passed; 1 failed`；把 manifest `id` 改成 `tampered-id` → `contract_c1 ... FAILED`。非 `assert True` 式假绿 |
-| 2 | **capabilities `--check` 手改检测** | 手改 → 失败并报 `E_CAPABILITIES_OUTDATED` | **✅ 复现为真，且覆盖 4 种场景** | ① 改 `already_provided` 一条 summary → `✗ 内容不一致：capabilities/index.json`；② 只改 `source_fingerprint` → 同上；③ 塞多余文件 `capabilities/sdk/rogue.json` → `✗ 多余文件（源码里已无对应产物）`；④ 删 `capabilities/sdk/ui.json` → `✗ 缺失`。**4/4 均 exit 1 + `E_CAPABILITIES_OUTDATED`** |
-| 2b | **索引逐字节可复现** | 用 `source_fingerprint` 取代墙钟时间戳，使 check 稳定 | **✅ 复现为真** | 连跑两次 `cargo xtask capabilities`，13 个文件 sha256 **逐一相同**（`diff /tmp/cap_run1.txt /tmp/cap_run2.txt` 无输出）；生成后 `git status` 为空 ⇒ 入库产物 == 生成产物。`index.json` 顶层键为 `already_provided/artifacts/entry_points/generated_by/not_yet_provided/platform/source_fingerprint`，**确认无 `generated_at`** |
-| 2c | **`already_provided` 每项真实存在** | 17 条（实为 **18** 条） | **✅ 全部真实存在** | 逐条 grep 源码全部命中（详见追溯表 AC-038） |
-| 2d | **`not_yet_provided` 每项确未实现** | 7 条，逐条未实现 | **✅ 全部确认未实现** | `@base/ui` 导出仅 `Tone/TONES/toneClass/RadiusTokens/defaultRadius`，**无 Table/分页**；`packages/`、`apps/` 全仓**无 `can()`**；`packages/schema/src/` **无 render/Renderer**；无 HTTP 层 |
-| 3 | **索引生成器零新依赖** | `git diff c8236b0 -- Cargo.lock` 为空 | **✅ 复现为真** | `git diff c8236b0 HEAD -- Cargo.lock \| wc -l` = **0**；`crates/xtask/Cargo.toml` 未改动（依赖仍为 anyhow/clap/serde/serde_json/platform-core）。注：`Cargo.lock` 里的 `syn`/`quote`/`proc-macro2`/`tokio` **基线已存在**（`git show c8236b0:Cargo.lock` 证实），非本需求引入。trait 扫描为**手写字符串扫描**（`crates/xtask/src/rustscan.rs:73` `find("pub trait ")`、`:261` `starts_with("fn ")`、`:155` 括号配对），**未引入 syn/quote/proc-macro2/regex** |
-| 4 | **AGENTS.md 命令真实可用** | 逐条跑过 | **✅ 13 条全部实跑通过** | `create-module` ✅ / `create-module --perm-prefix` ✅ / `capabilities` ✅ / `capabilities --check` ✅ / `check-modules` ✅ / `check-deps`（`依赖方向校验通过：平台 crate 未反向依赖业务模块`）✅ / `cargo check` ✅ / `fmt --all --check` ✅ / `clippy --workspace` ✅ / `cargo test --workspace` ✅ / `pnpm -r test` ✅ / `bun run test:e2e` ✅ / `bun run dev` ✅（后端 `HTTP 200 {"status":"ok","version":"0.1.0"}`、前端 `HTTP 200`） |
-| 4b | **AGENTS.md 目录/包名与仓库一致** | 一致 | **✅ 一致** | `crates/platform-core`/`platform-contracts`/**`platform-contracts-macros`**/`xtask`/`modules`/`packages`/`apps/shell`/`prompts`/`capabilities` **9 项全部存在**（含任务点名的 `platform-contracts-macros`）；硬规则提到的 `platform-core`/`platform-contracts` 真实；契约条款引用准确（`api-conventions v1` C4=权限点、C6=统一错误响应体、C13=命名与编码约定，逐条比对 `BA/contracts/api-conventions/v1.md` 标题相符） |
-| 4c | **AGENTS.md「已有能力」段 == index.json `already_provided`** | 逐行一致 | **✅ 内容完全一致**（顺序不同，见 #6） | Python 独立比对：18 条 key+value 集合**完全相等**；`not_yet_provided` 7 条同样相等。机器守卫 `test catalog::tests::agents_doc_matches_catalog ... ok` |
-| 5 | **prompts/ 8 套提示词** | 8 套，统一结构，引用真实 | **✅ 数量/文件名/结构/引用均复现为真** | 8 个文件名与设计摘要 §2 **逐一相符**；每套均含 目标/输入/步骤/约束/验收；占位符统一 `<...>`（不与 Rust 泛型冲突）。抽查引用全部真实：`platform_core::extension::repository::Repository` ✅、`platform_core::register_platform_module!`（`#[macro_export]`，crate root 可达）✅、`NotificationMessage::new/with_recipient/with_payload` ✅、`DeliveryResult::failed` ✅、`RequestContext::new().with_tenant()` ✅、`@base/auth` 的 `AuthState{authenticated,userId,tenantId}` ✅、`@base/sdk` 的 `createApiClient` ✅、`modules/sandbox/backend/src/repository.rs` 的 `block_on` ✅ / `SORTABLE_FIELDS` ✅ |
-| 6 | **CI 护栏** | 3 个新 job + CODEOWNERS | **⚠️ 部分成立；门禁有高severity缺陷（#1）** | `guardrails` job 内含 `cargo xtask capabilities --check` + `cargo xtask check-deps` ✅；依赖方向检查**确实复用** REQ-003 实现（`crates/xtask/src/deps.rs` 与 `modules.rs` **diff 为空**，`check-deps` 只是 `main.rs:74-86` 的 CLI 包装，走 `cargo metadata` 图遍历，**未重写成文本匹配**）；REQ-004 新增 CI 段落**无国内镜像前缀**（`.npmrc` 的 `registry.npmmirror.com` 是**基线既有**、非本需求引入）；`.github/CODEOWNERS` 内容合理，`@myg133` 占位已在文件头注明；**分支保护属仓库设置、不在代码里**，已由 `ci.yml:245-246` 注释与 Dev 报告如实记录 ✅ |
-| 6b | **CI jq 判定逻辑** | 3 组样本验证过 | **✅ 独立复测通过** | 非作者批准当前 HEAD → `1`（放行）；作者自批 → `0`（拒绝）；批准旧 commit → `0`（拒绝） |
-| 7 | **回归** | Rust 98/98、前端 23/23、E2E 1/1 | **✅ 全部复现为真** | Rust `test result` 汇总 **passed=98 failed=0**（+3 ignored 为 doctest）；REQ-003 的 73 个仍全绿：platform-core 41 / platform-contracts 8 / sandbox 6 / macros 0 / xtask 18→43，且 `git diff c8236b0 HEAD -- crates/platform-core crates/platform-contracts crates/platform-contracts-macros modules/` **为空**（平台核心一个字节未动）；clippy `--workspace --all-targets -D warnings` **0 告警**；`cargo fmt --all --check` 通过；`pnpm -r test` **23/23**（8 个包）；`bun run test:e2e` **1/1** |
-| 7b | **manifest.json 契约 pin** | 含 contracts + adrs | **✅ 复现为真** | `"contracts": {"api-conventions": "v1", "extension-points": "v1"}`、`"adrs": ["ADR-0001"]` —— **两份契约都 pin** |
-| 8 | **通用清单** | 无 TODO/调试输出/密钥 | **✅ 复现为真** | `crates/xtask/src/` + `prompts/` + `AGENTS.md` 内无 `TODO/FIXME/XXX/HACK/dbg!/todo!/unimplemented!`（唯一命中 `catalog.rs:15` 的散文「有 XXX」）；25 处 `println!` 全在 CLI 回显；无硬编码密钥；`capabilities/` **在 `.prettierignore` 内**（生成物不与 prettier 冲突，`prettier --check .` 全绿）且**未被 `.gitignore` 忽略**（`git check-ignore` 未命中，13 个文件均入库）；`eslint .` exit 0 |
+| **1** ★ | **健康检查异常路径** | PG 正常 → live 200 / ready 200；停库 → ready **503**（`DATABASE_UNAVAILABLE`）/ live 仍 **200** | ✅ **复现为真（自行起服务 + 停/起 PG 容器实测）** | PG 停：`/health/live` → **HTTP 200** `{"status":"alive",...}`；`/health/ready` → **HTTP 503** `{"code":"DATABASE_UNAVAILABLE","detail":"database is unreachable: pool timed out while waiting for an open connection","status":503,...}`；PG 起回：ready → **HTTP 200** `{"appliedMigrations":[20261118000100],"status":"ready",...}`；`_sqlx_migrations` 数据完好。**额外自测**另外两个错误码：`MIGRATIONS_PENDING`（连上但迁移表无记录）→ 503；`MIGRATION_DIRTY`（`UPDATE _sqlx_migrations SET success=false`）→ 503 `code=MIGRATION_DIRTY` |
+| **2** ★ | **迁移不随 `up -d` 自动跑** | 默认服务列表不含 migrate；profile 下含；迁移不在 app entrypoint | ✅ **复现为真** | `podman-compose -f deploy/compose.prod.yaml config --services` → `postgres / redis / app`（**无 migrate**）；`--profile migrate config --services` → 多出 `migrate`；开发 compose 同理（默认 `postgres / redis`）。**另用活证据证明不在 entrypoint**：对着一个**零表**的新库起 `base serve`，服务起来后该库**仍然零表**（`base serve` 不跑迁移），ready 返回 `MIGRATIONS_PENDING` |
+| **3** ★ | **备份恢复闭环 + 自己计时** | 备份 307ms / 恢复 704ms / 校验演练 1509ms | ✅ **复现为真，数字同量级**（RUNBOOK §6.2 未虚报） | 自测：**备份 311ms** / **恢复 783ms** / **校验演练 1769ms**。流程：造 `qa_probe_drill` 表 + 1 行 → `backup.sh` → `restore.sh <file> base_qa_restore_drill` → 临时库**表与数据都在**（`1|qa-drill-row`，4 张表）→ `backup-verify.sh` 输出「✓ 备份已导入临时库」且报 **4 张表**（= 源库张数，证明**确实导入**了，不是空库冒烟）→ 临时库 `base_verify_*` **自动清理**（前后 `pg_database` 对比无残留）。**反向测试**：损坏备份 → 退出码 3；合法 gzip 但空内容 → 冒烟 2 失败退出码 1；两种失败路径临时库均被清干净；`restore.sh` 不带 `--yes` 拒绝（`base_dev` 未被动）、未知参数退出码 2、`BACKUP_KEEP=abc` 退出码 1、缺 `DATABASE_URL` 退出码 1 |
+| **4** ★ | **迁移可回滚 + 不可逆拒绝** | up → down --target 0 → 业务表清空 → 再 up；`rollback.sh 0` 实跑 | ✅ **复现为真** | `migrate up` → `platform_meta` 建出；`migrate down --target 0` → 只剩 `_sqlx_migrations`（记账表 0 行）；再 `up` 成功。**不可逆拒绝**：在 `/tmp` 造 `20261118000200_irreversible_probe.up.sql`（**故意无 down**）→ `migrate status` 列出「不可逆（无配套 down）：[20261118000200]」；`migrate down --target 0` → **退出码 1**「目标版本 0 之上存在不可逆迁移 [20261118000200]（没有配套 down），拒绝回滚」，**三张表原样保留**；`scripts/rollback.sh 0` 同样退出码 1 并拒绝。`rollback.sh 0` 正常路径实跑：自动备份 → down → 提示用备份回退 |
+| **5** ★ | **sync-contracts 不再静默跳过** | 拿不到 demand → exit 2 + 清晰提示；正常路径仍一致 | ✅ **复现为真** | 临时仓库（**无 demand 引用**）→ 打印「✗ 找不到 BA 正本分支（demand / origin/demand）…本脚本不会静默跳过」→ **退出码 2**；`manifest.json` 缺 `contracts` pin → **退出码 2**；未知参数 → 退出码 2；本仓库正常路径 → 两份快照一致、**退出码 0** |
+| **6** | **配置 fail-fast** | 缺 `DATABASE_URL` → `CONFIG_MISSING_REQUIRED` + 退出码 2 | ✅ **复现为真** | 缺 `DATABASE_URL` / 空串 / 4 个非法值 / prod+seed 四组场景全部**退出码 2** 且给出稳定错误码与修复提示；迁移目录缺失 → 监听前退出码 1。**未出现「静默用默认值启动」** |
+| **7** | **Dockerfile 与镜像预算** | 三阶段、`rust:lld`、runtime 非 root、官方镜像地址、CI 有 build-image + 体积校验 | ✅ **复现为真（配置层）** | `Dockerfile`：`FROM rust:lld AS builder` / `FROM node:22-bookworm-slim AS frontend` / `FROM debian:12-slim AS runtime`；`RUN useradd --system --uid 10001` + `USER base`；**三个基础镜像全是官方地址，无国内镜像前缀**。CI：`build-image` job 含 `docker image inspect ... --format '{{.Size}}'` 且 `>100MB` 即 `exit 1`；`ci.yml` YAML 可解析，**12 个 job**。本机不构建镜像合理，且 CI 有 job 兜住（构建 + 体积 + 容器内迁移 + 探针冒烟） |
+| **8** | **Helm Chart** | `helm lint` / `helm template` 通过；渲染出 Deployment / Service / ConfigMap / 迁移 Job；迁移是 `pre-upgrade,pre-install` hook | ⚠️ **基本成立，但 Dev 与 RUNBOOK 的渲染口径不实** | `helm lint` → `1 chart(s) linted, 0 chart(s) failed`（exit 0）；默认渲染 = **ServiceAccount / ConfigMap / Service / Deployment / Job**（**无 Ingress**）；`--set ingress.enabled=true` 才多出 Ingress。迁移 Job：`"helm.sh/hook": pre-upgrade,pre-install`、`hook-weight: "-5"`、`hook-delete-policy: before-hook-creation` ✓；Secret **只引用不生成**（`secret.existingSecret`）✓；探针 / 资源配额 / 非 root / `readOnlyRootFilesystem` ✓。→ **问题 #2** |
+| **9** | **core-change-detect.sh 与 CI 门禁** | 自检通过；覆盖三个 crate；未登记平台 crate 自检能发现；`pull_request_review` 仍在；merge-base 口径语义正确 | ✅ **复现为真**（合并语义用**真实 diff** 验证） | `./scripts/core-change-detect.sh --self-test` → `✓ 自检通过`（exit 0）。**merge-base 语义（真实 diff 验证）**：构造「base 侧合入核心改动 + PR 侧只改非核心」→ **旧口径（diff base.sha）会误报** `crates/platform-core/a.txt`，**新口径输出为空**（exit 0）；再让 PR 侧改核心 → 正确检出 `crates/platform-core/a.txt`。**未登记平台 crate**：临时仓库加 `crates/qa-unregistered-probe/` → **退出码 1** 且点名该 crate。CI：`pull_request_review: types: [submitted, edited, dismissed]` **仍在**（REQ-004 修复未被改坏），`pull_request.types` 含 `review_requested` → **问题 #3**（自检入口未覆盖登记检查） |
+| **10** | **sqlx 引入克制** | 只用于部署期健康检查与迁移；无业务数据访问层；`sqlx-macros` 不参与编译；两个核心 crate 零改动 | ✅ **复现为真** | `cargo tree -i sqlx` → **只有** `platform-server`；`cargo tree --workspace \| grep -c sqlx-macros` → **0**（macros 特性已关，不参与编译）；依赖树中只有 `sqlx` / `sqlx-core` / `sqlx-postgres`；全仓 `Cargo.toml` 中除工作区根的 sqlx 外**无第二个 crate 依赖 sqlx**；`git diff develop..HEAD -- crates/platform-core crates/platform-contracts crates/platform-contracts-macros` → **输出为空**；`AGENTS.md:132` 与 `capabilities/index.json:67` 仍如实标注 `db_access_layer` = 「尚未提供」 |
+| **11** | **回归** | Rust 132/132（原有 99 全绿）、clippy 0 告警、fmt 通过、前端 23/23、E2E 1/1、三个 xtask 命令全过 | ✅ **全部复现为真** | Rust `cargo test --workspace -- --test-threads=2` → **132 passed / 0 failed**（platform-core 41 + platform-contracts 8 + platform-server 26+5 + sandbox 2+4 + xtask 46；3 个 doctest ignored）。「原有 99」核算成立：44(xtask 基线) + 41 + 8 + 2 + 4 = **99**，本轮新增 33（platform-server 31 + xtask 2，`modules.rs` 的 `#[test]` 由 12 → 14），且**无任何既有测试文件被改动**。`cargo clippy --workspace --all-targets -- -D warnings` → **0 告警**；`cargo fmt --all --check` → 通过；`pnpm -r test` → **23/23**；`bun run test:e2e` → **1/1**；`cargo xtask capabilities --check`（13 文件一致）/ `check-deps` / `check-modules` → 全过 |
+| **12** | **通用清单** | — | ⚠️ **基本通过，问题 #4 / #5 / #6** | **Secret**：`git ls-files` 只有 `.env.example`，**无 `.env`**（磁盘上也没有）；`.dockerignore` 排除 `.env*`（`!.env.example`）；全仓**无硬编码密钥**（只有 `PGPASSWORD` 变量传递）。**TODO/FIXME/XXX/HACK**：本轮改动的 `.rs/.ts/.tsx/.sh/.yaml/.sql` 文件中 **0 处**。**调试输出**：无 `dbg!`；`println!` 仅在 CLI 输出路径。**迁移位置**：放仓库根 `migrations/` **与 `check-modules` 的模块级约定不冲突** —— `modules/sandbox/migrations/` 仍是 README 占位（新规则已写进该 README 与 xtask 提示语），`check-modules` 通过。**RUNBOOK 演练记录**：与我自己的复现数字吻合（见 #3），**不是模板占位**。→ **问题 #4 / #5 / #6** |
 
 ---
 
 ## 测试
 
-- **Rust 98/98**（`cargo test --workspace -- --test-threads=2`：passed=98, failed=0, ignored=3（doctest））
-  - 其中 REQ-003 原有 73 个**全部仍绿**：platform-core 41 / platform-contracts 8 / sandbox 6 / platform-contracts-macros 0 / xtask 18→43（+25）
-- **前端 23/23**（`pnpm -r test`，8 个包：hooks 3 / schema 3 / i18n 3 / auth 3 / sdk 2 / theme 2 / ui 3 / shell 4）
-- **E2E 1/1**（`bun run test:e2e`，`e2e/shell.spec.ts` chromium，5.2s）
-- **lint**：`cargo fmt --all --check` ✅ / `cargo clippy --workspace --all-targets -- -D warnings` 0 告警 ✅ / `pnpm exec eslint .` ✅ / `pnpm exec prettier --check .` ✅
-- **咬合点**：`create-module demo-qa-check` 与 `create-module order-management` 各 4/4 契约测试全绿 + `check-modules` exit 0
-- **负向测试**（本轮自加）：C-1 / C-2 在真实违规下 FAILED（契约套件非空跑）
+- **Rust 132/132**（`cargo test --workspace -- --test-threads=2`，0 失败 / 3 doctest ignored；原有 99 个用例全绿且无既有测试文件被改动）
+- **前端 23/23**（`pnpm -r test`：i18n 3 + auth 3 + schema 3 + hooks 3 + sdk 2 + theme 2 + ui 3 + shell 4）
+- **E2E 1/1**（`bun run test:e2e`，chromium，`底座壳渲染并可过滤菜单`）
+- **Lint**：`cargo clippy --workspace --all-targets -- -D warnings` → 0 告警；`cargo fmt --all --check` → 通过
+- **静态门禁**：`cargo xtask capabilities --check` / `check-deps` / `check-modules` → 全过；`./scripts/sync-contracts.sh` → 两份快照一致（exit 0）
+- **Helm**：`helm lint` → 0 failed；`helm template` → 渲染通过（默认 5 类资源）
+- **运维脚本**：备份 311ms / 恢复 783ms / 校验演练 1769ms；迁移 up→down→up；`rollback.sh 0`；`core-change-detect.sh --self-test`；6 组失败路径反向测试全部按预期非 0 退出
 
 ---
 
@@ -67,43 +78,36 @@
 
 | # | 级别 | 描述 | 证据 | 建议 |
 |---|------|------|------|------|
-| **1** | **高** | **CI「强制人工评审」门禁缺 `pull_request_review` 触发器 → 它无法变绿。** workflow 的 `on:` 只声明了 `push` 与 `pull_request` 两个事件，但 `core-change-review` 的 `if:` 却判断 `github.event_name == 'pull_request' \|\| github.event_name == 'pull_request_review'` —— 后半段是**永远走不到的死代码**。后果：PR 改了平台核心 → `pull_request` 事件跑该 job → 此刻还没有批准 → **FAIL**；评审者随后批准（`pull_request_review` 事件）→ **workflow 根本不触发** → 状态仍是 FAIL；而唯一能触发 workflow 的推新 commit 又会让旧批准的 `commit_id` 与新 HEAD 对不上 → 再次 FAIL。需求「平台核心变更在 PR 中打标强制人工评审」里的「强制评审」环节实际无法达成。人工绕过手段：改 PR 描述触发 `pull_request`(edited) 事件，或在 UI 上手动 Re-run failed jobs。 | `.github/workflows/ci.yml:3-7`（`on:` 仅 push/pull_request）vs `.github/workflows/ci.yml:250`（`if:` 引用 `pull_request_review`）；`grep -n "pull_request_review" .github/workflows/ci.yml` 只有 1 处命中，即 `if:` 行，`on:` 段内 0 处 | 在 `on:` 补上 `pull_request_review: types: [submitted, edited, dismissed]`，使「评审提交」真的能触发该 job |
-| **2** | **中** | **两份提示词里的测试命令多了一个 `--`，导致「跑 0 个用例却 exit 0」的假绿。** `prompts/02-add-permission.md:35` 的 `cargo test -p <模块名> -- --test-threads=2 -- --nocapture` 与 `prompts/07-write-test-cases.md:18` 的 `cargo test -p <模块名> -- --test-threads=2 -- --list`：多出的 `--` 被 libtest 当成「选项与过滤串的分隔符」，`--nocapture`/`--list` 变成过滤器的一部分，结果是**所有用例被过滤掉**，命令仍返回 0。影响：`prompts/07` 第 2 步「先看现有测试…不要重复写已经覆盖的场景」会列出**空列表**，AI 会照着重复造用例；`prompts/02` 验收项「全绿，且 C-2 无告警」在 0 用例下也成立 → **验收项形同虚设**。同一问题还由脚手架模板下发到每一个新建模块：`crates/xtask/src/scaffold.rs:770` 的注释「需要看到时加 `-- --nocapture`」与其上方命令 `cargo test -p <name> -- --test-threads=2` 拼接后即为坏命令。 | 实测 `cargo test -p sandbox -- --test-threads=2 -- --nocapture` → `test result: ok. 0 passed; ... 2 filtered out` 与 `0 passed; ... 4 filtered out`，**exit=0**；正确写法 `cargo test -p sandbox -- --test-threads=2 --nocapture` → `2 passed` / `4 passed`。`cargo test -p sandbox -- --test-threads=2 -- --list` → 列出 0 个；正确写法 `-- --list` → 正确列出 4 个契约用例 | 删掉多余的 `--`：`-- --nocapture` / `-- --list`。并同步修 `scaffold.rs:770` 的注释措辞（如「改用 `cargo test -p <name> -- --test-threads=2 --nocapture`」） |
-| **3** | **中** | **AGENTS.md 与提示词 03 指向的契约文档路径在仓库内不存在。** `AGENTS.md:154-155` 的「参考」段写 `BA/contracts/api-conventions/v1.md` / `BA/contracts/extension-points/v1.md`，`prompts/03-new-sso-protocol.md:20` 也让 AI 去读 `BA/contracts/api-conventions/v1.md`。但 `BA/` **不在 git 仓库里**（`git ls-files BA/` 为空；`git archive develop` 解出的全新克隆里也没有 `BA/` 目录），合并后的 `code/` 工作树下同样没有 `code/BA/`。AGENTS.md 正是 AI 进入仓库读到的**第一份**文件，让它指向不存在的路径，AI 可能因此臆造契约内容。仓库既有惯例是 `docs/dev-environment.md:3` 用 `../../BA/...`（相对 `docs/` 层级），根目录的 AGENTS.md 应相应写成 `../BA/...`；且无论如何都应注明该目录不在仓库内。 | `ls -d code/BA` → `No such file or directory`；`git ls-files BA/` → 空；`git archive develop \| tar -x -C /tmp/qa_clone` 后 `ls -d /tmp/qa_clone/BA` → `No such file or directory`；`AGENTS.md:154-155`、`prompts/03-new-sso-protocol.md:20` | 改为仓库内可解析的路径（把契约正文固化进 `docs/` 或 `capabilities/` 并引用之），或在 AGENTS.md 明示「契约由 BA 侧维护，不随仓库分发，本地路径 `<workspace>/BA/contracts/...`」 |
-| **4** | **低** | **`--check` 报「多余文件」时给出的修复方式无效。** 错误信息统一提示「修复方式：运行 `cargo xtask capabilities` 重新生成」，但 `capabilities.rs:153 write_files` **只写不删**：已被移除的包（如 `packages/foo/` 被删）留下的 `capabilities/sdk/foo.json` 不会被清除，CI 会持续红，直到人工删文件。（**缺失文件**场景可自愈 ✅） | `main.rs:109` 的提示文案 vs `capabilities.rs:153-165` 的 `write_files` 只做 `std::fs::write`；实测注入 `capabilities/sdk/stale-pkg.json` → `--check` 报 `多余文件` → 执行文档所述的 `cargo xtask capabilities` → **该文件仍在** → 再 `--check` 依旧 `exit 1` | 让 `write_files` 剪除「生成器不产出」的存量文件（与 `check` 的 `extra` 口径一致），或把提示改成「多余文件需手动删除」 |
-| **5** | **低** | **Dev 自验文档把 `already_provided` 条数写成 17，实际是 18。** 产品本身无误（index.json 与 AGENTS.md 一致），错的是 Dev 报告的数字。 | `capabilities/index.json` 实际 `already_provided` = **18** 条；`feature-meta/verification-report.md:187`「`already_provided`（17 条…）」、`feature-meta/traceability.md:28`「`already_provided`（17 条）+ `not_yet_provided`（7 条）」 | BA 合并前让 Dev 更正这两处数字 |
-| **6** | **低** | **追溯矩阵称 AGENTS.md 与 index.json「逐行一致」，实际顺序不同。** AGENTS.md 的「已有能力」按「后端接缝 → 前端包」语义序排列，而 `index.json` 的 `already_provided` 因使用 `BTreeMap` 而按**字母序**输出。**内容集合完全相等**（18 条 key+value 逐条相同），不存在「两套说法」；机器守卫 `agents_doc_matches_catalog` 比对的是 `catalog.rs` 与 AGENTS.md（两者同序），不覆盖 index.json 的排序。 | Python 集合比对：`already_provided set-equal: True (18)`、`not_yet_provided set-equal: True (7)`；顺序 AGENTS.md = `request_context, repository, list_query…` vs index = `audit_declaration, auth_state, config…`；`feature-meta/traceability.md:25`「**逐行一致**」 | 把追溯矩阵措辞改为「内容完全一致（顺序按索引的字典序）」，或让生成器按 catalog 顺序输出数组以真正逐行对齐 |
+| **1** | **中** | **契约 C6 违规：健康检查 3 条错误路径中有 2 条把中文句子写进 `detail`。** 契约明文要求「后端**不得**在 `detail` 里拼中文句子」（面向用户的中文文案由前端 i18n 渲染，见 REQ-021 AC-S-029）。`MIGRATION_DIRTY` 与 `MIGRATIONS_PENDING` 的 `detail` 均为中文句子，`DATABASE_UNAVAILABLE` 才是英文。**更严重的是 Dev 的自验产物把这一项写成「符合 C6 / detail 为英文」，属不实结论**（验证只覆盖了数据库不可达那一条路径） | `crates/platform-server/src/health.rs:80` → `Some(format!("迁移 {version} 处于 dirty 状态，需人工处理"))`；`crates/platform-server/src/health.rs:85` → `Some(format!("待应用迁移：{pending:?}"))`；实测响应：`{"...","detail":"待应用迁移：[20261118000100]","code":"MIGRATIONS_PENDING",...}`、`{"...","detail":"迁移 20261118000100 处于 dirty 状态，需人工处理","code":"MIGRATION_DIRTY",...}`。契约依据：`BA/contracts/api-conventions/v1.md:110-111`「`detail` 是面向开发者的英文描述…后端**不得**在 `detail` 里拼中文句子（见 REQ-021 AC-S-029）」。**Dev 不实结论**：`feature-meta/verification-report.md:106`「错误体符合契约 C6…`detail` 为英文」；`feature-meta/traceability.md:49`「`detail`（**英文**，符合 C6「不得在 detail 里拼中文句子」）」。影响：REQ-021 要在错误体上做 i18n，后端塞中文句子会让非中文租户看到中文，且违反平台硬规则 5 | ① 把两条 `detail` 改成**英文**（如 `migration 20261118000100 is in a dirty state and needs manual recovery` / `pending migrations: [...]`），面向运维的中文说明**移到日志**（`main.rs:295-300` 已有 `tracing::warn!` 记录 code+detail，中文放日志是允许的）；② 补一条单测断言 `detail` 为纯 ASCII，防止回潮；③ 更正 `verification-report.md:106` 与 `traceability.md:49` 的「符合 C6」表述 |
+| **2** | **低** | **RUNBOOK §4 的 Helm 渲染自检口径错误，且 Dev 的报告/追溯矩阵重复了同一错误结论。** RUNBOOK 写「应含：ServiceAccount / ConfigMap / Service / Deployment / Ingress / Job」，但 `values.yaml` 默认 `ingress.enabled: false`，**默认渲染不含 Ingress**；运维按 RUNBOOK 逐字执行会以为 Chart 少了东西 | `deploy/RUNBOOK.md:191-192`（文档里的命令 + 注释）；实测默认渲染 = ServiceAccount / ConfigMap / Service / Deployment / Job；加 `--set ingress.enabled=true` 才出现 Ingress。**Dev 不实结论**：`feature-meta/verification-report.md:173`「`helm template ... \| grep -E '^kind:'` → kind: ServiceAccount / ConfigMap / Service / Deployment / **Ingress** / Job」；`feature-meta/traceability.md:28`「实渲染出 **ServiceAccount / ConfigMap / Service / Deployment / Ingress / Job** 六类资源」 | ① RUNBOOK 的自检命令改为 `helm template base-platform deploy/helm/base-platform --set ingress.enabled=true \| grep -E '^kind:'`，或把注释改成「默认 5 类；加 `--set ingress.enabled=true` 后含 Ingress」；② 更正 `verification-report.md:173` 与 `traceability.md:28` 的渲染清单 |
+| **3** | **低** | **K8s readinessProbe 超时与连接池获取超时同值（均 5s），真实集群里探针会「超时」而不是拿到设计好的 503/`DATABASE_UNAVAILABLE`。** 数据库挂掉时 ready 实测 **5.003s** 才返回 503，而 `readinessProbe.timeoutSeconds: 5` —— 探针会在 5s 处被 kubelet 掐断。功能上仍会「不接流量」（AC-S-006 的意图成立），但**设计好的错误码永远进不了 K8s 事件**，且 3ms 的余量是竞态 | `crates/platform-server/src/db.rs:24` `.acquire_timeout(Duration::from_secs(5))`；实测 `curl /health/ready`（PG 停）→ `time=5.003031s` → 503；`deploy/helm/base-platform/templates/deployment.yaml:77-84` readinessProbe `timeoutSeconds: 5`；镜像内 `HEALTHCHECK --timeout=5s`（`Dockerfile:89`）同样是 5s | ① readinessProbe `timeoutSeconds` 调到 **8**（或把池的 `acquire_timeout` 降到 2s）；② 镜像 `HEALTHCHECK --timeout` 同样放宽到 8s；③ 在 RUNBOOK §7.3 补一句「DB 不可达时 ready 需要约 5s 才返回 503，探针超时需大于该值」 |
+| **4** | **低** | **`core-change-detect.sh --self-test` 这个「自检入口」没有覆盖「平台 crate 必须登记」这条检查。** `check_core_coverage()` 只在主流程调用；`self_test()` 只测 merge-base 语义。检查本身有效（我实测能发现未登记 crate），但 Dev 的报告把它描述成「加自检」，且命名上的自检入口覆盖不到 | `scripts/core-change-detect.sh:47-68`（`check_core_coverage`）、`:71-115`（`self_test`，**不含** coverage 检查）、`:135`（coverage 仅在主流程调用）；`feature-meta/verification-report.md:197`「**加自检**：`crates/` 下每个平台 crate 都必须在清单里，忘了登记直接失败」 | 把 `check_core_coverage` 的调用并入 `self_test()`（在临时仓库里建一个未登记 crate，断言其失败），让 `--self-test` 成为名副其实的入口；否则把报告里的「加自检」措辞改为「主流程强制校验」 |
+| **5** | **低** | **私有化交付的 compose 默认口令是 `base`，且默认基础镜像指向第三方镜像源。** `POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-base}` 在客户没设该变量时**静默**用弱口令建库（设计摘要 §3.3 要求生产用 Docker secrets / K8s Secret 注入）；`POSTGRES_IMAGE` / `REDIS_IMAGE` 默认值是 `docker.m.daocloud.io/...`（客户交付物默认从非官方镜像源拉基础镜像）。另：`.env.example` 的 `DATABASE_URL` 指向 `base_dev`，而 prod compose 默认 `POSTGRES_DB=base` —— 照 RUNBOOK §3.1 逐字执行（只 `cp` 不改）会连错库名 | `deploy/compose.prod.yaml:23`（`POSTGRES_IMAGE` 默认第三方源）、`:28`（`POSTGRES_PASSWORD` 默认 `base`）、`:29`（`POSTGRES_DB` 默认 `base`）；`:43`（`REDIS_IMAGE` 默认第三方源）；`.env.example` 的 `DATABASE_URL=postgres://base:base@postgres:5432/base_dev`；`deploy/RUNBOOK.md:113-115` 的 §3.1 步骤 | ① prod compose 的口令默认值改为**空**并在缺失时直接报错（如 `POSTGRES_PASSWORD:?必须设置`，或启动前校验），避免弱口令静默生效；② 基础镜像默认值改为官方地址，国内/内网场景走 `${POSTGRES_IMAGE:-postgres:17-alpine}` + 文档说明内网覆盖方式；③ `.env.example` 与 prod compose 的库名保持一致（或在 RUNBOOK §3.1 加一句「库名要改成 `base`」） |
+| **6** | **信息** | **本轮把上一轮需求的 `feature-meta/status.md` 与 `feature-meta/qa-report.md` 原地覆盖了。** `develop` 上的 `feature-meta/status.md` 是 **REQ-004** 的状态记录，被本轮替换为 REQ-005；本报告也覆盖了 REQ-004 的 QA 报告。内容仍在 git 历史里（`beee35f` 归档了 REQ-004 的两份报告），但**分支工作区里看不到了**；BA 的正本在 `BA/demands/REQ-005-delivery/`，不受影响 | `git diff develop..HEAD -- feature-meta/status.md`（整文件替换）；`git log --oneline -- feature-meta/qa-report.md` → `beee35f [BA] 归档 REQ-004 的 QA 首轮报告与修复复核报告`；本文件写入后即覆盖 REQ-004 版本 | 沿用现有仓库约定即可（BA 归档进 git 历史后再被下一轮覆盖），但建议 BA 在归档时把上一轮文件**改名保留**（如 `qa-report-REQ-004.md`），避免历史报告在工作区里被无声覆盖。另按 QA 角色规范「不改 `status.md`（那是 BA 的）」，本轮 `status.md` 由 Dev 改写，若状态机由 BA 维护需 BA 复核 |
 
 ---
 
 ## 未覆盖 / 无法验证
 
-| 项 | 状态 | 原因 |
-|----|------|------|
-| **GitHub Actions 实际运行** | **未验证** | 本仓库**无 remote**（`git remote -v` 为空），Actions 跑不起来。本轮验证的是各 job 的**判定逻辑**（`capabilities --check`、`check-deps`、`git diff` 核心路径命中、`jq` 批准判定 3 组样本）与 YAML 结构；**YAML 在真实 Actions 上的行为未跑过**（含 #1 的触发器问题只能静态判读） |
-| **分支保护规则** | **未验证（需人工配置）** | 「强制人工评审」要求把 `core-change-review` 设为 required check 并打开「Require review from Code Owners」。这一步**在仓库设置里、不在代码里**——Dev 已如实登记（`ci.yml:245-246` 注释 + 报告 §7），本轮确认该登记**属实** |
-| **CODEOWNERS 维护者账号** | **未验证** | 无 remote，无法确认 GitHub 用户名；当前为 `@myg133` 占位，CODEOWNERS 文件头已注明需按实际情况调整 |
-| **AC-036 的字面测试** | **未验证（等价验证）** | 「把提示词原样交给 AI 助手生成模块」本机无可复现的 AI 执行环境。本轮验证的是等价命题：提示词第 2 步要求的 `cargo xtask create-module <name>` 产出物**实测直接通过** `check-modules` 与 C-1~C-4 |
-| **AC-038 的字面口径** | **需 BA 修订** | AC 原文期望「复用 `@base/ui` 表格与 `@base/schema` 渲染器」，但两者本期**确实不存在**（本轮已独立复核：`@base/ui` 仅 tone/radius token，无 Table/分页；`@base/schema` 无渲染器）。本轮以 `not_yet_provided` 的诚实口径达成「防重造 + 防幻觉」，**该 AC 原文需 BA 修订**（Dev 报告 §8 亦已提出，本轮复核认同） |
-| **测试覆盖率** | **未测量** | 本机无覆盖率工具，且按低配机约束不 `cargo install` 任何工具 |
-| **冷编译峰值内存** | **未测量** | 按约束禁止 `cargo clean`，未做 RSS 采样 |
-| **`prompts/` 的提示词效果 A/B 评测** | **未做** | 设计摘要 §6 明确「不做 AI 行为的自动化评测」 |
+| 项 | 原因 | 影响 / 由谁补 |
+|----|------|--------------|
+| **镜像实构建**（体积 <100MB、容器内启动、探针在容器内的真实行为、非 root 校验） | 本机内存不足，`cargo build --release` + LTO 链接峰值远超余量（设计摘要 §8 与任务约束明确要求本机不构建）—— **本次未构建任何镜像** | Dockerfile 只做了阶段/路径/权限静态核对（3 阶段、`rust:lld`、官方地址、`USER base` uid 10001）。体积与容器行为由 CI `build-image` job 兜住（含 `docker image inspect` >100MB 硬失败 + 容器内 `migrate up` + 探针冒烟），但 **Actions 未实跑**（本仓库 `git remote -v` 为空） |
+| **GitHub Actions 实跑** | 同上，仓库无 remote | CI 配置只做了 YAML 解析（12 个 job 全可枚举）与命令/仓库现状逐条核对；`pull_request_review` 触发器、build-image 体积校验均已静态确认，但**未在真实 GitHub 上跑过** |
+| **真实 K8s 集群部署**（Helm install / 探针真实行为 / 蓝绿切流） | 本机无 K8s 集群（`helm` 是临时下载到 `/tmp` 校验的，未装进系统） | Chart 经 `helm lint` + `helm template` 渲染校验；探针在集群里的超时行为见问题 #3（静态推断，未实跑） |
+| **Trivy 镜像漏洞扫描结果** | 需联网拉扫描器与漏洞库 | 由 CI `image-scan` job（CRITICAL/HIGH 阻断）验证 |
+| **数据库 TLS** | `sqlx` 未开 TLS 特性（`tls-none`），带 `sslmode=require` 的连接串会失败 | 已知偏离（Dev 报告 §6.1 已如实登记），随 REQ-006/007 的 DB 层一并处理；本期私有化部署走内网/本地 socket |
+| **`deploy/seed/` 种子脚本的实际效果** | 种子由 postgres 镜像的 initdb 钩子执行，本次未重建数据卷 | `base_dev` 中 `platform_seed_log` 表存在；种子内容未逐条核对（不属本需求 AC） |
+| **`capabilities/index.json` 13 个文件与源码的逐条语义比对** | 仓库已有机器守卫 `cargo xtask capabilities --check`（本次通过，13 文件与源码一致），逐条人工语义比对未做 | 与 REQ-004 已归档结论一致，本轮未改动 `AGENTS.md` 与能力目录 |
 
 ---
 
 ## 清理确认
 
-本轮在 worktree 内临时创建的 `modules/demo-qa-check`、`modules/order-management`、`modules/demo-perm`
-三个验证用模块**已全部删除**，根 `Cargo.toml` / `Cargo.lock` / `capabilities/` 已还原，
-`cargo xtask capabilities --check` 复检通过（13 个文件与源码一致）。
+- 本轮自建的临时库 `base_qa_restore_drill` / `base_qa_migrate_drill` / `base_qa_irrev_drill` / `base_qa_nomig` **已全部删除**
+- 测试表 `qa_probe_drill`（base_dev）**已删除**；`base_dev` 表清单回到 `_sqlx_migrations, platform_meta, platform_seed_log`（与开工前一致），迁移账本 `20261118000100|true` 完好
+- 本轮产生的 3 个备份文件（`base-20261118-094753/094832/094839.sql.gz`）**已删除**；Dev 遗留的 `base-20261118-093935.sql.gz` 保留原状
+- `/tmp` 下的临时迁移目录、静态目录、假仓库、helm 二进制与缓存、临时脚本**已删除**
+- 无残留 `base serve` 进程；`base-postgres` / `base-redis` 均 healthy
+- `git status --short` 除本报告文件外**为空**
 
-除本报告（`feature-meta/qa-report.md`，本次唯一交付物）外，**工作树干净**：
-
-```
-$ git status --porcelain
-$ git status --short --untracked-files=all
-（均为空）
-```
-
-> 注：`feature-meta/qa-report.md` 是**滚动槽位**——BA 自己的 `b0a26c9` 提交即以 REQ-003 的
-> 首轮 QA 报告覆盖了 REQ-002 的版本。本轮按同一惯例写入 REQ-004 的报告。
+**VERDICT: PASS-WITH-RISK**
