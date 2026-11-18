@@ -1,0 +1,33 @@
+[package]
+name = "platform-rbac"
+description = "平台权限：角色模型、数据范围求值、鉴权中间件"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# 平台核心：请求上下文 + 扩展点 trait（`PermissionChecker` / `DataScope` / `require_permission`）
+platform-core.workspace = true
+# 数据访问：租户作用域入口（`TenantDb` / `TenantQuery`）
+platform-db.workspace = true
+# 认证：验 access token（复用 REQ-007 的签发与验签，不重写语义）
+platform-iam.workspace = true
+anyhow.workspace = true
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+# 角色 ID 的默认生成。
+uuid.workspace = true
+
+[dev-dependencies]
+# 测试要驱动 axum 路由（`ServiceExt::oneshot`），不连网络。
+tower.workspace = true
+http-body-util.workspace = true
+# 夹具的「本轮运行标识」（跨运行也不能撞）。
+uuid.workspace = true

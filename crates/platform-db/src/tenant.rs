@@ -301,6 +301,7 @@ fn bind_row<'q, T>(
 ) -> QueryAs<'q, Postgres, T, PgArguments> {
     match value {
         BindValue::Text(text) => query.bind(text),
+        BindValue::TextArray(items) => query.bind(items),
         BindValue::Int(number) => query.bind(number),
         BindValue::Int4(number) => query.bind(number),
         BindValue::Bool(flag) => query.bind(flag),
@@ -319,6 +320,7 @@ fn bind_statement<'q>(
 ) -> Query<'q, Postgres, PgArguments> {
     match value {
         BindValue::Text(text) => query.bind(text),
+        BindValue::TextArray(items) => query.bind(items),
         BindValue::Int(number) => query.bind(number),
         BindValue::Int4(number) => query.bind(number),
         BindValue::Bool(flag) => query.bind(flag),

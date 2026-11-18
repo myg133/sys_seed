@@ -1,0 +1,27 @@
+{
+  "id": "rbac",
+  "name": "角色与权限",
+  "version": "0.1.0",
+  "enabled": true,
+  "permissions": [
+    { "code": "rbac:role:read", "name": "查看角色与授权", "type": "menu" },
+    { "code": "rbac:role:write", "name": "编辑角色与授权", "type": "button" },
+    { "code": "rbac:user-role:write", "name": "绑定用户角色", "type": "button" },
+    { "code": "rbac:permission:read", "name": "查看权限点注册表", "type": "button" }
+  ],
+  "menus": [],
+  "dependencies": [],
+  "tenantScoped": {
+    "tables": [
+      "platform_role",
+      "platform_role_permission",
+      "platform_role_inherit",
+      "platform_user_role",
+      "platform_permission_epoch"
+    ],
+    "column": "tenant_id"
+  },
+  "config": {
+    "cacheTtlSeconds": { "type": "number", "default": 60, "scope": "platform", "label": "权限缓存兜底 TTL（秒）" }
+  }
+}

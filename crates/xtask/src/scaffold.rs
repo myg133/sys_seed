@@ -231,6 +231,7 @@ fn render_files(spec: &ModuleSpec) -> Result<Vec<(String, String)>> {
         ("backend/src/mod.rs", BACKEND_MOD_RS),
         ("backend/src/entity.rs", ENTITY_RS),
         ("backend/src/permission.rs", PERMISSION_RS),
+        ("backend/src/http.rs", HTTP_RS),
         ("backend/src/repository.rs", REPOSITORY_RS),
         ("backend/src/service.rs", SERVICE_RS),
         ("frontend/routes.ts", FRONTEND_ROUTES_TS),
@@ -337,7 +338,13 @@ const MANIFEST_JSON: &str = r#"{
   "enabled": true,
   "permissions": [
     { "code": "{{perm_prefix}}:item:read", "name": "查看 {{name}} 记录", "type": "menu" },
-    { "code": "{{perm_prefix}}:item:write", "name": "编辑 {{name}} 记录", "type": "button" }
+    { "code": "{{perm_prefix}}:item:write", "name": "编辑 {{name}} 记录", "type": "button" },
+    {
+      "code": "{{perm_prefix}}:item:approve",
+      "name": "审批 {{name}} 记录",
+      "type": "button",
+      "condition": "$record.amount <= 10000"
+    }
   ],
   "menus": [
     { "label": "{{name}}", "icon": "flask", "route": "/{{name}}", "perm": "{{perm_prefix}}:item:read" }
@@ -433,8 +440,72 @@ pub const PERMISSION_ITEM_READ: &str = "{{perm_prefix}}:item:read";
 /// 编辑权限点。
 pub const PERMISSION_ITEM_WRITE: &str = "{{perm_prefix}}:item:write";
 
+/// 审批权限点（**携带属性级条件** `$record.amount <= 10000`）。
+pub const PERMISSION_ITEM_APPROVE: &str = "{{perm_prefix}}:item:approve";
+
 /// 本模块用到的全部权限点。
-pub const PERMISSIONS: [&str; 2] = [PERMISSION_ITEM_READ, PERMISSION_ITEM_WRITE];
+pub const PERMISSIONS: [&str; 3] = [
+    PERMISSION_ITEM_READ,
+    PERMISSION_ITEM_WRITE,
+    PERMISSION_ITEM_APPROVE,
+];
+"#;
+
+const HTTP_RS: &str = r#"//! {{name}} 模块的 HTTP 层。
+//!
+//! # 鉴权：每个路由都绑权限点
+//!
+//! `require_permission` 是**平台唯一的鉴权入口**（住在 `platform-core`）。
+//! 业务模块**只调用**它 —— 自己写一个鉴权函数就是绕过（契约检查 C-5 会失败）。
+//!
+//! ⚠️ **参数必须是字面量**（不是常量）：C-5 要能**静态确认**
+//! 「这个权限点真的有鉴权调用点」—— 参数是常量就没法确认，判为**失败**
+//! （无法确认 = 不放行，fail closed）。
+//!
+//! # 数据范围
+//!
+//! 业务模块**不自己实现**数据范围：向平台要一个 `ScopeFilter`，
+//! 交给 `platform-db` 的 `TenantQuery::with_scope` —— 条件在 **SQL 层**生效，
+//! 而且平台**没有**「跳过范围」的开关。
+//!
+//! # 越权怎么表现（契约 C5）
+//!
+//! | 情形 | HTTP | 错误码 |
+//! |------|------|--------|
+//! | 缺权限点 | **403** | `INSUFFICIENT_PERMISSION` |
+//! | 记录不在数据范围内 | **404** | `NOT_FOUND`（不泄露存在性） |
+
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use platform_core::extension::permission::require_permission;
+
+/// 构造模块的路由。
+pub fn router<S2>() -> Router<S2> {
+    // 一组路由一个权限点（`route_layer` 绑在子路由上）。
+    let read = Router::new().route("/item", get(list_items));
+    let write = Router::new().route("/item", post(create_item));
+    let approve = Router::new().route("/item/approve", post(approve_item));
+
+    Router::new()
+        .merge(read.route_layer(require_permission("{{perm_prefix}}:item:read")))
+        .merge(write.route_layer(require_permission("{{perm_prefix}}:item:write")))
+        .merge(approve.route_layer(require_permission("{{perm_prefix}}:item:approve")))
+}
+
+/// 列表处理器。
+async fn list_items() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "items": [] }))
+}
+
+/// 新建处理器。
+async fn create_item() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "ok": true }))
+}
+
+/// 审批处理器（权限点带属性条件 `$record.amount <= 10000`）。
+async fn approve_item() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "approved": true }))
+}
 "#;
 
 const REPOSITORY_RS: &str = r#"//! {{name}} 模块的数据访问实现（内存存储，**不引入 sqlx**）。

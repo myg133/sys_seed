@@ -40,7 +40,8 @@ pub const MANIFEST_JSON_SCHEMA: &str = r##"{
         "properties": {
           "code": { "type": "string", "pattern": "^[a-z][a-z0-9-]*:[a-z][a-z0-9-]*:[a-z][a-z0-9-]*$" },
           "name": { "type": "string", "minLength": 1, "pattern": "\\S" },
-          "type": { "enum": ["menu", "button", "field", "data"] }
+          "type": { "enum": ["menu", "button", "field", "data"] },
+          "condition": { "type": "string", "minLength": 1, "pattern": "\\S" }
         }
       }
     },

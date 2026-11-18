@@ -7,14 +7,16 @@ pub mod config;
 pub mod context;
 pub mod error;
 pub mod extension;
+pub mod problem;
 
 pub use config::{AppConfig, ConfigEntry, ConfigKey, ConfigResolver, ConfigScope};
 pub use context::RequestContext;
 pub use error::{CoreError, CoreResult};
 pub use extension::{
-    Auditable, Manifest, ModuleContext, NotificationSender, PlatformModule, Repository,
-    WorkflowHandler,
+    Auditable, DataScope, Manifest, ModuleContext, NotificationSender, PermissionChecker,
+    PlatformModule, Repository, ScopeFilter, WorkflowHandler,
 };
+pub use problem::ProblemDetails;
 
 /// 平台核心版本号，与 `Cargo.toml` 中的 `version` 保持一致。
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

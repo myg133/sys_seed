@@ -14,6 +14,22 @@
           "code": "sandbox:demo:write",
           "name": "编辑沙箱示例",
           "type": "button"
+        },
+        {
+          "code": "sandbox:scope-item:read",
+          "name": "查看数据范围示例",
+          "type": "button"
+        },
+        {
+          "code": "sandbox:scope-item:approve",
+          "condition": "$record.amount <= 10000",
+          "name": "审批数据范围示例",
+          "type": "button"
+        },
+        {
+          "code": "sandbox:scope-item:export",
+          "name": "导出数据范围示例",
+          "type": "button"
         }
       ]
     },
@@ -67,7 +83,33 @@
           "type": "button"
         }
       ]
+    },
+    {
+      "manifest": "crates/platform-rbac/manifest.json",
+      "module": "rbac",
+      "permissions": [
+        {
+          "code": "rbac:role:read",
+          "name": "查看角色与授权",
+          "type": "menu"
+        },
+        {
+          "code": "rbac:role:write",
+          "name": "编辑角色与授权",
+          "type": "button"
+        },
+        {
+          "code": "rbac:user-role:write",
+          "name": "绑定用户角色",
+          "type": "button"
+        },
+        {
+          "code": "rbac:permission:read",
+          "name": "查看权限点注册表",
+          "type": "button"
+        }
+      ]
     }
   ],
-  "total": 11
+  "total": 18
 }

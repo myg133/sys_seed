@@ -15,6 +15,11 @@ path = "backend/src/mod.rs"
 
 [dependencies]
 anyhow.workspace = true
+# 业务模块**可以**依赖 axum（它不是平台内部模块）—— 路由层要用。
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
 # 业务模块只依赖平台核心（扩展点 trait），不依赖平台内部模块
 platform-core.workspace = true
 # REQ-006：数据访问走 platform-db 的租户作用域入口（拿不到裸连接）
@@ -27,3 +32,6 @@ platform-contracts.workspace = true
 # 建表、跑迁移、按 manifest 生成 RLS 策略。**仅测试用**，运行期依赖不受影响。
 sqlx.workspace = true
 tokio.workspace = true
+# 契约测试要驱动 axum 路由（`ServiceExt::oneshot`），不连网络。
+tower.workspace = true
+http-body-util.workspace = true

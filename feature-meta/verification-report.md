@@ -1,13 +1,12 @@
-# REQ-008 验证报告
+# REQ-009 验证报告（自验）
 
-- **需求**: REQ-008 用户与组织架构
-- **分支**: `feature/REQ-008` @ `feature/REQ-008`（实现提交见 §0）
-- **基线**: `develop` @ `a0a8d7a`（REQ-002 ~ REQ-007 已合并）
-- **设计依据**: `BA/demands/REQ-008-user-org/design-summary.md`（D1–D12 照做）
-- **契约**: api-conventions v1（C1 / C3 / C5 / C6 / C13）、extension-points v1
+- **需求**: REQ-009「RBAC 权限与数据范围」
+- **分支**: `feature/REQ-009`（基线 `develop` @ `400cefa`）
+- **验收基线**: `BA/demands/REQ-009-rbac/acceptance.md`（2026-11-18 21:40 修订版，含 BA 第二轮 10 条裁定）
+- **契约**: `api-conventions v1`（C1 / C4 / C5 / C6 / C7）、`extension-points v2`（C-1 ~ C-5）
 - **开发者**: myg133-dev-1
 - **日期**: 2026-11-18
-- **轮次**: 第一轮（实现 + 自验）+ 第二轮（修复轮：QA `PASS-WITH-RISK` 的 2 中 + 3 低，见 §9）+ **第三轮（复核轮：QA 复核的 **低 1 回归不稳定** + **信息 1 `add_member` 500→4xx**，见 §10）**
+- **轮次**: 第一轮（实现 + 自验）→ 第二轮（定点修复：多角色 scope 的合并语义改成真正的并集，见 §8）→ **第三轮（QA 指出的定点修复：2 个中 + 2 个低 + 2 个信息，见 §9）**
 
 ---
 
@@ -15,560 +14,514 @@
 
 | 项 | 结果 |
 |----|------|
-| 分支 | `feature/REQ-008` |
-| 改动 | **44 文件 / +10214 -775 行**（其中 `Cargo.lock` +181 -11；去掉锁文件是 **43 文件 / +10033 -764**）；**新建 crate `crates/platform-org`**（13 个源文件 + 3 个测试文件） |
-| **★ 修复轮** | QA 结论 **PASS-WITH-RISK**（无阻塞合并项）→ 本轮修 **2 中 + 3 低**：<br>**中 1** 同步错误计数不再是死代码（失败留痕 / 成功清零）· **中 2** `user_id` 侧补复合外键（幽灵 / 跨租户 user_id 被 **DB 层**拒绝）· **低 1** 依赖归属更正（**ldap3 = 8、SCIM 出站 = 2**）· **低 2** 计数口径写死 · **低 3** LDAP scheme **连接前**校验。详见 **§9** |
-| **★ 复核轮** | QA 复核结论 **PASS-WITH-RISK**（5 个改动点**全部复现为真**），但登记了 **1 个新的低危问题（回归不稳定）** → 本轮修：<br>**低 1** 全量含 ignored 回归的**间歇性 `deadlock detected`**（2/4 次失败）—— **根因是测试之间的并发竞态**（一个用例在改 schema / 持锁，另一个在插数据），**不是生产代码的 bug**；修法 = **库结构准备整个测试二进制只做一次**（DDL 一定发生在任何用例体开始之前 → DDL 与数据写入不再并发）。**不是**用「调大超时」或「重试几次」盖住。<br>**信息 1** `add_member` 传不存在的 `user_id` → 由 **500 `INTERNAL_ERROR`** 改为 **404 `NOT_FOUND`**（外键违约 = 「引用的那一行不存在」= 客户端错误）。详见 **§10** |
-| 新增第三方依赖 | **仅 `ldap3 0.11`（`default-features = false`）**。SCIM 出站**没有新增直接依赖**，但**间接引入了 2 个 crate**（`want` / `try-lock` —— `hyper-util` 的 `client-legacy` → `hyper` 的 http1 **客户端**）。⚠️ 第一轮报告写的「SCIM 出站零新增依赖」**不成立**，见 §3.1 |
-| **ring / aws-lc-rs** | **0 命中** —— `cargo metadata` 里 `ring` / `aws-lc-rs` / `aws-lc-sys` 均**不存在**；唯一含 “ring” 字样的是 `stringprep`（Unicode 库，非加密库） |
-| 依赖树 | **口径 A（第三方 crate 去重名）**：**263 → 273（+10）**；**口径 B（第三方 package 条目，含多版本）**：**272 → 284（+12）**；**口径 C（构建图去重 `name vX`）**：**239 → 253（+14）**；**口径 D（`cargo tree` 原始行数）**：**607 → 682（+75 行）**。**四个口径的命令都写在 §3.1**，可逐字复算 |
-| TLS 方案 | **选 (a) 只支持明文**。理由：树里**无任何 TLS 栈**，引入会带 30~50 个 crate，且 `rustls` 默认后端带 `ring` / `aws-lc-rs`（依赖预算要求 0 命中）。SCIM `https://` 与 LDAP `ldaps://` **明确报错**（不静默降级），配置项已留口。**修复轮补上了 LDAP 侧的前置校验**（`ldaps://` 不再落到底层 `UnknownScheme`） |
-| Rust 测试 | **303 passed / 0 failed**（非 ignored 口径；第二轮 299 → **+4**，只增不减）；**带 `--include-ignored`：341 passed / 0 failed**（第二轮 336 → **+5**；真实库层 **15/15** + SCIM **7/7**）· ★ **复核轮：含 ignored 的全量回归连跑 8 次，8/8 全绿**（第二轮的间歇性 `deadlock detected` 已消除，见 §10.1） |
-| 前端测试 | **23/23**（`pnpm -r test`） |
-| E2E | **1/1**（`bun run test:e2e`，chromium） |
-| lint | `cargo fmt --all --check` ✅ / `cargo clippy --workspace --all-targets -- -D warnings` ✅ **0 告警** |
-| xtask 门禁 | `capabilities --check` ✅ 13 文件一致 / `check-deps` ✅ / `check-modules` ✅ / `tenant-policies --check` ✅「2 个模块声明的表都开了 RLS 且有策略」 |
-| 冷编译实测 | `cargo check --workspace --all-targets` **52.7s / 1038 MB**；`cargo test --workspace --no-run`（含链接）**83.4s / 1638 MB**（`.cargo/config.toml` 的 `jobs` **保持 3**） |
-| ★ 组织树 | ✅ 移动 dept → **子树查询立即**反映新结构；`path_labels` 与 `parent_id` **一致**；人为写坏 → **报得出** → **可重建**；**成员关系不破坏** |
-| ★ SCIM 出站 | ✅ **真的 HTTP** 打 mock SCIM 服务：PUT 两次 → **1 条**；两次全量同步 → **条目数不变**；字段映射 `login` / `workEmail` / `cn` **逐字段生效**；目标延迟 800ms → **本地入队 < 100ms** |
-| ★ LDAP 入站 | ✅ `userAccountControl` **位运算**：`512`/`660`/`402653184` 在职，`514`/`546`/`4098`/`2` 离职；映射**外置为配置**；**scheme 前置校验**（`ldap://` 放行 / `ldaps://` 与其它 scheme 明确报错） |
-| ★ 冲突队列 | ✅ **字段级**（`field` / `local_value` / `remote_value`）；`manual` 策略下**本地值不被覆盖**；裁决 `take_remote` 后**按裁决生效** |
-| ★ 离职禁用 | ✅ 账号禁用 + **旧 refresh 立即作废**（直查库 `revoked_at` 非空）+ 会话全撤销 + 成员解绑 + 审计 + 通知 |
-| ★ 租户隔离 | ✅ 跨租户 id → `None`；**绕过应用层 → 0 行**；**直查 `pg_class`** → 6 张表**全部** `relrowsecurity=true` 且**有 policy**；**修复轮补齐用户侧外键**（幽灵 / 跨租户 `user_id` 被 DB 层拒绝） |
-| **未完成 / 未验证** | 见 §6（如实登记） |
+| 交付形态 | 新建平台 crate **`crates/platform-rbac`**（10 个源文件 + 3 个测试文件）；新增 `platform-core` 的 `extension/permission.rs`（鉴权入口）、`extension/expr.rs`（受限表达式 DSL）、`problem.rs`（RFC 9457 错误体唯一一份）；新增契约检查 **C-5**；`platform-server` 挂载 `/api/rbac/*` 并在**启动时**对账 |
+| 改动规模 | **60 文件 / +11653 −675 行**（新建 29 个、修改 31 个；删除的 675 行是**替换掉 REQ-008 遗留的** `feature-meta/traceability.md` 与 `verification-report.md`）；第三轮增量见 §9.1 |
+| 依赖预算 | **第三方包数不变**：锁文件里 **registry 包 284 → 284**（总数 293 → 294，多出的 1 个是**新增的本地工作区成员** `crates/platform-rbac`）。未引策略引擎（Casbin/Opa）、未引 Redis 客户端、未引 nom/pest；表达式解析器自研；`tower` / `http-body-util` 已在锁文件里（只做 **dev-dependency**，**不增长依赖树**）。**第三轮同样没碰 `Cargo.lock` / `Cargo.toml`** |
+| **测试** | `scripts/test-integration.sh`（重置 `base_test` + `--include-ignored`）→ **461 passed / 0 failed**（含真实库层）；`cargo clippy --workspace --all-targets -- -D warnings` → **0 warning** |
+| **破坏性验证** | C-5 的 **4 类违规**逐个造出来 → 全部被拦住 → **逐字节还原**（sha256 校验） |
+| **变异验证** | 第一轮 **4 个** + 第二轮 **2 个** + **第三轮 1 个**（D43 精确优先）关键判定故意改错 → 对应测试**变红** → 还原 → **变绿**（含 1 次「变异没被抓住 → 补断言 → 再验」） |
+| **未验证项** | 见 §6（**如实列出**，未跑的没写成跑了） |
 
 ---
 
-## 1. 交付形态：为什么是**平台 crate**
+## 1. 实现了什么（按 AC）
 
-| 候选 | 结论 |
-|------|------|
-| `modules/org`（业务模块） | ❌ 业务模块**不得**依赖平台内部模块（`extension-points v1` §1「D7 硬约束」），而离职禁用**必须**撤销 IAM 会话；且 `check-deps` 禁止 `platform-server` 依赖业务模块 → **`/api/org/*` 无法挂载** |
-| **`crates/platform-org`（平台 crate）** | ✅ 与 `platform-iam` 同级同构；租户作用域表的 policy 仍由平台按 manifest 的 `tenantScoped` 段**统一生成** |
+| AC | 落在哪 | 关键口径 |
+|----|--------|----------|
+| AC-S-033 | `platform-rbac/src/registry.rs` + `platform-server/src/main.rs::reconcile_permissions` | 对账不一致 → **启动失败**（退出码 1），逐条列出缺失编码与**来源 manifest 路径** |
+| AC-S-034 | `platform-rbac/src/{service,http,store}.rs` + 迁移 `20261118000900` | 四张表都带 `tenant_id` + RLS；**★ 自举防护**：管理接口要 `rbac:role:*`，普通用户 403；**豁免** `GET /api/rbac/permissions` |
+| AC-S-035 | `service.rs::detect_cycle` / `RoleGraph::ancestors` | 继承**查询时展开**；成环的写入被拒，错误**指出是哪两个角色** |
+| AC-S-036 | `entity.rs::PermissionPattern` | 只允许 `module:*` 与 `module:resource:*`；`*:*` 与 `*:demo:read` **写入被拒** |
+| AC-S-037 | `entity.rs::BUILTIN_*` + `service.rs` | 内置角色按租户物化；不可删 / 不可降权；`platform-admin` = **注册表全集**（动态） |
+| AC-S-038 | `scope.rs::combine_scopes` / `ScopeResolver` | 五种 scope × **五个不同探针用户**，期望集合逐条列出 |
+| AC-S-039 | `scope.rs::org_nodes` | 兼岗**默认只按主部门**；并集必须 `use_all_memberships = true` |
+| AC-S-040 | `scope.rs::primary_department` + `user_org_one_primary_idx` | 缺失 / 歧义 → **fail closed 到 `SELF`**（**不是** `ALL`）；DB 索引是**预防层**，判定是**防御层** |
+| AC-S-041 | `service.rs::contributions_for` + `scope.rs::combine_scopes` | 多角色**取最宽松**；权限点级 scope **覆盖**角色级 |
+| AC-S-042 | `platform-core/src/extension/expr.rs` | 白名单 + 参数化 + 禁函数调用 + 禁多语句；SQL 文本里**只有占位符** |
+| AC-S-043 | `manifest.rs::PermissionSpec::condition` + `checker.rs` | 条件引用白名单外属性 → **永不匹配**（fail closed），不是「忽略条件放行」 |
+| AC-S-044 | `platform-core/src/extension/permission.rs` + `problem.rs` | 401 / 403 / 404 三种语义；错误体**英文 ASCII** + `trace_id` + `instance` |
+| AC-S-045 | `sandbox/backend/src/{scope_item,http}.rs` | 无权资源 vs 不存在资源：**状态码 / 字段集合 / 响应头集合全同** |
+| AC-S-046 | `platform-contracts/src/authz_scan.rs` + `checks.rs::check_c5` + 宏 | 扫的是**调用**（不是字面量）；入口**全仓库唯一**；参数**必须字面量** |
+| AC-S-047 | `checker.rs::ensure_fresh` + `store.rs::bump_epoch` | 写操作同事务 `epoch+1` → 撤销在**下一个请求**即生效（**跨实例**） |
+| AC-S-048 | `platform-db/src/query.rs::with_scope` | 条件**插进 WHERE 子句** + 参数绑定；**平台没有「跳过范围」的入口** |
 
-配套改动：`platform-db::collect_scopes` 扩展为扫 `modules/` **与** `crates/` 两处；
-`Dockerfile` 把平台 crate 的 manifest 也拷进镜像（否则部署期 `base tenant-policies`
-看不到组织表的声明 → **那批表完全没有隔离**）。
-
-**未改 `platform-core` / `platform-contracts`**（CODEOWNERS 保护目录，一行未动）。
-
----
-
-## 2. 实测证据
-
-### 2.1 组织树（AC-S-011）
-
-```
-moving_a_node_updates_the_subtree_immediately_and_keeps_memberships ... ok
-path_labels_are_detected_and_rebuilt_from_the_authoritative_parent_id ... ok
-```
-
-- 建 `company → dept → team`，把 `dept` 移到另一个部门下：
-  - `subtree(company)` 立刻反映新 `parent_id`（**权威是 `parent_id`，不是 `path_labels`**）；
-  - `verify_path_labels()` 返回**空**（移动后加速字段与权威一致）；
-  - 成员的 `org_node_id` **不变**（节点搬家，成员跟着走）。
-- 人为把某个节点的 `path_labels` 写成 `["stale"]`：
-  `verify_path_labels()` **报出该节点** → `rebuild_path_labels()` 修正 **1** 条 → 再校验**空**。
-
-### 2.2 SCIM 出站（AC-S-012 / AC-S-013）
-
-```
-put_semantics_do_not_duplicate_entries ... ok
-the_field_mapping_is_applied_to_the_payload ... ok
-a_slow_target_does_not_block_the_local_request ... ok
-a_failed_push_is_retried ... ok
-users_can_be_queried_with_a_filter ... ok
-https_is_rejected_instead_of_silently_downgraded ... ok
-two_consecutive_full_syncs_do_not_duplicate_entries ... ok
-```
-
-- **真的 HTTP**：测试起一个 SCIM mock 服务（axum），用自己实现的 `HttpScimGateway` 对话
-  —— 「自己实现的协议」不能只靠内存替身验证。
-- **幂等**：同一个 id PUT 两次 → 目标端 **1 条**；连续两次全量同步 → 目标端 **条目数不变**。
-- **字段映射**：映射成 `login` / `workEmail` / `cn`（单值形态）→ mock 收到的请求体
-  **逐字段断言**，且**不含**默认字段名 `userName` / `emails`。
-- **不阻塞**：mock 延迟 **800ms** → 本地**入队耗时 < 100ms**；推送本身 ≥ 700ms。
-- **重试**：失败 → 留在队列 → 退避到期 → 重试成功；超过 3 次才丢弃。
-
-### 2.3 LDAP 入站与位运算（AC-S-016）
-
-```
-the_ad_disabled_flag_is_decided_by_bitwise_operations ... ok
-bit_not_expresses_the_inverted_flag ... ok
-the_ad_disabled_bit_triggers_the_departure_flow ... ok
-```
-
-| `userAccountControl` | 含义 | 判定 |
-|---|---|---|
-| 512 | NORMAL_ACCOUNT | **在职** |
-| 514 | NORMAL_ACCOUNT \| ACCOUNTDISABLE | **离职** |
-| 546 | 512 \| LOCKOUT \| ACCOUNTDISABLE | **离职** |
-| 4098 | DONT_REQ_PREAUTH \| ACCOUNTDISABLE | **离职** |
-| **660** | 512 \| 128 \| 16 \| 4 | **在职**（布尔比较 `== 514` 会**误判**为在职/离职） |
-| 402653184 | NORMAL_ACCOUNT \| DONT_EXPIRE_PASSWORD | **在职** |
-| 2 | 只有 ACCOUNTDISABLE 位 | **离职** |
-
-### 2.4 冲突队列（AC-S-014）
-
-```
-conflicts_are_recorded_per_field_and_applied_after_adjudication ... ok
-```
-
-- 目录里邮箱不同 → 同步产出**恰好 1 个字段级冲突**
-  （`field=email` / `local_value=alice-…@example.com` / `remote_value=remote-…@example.com`）；
-- **`manual` 策略下本地值未被覆盖**（直查账号表）；
-- 人工裁决 `take_remote` → 本地值**按裁决生效**；
-- 再同步 → **冲突数 = 0**（两边已一致）。
-
-### 2.5 离职自动禁用（AC-S-015）
-
-```
-departure_disables_the_account_and_revokes_every_session ... ok
-```
-
-- `status = disabled` + `departed_at` 非空；
-- `refresh_tokens_revoked = 1` / `sessions_revoked = 1`；
-- **直查库**：旧 refresh 记录 `revoked_at` **非空** → **立即失效**
-  （不是等 access TTL 到期）；会话**全部** `revoked_at` 非空；
-- 成员关系**已解绑**（`memberships_removed = 1`）；
-- 审计事件 `org.user.departed` **已产生**；通知**已发出**。
-
-### 2.6 租户隔离与 RLS（AC-S-018）
-
-```
-organization_data_is_isolated_per_tenant ... ok
-every_organization_table_has_a_tenant_policy ... ok
-```
-
-- 两个租户各有**同名**节点 → 各自只看到自己的；
-- `find(tenant_b 的 id)` 在 tenant_a 下 → **`None`**（不是 403，是「不存在」）；
-- **绕过应用层**（不设 `app.tenant_id`）→ **0 行**；管理员连接能看到数据（对照组有效）；
-- **直查 `pg_class`**：6 张组织表**全部** `relrowsecurity = true` 且**有 policy**；
-- `cargo xtask tenant-policies --check` ✅。
-
-### 2.7 组织变更事件（AC-S-017）
-
-```
-members_receive_a_notification_when_their_node_moves ... ok
-deleting_a_node_with_members_requires_handling_them_first ... ok
-```
-
-- 节点移动 → 受影响成员**收到通知**；
-- 删除仍有成员的节点 → **422 `ORG_NODE_HAS_MEMBERS`**（节点**没被删**）；
-- 指定 `moveMembersTo` → 成员**迁到目标节点** → 节点才删得掉（**不留悬空成员**）。
+追溯矩阵见 `feature-meta/traceability.md`（含**权限点 → 鉴权调用点**逐条对照，以及 `platform-org` 9 个权限点的现状）。
 
 ---
 
-## 3. 资源与依赖
+## 2. 跑过的命令与**实际输出里的 passed 数**
 
-### 3.1 依赖树
+> ⚠️ 每条命令都**只有一个 `--`**（AGENTS.md 硬规则 9）。
+> 下面每个数字都来自命令输出里的「N passed」，**不是**估算。
 
-#### 3.1.1 计数口径（**先说清楚怎么数**，否则绝对值对不上）
-
-⚠️ 第一轮报告只写了「240 → 254」而没写命令，QA 用别的口径数出 **239 → 253** ——
-**增量 +14 一致，绝对值差 1**。根因是「数的是什么」没写死。本轮把四个口径与命令**全部写死**
-（下面的命令**逐字可复现**）：
-
-| 口径 | 数的是什么 | 命令 | 基线 `develop@a0a8d7a` | 本轮 | 增量 |
-|------|-----------|------|------|------|------|
-| **A** | 第三方 crate **去重名**（同一 crate 的多个版本只算 1 个） | `cargo metadata --format-version 1 --all-features \| jq '. as $m \| [$m.packages[] \| select(.id as $id \| ($m.workspace_members \| index($id)) \| not) \| .name] \| unique \| length'` | **263** | **273** | **+10** |
-| **B** | 第三方 **package 条目**（含多版本，`thiserror` v1/v2 各算 1 条） | 同上，去掉 `\| unique` | **272** | **284** | **+12** |
-| **C** | 构建图节点（`cargo tree` 去重 `name vX`，**含工作区成员**） | `cargo tree --workspace --edges normal,build \| grep -oE '\b[a-zA-Z0-9_-]+ v[0-9][0-9A-Za-z.+-]*' \| sort -u \| wc -l` | **239** | **253** | **+14** |
-| **D** | `cargo tree` **原始行数**（同一棵树画了多遍） | `cargo tree --workspace --edges normal,build \| wc -l` | **607** | **682** | **+75 行** |
-
-- 口径 A 与 B 的差（+10 vs +12）来自 `thiserror` / `thiserror-impl` 的 **v1 线**：
-  基线里这两个 crate **名**已在（v2.0.21），`ldap3` 拉的 v1.0.69 是**同一 crate 名的第二个版本**
-  → 口径 A 不加、口径 B 加 2。
-- 口径 C **含工作区成员**（本轮 9 个、基线 8 个 —— 本轮多了 `platform-org`）；
-  去掉工作区成员则是 **244 / 231**。
-- 「cargo tree 行数」（口径 D）**不是 crate 数** —— 同一节点在树里出现多次就会多行；
-  拿它当「依赖个数」是错的。
-- 基线数字的取法：`git archive a0a8d7a \| tar -x -C /tmp/base008` 后在 `/tmp/base008`
-  里跑同一批命令（**不注册 git worktree、不动本仓库的 `target/`**）。
-
-#### 3.1.2 +10 的**逐 crate 归属**（⚠️ 更正第一轮的说法）
-
-第一轮写的是「新增的 10 个第三方 crate **全部**是 `ldap3` 的传递依赖」「**SCIM 出站的依赖增量 = 0**」。
-**这两句都不成立**（QA 实测纠正，本轮复核确认）：
-
-| 来源 | crate（新增的 **crate 名**） | 说明 |
-|------|---------------------------|------|
-| **`ldap3` 的传递依赖（8）** | `ldap3` / `lber` / `nom` / `minimal-lexical` / `futures` / `futures-macro` / `async-trait` / `tokio-util` | 与第一轮一致（第一轮把 `thiserror` v1 / `thiserror-impl` v1 也列了进去 —— 它们的 **crate 名**基线已有，只是**版本**新增，见 §3.1.1） |
-| **SCIM 出站（2）** | **`want`** / **`try-lock`** | 由 `platform-org` 打开 `hyper-util` 的 **`client-legacy` + `http1`** 特性 → `hyper` 的 **http1 客户端** → `want` → `try-lock` |
-
-**证据（可复算）**：
+### 2.1 集成测试（重置 `base_test` + 跑真实库层）
 
 ```bash
-# 基线锁文件里根本没有这两个包：
-git show a0a8d7a:Cargo.lock | grep -cE 'name = "(want|try-lock)"'   # → 0
-
-# 基线的 hyper 只被当「服务端」用（依赖里没有 want）：
-#   基线 hyper 1.12.0 deps: atomic-waker, bytes, futures-core, http, http-body,
-#                          httparse, httpdate, itoa, pin-project-lite, smallvec, tokio
-# 本轮 hyper 1.12.0 deps: ……多出 want → want → try-lock
-cargo tree --workspace --edges normal,build -i want        # → want v0.3.2 └── hyper v1.12.0
-cargo tree --workspace --edges normal,build -i try-lock    # → try-lock v0.2.5 └── want v0.3.2 └── hyper v1.12.0
-```
-
-→ **「SCIM 出站零新增依赖」是错的**（它零新增**直接依赖**，但间接引入了 **2 个 crate**）。
-复用 `hyper` / `hyper-util` 的做法**本身是对的**（不引第三方 SCIM 库、TLS 栈仍然是 0 命中），
-错的只是**记账归属**。依赖预算的总数 **+10 不变**。
-
-#### 3.1.3 构建图口径的 **+14** 是怎么来的（更正第一轮的说法）
-
-第一轮写的是「多出的 4 个是 `hyper-util` 的 `client-legacy` 特性所需
-（`tower-service` / `pin-project-lite` / `futures-util` / `http-body-util`）」——
-**这 4 个 crate 基线的构建图里本来就有**（实测：`tower-service` / `pin-project-lite` /
-`futures-util` / `http-body-util` 在基线构建图里各命中 1 次），不是本轮新增。
-
-`cargo tree --workspace --edges normal,build` 去重后逐个节点做差集，**+14 的真实构成**：
-
-| 类别 | 数量 | 节点 |
-|------|------|------|
-| **新 crate 名** | **10** | `ldap3` / `lber` / `nom` / `minimal-lexical` / `futures` / `futures-macro` / `async-trait` / `tokio-util`（ldap3 8）+ `want` / `try-lock`（SCIM 出站 2） |
-| **新工作区成员** | 1 | `platform-org v0.1.0` |
-| **新版本节点**（crate 名基线已有，只是版本是新的） | 3 | `thiserror v1.0.69` / `thiserror-impl v1.0.69`（ldap3 拉的 v1 线）/ `futures-executor v0.3.34` |
-
-差集可复算（**无删除项**）：
-
-```bash
-cargo tree --workspace --edges normal,build \
-  | grep -oE '\b[a-zA-Z0-9_-]+ v[0-9][0-9A-Za-z.+-]*' | sort -u > /tmp/tree-head.txt
-# 基线同法得到 /tmp/tree-base.txt 后：
-comm -13 /tmp/tree-base.txt /tmp/tree-head.txt     # → 上表 14 个节点
-comm -23 /tmp/tree-base.txt /tmp/tree-head.txt     # → 空（没有节点消失）
-```
-
-### 3.2 冷编译实测（`scripts/measure-cold-build.sh`，本机 8 线程 i7-8550U / 4.6G 可用）
-
-| 操作 | 耗时 | 峰值内存 |
-|------|------|----------|
-| `cargo check --workspace --all-targets` | **52.7 s** | **1038 MB** |
-| `cargo test --workspace --no-run`（含链接） | **83.4 s** | **1638 MB** |
-
-- `.cargo/config.toml` 的 `jobs` **保持 3**（未动 profile、未加 linker 配置）；
-- ⚠️ **链接峰值 1638 MB** 比 REQ-007 的 1250 MB 高 **388 MB**（`ldap3` → `nom` 这条链
-  编译时吃内存）。仍在机器余量内（4.6G 可用），但**已越过** REQ-007 报告里的 1.5G 参考线
-  —— 如实登记（见 §6）。
-
-### 3.3 前端与 E2E
-
-- `pnpm -r test` → **23/23**（`@base/ui` 3 + `@base/sdk` 2 + `@base/shell` 4 + 其余包）；
-- `bun run test:e2e` → **1/1**（chromium，「底座壳渲染并可过滤菜单」）；
-- 本需求**不含前端改动**（D12：同步的管理界面不做）。
-
----
-
-## 4. 数据表（全部带 `tenant_id` + RLS）
-
-| 表 | 关键列 | 说明 |
-|----|--------|------|
-| `org_node` | `id` / `parent_id` / `node_type` / `code` / `name` / `path_labels` | 组织节点（邻接表）；`CHECK (node_type IN ('company','dept','team'))`；`UNIQUE (tenant_id, code)`；自引用外键 `(tenant_id, parent_id)` |
-| `user_org` | `user_id` / `org_node_id` / `role` / `is_primary` | 用户 ↔ 节点多对多；`UNIQUE (tenant_id, user_id, org_node_id)`；外键 `(tenant_id, org_node_id)` → `org_node`、**`(tenant_id, user_id)` → `platform_iam_user`**（修复轮补） |
-| `user_position` | `user_id` / `position_code` / `org_node_id` | 岗位（挂在部门上的属性）；外键 `(tenant_id, org_node_id)` → `org_node`、**`(tenant_id, user_id)` → `platform_iam_user`**（修复轮补） |
-| `external_identity` | `provider` / `external_id` / `user_id` / `last_synced_at` | 外部身份映射；幂等键 `UNIQUE (tenant_id, provider, external_id)`；外键 **`(tenant_id, user_id)` → `platform_iam_user`**（修复轮补） |
-| `sync_conflict` | `source` / `external_id` / `field` / `local_value` / `remote_value` / `status` | 字段级冲突队列；`UNIQUE (tenant_id, source, external_id, field)`；**没有 `user_id` 列**（它按 `(source, external_id, field)` 定位**远端**条目）→ **不需要**用户侧外键 |
-| `sync_source_state` | `source` / `last_sync_at` / `last_error` / `error_count` | 同步状态可见性（**D4 的 5 张表之外多这一张**，见 §6 偏离 2）；**修复轮补齐了错误路径的写入**（见 §9 中 1） |
-
-**外键都带 `tenant_id` → 结构上杜绝跨租户引用与悬空成员关系。**
-
-- 节点侧：`org_node_parent_fk` / `user_org_node_fk` / `user_position_node_fk`（第一轮就有）；
-- 用户侧（**修复轮补齐**）：`user_org_user_fk` / `user_position_user_fk` / `external_identity_user_fk`
-  → `(tenant_id, user_id)` 指向 `platform_iam_user (tenant_id, id)`；
-  为此给 `platform_iam_user` 补了 `UNIQUE (tenant_id, id)`（复合外键的目标必须唯一，
-  原来只有单列主键 `id` —— **REQ-007 遗留的结构缺口**）。
-
-账号表（REQ-007 的 `platform_iam_user`）加 3 列：`display_name` / `manager_id` / `departed_at`；
-修复轮再加 1 个约束：`platform_iam_user_tenant_id_uq UNIQUE (tenant_id, id)`。
-
----
-
-## 5. 为 REQ-009 提供的结构
-
-| REQ-009 需要 | 本期提供的结构 | 位置 |
-|--------------|----------------|------|
-| 「本部门及下级」判定 | `org_node`（邻接表）+ **递归 CTE** 查子树；`path_labels` 加速字段 | `store.rs::subtree_in`、`service.rs::subtree` / `members_of_subtree` |
-| 「我的下属」判定 | `user.manager_id`（**汇报关系是人的属性**，D3） | `platform_iam_user.manager_id`、`service.rs::set_manager` / `manager_of` |
-| 主部门判定 | `user_org.is_primary` | `service.rs::add_member`（一个用户只有一个主部门） |
-| 岗位型权限 | `user_position`（`position_code` + 挂靠节点） | `service.rs::add_position` / `list_positions` |
-| SSO 用户的权限挂载点 | `external_identity`（`provider` + `external_id` → `user_id`） | `service.rs::apply_remote_user` |
-
-**REQ-008 不含任何权限判定逻辑**（D11）—— 全 crate 没有「能不能访问 / 有没有权限」的分支。
-
----
-
-## 6. 未完成 / 未验证 / 偏离（如实登记）
-
-| # | 项 | 说明 |
-|---|----|------|
-| 1 | **设计摘要 §1.2 与 D3 自相矛盾** | §1.2 写 `org_node.manager_id`，D3 写「汇报关系是**人的属性**（`user.manager_id`），**不是**节点的属性」。本实现按 **D3**：`org_node` **没有** `manager_id` 列。**请 BA 确认** |
-| 2 | **多 1 张表 `sync_source_state`** | §9 要求交付「同步状态的可见性（上次同步时间、同步错误计数）」，D4 的 5 张表里没有承载位置 → 加第 6 张 |
-| 3 | **只支持明文**（SCIM `http://` / LDAP `ldap://`） | 树里**无 TLS 栈**；引入会带 30~50 crate 且拉进 `ring` / `aws-lc-rs`。HTTPS / LDAPS 明确报错（不静默降级），配置项已留口 → 留后续需求 |
-| 4 | **LDAP 入站不自动开号** | 目录有、本地无的账号**不自动创建**（计入 `skipped`）。开号涉及密码策略 / SSO 绑定 / 初始状态，属账号生命周期的决策 → 属 REQ-013 / 管理员动作 |
-| 5 | **「解绑角色」无处可解** | 角色绑定表属 REQ-009，本期**还不存在**。离职流程已解绑**组织成员关系与岗位** |
-| 6 | **审计落库未接** | 平台审计 sink（落库 + 查询）属 REQ-014 → 本期生产用 `NoopAuditRecorder`（事件**声明**齐备：`Auditable` + 9 条 `AuditEventSpec`），测试用 `RecordingAuditRecorder` **断言事件已产生** |
-| 7 | **通知通道未接** | 平台通知通道属 REQ-015 → 本期生产用 `LoggingNotifier`（事件**照常产生**并写日志），测试用 `RecordingNotifier` **断言收件人与载荷** |
-| 8 | **LDAP 真实服务端到端未验** | 本期用**可测的抽象层**（`LdapSource` trait）+ 内置 mock（`InMemoryLdapSource`）验证映射与位运算；
-    `ldap3` 的**连接与检索**代码（`Ldap3Source`）**没有真 LDAP 服务器可验** → **未验证**。
-    纯逻辑部分（`SearchEntry` → `LdapEntry` 的转换、时间戳格式化、过滤器拼装）**有单测** |
-| 9 | **SCIM 出站 worker 未在服务端常驻** | 本期 `ScimOutbox` 提供 `enqueue` / `drain_once`；**后台 worker 的常驻循环**由部署侧调度（本期 `base serve` 只提供 API，
-    触发全量同步后由调用方 `drain_outbox` 或后续调度器推进）→ **未验证**（无常驻推送进程） |
-| 10 | **`/api/org/*` 未做真机 HTTP 冒烟** | 路由与错误体有**单测**（RFC 9457 形状 + 英文 ASCII `detail`），但**没有**起 `base serve` 打真机 HTTP
-    （鉴权提取器依赖 IAM 的 access token）→ **未验证** |
-| 11 | **链接峰值内存 1638 MB** | 比 REQ-007 的 1250 MB 高 388 MB（`ldap3` → `nom`）。仍在余量内，但越过 1.5G 参考线 → 如实登记 |
-| 12 | **依赖树增量 +10（归属已更正）** | **+10 属实**，但归属**不是**「全部是 ldap3」：**ldap3 = 8、SCIM 出站 = 2**（`want` / `try-lock`）。四个计数口径与命令写在 §3.1，**请 BA 按同一口径记账** |
-| 13 | **`platform-iam` 的测试夹具被改动** | `iam_real_db.rs` 的「所有会话记录都带 tenant_id」断言原本查**整张表** —— `base_test` 是共享库，
-    本需求的离职用例也会写会话 → 断言误判。已改成只看本用例的租户前缀（`iam-test-%`） |
-| 14 | **同步的管理界面** | 按 D12 不做（数据层 + API 已做） |
-| 15 | **组织架构多版本历史 / SCIM 入站 / 跨租户组织共享** | 按 D12 不做 |
-| 16 | **修复轮新增**：`add_member` 传入**不存在的 user_id** 现在被**数据库**拒绝 → 表现为 `500 INTERNAL_ERROR` | 用户侧外键补齐后（§9 中 2），**悬空成员关系**写不进去了；但 `add_member` **没有**服务层的「用户存在吗」校验 → 错误码是 500 而不是 404。
-    本轮**按任务范围只做结构保证**（DB 层拒绝），服务层的 404 校验**留后续需求**（REQ-009 要消费 `user_org`，届时一并处理） |
-| 17 | **修复轮新增**：`platform_iam_user` 加了 `UNIQUE (tenant_id, id)` | 这是复合外键的**必要前提**（PostgreSQL 要求被引用列组唯一），属于**补齐 REQ-007 遗留的结构缺口**。约束名 `platform_iam_user_tenant_id_uq` |
-| 18 | **修复轮新增**：新迁移 `20261118000800_org_user_fk.*` 遇到**已有悬空成员行**的库会失败 | 这是刻意的：把脏数据暴露出来，而不是悄悄留着。`base_test` 实测**无悬空行**（`user_org` / `user_position` / `external_identity` 各 0 条） |
-
----
-
-## 7. 回归与门禁（**复核轮实测**，2026-11-18）
-
-| 门禁 | 结果 |
-|------|------|
-| `cargo check --workspace --all-targets` | ✅ |
-| `cargo test --workspace -- --test-threads=2` | ✅ **303 passed / 0 failed / 38 ignored**（第二轮 299 → **+4**，只增不减） |
-| `cargo test --workspace -- --include-ignored --test-threads=2` | ✅ **341 passed / 0 failed**（第二轮 336 → **+5**；真实库层 **15/15**，SCIM **7/7**）· ★ **连跑 8 次 8/8 全绿**（见 §10.1） |
-| `cargo clippy --workspace --all-targets -- -D warnings` | ✅ **0 告警** |
-| `cargo fmt --all --check` | ✅ |
-| `cargo xtask capabilities --check` | ✅ 13 文件一致 |
-| `cargo xtask check-deps` | ✅ 平台 crate 未反向依赖业务模块 |
-| `cargo xtask check-modules` | ✅ |
-| `cargo xtask tenant-policies --check` | ✅ 2 个模块声明的表都开了 RLS 且有策略 |
-| `scripts/test-integration.sh` | ✅ **exit 0**（容器 **2 → 2**；该脚本 `--tests` 口径 = **336 passed / 0 failed**） |
-| `pnpm -r test` | ✅ **23/23** |
-| `bun run test:e2e` | ✅ **1/1** |
-
-> ⚠️ **命令写法有坑**：`cargo test --workspace -- --include-ignored -- --test-threads=2`
-> 里的**第二个 `--`** 会让 libtest 把 `--test-threads=2` 当成**过滤器**，
-> 结果是 **0 passed / 0 failed**（**假绿**）。正确写法是
-> `cargo test --workspace -- --include-ignored --test-threads=2`（**一个** `--`）。
-> 本轮实测：写错时全量输出为「0 passed」；写对时 **336 passed**。
-
-### 防假绿护栏（沿用 REQ-006/007 模式）
-
-`crates/platform-org/tests/org_real_db.rs::missing_database_url_test_does_not_report_success`：
-
-- 缺 `DATABASE_URL_TEST` → 子进程**非零退出** 且输出含 **`0 passed`**（不得出现「N passed」）；
-- 真实库用例默认 `#[ignore]`，由 `scripts/test-integration.sh` 的 `--include-ignored` 真正跑到；
-- 库名不是 `base_test` → **直接失败**（`base_dev` 是开发库，测试绝不能碰）。
-
-> ⚠️ 第一轮**未做变异验证**（故意破坏 → 护栏变红 → 还原）—— **QA 已补做并通过**
-> （见 `feature-meta/qa-report.md` §变异验证）。
-> 本轮（修复轮）沿用同一个护栏，**未再重复做变异验证**。
-
----
-
-## 8. 复现命令
-
-```bash
-# 依赖 / 门禁
-cargo xtask capabilities --check
-cargo xtask check-deps
-cargo xtask check-modules
-DATABASE_URL=postgres://base:base@127.0.0.1:5432/base_test cargo xtask tenant-policies --check
-
-# 依赖（口径见 §3.1.1，归属见 §3.1.2）
-cargo tree --workspace --edges normal,build \
-  | grep -oE '\b[a-zA-Z0-9_-]+ v[0-9][0-9A-Za-z.+-]*' | sort -u | wc -l
-git show a0a8d7a:Cargo.lock | grep -cE 'name = "(want|try-lock)"'   # → 0（基线没有这两个包）
-
-# 测试
-cargo test --workspace -- --test-threads=2
 DATABASE_URL_TEST=postgres://base:base@127.0.0.1:5432/base_test \
-  cargo test --workspace -- --include-ignored --test-threads=2
-bash scripts/test-integration.sh
-
-# 前端
-pnpm -r test
-bun run test:e2e
+  ./scripts/test-integration.sh
 ```
+
+| 测试二进制 | passed |
+|-----------|--------|
+| `platform-contracts`（lib） | 17 |
+| `platform-core`（lib） | 72 |
+| `platform-core`（`tests/authz_entry.rs`） | 7 |
+| `platform-db`（lib） | 35 |
+| `platform-db`（`tests/quota_real_db.rs`） | 2 |
+| `platform-iam`（lib） | 41 |
+| `platform-iam`（`tests/iam_real_db.rs`） | 16 |
+| `platform-org`（lib） | 68 |
+| `platform-org`（`tests/org_real_db.rs`） | 15 |
+| `platform-org`（`tests/scim_outbound.rs`） | 7 |
+| **`platform-rbac`（lib）** | **42** |
+| **`platform-rbac`（`tests/rbac_real_db.rs`，真实库）** | **22** |
+| **`platform-rbac`（`tests/http_admin.rs`，真实库）** | **3** |
+| `platform-server`（lib） | 38 |
+| `base`（bin） | 9 |
+| `sandbox`（lib） | 3 |
+| `sandbox`（`tests/c3_real_db.rs`，真实库） | 4 |
+| `sandbox`（`tests/contracts.rs`，C-1 ~ C-5） | 5 |
+| **`sandbox`（`tests/http_authz.rs`，真实库）** | **6** |
+| `xtask`（lib） | 49 |
+| **合计** | **461 passed / 0 failed** |
+
+> 第二轮（定点修复）的增量：**+13** = 真实库层 **+6**（§8.5）、
+> `platform-rbac` 单测 **+6**（§8.5）、`platform-db` 单测 **+1**（§8.4）。
+>
+> **第三轮（QA 定点修复）的增量：+9** = `platform-contracts` 单测 **+2**（§9.4）、
+> `platform-rbac` 单测 **+3**（§9.5）、`platform-rbac` 真实库层 **+4**（§9.5）。
+
+### 2.2 其它门禁
+
+| 命令 | 结果 |
+|------|------|
+| `cargo clippy --workspace --all-targets -- -D warnings` | **0 warning** |
+| `cargo fmt --all --check` | 通过（提交前已 `cargo fmt --all`） |
+| `cargo xtask check-modules` | `模块目录校验通过：1 个模块` |
+| `cargo xtask check-deps` | `依赖方向校验通过：平台 crate 未反向依赖业务模块` |
+| `cargo xtask capabilities` | 生成 13 个产物（`permissions.json` 带 `condition`、`extension-points.json` 的 `contract` = **v2**、`extension_point_count` 仍为 **5**） |
+| `scripts/sync-contracts.sh` | `快照一致：docs/contracts/api-conventions/v1.md` + `docs/contracts/extension-points/v2.md`（**exit 0**） |
+| `cargo test -p platform-core --test authz_entry` | 7 passed |
+| `cargo test -p sandbox --test contracts` | 5 passed（C-1 ~ C-5，含新增 C-5） |
+| `cargo test -p xtask` | 49 passed |
+| `cargo xtask create-module scaffold-probe` + `cargo test -p scaffold-probe` | **5 passed**（脚手架生成的模块**开箱即过 C-1 ~ C-5**；验证后已删除该探针模块） |
+
+### 2.3 稳定性（**回归不稳定**是本仓的历史问题，本轮专门盯了）
+
+`http_admin` 首轮出现过**偶发死锁**（`ALTER TABLE ... ENABLE ROW LEVEL SECURITY` 的
+AccessExclusiveLock 与另一个用例的 INSERT 的 RowShareLock 互等）。
+**根因已定位并修掉**（夹具只在策略缺失时才执行 DDL），修后连跑 **6 次全绿**，
+完整集成套件连跑 **2 次全绿**（**439 / 439** —— ⚠️ 这个数字**已过时**，
+第三轮实测是 **461 / 461**，见 §2.1 与 §9.6）。
+
+**第三轮（QA 定点修复）又盯了一轮**：完整集成套件 **3 轮全绿（每轮 461 / 461）**，
+`rbac_real_db` 与 `org_real_db` 两个真实库二进制**各连跑 8 轮**（见 §9.1）。
+QA 怀疑的「摘全局索引 → 第二个主部门写得进去 → `CREATE UNIQUE INDEX` 失败 → 级联变红」
+这条机制，在本轮**被消除**（那条用例改在独立 schema 里跑，全局索引一次都没碰 —— 见 §9.3）。
 
 ---
 
-## 9. 修复轮（QA `PASS-WITH-RISK` → **2 中 + 3 低**）
+## 3. 破坏性验证（造违规 → 确认被拦住 → 逐字节还原）
 
-- **输入**：`feature-meta/qa-report.md`（QA 独立复现，10 项核心检查全部复验为真，无阻塞合并项）
-- **范围**：**只修 QA 登记的 2 中 + 3 低**，不扩大 scope
-- **约束遵守**：未新增任何依赖；未动 `crates/platform-core/` 与 `crates/platform-contracts/`；
-  未动 `.cargo/config.toml` 与 profile；未 `cargo install` / `cargo clean`；
-  测试只碰 `base_test`；应用连接用**普通角色 `base_app`**（`require_isolation` 自检通过）
+> 只写「正常路径通过」的测试**不算数**。每条违规都是**真的造出来**跑一遍的。
 
-| # | 级别 | 问题 | 本轮怎么修 | 证据 |
-|---|------|------|-----------|------|
-| **1** | **中** | 同步错误计数是**死代码**：`upsert_sync_state` 只有成功路径一个调用点，且写死 `error_count: 0` → `sync_source_state.error_count` 永远是 0、`last_error` 永远 NULL | `store.rs::record_sync_failure`（新增：`ON CONFLICT` 时 `error_count = error_count + 1`、`last_error` 写入、`last_sync_at` **不动**）；`service.rs::sync_ldap` 拆成「外壳 + 本体」：**任何失败路径**都留痕，成功路径仍写 `error_count = 0` / `last_error = NULL` / `last_sync_at = now` | 真实库层 `a_failed_sync_records_the_error_and_a_successful_one_clears_it`（见 §9.1） |
-| **2** | **中** | `user_org.user_id` 侧**没有外键** → 能写**幽灵 user_id** 与**跨租户 user_id** | 新迁移 `20261118000800_org_user_fk`：`platform_iam_user` 加 `UNIQUE (tenant_id, id)`（复合外键的**必要前提**）；`user_org` / `user_position` / `external_identity` 各加 `(tenant_id, user_id)` → `platform_iam_user (tenant_id, id)` 的复合外键。`sync_conflict` **没有 `user_id` 列** → 不需要（§4 有说明） | 真实库层 `the_database_refuses_a_ghost_user_id` / `the_database_refuses_a_cross_tenant_user_id`（见 §9.2） |
-| **3** | **低** | 依赖归属不准：「SCIM 出站零新增依赖」**不成立** | 报告更正为 **ldap3 = 8、SCIM 出站 = 2**（`want` / `try-lock`），并附依赖闭包证据。**代码不改**（复用 `hyper`/`hyper-util` 仍然对） | §3.1.2 |
-| **4** | **低** | 构建图绝对值口径不一致（240 → 254 vs 239 → 253） | 报告写死**四个口径 + 逐字命令**，并解释「增量一致、绝对值差 1」的来源 | §3.1.1 / §3.1.3 |
-| **5** | **低** | LDAP 源缺**前置** URL 校验（`ldaps://` 的错误来自底层 `UnknownScheme`） | `ldap.rs::validate_ldap_url`（新增）+ `Ldap3Source::validate`；`Ldap3Source::connect()` **连接前**先校验；`LdapError::Config` → `OrgError::InvalidArgument`（**422**，与 SCIM 的 `baseUrl` 校验对称） | 4 个单测 + 实测输出（见 §9.3） |
+### 3.1 契约检查 C-5（`modules/sandbox`，每次都还原 + sha256 校验）
 
-### 9.1 中 1 的实测输出（真实库层）
+| # | 造出来的违规 | 实际输出 | 还原 |
+|---|-------------|---------|------|
+| 1 | 把 `export` 路由的 `route_layer(require_permission("sandbox:scope-item:export"))` 去掉（**登记了但没有调用点**） | `the permission point 'sandbox:scope-item:export' is declared in manifest.json but has no authorization call site` → **FAILED** | ✅ sha256 一致 |
+| 2 | 在模块里自写一个鉴权函数 `fn check_perm(code: &str) -> bool`（**绕过平台入口**） | `the custom authorization entry point at .../http.rs:10922 bypasses the platform entry point 'require_permission'` → **FAILED** | ✅ sha256 一致 |
+| 3 | 把调用点的字面量换成常量 `require_permission(crate::permission::PERMISSION_SCOPE_ITEM_READ)`（**无法静态确认**） | `the authorization call site at .../http.rs:4525 does not use a string literal; it cannot be verified statically` → **FAILED** | ✅ sha256 一致 |
+| 4 | 在另一个模块里加 `pub fn require_permission(...)`（**第二个入口定义**） | `the authorization entry point must be defined exactly once in the whole repository, found 2: [.../platform-core/.../permission.rs, .../sandbox/backend/src/rogue.rs]` → **FAILED** | ✅ sha256 一致（rogue.rs 已删除） |
 
-```
-【失败后】error_count=1 last_error=Some("[INTERNAL_ERROR] an internal error occurred: ldap connection failed: the directory server is unreachable") last_sync_at=None
-【成功后】error_count=0 last_error=None last_sync_at=Some(2026-11-18 10:02:25.238249 +00:00:00)
-```
+还原后 `cargo test -p sandbox --test contracts` → **5 passed**。
 
-- 失败 → `error_count` **递增到 1**、`last_error` **非空**、上次**成功**同步时间**不动**（`None`）；
-- 随后成功一次 → `error_count` **归 0**、`last_error` **清空**、`last_sync_at` **更新**。
+### 3.2 其它「应当被拦住」的机制（断言里就是「被拦住」）
 
-### 9.2 中 2 的实测输出（**数据库层**的报错原文）
-
-用**应用角色 `base_app`**（不绕过 RLS，与生产路径同权）直插 `user_org`：
-
-```
---- 幽灵 user_id（应用角色）---
-ERROR:  insert or update on table "user_org" violates foreign key constraint "user_org_user_fk"
-DETAIL:  Key is not present in table "platform_iam_user".
---- 跨租户 user_id（应用角色）---
-ERROR:  insert or update on table "user_org" violates foreign key constraint "user_org_user_fk"
-DETAIL:  Key is not present in table "platform_iam_user".
-```
-
-（跨租户那条用**管理员**连接复核时，DETAIL 更具体：
-`Key (tenant_id, user_id)=(tenant-a, u-other-tenant-86a95e03-…) is not present in table "platform_iam_user"`。）
-→ 拒绝发生在**数据库**，**不是**服务层报错。
-
-### 9.3 低 3 的实测输出（三种 scheme）
-
-```
-ldap://127.0.0.1:389   => OK（放行）
-ldaps://127.0.0.1:636 => ldap configuration is invalid: the ldap url uses ldaps:// but only plaintext ldap:// is supported in this release (ldap over tls is planned for a later requirement)
-https://dir.example.com => ldap configuration is invalid: the ldap url must start with ldap:// (unsupported scheme: https)
-```
-
-- `ldap://` → 放行；
-- `ldaps://` → **明确报错**（写清「本期只支持明文、TLS 留后续需求」）；
-- 其它 scheme → **明确报错**（写清实际用的 scheme）；
-- 三条都**不含**底层的 `UnknownScheme`。
+| 机制 | 判据 | 断言位置 |
+|------|------|---------|
+| `*:*` / `*:demo:read` 通配 | 写入被拒（`WILDCARD_FORBIDDEN`） | `rbac_real_db.rs::wildcards_work_and_the_full_wildcard_is_rejected` |
+| 内置角色删除 / 降权 / 减权 | 三个操作全被拒（`BUILTIN_ROLE_PROTECTED`） | `rbac_real_db.rs::the_built_in_roles_cannot_be_deleted_or_downgraded` |
+| 角色继承成环 | 被拒 + **指出是哪两个角色** | `rbac_real_db.rs::inheritance_expands_and_cycles_are_rejected` |
+| 第二个主部门写入 | **数据库**拒绝（部分唯一索引） | `rbac_real_db.rs::a_missing_or_ambiguous_primary_department_falls_back_to_self` |
+| 白名单外字段 / 函数调用 / 多语句 | **解析失败**并给出明确原因 | `expr.rs::tests::*` |
+| 注入串 | 当作**普通字符串值**绑定，SQL 文本里不出现 | `expr.rs::tests::an_injection_string_is_compiled_as_a_plain_value` |
+| 非法范围列名 | **拒绝**（列名会被拼进 SQL） | `query.rs::tests::an_unsafe_scope_column_is_rejected` |
+| 未认证 / 缺权限点 / 判定实现缺失 | 401 / 403 / **fail closed**（不是放行） | `authz_entry.rs`（5 条） |
+| 普通用户调 `/api/rbac/*` | 403 且**不落库** | `http_admin.rs::a_plain_user_cannot_reach_the_management_api` |
 
 ---
 
-## 10. 复核轮（QA 复核 → **低 1 回归不稳定** + **信息 1 `add_member` 500**）
+## 4. 变异验证（把关键判定**故意改错** → 测试必须变红）
 
-- **输入**: `feature-meta/qa-report-recheck.md`（QA 复核结论 **PASS-WITH-RISK**；5 个改动点**全部复现为真**）
-- **本轮范围**: **低 1（必修）** —— 全量含 ignored 回归的**间歇性 `deadlock detected`**；**信息 1（建议修，一并做）** —— `add_member` 传不存在的 `user_id` 返回 500 → 4xx。
+> 判据：改错 → **对应测试红** → 还原（sha256 校验）→ **对应测试绿**。
 
-### 10.1 低 1：间歇性死锁 —— 根因、修法与实测
+| # | 故意改错的地方 | 期望变红的测试 | 实测 |
+|---|--------------|--------------|------|
+| 1 | **fail closed → fail open**：主部门缺失 / 歧义时退化成 `ALL`（`scope.rs` 的 `DegradeToSelf` 分支） | `a_missing_or_ambiguous_primary_department_falls_back_to_self` | ✅ **FAILED**（`主部门缺失必须退化为 SELF（不得看到本部门或全租户数据）`），还原后 12 passed |
+| 2 | **兼岗默认从「主部门」改成「并集」**（`scope.rs` 的 `org_nodes`） | `the_part_time_membership_defaults_to_the_primary_department` + `a_missing_or_ambiguous_...` | ✅ **FAILED**（2 条），还原后 12 passed |
+| 3 | **鉴权入口静默放行**（`permission.rs` 的 `has` 判断短路成 `false &&`） | `platform-core/tests/authz_entry.rs`（3 条）+ `sandbox/tests/http_authz.rs`（1 条） | ✅ **FAILED**（3 + 1），还原后 7 passed / 6 passed |
+| 4 | **对账不一致只告警不失败**（`registry.rs` 的 `require_consistent` 返回 `Ok`） | `the_registry_matches_the_manifests_and_a_difference_is_reported` | ⚠️ **第一次没变红** → 补了断言（`require_consistent` 必须 **Err** + 差异逐条列出）→ **第二次变红** ✅，还原后 12 passed |
 
-#### 根因（**不是生产代码的 bug**，是**测试之间的并发竞态**）
+> **第 4 条是本轮最有价值的发现**：原用例只测了 `reconcile()`（它本来就报差异），
+> **没测启动路径**（`require_consistent()`）—— 也就是说「不一致即启动失败」这条
+> **一度没有测试保护**。补断言后，变异能被抓住。这是「变异验证」真正的价值：
+> **它发现的是测试的漏洞，不是代码的漏洞。**
 
-复现（本机第一轮实测，**第一次就撞上**）：
+---
 
-```
-$ cargo test --workspace -- --include-ignored --test-threads=2
-test the_database_refuses_a_cross_tenant_user_id ... FAILED
----- the_database_refuses_a_cross_tenant_user_id stdout ----
-panicked at crates/platform-org/tests/org_real_db.rs:1195:5:
-应指出是哪条外键违约：数据库访问失败：error returned from database: deadlock detected
-test result: FAILED. 13 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
-```
+## 5. 顺带修掉的既有缺陷（BA 点名的「开工前必须先修」）
 
-PostgreSQL 日志（`podman logs base-postgres`）把锁环写得很清楚：
-
-```
-ERROR:  deadlock detected
-DETAIL:  Process 10372 waits for RowShareLock on relation 25761 of database 16385; blocked by process 10373.
-        Process 10373 waits for AccessExclusiveLock on relation 25778 of database 16385; blocked by process 10372.
-        Process 10372: INSERT INTO public.user_org (tenant_id, id, user_id, org_node_id) VALUES ($1, $2, $3, $4)
-        Process 10373: ALTER TABLE public.user_org ENABLE ROW LEVEL SECURITY
-```
-
-OID 对照（`SELECT oid, relname FROM pg_class WHERE oid IN (25761, 25778)`）：
-
-```
-25761 | org_node
-25778 | user_org
-```
-
-→ **锁环 = `user_org` ↔ `org_node`**：
-
-| 角色 | 语句 | 持锁 | 等锁 |
-|------|------|------|------|
-| A（用例体） | `INSERT INTO user_org` | `RowExclusiveLock` on `user_org` | `RowShareLock` on `org_node`（`user_org_node_fk` 的外键检查） |
-| B（**另一个用例的 `setup()`**） | `ALTER TABLE … ENABLE ROW LEVEL SECURITY` | `AccessExclusiveLock` on `org_node`（同一事务里**先**改的 `org_node`） | `AccessExclusiveLock` on `user_org` |
-
-**两条路径的加锁顺序正好相反**（DDL：`org_node` → `user_org`；写入：`user_org` → `org_node`）→ 锁环。
-锁环里**只有第一轮就有的 `user_org_node_fk`**，不含本轮新增的用户侧外键 —— **不是新外键引入的**；
-是「新增用例是第一个在用例体里早期直插 `user_org` 的」把这条**既有**竞态变成了可见的随机失败。
-
-#### 修法：**库结构准备整个测试二进制只做一次**（DDL 与数据写入不再并发）
-
-`crates/platform-org/tests/org_real_db.rs`：
-
-- 新增 `static SCHEMA_READY: tokio::sync::OnceCell<()>`；
-- `setup()` 里把「应用角色 → 平台迁移 → 按 manifest 生成 RLS 策略」整段挪进
-  `prepare_schema()`，由 `SCHEMA_READY.get_or_init(...)` 保证**整个测试二进制只跑一次**；
-- **为什么这样就够**：每个用例都要**先过 `setup()`** 才能进用例体，而 `setup()` 里等着这次准备 ——
-  于是 **DDL 一定发生在任何用例体开始之前**，**DDL 与数据写入不再并发**，竞态被**消除**；
-- **为什么不是「调大超时」或「重试几次」**：那只是把随机失败**藏起来**，竞态还在，下一轮还会翻车；
-- **为什么不是「全套单线程」**：那会**掩盖**其它真实竞态。本修法只让**改 schema 的那一步**串行，
-  **用例体之间仍然真并发**（`--test-threads=2` 不变），其它竞态照样暴露；
-- **跨进程**：`prepare_schema()` 仍在原有的 `pg_advisory_lock(SETUP_LOCK)` 里（跨进程不互相踩 DDL / policy）。
-
-> 副作用（正向）：真实库用例二进制从 **3.10s → 1.47s**（DDL 不再每个用例重跑一遍）。
-
-#### 实测：**连跑 8 次，8/8 全绿**
-
-```bash
-for i in $(seq 1 8); do
-  cargo test --workspace -- --include-ignored --test-threads=2 2>&1 | tail -3
-  echo "=== 第 $i 轮结束 ==="
-done
-```
-
-| 轮次 | exit | 汇总（passed / failed / ignored） | `deadlock` |
-|------|------|----------------------------------|-----------|
-| 1 | 0 | 341 / 0 / 0 | 无 |
-| 2 | 0 | 341 / 0 / 0 | 无 |
-| 3 | 0 | 341 / 0 / 0 | 无 |
-| 4 | 0 | 341 / 0 / 0 | 无 |
-| 5 | 0 | 341 / 0 / 0 | 无 |
-| 6 | 0 | 341 / 0 / 0 | 无 |
-| 7 | 0 | 341 / 0 / 0 | 无 |
-| 8 | 0 | 341 / 0 / 0 | 无 |
-
-> 复核轮之前：QA 实测 **4 次里 2 次红**（`deadlock detected`）；Dev 本轮修复前第 1 次跑就红。
-> 修复后 **8/8 全绿**。
-
-### 10.2 信息 1：`add_member` 传不存在的 `user_id` → **404**（不再是 500）
-
-| 层 | 改动 |
-|----|------|
-| **platform-db** | `DbError::foreign_key_constraint()` —— 从底层错误里**认出**外键违约（SQLSTATE `23503`）并返回**约束名**；`None` = 不是外键违约 |
-| **platform-org** | `From<DbError> for OrgError`：**外键违约 → `OrgError::NotFound { resource }` → 404 `NOT_FOUND`**（契约 C5：不泄露资源存在性）；其它数据库错误仍是 500 |
-| 资源类型映射 | `user_org_user_fk` / `user_position_user_fk` / `external_identity_user_fk` → `resource="user"`；`user_org_node_fk` / `user_position_node_fk` / `org_node_parent_fk` → `resource="org_node"`；对不上 → `record` |
-
-**为什么外键违约是 4xx**：外键违约的含义是「**引用的那一行不存在**」（幽灵 `user_id` / 跨租户 `user_id`）——
-这是**客户端错误**（该资源查不到），500 会把「用户不存在」说成「服务端坏了」。
-
-**实测**（真实库层 `adding_a_member_for_an_unknown_user_is_a_client_error`）：
-
-```
-PROBE add_member 幽灵 user → code=NOT_FOUND status=404 detail=the user was not found params={"resource": String("user")}
-```
-
-（同一次运行里 PostgreSQL 侧仍记录着**数据库层**的拒绝 —— 404 是把**真实的外键违约**映射过来的，
-不是服务层自己先查了一遍再报错：
-
-```
-ERROR:  insert or update on table "user_org" violates foreign key constraint "user_org_user_fk"
-```
-
-）
-
-**新增用例 / 单测**：
-
-| 用例 | 位置 | 断言 |
+| 缺陷 | 修法 | 验证 |
 |------|------|------|
-| `adding_a_member_for_an_unknown_user_is_a_client_error` | `crates/platform-org/tests/org_real_db.rs`（真实库层） | 404 + `NOT_FOUND` + `params.resource == "user"` |
-| `a_foreign_key_violation_is_a_client_error_not_an_internal_one` | `crates/platform-org/src/error.rs` | 外键违约 → 404 `NOT_FOUND` |
-| `other_database_errors_stay_internal` | `crates/platform-org/src/error.rs` | 其它数据库错误 → 500 `INTERNAL_ERROR` |
-| `a_foreign_key_violation_is_recognized_by_its_constraint` | `crates/platform-db/src/error.rs` | 外键违约 → 拿到约束名 |
-| `other_database_errors_are_not_foreign_key_violations` | `crates/platform-db/src/error.rs` | 非外键违约 → `None` |
+| `feature-meta/manifest.json` **缺 `contracts` pin** → `scripts/sync-contracts.sh` **恒 exit 2** → 契约门禁在 CI 上**常红** | 补 `"contracts": { "api-conventions": "v1", "extension-points": "v2" }` | `scripts/sync-contracts.sh` → **exit 0**（此前恒 2） |
+| `docs/contracts/extension-points/v2.md` 快照缺失 | `scripts/sync-contracts.sh --sync`（**不是手改快照**） | 校验一致 ✅ |
+| 脚手架生成的模块**过不了 C-5**（声明了权限点却没有调用点） | 脚手架模板加 `backend/src/http.rs`（三个权限点各一个调用点）+ `condition` 示例 | `cargo xtask create-module scaffold-probe` → **5 passed**（含 C-5） |
+
+---
+
+## 6. 未验证项（**如实列出**）
+
+| 项 | 状态 | 原因 / 补法 |
+|----|------|-----------|
+| **真机 `base serve` 的启动对账**（AC-S-033 第 1/2 步要求「启动进程 → 记退出码」） | ⚠️ **未跑真机进程** | 已验证的是**对账函数**（`require_consistent` 必须 Err + 逐条列出差异）与**启动路径的接线**（`platform-server/src/main.rs::reconcile_permissions` → `Failure::Runtime` → 退出码 1）。**没有**真的起进程注入差异看退出码 —— 需要一套 IAM 环境变量 + 迁移后的库，本机未搭。**建议 QA 补跑** |
+| **多实例真机部署下的 epoch 收敛**（AC-S-047 的跨进程口径） | ⚠️ **用两个独立 checker 实例模拟**，不是两个真机进程 | 两个实例**各自持自己的缓存、共享同一个数据库**（满足「跨进程」的判定要点）；**没有**起两个 `base serve` 进程。BA 的 AC §9 指出单实例部署下无法证伪 —— 真机双实例需部署侧配合 |
+| **`platform-org` 的 9 个权限点** | ⚠️ **未修**（按 BA 指示不顺手改） | 现状：**登记了但 `require_permission` 调用点一个都没有**（`crates/platform-org/src/http.rs` 只有令牌校验）。属 REQ-008 范围。已如实登记在 `traceability.md` §4 |
+| **C-5 扫平台 crate** | ⚠️ **未做**（BA 说「不要求扩 C-5 的扫描范围」） | C-5 目前只扫 `modules/*/backend/**/*.rs`；`platform-rbac` 的 4 个权限点**逐条列了调用点**（`traceability.md` §4），但**没有机械门禁**。建议后续把 C-5 的扫描范围扩到 `crates/*`（否则平台 crate 的假权限仍无门禁） |
+| **CI 真跑**（6 个 job / 镜像体积门禁 / Trivy） | ⚠️ **跑不了** | 本仓**无 remote**。本地已跑：`cargo test --workspace`、`cargo clippy -- -D warnings`、`cargo fmt`、`cargo xtask check-modules`、`cargo xtask check-deps`、`cargo xtask capabilities`、`scripts/sync-contracts.sh`、`scripts/test-integration.sh` |
+| **前端 `can()`** | ❌ **不在本期** | 属 REQ-011。本期只保证「注册表有接口可读」+ 能力索引里带 `condition` |
+| **覆盖率数字** | ❌ 不设门槛 | 本期不设覆盖率门槛（与既有需求一致） |
+| **真实租户的权限点数据** | ⚠️ 只有夹具 | 夹具覆盖了 AC-S-034 的跨租对照（两个租户各自的角色行 + RLS 隔离断言）；**没有**真的建第二个租户并跑完整业务流 |
+
+---
+
+## 7. 对规格的疑问（**按现有规格实现**；有分歧的地方已说明取舍）
+
+| # | 疑问 | 本期实现 | 影响 |
+|---|------|---------|------|
+| 1 | **design-summary §4.4**：「`CUSTOM` 与其它 scope 同时出现时**取 `CUSTOM` 的那一路**」—— 多个角色的 scope 是**并集**语义；按并集，`CUSTOM` 与 `OWN_ORG` 应当是「**或**」（更宽），而「取 CUSTOM 那一路」比并集**窄**、比「两者都满足」**宽** | **照规格实现**（`combine_scopes`：`CUSTOM` 存在时只走 CUSTOM；多个 CUSTOM 取**交集**） | ⚠️ **安全方向的疑问**：若某用户既有 `OWN_ORG`（本部门）又有 `CUSTOM`（如 `$record.amount <= 10000`）两个角色，按「取 CUSTOM 那一路」，他会看到**本部门之外**满足金额条件的记录 —— 比「本部门」**宽**。这不是越权（两个角色都是管理员授的），但**比字面的「本部门」宽**。若 BA 认为应当更严（`AND` 语义），改 `scope.rs::combine_scopes` 一处即可（**本次未擅自改设计**） |
+| 2 | **`PermissionChecker` 的 trait 形状**：design §1 给的是**两个方法**（`has` + `scope`），但 §5.3 的属性级校验与 §4.3 的权限点级覆盖需要更多通道 | **按设计的两个方法实现**，另加 `effective_scope` 与 `condition` 两个方法（共 4 个，仍**全同步** → dyn 兼容） | 加的是**能力面**，没有削弱任何安全属性；`PermissionChecker` **不属于** `extension-points v2` 冻结的 5 个 trait，改它**不违反**契约 |
+| 3 | **`platform_permission` 是平台级表**（无 `tenant_id`），但 `TenantQuery` 强制每条语句都要有 `{tenant}` | 语句写成 `WHERE {tenant} IS NOT NULL`（恒真，租户照样绑定） | 保持了「`{tenant}` 是**所有**语句的硬约束」这条不变量；没有为平台级表开特例 |
+| 4 | **`rbac:permission:read` 登记了却没有调用点** | 按 BA 裁定**豁免** `GET /api/rbac/permissions` 的管理权限点 | 它是**唯一**「登记了但无调用点」的权限点；不是假权限（该接口对任何已认证用户开放） |
+| 5 | **AC-S-045 前置条件的自相矛盾**（BA 已在 §9 提过） | 按 BA 第二轮裁定实现：**无权资源 vs 不存在资源**必须无法区分；**有权资源 → 200** | 夹具里可见记录（`dept-a-2`）与不可见记录（`dept-b`）落在**不同部门分支** |
+
+> **第 1 条已由 BA 裁定并在本轮修复** → 见 §8（多角色 scope 的合并语义改成**真正的并集**）。
+> 下面第 1 行保留第一轮的原样，作为「当时按规格实现」的记录。
+
+---
+
+## 8. 第二轮：定点修复 —— 多角色 scope 的合并语义改成**真正的并集**
+
+> 触发：BA 裁定了 §7 的第 1 条疑问。**实现是忠实的，错的是规格**（design-summary §4.4 的笔误）。
+> 本轮只做这一处定点修复 + 两个「顺带确认」，不夹带别的需求。
+
+### 8.1 错在哪：旧语义既不是并集也不是交集
+
+design-summary §4.4 原文：
+
+> `CUSTOM` 不参与宽松比较：与其它 scope 同时出现时，**取 `CUSTOM` 的那一路**
+
+按这条实现出来的效果是：**多角色里有 `CUSTOM` 时，其它角色（`OWN_ORG` / `OWN_ORG_AND_BELOW`）
+的贡献被整个丢掉**。后果：
+
+- 用户同时有「本部门」角色和一个「CUSTOM 条件」角色时，
+  **本部门里不满足 CUSTOM 条件的记录反而看不见了** —— **加一个角色缩小了可见范围**；
+- 这与同节 §4.3「多个角色的 scope **取最宽松的**（并集语义）—— 与权限点『任一满足即通过』一致」
+  直接矛盾；
+- 多个 `CUSTOM` 之间取**交集**（原 §4.4 的另一条）同样与并集原则矛盾 → **一并作废**。
+
+### 8.2 BA 裁定后的新规则（实现按此）
+
+| 情况 | 结果 |
+|------|------|
+| 任一角色是 `ALL` | `ALL`（最宽松，其他都不必看） |
+| 否则有 `CUSTOM` 角色 | **CUSTOM 的条件 OR 其它（非 CUSTOM）角色的最宽松范围** |
+| 否则有 `OWN_ORG_AND_BELOW` | `OWN_ORG_AND_BELOW`（最宽松） |
+| 否则有 `OWN_ORG` | `OWN_ORG` |
+| 否则 | `SELF` |
+
+多个 `CUSTOM` 角色：条件之间取 **OR**（并集），**不是 AND**。
+
+### 8.3 改动落点
+
+| 文件 | 改动 |
+|------|------|
+| `crates/platform-rbac/src/scope.rs` | `CombinedScope::Custom` 增加 `plus: Option<ContainmentScope>`；`combine_scopes` 改成并集；`ScopeResolver` 把包含型范围与自定义条件合成**一个** OR 组 |
+| `crates/platform-rbac/src/checker.rs` | 抽出 `compile_condition`（编译失败 → 永不匹配）+ 3 条单测 |
+| `crates/platform-core/src/extension/permission.rs` | **平台契约的最小演进**：`ScopeFilter` 增加 `CustomOr { conditions, scope }`（理由见 §8.4） |
+| `crates/platform-db/src/query.rs` | 渲染 `CustomOr`：**一个**括号包起来的 OR 表达式；`Custom` 的多个条件由 AND 改为 OR |
+| `crates/platform-rbac/tests/rbac_real_db.rs` | 新增 **6** 条真实库用例 + 1 个新夹具（`visible_ids_with_condition`） |
+
+**没有**改 BA 的任何文件；**没有**改 `platform-core` 以外的平台契约面（`PermissionChecker` 的
+四个方法签名、`DataScope` 五种语义、`require_permission` 入口都**原样**）。
+
+### 8.4 为什么必须动 `platform-core`（**不是**顺手扩平台，是契约表达能力的缺口）
+
+BA 的渲染要求是「整体必须是**一个**括号包起来的 OR 表达式，且**所有值走参数绑定**」，
+同时「`OWN_ORG_AND_BELOW` 的子树 id 集合是**数组绑定**，与 OR 组合时**不要**把数组展开成字符串拼接」。
+这两条在旧契约下**无法同时满足**：
+
+| 障碍 | 事实 |
+|------|------|
+| `ScopeFilter` 没有能表达「OR」的变体 | 四个变体（`All` / `OrgNodes` / `Owner` / `Custom`）各自渲染成**独立**的 AND 条件；`Custom` 的多个条件之间也是 AND |
+| 自定义条件的载体装不下数组 | `CompiledCondition.values` 的类型是 `ConditionValue`（`Text` / `Int` / `Bool` / `Float`），**没有数组** → `org_node_id = ANY($n)` 根本无法放进 `CompiledCondition` → 也就无法与自定义条件拼成同一个 OR 表达式 |
+| 展开数组被明确禁止 | 把节点集合拼成 `IN ('dept-a', 'dept-b')` 违反「值走参数绑定」，也不许做 |
+
+所以契约必须**恰好长一个变体**：
+
+```rust
+/// 自定义条件 **OR** 一个包含型范围（**并集**语义）。
+CustomOr {
+    conditions: Vec<CompiledCondition>,   // 彼此 OR
+    scope: Box<ScopeFilter>,              // 另一侧：OrgNodes / Owner
+}
+```
+
+- 落在 `platform-core`（`ScopeFilter` 的定义处）→ 属 AGENTS.md 硬规则 1 的**例外条款**
+  （「平台 crate 可以在**已评审的需求**里演进」，REQ-009 已在该文件新增过 `extension/permission.rs`）；
+- 改动是**纯增量**：既有四个变体的渲染行为不变；只有 `Custom` 的「多条件之间」由 AND 改为 OR ——
+  那是**本轮语义修正的一部分**（且只有 `platform-rbac` 生产 `ScopeFilter`，业务模块只消费）；
+- `AGENTS.md` **不需要**改：没有新增 crate / 文件 / 能力项，它对 `platform-core` 的描述仍然成立；
+- 能力索引 `cargo xtask capabilities --check` → **13 个文件与源码一致**（无需重新生成）。
+
+### 8.5 渲染（一个括号包起来的 OR 表达式 + 值全部走绑定）
+
+```sql
+-- 自定义条件 OR 本部门（OWN_ORG）
+... AND ((amount <= $2) OR (org_node_id = ANY($3)))
+```
+
+| 要求 | 落实 |
+|------|------|
+| 一个括号包起来的 OR 表达式 | 整个 OR 组只加**一对**括号 → 不会被外层的 AND 拆开 |
+| 自定义条件的值走绑定 | `$2`（`ConditionValue` → `BindValue`） |
+| 子树 id 集合走**数组绑定** | `$3` = `BindValue::TextArray` —— **没有**展开成字符串拼接 |
+| 多个 CUSTOM 取 OR | `((c1) OR (c2))` |
+
+证据：`platform-db` 的 2 条单测（`a_custom_scope_renders_every_condition_as_one_or_group`、
+`a_custom_or_scope_renders_one_or_group_with_an_array_bound`）+ 真实库用例里的 SQL 断言
+（`sql.contains(" OR ")`、SQL 文本里**不含** `dept-a` / `10000`、绑定值 3 个）。
+
+### 8.6 新增用例（真实库层，**6** 条）
+
+| 用例 | 覆盖 |
+|------|------|
+| `a_custom_scope_is_unioned_with_the_other_roles_scope` | **四个象限**（主部门内/外 × 满足/不满足 CUSTOM）；★「主部门内但不满足 CUSTOM → **可见**」是本次修复的核心判据；另断言过滤条件形态是 `CustomOr`、SQL 是 OR 组、值全走绑定 |
+| `multiple_custom_scopes_are_unioned` | 两个 CUSTOM 条件不同 → **满足任一**即可见（OR，不是 AND） |
+| `all_wins_over_a_custom_scope` | `ALL` + `CUSTOM` → `ALL`（全部可见，含金额超限的记录） |
+| `the_most_permissive_containment_scope_still_wins` | **回归**：`OWN_ORG` + `OWN_ORG_AND_BELOW` → `OWN_ORG_AND_BELOW`（行为不变） |
+| `the_permission_checker_is_usable_as_a_trait_object` | 顺带确认 1（dyn 兼容） |
+| `a_condition_outside_the_whitelist_never_grants_access` | 顺带确认 2（fail closed） |
+
+另有 **7** 条单测（`platform-rbac` 的 `scope::tests` **+3**、`checker::tests` **+3**；
+`platform-db` 的 `query::tests` **+1**）。
+
+### 8.7 变异验证（第二轮 **2** 条）
+
+判据：改错 → **对应测试红** → 还原（**sha256 校验**）→ **对应测试绿**。
+
+| # | 故意改错的地方 | 期望变红的测试 | 实测 | 还原 |
+|---|--------------|--------------|------|------|
+| 1 | **退回旧行为**：「有 CUSTOM 就只返回 CUSTOM」（`scope.rs::combine_scopes` 把 `plus` 丢成 `None`） | `rbac_real_db::a_custom_scope_is_unioned_with_the_other_roles_scope` + `scope::tests::a_custom_scope_is_unioned_with_the_other_roles_scope` | ✅ **FAILED（2 条）**：真实库报「主部门内不满足 CUSTOM 的记录必须仍然可见」且可见集合少了 `item-big`；单测报 `left: None / right: Some(OwnOrg { .. })` | ✅ sha256 一致（`f2b62728…d9bb0`）→ 还原后 1 passed / 2 passed |
+| 2 | **多个 CUSTOM 由 OR 改成 AND**（`platform-db::render_condition_group` 的 `join(" OR ")` → `join(" AND ")`） | `rbac_real_db::multiple_custom_scopes_are_unioned` + `platform-db::query::tests::a_custom_scope_renders_every_condition_as_one_or_group` | ✅ **FAILED（2 条）**：真实库只剩交集 `{item-b1, item-self2}`；单测渲染出 `((amount <= $2) AND (dept_id = $3))` | ✅ sha256 一致（`655df077…51f94`）→ 还原后 2 passed / 1 passed |
+
+> 两次变异都**没有**靠「整条 SQL 文本比对」蒙对：第 1 条红在**记录集合**上，
+> 第 2 条红在**记录集合**与**渲染结果**上 —— 也就是说，修复的语义本身被用例**真的**盯着。
+
+### 8.8 两个「顺带确认」的结论
+
+#### ① 四个方法全同步 → trait 仍 dyn 兼容 ✅
+
+`PermissionChecker` 的四个方法（`has` / `scope` / `effective_scope` / `condition`）
+**全部是同步方法**：没有 `async fn`、没有 RPITIT（返回具名类型）→ trait **对象安全**。
+
+证据（`the_permission_checker_is_usable_as_a_trait_object`，真实库层）：
+
+- `let dyn_checker: Arc<dyn PermissionChecker> = platform_rbac::as_dyn_checker(checker.clone());`
+  —— **这一行能编译过就是证明**：任何一个方法改成 `async fn` 或返回 `impl Trait`，
+  这行都编译不过（`Arc<dyn PermissionChecker>` 不成立）；
+- 四个方法**逐个经由 trait 对象**调用并断言结果（`has` / `scope` / `effective_scope` / `condition`）；
+- 平台侧本来就靠它注入请求扩展（`platform-core::permission::authorize` 从扩展里取
+  `Arc<dyn PermissionChecker>`），`platform-core/tests/authz_entry.rs` 另有 7 条用例覆盖。
+
+#### ② `condition()` 引用白名单外属性 → fail closed ✅（但**返回的不是 `None`**）
+
+**实测行为**：返回 **`Some(1 = 0)`**（永不匹配的条件），**不是** `None`。
+（`platform-core` 的 trait 文档写的是「条件引用白名单外的属性时返回 `None`」——
+**文档与实现不一致**，见下面的说明。）
+
+证据（`a_condition_outside_the_whitelist_never_grants_access`，真实库层）：
+
+1. 做法：用一个**不含 `record.amount`** 的白名单重建判定器 → 注册表里
+   `sandbox:scope-item:approve` 的条件 `$record.amount <= 10000` 就成了**白名单外**的写法；
+2. `checker.condition(ctx, PERM_APPROVE)` → `sql == "1 = 0"`、`values` 为空
+   → **永不匹配**；
+3. 调用方把它交给 `TenantQuery::with_condition` → **一行都看不到**（数据范围是 `ALL` 也看不到）
+   → 调用方据此**判定不通过**（fail closed），**不是**「忽略条件放行」；
+4. 对照组：白名单内的同一条件 → 编译成**真实**条件 → 金额超限的记录被挡住、满足条件的可见
+   → 证明条件**确实被生效**，不是被忽略；
+5. 另有 3 条单测（`checker::tests`）钉住同一条策略：白名单外属性 / 函数调用 / 多语句
+   → 一律落到 `1 = 0`。
+
+**为什么实现不改成「返回 `None`」**（这点需要 BA 复核）：
+
+| 方案 | 后果 |
+|------|------|
+| 返回 `None`（照 trait 文档改） | `None` 同时表示「该权限点**没有**条件」与「条件**非法**」→ 调用方无法区分 → 按文档「`None` 即判定不通过」的话，**所有没有条件的权限点都会被拒**（把「无条件」误当成「条件非法」）；若调用方选择「`None` 就放行」，则白名单外的条件会被**静默忽略 = 放行** |
+| 保持 `Some(1 = 0)`（现实现） | 「没有条件」= `None`（调用方不加条件）；「条件非法」= 永不匹配（调用方**必然**判不通过）→ **两个语义不混淆，且都是 fail closed** |
+
+→ **建议 BA 修订 trait 文档**（把「引用白名单外的属性时返回 `None`」改成
+「返回**永不匹配**的条件」），而不是改实现。**本轮按「不改，只确认」的要求没有动它。**
+
+### 8.9 本轮的已知取舍与剩余风险（如实列出）
+
+| 项 | 说明 |
+|----|------|
+| **改了 `platform-core`** | 契约表达能力缺口所迫（§8.4），**需要 BA 复核这处演进**；改动是纯增量 |
+| **trait 文档与实现不一致** | 见 §8.8 ② —— 第二轮**未改**；→ **第三轮已改**（§9.2）：文档改成 D40 口径，**实现未动** |
+| `use_all_memberships` 开关口径 | 「取所有成员节点的并集」的开关取自**所有**贡献（任一角色要求并集 → 整体并集）—— 与第一轮一致，**行为未变** |
+| 自定义 + 包含型范围时的查询次数 | 组合出 `CustomOr` 时，每个权限点会**多查一次**组织节点（第一轮只查纯 scope）。只在「有 CUSTOM 角色」的用户上发生，量级是「权限点数 × 1 次查询 / 缓存刷新」—— **未做优化**（正确性优先），留作后续 |
+| `platform-org` 的偶发失败 | 一次完整套件跑里 `platform-org` 的 `org_real_db` 有 **1 条**偶发失败（单独重跑 **15 passed**，另两次完整套件全绿）。⚠️ 第二轮归因「与本次改动无关」**已被 QA 反驳**（理由不足）→ 第三轮**消除了 QA 怀疑的那条机制**（摘全局索引的窗口，§9.3）；**根因仍未定论**（QA 与本轮都未复现） |
+| 依赖预算 | **不变**：锁文件未改动，仍是 **293 → 294**（+1 是本地工作区成员 `platform-rbac`）；本轮**未引入任何新依赖** |
+
+---
+
+## 9. 第三轮：QA 指出的定点修复（2 个中 + 2 个低 + 2 个信息）
+
+> 来源：QA 的 Pre-merge 报告（`feature-meta/qa-report.md`；结论 **PASS-WITH-RISK，HIGH 0**）。
+> 本轮**逐条**对应 QA §7 的 6 个问题编号；**没做的说清为什么**。
+
+### 9.1 本轮增量
+
+| 项 | 值 |
+|---|---|
+| 改动文件 | `crates/platform-core/src/extension/permission.rs`（**只改文档**）、`crates/platform-rbac/src/{checker,service}.rs`、`crates/platform-contracts/src/authz_scan.rs`、`crates/platform-rbac/tests/{common/mod.rs,rbac_real_db.rs}`、`CHANGELOG.md`、本报告 |
+| 新增用例 | **+9**（`platform-contracts` 单测 **2**、`platform-rbac` 单测 **3**、`platform-rbac` 真实库 **4**） |
+| 依赖预算 | **不变**：`Cargo.lock` / `Cargo.toml` **本轮没碰** → 仍是 **294 包 / 284 第三方 registry 包** |
+| 测试 | 完整集成套件 **3 轮全绿，每轮 461 / 461**（上一轮记的 **439 / 439** 与 QA 记的 **452 / 452** **都已过时** —— 见 §9.7） |
+
+### 9.2 QA 问题 #1（中）—— `condition()` 的 trait 文档与 D40 相反
+
+**问题**：`platform-core` 的 `PermissionChecker::condition()` 文档原写「条件引用白名单外的属性时返回 `None`
+—— 调用方据此判定不通过（fail closed）」。这句话**自相矛盾**：`None` 只该表示「无条件」；
+若非法条件也返回 `None`，调用方（`sandbox/backend/src/http.rs`：`if let Some(c) = ... { 应用条件 }`，
+`None` 直接落到 200）**无法区分**「无条件」与「条件非法」→ **静默放行非法条件**。
+
+**修法**（**只改文档，不改实现** —— 实现的 `Some(never_match())` 是对的，已被测试锁住）：
+
+| 文件 | 改法 |
+|---|---|
+| `crates/platform-core/src/extension/permission.rs` | 文档改成 **D40 的两值语义表**（`None` = 没有条件 → 放行；`Some(永不匹配)` = 条件非法 → 判不通过），并显式写明「⚠️ **非法条件不得返回 `None`**」及其后果 |
+| `crates/platform-rbac/src/checker.rs` | 实现上的 `condition()` **原来没有文档注释** → 补上同一口径（「非法条件返回永不匹配而不是 `None`」） |
+
+**验收**：`a_condition_outside_the_whitelist_never_grants_access` 里补了**显式**断言 ——
+「返回的是 `Some`（**不是** `None`）」+「`sql == "1 = 0"`」+「不绑定任何值」。
+
+### 9.3 QA 问题 #2（中）—— 测试夹具污染（本轮最要紧的一条）
+
+**问题**（QA 实测确认）：`DELETE FROM user_org WHERE user_id LIKE 'u-dual-primary-%'` **没有租户条件**
+（删所有租户的匹配行）；`DROP INDEX user_org_one_primary_idx` 是**全局** schema 变更；
+重建索引是**裸 `expect`**（库里一旦有重复就 **panic**）；若在 `DROP` 与 `CREATE` 之间 panic，
+**预防层会留在关闭状态直到本轮结束** → 后续用例失去 DB 层保护。
+
+**修法**：**整条用例搬到独立 schema（探针）里跑** —— 用的正是平台自己的
+「L2 独立 schema」能力（`DbOptions.schema`，见 design-summary §2），**全局索引一次都没碰**。
+
+| QA 的四条要求 | 落地 |
+|---|---|
+| ① DELETE 加租户条件 | `DELETE FROM user_org WHERE tenant_id = $1 AND user_id LIKE 'u-dual-primary-%'` |
+| ② 索引操作限定到本用例 | 探针 schema 里的 `user_org`（含**同名**的部分唯一索引 `user_org_one_primary_idx`）—— 摘/建都只发生在探针里；**`public` 的全局索引一次都没被 DROP/CREATE** |
+| ③ panic 点不能裸 `expect` | 重建索引前**先清重复**（带租户条件），失败时给**清晰错误信息**（点名「could not create unique index = 库里还有重复主部门」）；不是裸 `expect` |
+| ④ 收尾自查 | 用例结尾**断言索引仍在**：`pg_indexes` 里查得到 `user_org_one_primary_idx` —— **探针与全局两处都查** |
+
+**顺带消除的机制**：QA §4.3 怀疑的那条链（摘全局索引 → 第二个主部门写得进去 →
+`CREATE UNIQUE INDEX` 失败 → 级联变红 → `platform-org` 失去 DB 层保护）
+**在这条用例上不再成立** —— 现在根本没有「全局索引被摘掉」的窗口。
+
+**探针的生命周期**（别留残留）：
+
+| 环节 | 做法 |
+|---|---|
+| 建 | schema 名 = `rbac_probe_<本轮运行标识>`（**并发跑不撞名**）；把 `public` 的表**结构 + 数据**复制一份（`LIKE ... INCLUDING ALL`） |
+| 授权 | `GRANT USAGE ON SCHEMA … TO base_platform_app` + 表权限（探针表**不开 RLS** —— 探针只验范围判定层；租户隔离仍由 `public` 那套用例负责） |
+| 连接 | `search_path` 指到探针 → 夹具里那些**不带 schema 的表名**能直接用同一套夹具函数 |
+| 收尾 | 删掉探针 schema |
+| 残留 | 跑挂的那一轮会留下探针 schema → **按创建时间（1 小时 TTL）**清理（schema 注释里记 `created_at=`）；已实测：造一个带旧时间戳的残留 → 跑一次用例 → 残留被清掉 |
+
+### 9.4 QA 问题 #3（低）—— C-5 违例位置是**字符偏移**，文档写「文件:行」
+
+**问题**：`format!("{}:{}", file.display(), start)` 的 `start` 是**源码字符下标** → QA 实测报出 `lib.rs:96`，
+而那个文件只有 3 行。
+
+**修法**：新增 `line_and_column()`（数 `start` 之前的换行符得行号，再数到上一个换行符得列号）
+→ 位置改成 **`文件:行:列`**（如 `lib.rs:2:7`）。行号是**精确**的（`strip_comments` 保留换行结构）；
+列号在同一行有块注释时可能偏小 —— 这条限制写进了代码注释。
+
+**验收**：**2 条新单测**断言违例位置**确实指向那一行**（`demo.rs:2:4` / `demo.rs:2:5`）。
+
+### 9.5 QA 问题 #4（低 → D43）—— grant 匹配优先级必须**显式**实现
+
+**问题**：`contributions_for` 里「取**排序里最后一个**匹配的」。直接授权时精确的恰好赢
+（`'*' < 小写字母`），**但那只是排序的副产物**；经角色继承时胜者由**角色 ID 的字典序**决定
+（UUID → 实际等同随机）→ 同一份配置两次部署可能给出不同的可见范围。
+
+**修法**（`crates/platform-rbac/src/service.rs`，**跨角色仍是并集（D37）**，只管同一个角色内部）：
+
+| 维度 | 规则 |
+|---|---|
+| 匹配具体度 | 精确 `module:resource:action` > `module:resource:*` > `module:*` |
+| 同具体度 | 取**更严格**的 scope（`ALL` < `OWN_ORG_AND_BELOW` < `OWN_ORG` < `SELF`） |
+| `CUSTOM` | **不参与**严格度比较（它不是包含型 scope）→ 同具体度时按**包含型**那条走 |
+
+**验收用例**（**3 条单测 + 4 条真实库用例**）：
+
+| # | 场景 | 期望 | 落在哪 |
+|---|---|---|---|
+| 1 | 同角色：`sandbox:*`（ALL）+ `sandbox:scope-item:read`（SELF） | **SELF** | 单测 + 真实库 |
+| 2 | 同角色：`sandbox:scope-item:*`（ALL）+ `sandbox:scope-item:read`（SELF） | **SELF** | 真实库 |
+| 3 | **经继承**：两条 grant 都在父角色上，子角色继承 | **SELF** | 单测 + 真实库 |
+| 4 | **经继承 + 顺序无关**：父角色=精确、子角色=通配，**两种角色 ID 顺序各跑一遍** | **SELF** | 单测 + 真实库 |
+
+### 9.6 QA 问题 #5（信息）—— 自验报告的数字过时
+
+报告里写的 **439 / 439** **已过时**（QA 实测 452 / 452）。本轮**提交前重跑**确认：
+完整集成套件 **3 轮，每轮 461 / 461**（§2.1 的表已按实测更新）。**不是照抄任何人的数字。**
+
+### 9.7 QA 问题 #6（信息 → D44）—— `use_all_memberships` 的取值口径
+
+**行为与 D44 一致，已核实**：`use_all_memberships` 取自**所有「真正授予该权限点」的角色**
+（任一开即整体开），**不会跨权限点泄漏**（只有真正授予该权限点的角色才进入贡献）。
+**不改代码**；口径已由 BA 补进 design-summary §4.5（D44）。
+
+### 9.8 变异验证（第三轮）
+
+| # | 故意改错的地方 | 期望变红的测试 | 实测 |
+|---|--------------|--------------|------|
+| 1 | **「精确优先于通配」改回「取排序里最后一个匹配的」**（`service.rs::contributions_for`） | 单测 `service::tests::an_exact_grant_on_a_parent_role_wins_over_a_wildcard_grant_on_the_child_role` + 真实库 `an_exact_grant_on_the_parent_role_wins_over_a_wildcard_grant_on_the_child_role` | ✅ **FAILED（1 + 1）**（真实库那条的失败信息：`有效范围必须是 SELF（精确授权优先于通配）`），还原后 **42 passed / 22 passed** |
+
+> 真实库那条之所以能抓住：它把**两种角色 ID 顺序**都跑了一遍 ——
+> 旧实现在其中一种顺序下必然选到子角色的通配（`ALL`）→ **必红**，不依赖字典序碰运气。
+
+### 9.9 本轮**没做**的与取舍（如实列出）
+
+| 项 | 说明 |
+|---|---|
+| **没改** `condition()` 的**实现** | 实现返回 `Some(never_match())` 是对的（已被测试锁住）；QA 的建议也是「改文档而不是改实现」 |
+| **没做**「独立测试库」方案 | 用的是**独立 schema** —— 平台自己支持 `DbOptions.schema`（L2 能力），不新建数据库、不动 `base_test` 的库边界（白名单闸门仍然只放行 `base_test`） |
+| **没给** `AGENTS.md` 加内容 | 本轮改的是**文档措辞**与**错误消息格式**，**没有新增 API / 新增规则** → AGENTS.md 的硬规则 1 例外说明（platform-core / platform-contracts 的演进）已覆盖，无需再改 |
+| 探针表**不开 RLS** | 探针只验**范围判定层**；租户隔离仍由 `public` 那套用例（`the_role_tables_are_tenant_scoped_and_rls_protected`）负责 |
+| `CUSTOM` 与包含型**同具体度**时按包含型那条 | 这是 D43 的口径；**跨角色**的 `CUSTOM` OR 包含型仍是 D37 的并集（**未动**） |
+| `platform-org` 偶发失败的**根因** | 仍未定论（QA 也未复现）。但本轮**消除了** QA 怀疑的那条机制（摘全局索引的窗口）—— 见 §9.3 |
+
+---
+
+## 10. 提交与分支
+
+| 项 | 值 |
+|----|---|
+| 分支 | `feature/REQ-009` |
+| 基线 | `develop` @ `400cefa` |
+| 提交 | ① `[Dev] 实现 RBAC 权限与数据范围（角色模型 / 数据范围 / 鉴权中间件 / 契约 C-5） (关联: REQ-009)`<br>② `[Dev] 修正 CUSTOM scope 的多角色合并语义为真正的并集 (关联: REQ-009)`<br>③ `[Dev] 修 QA 指出的 2 个中 + 2 个低问题 (关联: REQ-009)` |
+| 契约 pin | `feature-meta/manifest.json` → `{"api-conventions": "v1", "extension-points": "v2"}` |
+| 追溯矩阵 | `feature-meta/traceability.md` |
+| 变更日志 | `CHANGELOG.md` → `### REQ-009 RBAC 权限与数据范围` |

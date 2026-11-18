@@ -1,5 +1,5 @@
 {
-  "contract": "extension-points v1",
+  "contract": "extension-points v2",
   "extension_point_count": 5,
   "generated_by": "cargo xtask capabilities",
   "source": "crates/platform-core/src/extension/",
@@ -38,6 +38,36 @@
       ],
       "name": "NotificationSender",
       "supertraits": "Send + Sync"
+    },
+    {
+      "associated_types": [],
+      "description": "权限判定能力（**平台实现，业务模块调用**）。",
+      "generics": "",
+      "kind": "platform-capability",
+      "methods": [
+        {
+          "declaration": "fn has(&self, ctx: &RequestContext, permission: &str) -> bool",
+          "has_default": false,
+          "name": "has"
+        },
+        {
+          "declaration": "fn scope(&self, ctx: &RequestContext, scope: DataScope) -> ScopeFilter",
+          "has_default": false,
+          "name": "scope"
+        },
+        {
+          "declaration": "fn effective_scope(&self, ctx: &RequestContext, permission: &str) -> ScopeFilter",
+          "has_default": false,
+          "name": "effective_scope"
+        },
+        {
+          "declaration": "fn condition(&self, ctx: &RequestContext, permission: &str) -> Option<CompiledCondition>",
+          "has_default": false,
+          "name": "condition"
+        }
+      ],
+      "name": "PermissionChecker",
+      "supertraits": "Send + Sync + 'static"
     },
     {
       "associated_types": [],

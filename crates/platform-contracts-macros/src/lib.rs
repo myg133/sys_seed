@@ -26,11 +26,11 @@
 //! }
 //! ```
 //!
-//! 宏会在该 `mod` 内追加 4 个 `#[test]`：C-1 / C-2 / C-3 / C-4。
+//! 宏会在该 `mod` 内追加 5 个 `#[test]`：C-1 / C-2 / C-3 / C-4 / C-5。
 
 use proc_macro::{Delimiter, Group, Ident, Literal, TokenStream, TokenTree};
 
-/// 生成的四个契约测试。
+/// 生成的五个契约测试。
 ///
 /// 用字符串写死再解析成 token 流：这段代码是固定的，字符串形式比手写 token 拼接
 /// 可读得多，且不引入 quote / syn。
@@ -76,6 +76,15 @@ const GENERATED_TESTS: &str = r#"
         });
         ::platform_contracts::checks::assert_compliant("C-4", &outcome);
     }
+
+    #[cfg(test)]
+    #[test]
+    fn contract_c5_declared_permissions_have_authorization_call_sites() {
+        let subject = contract_subject();
+        let outcome = ::platform_contracts::checks::check_c5(&subject)
+            .unwrap_or_else(|err| panic!("C-5 check could not run: {err}"));
+        ::platform_contracts::checks::assert_compliant("C-5", &outcome);
+    }
 "#;
 
 /// 被标注的 `mod` 解析结果。
@@ -85,7 +94,7 @@ struct ParsedModule {
     body: TokenStream,
 }
 
-/// 为业务模块生成 C-1 ~ C-4 四项契约测试。
+/// 为业务模块生成 C-1 ~ C-5 五项契约测试。
 ///
 /// 宏不接受参数：被标注的 `mod` 内需提供 `contract_subject()`。
 #[proc_macro_attribute]

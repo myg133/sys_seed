@@ -3,7 +3,7 @@
     "audit_declaration": "Auditable + AuditEventSpec 提供审计事件声明面，平台据此自动埋点，勿自建审计表",
     "auth_state": "@base/auth 的 isAuthenticated()/tenantId() 提供登录态形状，勿另造登录态模型",
     "config": "ConfigScope/ConfigResolver/AppConfig + manifest 的 config 段提供配置分层（platform/tenant/space），勿自建配置读取",
-    "contract_suite": "#[platform_module_contract] 自动生成 C-1~C-4 四项契约测试，勿自写重复的契约检查",
+    "contract_suite": "#[platform_module_contract] 自动生成 C-1~C-5 五项契约测试（C-5：已登记权限点必须有鉴权调用点、鉴权入口全仓库唯一），勿自写重复的契约检查",
     "error_code_i18n": "@base/i18n 的 translate()/hasMessage() 提供错误码到文案映射，勿在后端拼中文句子",
     "hooks_toggle": "@base/hooks 的 createToggle() 提供通用布尔开关状态容器，勿另造状态容器",
     "iam_auth": "platform-iam 提供 /api/iam/* 认证接口（本地账号 + JWT access / 不透明 refresh + Argon2id + TOTP）与 /.well-known/jwks.json；业务模块要鉴权请用这些接口，勿自造认证",
@@ -11,7 +11,8 @@
     "manifest": "Manifest 解析与字段校验 + capabilities/schema/manifest.schema.json 已提供，勿手写 manifest 校验",
     "module_registry": "register_platform_module! + discover()/discover_enabled() 做编译期模块注册，勿自建插件或动态加载",
     "notification_sender": "NotificationSender + NotificationMessage/DeliveryResult 提供通知投递接缝，勿自建消息中心",
-    "org_structure": "platform-org 提供 /api/org/* 组织架构接口（组织树用邻接表 + 递归 CTE、用户↔节点成员关系、岗位与汇报关系）、SCIM 2.0 出站与 LDAP/AD 入站、字段级同步冲突队列与人工裁决；权限判定在 REQ-009，勿自造组织树或数据范围判定",
+    "org_structure": "platform-org 提供 /api/org/* 组织架构接口（组织树用邻接表 + 递归 CTE、用户↔节点成员关系、岗位与汇报关系）、SCIM 2.0 出站与 LDAP/AD 入站、字段级同步冲突队列与人工裁决；数据范围的输入是它，勿自造组织树",
+    "rbac_authorization": "platform-core 的 require_permission 是平台唯一鉴权入口，platform-rbac 提供 /api/rbac/* 角色授权接口、5 种数据范围与 DB epoch 主动失效；业务模块用 require_permission + TenantQuery::with_scope，勿自写鉴权或数据范围",
     "repository": "Repository<T> 提供 find/list/insert/update/delete，业务模块实现它即可，勿另造 DAO 基类或数据访问框架",
     "request_context": "RequestContext 携带租户/空间/追踪 ID；Repository 每个方法强制传 ctx，租户隔离是编译期保证，勿自建租户上下文",
     "schema_field_meta": "@base/schema 的 FieldMeta/describeField()/findField() 提供字段元数据形状，勿另造元数据结构",
@@ -30,7 +31,7 @@
       "traits": 5
     },
     "permissions.json": {
-      "total": 11
+      "total": 18
     },
     "schema/manifest.schema.json": {},
     "schema/metadata.schema.json": {},
@@ -70,7 +71,7 @@
     "crud_scaffolding": "平台没有通用 CRUD/分页脚手架（模块的仓储要自己实现），但数据访问必须走 platform-db 的租户作用域入口",
     "http_api_layer": "HTTP 接口层尚未就绪（REQ-011/012 补），capabilities/api.json 目前为空",
     "notification_dispatch": "通知只到 trait，通道投递与模板待 REQ-015",
-    "permission_can": "前端 can() 与服务端鉴权中间件尚未落地（REQ-009 补），权限判定别自己写一套",
+    "permission_can": "前端 can() 尚未落地（REQ-011 补）；服务端鉴权中间件已在 REQ-009 提供（require_permission），前端别自己写一套",
     "ui_table_component": "@base/ui 尚无表格与分页组件，列表页要自己实现（REQ-012 补）",
     "workflow_engine": "工作流只到 trait，流程定义与实例待 REQ-017"
   },
@@ -80,5 +81,5 @@
     ],
     "version": "0.1.0"
   },
-  "source_fingerprint": "fnv1a64:5de6498e5aa6332c"
+  "source_fingerprint": "fnv1a64:f3ef0d24261a9c90"
 }

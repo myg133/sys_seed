@@ -89,6 +89,11 @@
             "pattern": "^[a-z][a-z0-9-]*:[a-z][a-z0-9-]*:[a-z][a-z0-9-]*$",
             "type": "string"
           },
+          "condition": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
           "name": {
             "minLength": 1,
             "pattern": "\\S",
