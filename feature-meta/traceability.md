@@ -8,6 +8,9 @@
 - **开发者**: myg133-dev-1
 - **更新时间**: 2026-11-18
 - **本轮改动**: 37 文件 / +2860 -20 行（vs BA 分配提交 `31c692b`）
+- **第二轮（QA Pre-merge 复核后）改动**: **35 文件 / +1548 -158 行**（vs 第一轮的 `668d357`）；
+  **`crates/platform-core/` 一行未改**，`crates/platform-db/src` 只**新增** `scopes.rs`
+  与 `IsolationReport::table_problems`（核心查询逻辑一行未改）
 
 图例：**PASS** = 已实现且有自动化或可复现的验证证据；**未验证** = 没有证据，如实标注。
 
