@@ -20,7 +20,8 @@
 //!   cargo test -p sandbox --test c3_real_db -- --test-threads=2
 //! ```
 //!
-//! 未设置 `DATABASE_URL_TEST` 时**跳过**（本地开发不常开 DB），并打印明确提示。
+//! 未设置 `DATABASE_URL_TEST` 时**判为失败**，不是「跳过」——
+//! 见 [`required_test_database_url`] 的说明（跳过也算通过 = 假绿）。
 //! 数据库名不是 `base_test` 时**直接失败** —— `base_dev` 是开发库，测试绝不能碰。
 
 use std::path::{Path, PathBuf};
@@ -43,6 +44,9 @@ const TABLE: &str = "sandbox_tenant_item";
 /// 部署准备用的 advisory lock 键（两个测试并行时不互相踩）。
 const SETUP_LOCK: i64 = 6_006_006;
 
+/// 防假绿护栏的子进程标记（防止护栏自己递归拉起子进程）。
+const GUARD_CHILD: &str = "C3_GUARD_CHILD";
+
 /// 测试夹具：管理员连接（建表 / 建策略）+ 应用角色连接（业务数据访问）。
 struct Fixture {
     admin_db: TenantDb,
@@ -51,8 +55,25 @@ struct Fixture {
 }
 
 /// 测试库地址：只允许 `base_test`。
-fn test_database_url() -> Option<String> {
-    let url = std::env::var("DATABASE_URL_TEST").ok()?;
+///
+/// **缺 `DATABASE_URL_TEST` 是失败，不是「跳过」。**
+///
+/// 曾经这里「安静地返回 `None`」，于是断言一条都没跑、测试框架却报
+/// `ok`（"3 passed"）—— 任何形如 `cargo test -- --include-ignored` 的 CI
+/// 都会把「真实库层」当成通过。这就是**假绿**：结果绿了，护栏没生效。
+///
+/// 现在缺环境变量直接 **panic**：结果非绿，护栏不会骗人。
+fn required_test_database_url() -> String {
+    let url = std::env::var("DATABASE_URL_TEST")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            panic!(
+                "缺少 DATABASE_URL_TEST：真实库用例必须真的连库跑，不能静默跳过。\n  \
+                 本地开发：先起库（bun run db:up），再跑 scripts/test-integration.sh。\n  \
+                 库名必须恰好是 base_test（base_dev 是开发库，测试绝不能碰）。"
+            )
+        });
     let db = url
         .rsplit('/')
         .next()
@@ -65,7 +86,7 @@ fn test_database_url() -> Option<String> {
         db, "base_test",
         "集成测试只允许跑在 base_test 库上（当前：{db}）—— base_dev 是开发库，测试绝不能碰"
     );
-    Some(url)
+    url
 }
 
 /// 把管理员连接串换成**应用角色**的连接串。
@@ -93,13 +114,11 @@ fn read_file(path: &Path) -> String {
 /// 准备真实库环境。
 ///
 /// 顺序：应用角色 → 平台迁移 → 模块建表 → **平台按 manifest 生成 RLS 策略** → 应用角色连接。
-async fn setup() -> Option<Fixture> {
-    let Some(url) = test_database_url() else {
-        eprintln!(
-            "跳过：未设置 DATABASE_URL_TEST（集成测试用 base_test 库，见 scripts/test-integration.sh）"
-        );
-        return None;
-    };
+///
+/// ⚠️ 缺 `DATABASE_URL_TEST` 时**直接失败**（见 [`required_test_database_url`]）——
+/// 「安静地跳过」会让这一层变成假绿。
+async fn setup() -> Fixture {
+    let url = required_test_database_url();
 
     let admin_pool = match PgPoolOptions::new().max_connections(2).connect(&url).await {
         Ok(pool) => pool,
@@ -193,11 +212,11 @@ async fn setup() -> Option<Fixture> {
         .expect("RLS 隔离前提必须成立（角色不绕过 RLS + 表有 policy）");
 
     let repo = PgTenantRepository::new(app_db.clone());
-    Some(Fixture {
+    Fixture {
         admin_db,
         app_db,
         repo,
-    })
+    }
 }
 
 /// 灌入两个租户的**同名**数据（同一个标题，主键不同）。
@@ -227,9 +246,7 @@ async fn seed(repo: &PgTenantRepository, id_a: &str, id_b: &str) {
 #[tokio::test]
 #[ignore = "需要 base_test 库：scripts/test-integration.sh 会用 --include-ignored 跑到"]
 async fn c3_real_db_isolates_tenants() {
-    let Some(fixture) = setup().await else {
-        return;
-    };
+    let fixture = setup().await;
     let ctx_a = RequestContext::new().with_tenant(TENANT_A);
     let id_a = "c3-a";
     let id_b = "c3-b";
@@ -306,9 +323,7 @@ async fn c3_real_db_isolates_tenants() {
 #[tokio::test]
 #[ignore = "需要 base_test 库：scripts/test-integration.sh 会用 --include-ignored 跑到"]
 async fn tenant_context_does_not_leak_through_the_connection_pool() {
-    let Some(fixture) = setup().await else {
-        return;
-    };
+    let fixture = setup().await;
     let ctx_a = RequestContext::new().with_tenant(TENANT_A);
     let ctx_b = RequestContext::new().with_tenant(TENANT_B);
     let id_a = "leak-a";
@@ -351,9 +366,7 @@ async fn tenant_context_does_not_leak_through_the_connection_pool() {
 #[tokio::test]
 #[ignore = "需要 base_test 库：scripts/test-integration.sh 会用 --include-ignored 跑到"]
 async fn the_application_role_does_not_bypass_rls() {
-    let Some(fixture) = setup().await else {
-        return;
-    };
+    let fixture = setup().await;
     let report = platform_db::verify_policies(&fixture.app_db, &[])
         .await
         .expect("隔离自检应成功");
@@ -361,5 +374,56 @@ async fn the_application_role_does_not_bypass_rls() {
         !report.role_bypasses_rls,
         "应用角色 {} 绕过了 RLS —— 租户隔离会 fail open",
         report.role
+    );
+}
+
+/// 防假绿护栏：缺 `DATABASE_URL_TEST` 时**不得**报 "3 passed"。
+///
+/// 守的是 C-3 真实库层曾经有过的假绿：缺环境变量时夹具「安静地返回」→
+/// 断言一条没跑 → 框架却报 `ok`（"3 passed"）。任何形如
+/// `cargo test -- --include-ignored` 的 CI 都会把「真实库层」当成通过。
+///
+/// 做法：把**自己这个测试二进制**再拉起一个子进程，**去掉** `DATABASE_URL_TEST`，
+/// 只跑那三条真实库用例（`--skip` 掉本护栏，避免递归），然后断言：
+///
+/// 1. 子进程**退出码非 0**（真正承重的一条：结果必须非绿）；
+/// 2. 子进程**一个用例都没报通过**（`0 passed`）；
+/// 3. 子进程输出里**没有** "3 passed"。
+#[test]
+fn missing_database_url_test_does_not_report_success() {
+    // 子进程里不再递归：这一层只验「缺环境变量 → 非零退出」。
+    if std::env::var_os(GUARD_CHILD).is_some() {
+        return;
+    }
+
+    let exe = std::env::current_exe().expect("应当能拿到当前测试二进制路径");
+    let output = std::process::Command::new(exe)
+        .args([
+            "--include-ignored",
+            "--skip",
+            "missing_database_url_test_does_not_report_success",
+            "--test-threads=1",
+        ])
+        .env_remove("DATABASE_URL_TEST")
+        .env(GUARD_CHILD, "1")
+        .output()
+        .expect("应当能拉起子进程");
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        !output.status.success(),
+        "缺 DATABASE_URL_TEST 时子进程必须失败（它却成功退出了）：\n{combined}"
+    );
+    assert!(
+        combined.contains("0 passed"),
+        "缺 DATABASE_URL_TEST 时一个用例都不该报通过：\n{combined}"
+    );
+    assert!(
+        !combined.contains("3 passed"),
+        "缺 DATABASE_URL_TEST 时不得报 \"3 passed\"（假绿）：\n{combined}"
     );
 }

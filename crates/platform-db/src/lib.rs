@@ -57,6 +57,7 @@ mod error;
 mod query;
 mod quota;
 mod rls;
+mod scopes;
 mod tenant;
 
 pub use error::{DbError, DbResult};
@@ -66,6 +67,7 @@ pub use rls::{
     IsolationReport, TableIsolation, apply_policies, policy_statements, require_isolation,
     unscoped_row_count, verify_policies,
 };
+pub use scopes::{TenantScope, apply_scopes, check_scopes, collect_scopes};
 pub use tenant::{ACQUIRE_TIMEOUT, DbOptions, TenantDb, TenantTx};
 
 /// 供 [`tenant_row!`] 宏使用：sqlx 错误类型。

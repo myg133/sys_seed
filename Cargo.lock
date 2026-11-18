@@ -1130,6 +1130,7 @@ dependencies = [
  "axum",
  "clap",
  "platform-core",
+ "platform-db",
  "serde",
  "serde_json",
  "sqlx",

@@ -84,6 +84,16 @@ impl IsolationReport {
                 self.role
             ));
         }
+        problems.extend(self.table_problems());
+        problems
+    }
+
+    /// **表级**不合规项的说明。
+    ///
+    /// 与 [`Self::problems`] 的区别：**不含**角色问题 ——
+    /// 运维用管理员角色跑校验是常态，角色问题应当单独告警（而不是让整条校验失败）。
+    pub fn table_problems(&self) -> Vec<String> {
+        let mut problems = Vec::new();
         for table in &self.tables {
             if !table.rls_enabled {
                 problems.push(format!(

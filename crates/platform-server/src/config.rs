@@ -167,6 +167,15 @@ pub struct DeployConfig {
     pub migrations_dir: String,
     /// 前端静态资源目录；`None` 表示不托管前端。
     pub static_dir: Option<String>,
+    /// 是否允许用**绕过 RLS 的角色**（超级用户 / `BYPASSRLS`）启动。
+    ///
+    /// 默认 **false** —— 应用用这种角色连接时租户隔离会 fail open。
+    /// 只给本地开发用（`BASE_ALLOW_SUPERUSER=true`）。
+    pub allow_superuser: bool,
+    /// 租户作用域声明的根目录（其下是 `modules/<模块>/manifest.json`）。
+    ///
+    /// 开发期默认当前目录（仓库根）；镜像内由 `BASE_MANIFEST_ROOT=/app` 指定。
+    pub manifest_root: String,
 }
 
 impl DeployConfig {
@@ -241,11 +250,31 @@ impl DeployConfig {
             },
         };
 
+        let allow_superuser = match optional(&lookup, "BASE_ALLOW_SUPERUSER") {
+            None => false,
+            Some(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+                "true" | "1" | "yes" | "on" => true,
+                "false" | "0" | "no" | "off" => false,
+                _ => {
+                    problems.push(invalid("BASE_ALLOW_SUPERUSER", &raw, "true | false"));
+                    false
+                }
+            },
+        };
+
         if environment == Environment::Prod && seed_on_start {
             problems.push(ConfigProblem {
                 code: CODE_FORBIDDEN,
                 key: "BASE_SEED_ON_START",
                 detail: "生产环境禁止启动时灌种子数据（请设为 false）".to_string(),
+            });
+        }
+
+        if environment == Environment::Prod && allow_superuser {
+            problems.push(ConfigProblem {
+                code: CODE_FORBIDDEN,
+                key: "BASE_ALLOW_SUPERUSER",
+                detail: "生产环境禁止放行绕过 RLS 的角色（租户隔离会 fail open）".to_string(),
             });
         }
 
@@ -266,6 +295,9 @@ impl DeployConfig {
             migrations_dir: optional(&lookup, "BASE_MIGRATIONS_DIR")
                 .unwrap_or_else(|| "./migrations".to_string()),
             static_dir: optional(&lookup, "BASE_STATIC_DIR"),
+            allow_superuser,
+            manifest_root: optional(&lookup, "BASE_MANIFEST_ROOT")
+                .unwrap_or_else(|| ".".to_string()),
         })
     }
 
@@ -426,6 +458,39 @@ mod tests {
         ]))
         .expect("开发环境允许 seed");
         assert!(config.seed_on_start);
+    }
+
+    #[test]
+    fn the_superuser_escape_hatch_is_off_by_default() {
+        let config = DeployConfig::from_lookup(lookup_from(&[(
+            "DATABASE_URL",
+            "postgres://base:base@db:5432/base",
+        )]))
+        .expect("只给 DATABASE_URL 应当通过");
+        assert!(!config.allow_superuser, "默认必须拒绝绕过 RLS 的角色");
+        assert_eq!(config.manifest_root, ".");
+    }
+
+    #[test]
+    fn the_superuser_escape_hatch_can_be_enabled_for_dev() {
+        let config = DeployConfig::from_lookup(lookup_from(&[
+            ("DATABASE_URL", "postgres://base:base@db:5432/base"),
+            ("BASE_ALLOW_SUPERUSER", "true"),
+        ]))
+        .expect("开发环境可以显式打开开关");
+        assert!(config.allow_superuser);
+    }
+
+    #[test]
+    fn prod_forbids_the_superuser_escape_hatch() {
+        let err = DeployConfig::from_lookup(lookup_from(&[
+            ("DATABASE_URL", "postgres://base:base@db:5432/base"),
+            ("BASE_ENV", "prod"),
+            ("BASE_ALLOW_SUPERUSER", "true"),
+        ]))
+        .expect_err("生产环境禁止放行超级用户");
+        assert_eq!(err.problems[0].code, CODE_FORBIDDEN);
+        assert_eq!(err.problems[0].key, "BASE_ALLOW_SUPERUSER");
     }
 
     #[test]

@@ -19,6 +19,8 @@ clap.workspace = true
 anyhow.workspace = true
 # 复用平台核心的请求上下文（健康检查响应带 traceId）
 platform-core.workspace = true
+# 平台数据访问层：租户隔离前提自检（require_isolation）+ 部署期 RLS 策略生成
+platform-db.workspace = true
 # 部署期数据库客户端：迁移 + 健康检查；不承担业务数据访问
 sqlx.workspace = true
 
