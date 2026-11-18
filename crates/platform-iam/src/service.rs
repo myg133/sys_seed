@@ -13,6 +13,24 @@
 //!
 //! 假哈希用**与真密码相同的 Argon2 参数**生成 → 耗时相当（design-summary §5.1）。
 //!
+//! # 锁定判定排在**密码校验之后**（否则它就是一个枚举预言机）
+//!
+//! `ACCOUNT_LOCKED` 只有在**调用方已经证明知道密码**之后才可能出现：
+//!
+//! | 请求 | 账号不存在 | 账号存在 + 密码错 | 账号存在 + 密码对 + 已锁 |
+//! |------|-----------|------------------|----------------------|
+//! | 错误码 | `INVALID_CREDENTIALS` | `INVALID_CREDENTIALS` | `ACCOUNT_LOCKED` |
+//!
+//! 如果锁定判定排在密码校验**之前**，那么「第 6 次错密码返回 403」本身就泄露了
+//! 「这个账号存在」—— **6 个请求就能枚举一个租户内的账号**（CWE-204）。
+//!
+//! 排在密码校验之后，两个约束**同时**成立：
+//!
+//! - 攻击者（不知道密码）**永远**只拿到 `INVALID_CREDENTIALS`，与不存在的账号完全一致；
+//! - **知道密码**的被锁用户仍然拿到 `ACCOUNT_LOCKED`（前端要靠它提示「你被锁了」）。
+//!
+//! 顺带把锁定路径也纳入了 Argon2 校验 → 三条失败路径的耗时天然对齐。
+//!
 //! # refresh token 的轮换与重放（design-summary §2.1 / D2）
 //!
 //! ```text
@@ -22,6 +40,8 @@
 //!
 //! 「读旧令牌 → 作废旧令牌 → 签发新令牌」在**同一个事务**里完成，
 //! 否则并发刷新会出现「同一个旧令牌签发两次」。
+
+use std::time::Duration;
 
 use platform_core::RequestContext;
 use serde::{Deserialize, Serialize};
@@ -272,7 +292,7 @@ impl IamService {
     ) -> Result<LoginResponse, IamError> {
         let tenant = ctx.tenant_id().ok_or(IamError::TenantContextMissing)?;
 
-        // 1) 按 IP 的滑动窗口限流（瞬时打爆）。
+        // 1) 按 IP 的滑动窗口限流（瞬时打爆）：**只算失败尝试**，且**跨租户共享**。
         self.check_ip_rate_limit(ctx, &meta.ip).await?;
 
         // 2) 查账号。
@@ -287,9 +307,10 @@ impl IamService {
         let Some(user) = user else {
             // 假哈希校验（对齐**哈希**耗时）。
             self.dummy_hash.verify(&req.password);
-            // 再对齐**数据库**耗时：走与「密码错误」路径**完全相同**的两条语句
-            // （一次 UPDATE + 一次 INSERT，同一个事务），只是 UPDATE 命中 0 行。
-            // 这样两条失败路径的耗时差只剩「行数」那点噪声 —— 时序枚举拿不到信号。
+            // 再对齐**数据库**耗时：走与「密码错误」路径**完全相同**的三条语句
+            // （一次 UPDATE + 一次 INSERT 流水 + 一次 INSERT 失败计数，同一个事务），
+            // 只是 UPDATE 命中 0 行。
+            // 这样三条失败路径的耗时差只剩「行数」那点噪声 —— 时序枚举拿不到信号。
             let mut tx = self.store.begin(ctx).await.map_err(internal)?;
             self.store
                 .record_login_failure_in(&mut tx, &Uuid::new_v4().to_string(), 0, None)
@@ -305,23 +326,33 @@ impl IamService {
                 )
                 .await
                 .map_err(internal)?;
+            self.store
+                .record_login_rate_in(&mut tx, &Uuid::new_v4().to_string(), &ip_hash(&meta.ip))
+                .await
+                .map_err(internal)?;
             tx.commit().await.map_err(internal)?;
             return Err(IamError::InvalidCredentials);
         };
 
-        // 4) 账号锁定：锁定期内**即使密码正确也拒**（AC-S-017）。
-        if is_locked(&user) {
-            self.record_attempt(ctx, meta, &req.username, false).await?;
-            return Err(IamError::AccountLocked);
-        }
-
-        // 5) 校验密码。
+        // 4) 校验密码 —— **必须排在锁定判定之前**。
+        //    否则 `ACCOUNT_LOCKED` 就是一个账号枚举预言机：未注册账号永远拿不到它，
+        //    已注册账号第 6 次就拿到 → 6 个请求即可枚举（CWE-204）。
+        let now = OffsetDateTime::now_utc();
         if !password::verify_password(&req.password, &user.password_hash) {
             // 失败计数 + 尝试流水放**同一个事务**：两条失败路径的数据库往返次数一致，
             // 耗时差只剩「多一条 UPDATE」—— 时序枚举的信号被压到最小。
-            self.on_password_failure(ctx, &user, meta, &req.username)
+            self.record_failed_login(ctx, &user, meta, &req.username, now)
                 .await?;
             return Err(IamError::InvalidCredentials);
+        }
+
+        // 5) 密码正确 → 这时才可以说「你的账号被锁了」。
+        //    （走到这里的人**已经证明知道密码**，所以这不是枚举信号。）
+        if is_locked(&user, now) {
+            // 记一条失败流水，但**不续期、不增计数**（见 `record_failed_login`）。
+            self.record_failed_login(ctx, &user, meta, &req.username, now)
+                .await?;
+            return Err(IamError::AccountLocked);
         }
 
         // 6) 账号已禁用：密码正确之后才提示（减少账号枚举面）。
@@ -353,22 +384,24 @@ impl IamService {
         Ok(response)
     }
 
-    /// 登录失败：累加失败次数，达到阈值则锁定；并记一条尝试流水。
+    /// 记一次**失败的登录**（密码错误 **或** 账号被锁）并更新锁定状态。
     ///
-    /// 两件事在**同一个事务**里 —— 见 [`IamService::login`] 的说明。
-    async fn on_password_failure(
+    /// 三件事在**同一个事务**里 —— 见 [`IamService::login`] 的说明：
+    /// 两条失败路径的数据库往返次数必须一致，否则耗时差会泄露账号是否存在。
+    async fn record_failed_login(
         &self,
         ctx: &RequestContext,
         user: &UserRecord,
         meta: &RequestMeta,
         username: &str,
+        now: OffsetDateTime,
     ) -> Result<(), IamError> {
-        let attempts = user.failed_attempts + 1;
-        let locked_until = if attempts >= self.config.login.account_failure_limit as i32 {
-            Some(OffsetDateTime::now_utc() + self.config.login.lockout_duration)
-        } else {
-            None
-        };
+        let (attempts, locked_until) = next_lock_state(
+            user,
+            now,
+            self.config.login.account_failure_limit as i32,
+            self.config.login.lockout_duration,
+        );
         let mut tx = self.store.begin(ctx).await.map_err(internal)?;
         self.store
             .record_login_failure_in(&mut tx, &user.id, attempts, locked_until)
@@ -382,6 +415,10 @@ impl IamService {
                 username,
                 false,
             )
+            .await
+            .map_err(internal)?;
+        self.store
+            .record_login_rate_in(&mut tx, &Uuid::new_v4().to_string(), &ip_hash(&meta.ip))
             .await
             .map_err(internal)?;
         tx.commit().await.map_err(internal)
@@ -408,17 +445,24 @@ impl IamService {
     }
 
     /// 按 IP 的滑动窗口限流。
+    ///
+    /// 两条口径（QA 报告 LOW 6）：
+    ///
+    /// - **只算失败尝试**：成功登录**不进入**窗口 —— 否则共用一个 NAT 出口的
+    ///   办公网在 5 分钟内 20 次正常登录就会被 429 误伤。
+    /// - **跨租户共享**同一个 IP 的预算：同一个 IP 换租户不应该拿到一份新的额度，
+    ///   否则限流预算会被放大成「租户数倍」。
     async fn check_ip_rate_limit(&self, ctx: &RequestContext, ip: &str) -> Result<(), IamError> {
         if ip.is_empty() {
             return Ok(());
         }
         let since = OffsetDateTime::now_utc() - self.config.login.ip_window;
-        let attempts = self
+        let failures = self
             .store
-            .count_login_attempts_since(ctx, ip, since)
+            .count_login_failures_since(ctx, &ip_hash(ip), since)
             .await
             .map_err(internal)?;
-        if attempts >= i64::from(self.config.login.ip_limit) {
+        if failures >= i64::from(self.config.login.ip_limit) {
             return Err(IamError::LoginRateLimited {
                 retry_after_seconds: self.config.login.ip_window.as_secs(),
             });
@@ -813,7 +857,7 @@ impl IamService {
 
     /// 应用新密码：历史不重复 → 落库 → **撤销 refresh family**。
     ///
-    /// `keep_session_id` = `Some` 时保留当前会话（改密后踢出**其它**设备）；
+    /// `keep_session_id` = `Some` 时**保留当前会话的 family**（改密后踢出**其它**设备）；
     /// `None` 时撤销**全部**（密码重置场景）。
     async fn apply_new_password(
         &self,
@@ -846,19 +890,35 @@ impl IamService {
             .await
             .map_err(internal)?;
 
-        // 改密码 → **撤销全部 refresh family**（design-summary §7 / D10）。
-        self.store
-            .revoke_all_refresh_tokens(ctx, &user.id)
-            .await
-            .map_err(internal)?;
+        // 改密码 → **撤销除当前 family 外的全部 refresh family**（design-summary §7 / D10）。
+        //
+        // ⚠️ **当前设备自己的 family 必须保留** —— 否则用户在自己设备上改完密，
+        //    当前设备的 refresh 立刻失效，等于逼他重新登录（偏离设计摘要 §7：
+        //    「改密后踢出**其他**设备」）。
         match keep_session_id {
             Some(session_id) => {
+                let session = self
+                    .store
+                    .find_session(ctx, session_id)
+                    .await
+                    .map_err(internal)?
+                    .ok_or(IamError::NotFound {
+                        resource: "session",
+                    })?;
+                self.store
+                    .revoke_other_refresh_tokens(ctx, &user.id, &session.family_id)
+                    .await
+                    .map_err(internal)?;
                 self.store
                     .revoke_other_sessions(ctx, &user.id, session_id)
                     .await
                     .map_err(internal)?;
             }
             None => {
+                self.store
+                    .revoke_all_refresh_tokens(ctx, &user.id)
+                    .await
+                    .map_err(internal)?;
                 self.store
                     .revoke_all_sessions(ctx, &user.id)
                     .await
@@ -991,10 +1051,48 @@ impl IamService {
     }
 }
 
-/// 账号是否处于锁定期。
-fn is_locked(user: &UserRecord) -> bool {
-    user.locked_until
-        .is_some_and(|until| until > OffsetDateTime::now_utc())
+/// 账号是否处于锁定期（`now` 由调用方传入 → 判定与状态更新用**同一个时刻**）。
+fn is_locked(user: &UserRecord, now: OffsetDateTime) -> bool {
+    user.locked_until.is_some_and(|until| until > now)
+}
+
+/// 一次失败登录之后的**失败计数**与**锁定到期时间**。
+///
+/// | 登录前的状态 | 失败计数 | `locked_until` |
+/// |-------------|---------|----------------|
+/// | 未锁定 | +1 | 达阈值则 `now + 锁定时长`，否则 `NULL` |
+/// | **锁定期内** | **不变**（不增） | **不变**（**不续期**） |
+/// | 锁定**已到期** | **从头开始**（= 1） | `NULL` |
+///
+/// 「不续期」是必须的：否则攻击者每 15 分钟发一次错密码就能把受害者的锁
+/// **无限延长** —— 受害者连**正确密码**都登不进去（未认证的账号锁死 DoS）。
+fn next_lock_state(
+    user: &UserRecord,
+    now: OffsetDateTime,
+    limit: i32,
+    lockout: Duration,
+) -> (i32, Option<OffsetDateTime>) {
+    // 已经在锁定期 → **不续期、不增计数**。
+    if let Some(until) = user.locked_until.filter(|until| *until > now) {
+        return (user.failed_attempts, Some(until));
+    }
+    // 上一轮锁定**已到期** → 失败计数从头开始（不接着旧的累计）。
+    let attempts = if user.locked_until.is_some() {
+        1
+    } else {
+        user.failed_attempts + 1
+    };
+    let locked_until = if attempts >= limit {
+        Some(now + lockout)
+    } else {
+        None
+    };
+    (attempts, locked_until)
+}
+
+/// IP → 摘要（全局限流表里**不存明文 IP**）。
+fn ip_hash(ip: &str) -> String {
+    crypto::digest_base64url(ip.as_bytes())
 }
 
 /// 账号视图。

@@ -31,8 +31,10 @@ pub const MFA_SECRET_TABLE: &str = "platform_iam_mfa_secret";
 pub const RECOVERY_CODE_TABLE: &str = "platform_iam_recovery_code";
 /// 密码重置令牌表。
 pub const PASSWORD_RESET_TABLE: &str = "platform_iam_password_reset";
-/// 登录尝试表。
+/// 登录尝试表（审计流水；**带租户维度**）。
 pub const LOGIN_ATTEMPT_TABLE: &str = "platform_iam_login_attempt";
+/// 登录失败计数表（**IP 全局限流**用；**不带租户维度**，只存 IP 摘要）。
+pub const LOGIN_RATE_TABLE: &str = "platform_iam_login_rate";
 /// 幂等键表。
 pub const IDEMPOTENCY_TABLE: &str = "platform_iam_idempotency";
 
@@ -640,7 +642,7 @@ impl IamStore {
         self.db.execute(ctx, &query).await
     }
 
-    /// 作废某账号的**全部** refresh token（改密 / 登出全端 / 离职）。
+    /// 作废某账号的**全部** refresh token（登出全端 / 离职）。
     pub async fn revoke_all_refresh_tokens(
         &self,
         ctx: &RequestContext,
@@ -652,6 +654,26 @@ impl IamStore {
             table = self.table(REFRESH_TOKEN_TABLE)
         ))
         .bind(user_id);
+        self.db.execute(ctx, &query).await
+    }
+
+    /// 作废某账号**除指定 family 外**的全部 refresh token（改密后踢出其它设备）。
+    ///
+    /// design-summary §7：「改密后踢出其他设备」= 作废**除当前以外**的全部 family ——
+    /// 当前设备自己的 refresh 必须**继续可用**（否则用户改完密就得重新登录）。
+    pub async fn revoke_other_refresh_tokens(
+        &self,
+        ctx: &RequestContext,
+        user_id: &str,
+        keep_family_id: &str,
+    ) -> DbResult<u64> {
+        let query = TenantQuery::new(format!(
+            "UPDATE {table} SET revoked_at = now() \
+             WHERE tenant_id = {{tenant}} AND user_id = ? AND family_id <> ? AND revoked_at IS NULL",
+            table = self.table(REFRESH_TOKEN_TABLE)
+        ))
+        .bind(user_id)
+        .bind(keep_family_id);
         self.db.execute(ctx, &query).await
     }
 
@@ -859,22 +881,51 @@ impl IamStore {
         Ok(())
     }
 
-    /// 统计窗口内的登录尝试次数（**滑动窗口**：按时间倒推，不按固定桶）。
-    pub async fn count_login_attempts_since(
+    /// 统计窗口内的**失败**登录次数（**按 IP 全局**，跨租户）。
+    ///
+    /// 限流预算必须**跨租户共享**：同一个 IP 换租户不应该拿到一份新的额度 ——
+    /// 否则攻击者只要把请求散到多个租户，限流预算就被放大成「租户数倍」。
+    ///
+    /// ⚠️ 这张表**故意不带租户维度**（只存 IP 摘要与时间戳，没有任何租户数据），
+    ///    所以 RLS 不生效，计数天然是跨租户的。
+    ///    但 [`TenantQuery`] 强制每条语句都带 `{tenant}` 占位符 —— 这里用恒真的
+    ///    `{tenant} IS NOT NULL` 占位（租户 ID 永远非空），查询本身不受租户维度影响。
+    pub async fn count_login_failures_since(
         &self,
         ctx: &RequestContext,
-        ip: &str,
+        ip_hash: &str,
         since: OffsetDateTime,
     ) -> DbResult<i64> {
         let query = TenantQuery::new(format!(
             "SELECT COUNT(*) AS attempts FROM {table} \
-             WHERE tenant_id = {{tenant}} AND ip = ? AND occurred_at >= ?",
-            table = self.table(LOGIN_ATTEMPT_TABLE)
+             WHERE ip_hash = ? AND occurred_at >= ? AND {{tenant}} IS NOT NULL",
+            table = self.table(LOGIN_RATE_TABLE)
         ))
-        .bind(ip)
+        .bind(ip_hash)
         .bind(since);
         let rows: Vec<CountRow> = self.db.fetch_all(ctx, &query).await?;
         Ok(rows.first().map(|row| row.attempts).unwrap_or(0))
+    }
+
+    /// 在事务内记一次**失败**的登录尝试（全局 IP 限流的计数依据）。
+    ///
+    /// ⚠️ 这张表**没有 `tenant_id` 列**，所以插入语句用 `INSERT ... SELECT ... WHERE`
+    ///    的形式挂上 `{tenant}` 占位符（恒真）—— [`TenantQuery`] 要求每条语句
+    ///    都带租户占位符，而这张表**不按租户切分**。
+    pub async fn record_login_rate_in(
+        &self,
+        tx: &mut TenantTx,
+        id: &str,
+        ip_hash: &str,
+    ) -> DbResult<()> {
+        let query = TenantQuery::new(format!(
+            "INSERT INTO {table} (id, ip_hash) SELECT ?, ? WHERE {{tenant}} IS NOT NULL",
+            table = self.table(LOGIN_RATE_TABLE)
+        ))
+        .bind(id)
+        .bind(ip_hash);
+        tx.execute(&query).await?;
+        Ok(())
     }
 
     /// 清理过期的登录尝试（防止流水无限增长）。
