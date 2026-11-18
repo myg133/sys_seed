@@ -268,6 +268,9 @@ impl IamService {
             failed_attempts: 0,
             locked_until: None,
             password_changed_at: OffsetDateTime::now_utc(),
+            display_name: None,
+            manager_id: None,
+            departed_at: None,
             created_at: OffsetDateTime::now_utc(),
             updated_at: OffsetDateTime::now_utc(),
         };

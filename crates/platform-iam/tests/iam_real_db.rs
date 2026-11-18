@@ -192,7 +192,9 @@ async fn build_stack(db_url: &str) -> (Arc<IamState>, axum::Router) {
         .await
         .expect("应用角色连接串应可解析");
     let service = IamService::new(IamStore::new(tenant_db), test_config()).expect("服务应当能构造");
-    let state = Arc::new(IamState { service });
+    let state = Arc::new(IamState {
+        service: Arc::new(service),
+    });
     // 与 `platform-server` 一样的挂法：IAM 路由挂在 `/api/iam` 下，JWKS 在根路径。
     let router = axum::Router::new()
         .nest("/api/iam", platform_iam::http::router(state.clone()))
@@ -1283,11 +1285,15 @@ async fn tokens_cannot_cross_tenants_and_sessions_record_the_tenant() {
         .connect(&required_test_database_url())
         .await
         .expect("管理员连接应当成功");
-    let rows: Vec<(String, String)> =
-        sqlx::query_as("SELECT tenant_id, user_id FROM platform_iam_session")
-            .fetch_all(&admin_pool)
-            .await
-            .expect("会话表应当能查");
+    // ⚠️ **只看本用例建的会话**：测试库是**共享**的（`base_test`），
+    // 别的用例（REQ-008 的离职禁用）也会往会话表里写 —— 断言整张表会误判。
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT tenant_id, user_id FROM platform_iam_session WHERE tenant_id LIKE $1",
+    )
+    .bind("iam-test-%")
+    .fetch_all(&admin_pool)
+    .await
+    .expect("会话表应当能查");
     assert!(!rows.is_empty(), "应当有会话记录");
     for (tenant, _) in &rows {
         assert!(

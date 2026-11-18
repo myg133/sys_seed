@@ -43,6 +43,17 @@ pub const STATUS_ACTIVE: &str = "active";
 /// 账号状态：已禁用。
 pub const STATUS_DISABLED: &str = "disabled";
 
+/// 可由同步裁决写入的账号档案字段（**白名单** —— 不允许拼 SQL 片段）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserProfileField {
+    /// 登录名。
+    Username,
+    /// 邮箱。
+    Email,
+    /// 显示名。
+    DisplayName,
+}
+
 /// 一个账号。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserRecord {
@@ -68,6 +79,12 @@ pub struct UserRecord {
     pub locked_until: Option<OffsetDateTime>,
     /// 最近一次改密时间（有效期判定用）。
     pub password_changed_at: OffsetDateTime,
+    /// 显示名（REQ-008 的组织侧属性：SCIM / LDAP 同步的对象）。
+    pub display_name: Option<String>,
+    /// 直属上级（**汇报关系是人的属性**，REQ-008 D3）。
+    pub manager_id: Option<String>,
+    /// 离职时间（`None` = 在职）。
+    pub departed_at: Option<OffsetDateTime>,
     /// 创建时间。
     pub created_at: OffsetDateTime,
     /// 更新时间。
@@ -86,6 +103,9 @@ platform_db::tenant_row!(UserRecord {
     failed_attempts: "failed_attempts",
     locked_until: "locked_until",
     password_changed_at: "password_changed_at",
+    display_name: "display_name",
+    manager_id: "manager_id",
+    departed_at: "departed_at",
     created_at: "created_at",
     updated_at: "updated_at",
 });
@@ -288,7 +308,7 @@ impl IamStore {
         let query = TenantQuery::new(format!(
             "SELECT id, tenant_id, username, email, password_hash, status, mfa_enabled, \
              must_change_password, failed_attempts, locked_until, password_changed_at, \
-             created_at, updated_at FROM {table} \
+             display_name, manager_id, departed_at, created_at, updated_at FROM {table} \
              WHERE tenant_id = {{tenant}} AND username = ?",
             table = self.table(USER_TABLE)
         ))
@@ -305,7 +325,7 @@ impl IamStore {
         let query = TenantQuery::new(format!(
             "SELECT id, tenant_id, username, email, password_hash, status, mfa_enabled, \
              must_change_password, failed_attempts, locked_until, password_changed_at, \
-             created_at, updated_at FROM {table} \
+             display_name, manager_id, departed_at, created_at, updated_at FROM {table} \
              WHERE tenant_id = {{tenant}} AND email = ?",
             table = self.table(USER_TABLE)
         ))
@@ -322,12 +342,26 @@ impl IamStore {
         let query = TenantQuery::new(format!(
             "SELECT id, tenant_id, username, email, password_hash, status, mfa_enabled, \
              must_change_password, failed_attempts, locked_until, password_changed_at, \
-             created_at, updated_at FROM {table} \
+             display_name, manager_id, departed_at, created_at, updated_at FROM {table} \
              WHERE tenant_id = {{tenant}} AND id = ?",
             table = self.table(USER_TABLE)
         ))
         .bind(user_id);
         self.db.fetch_optional(ctx, &query).await
+    }
+
+    /// 列出租户内的账号（SCIM 出站全量对账用）。
+    ///
+    /// 带上限：全量对账一次拉太多会把内存吃满 —— 超出部分由调用方分页处理。
+    pub async fn list_users(&self, ctx: &RequestContext, limit: i64) -> DbResult<Vec<UserRecord>> {
+        let query = TenantQuery::new(format!(
+            "SELECT id, tenant_id, username, email, password_hash, status, mfa_enabled, \
+             must_change_password, failed_attempts, locked_until, password_changed_at, \
+             display_name, manager_id, departed_at, created_at, updated_at FROM {table} \
+             WHERE tenant_id = {{tenant}} ORDER BY id LIMIT {limit}",
+            table = self.table(USER_TABLE)
+        ));
+        self.db.fetch_all(ctx, &query).await
     }
 
     /// 新建账号。
@@ -348,6 +382,62 @@ impl IamStore {
         .bind(user.must_change_password);
         self.db.execute(ctx, &query).await?;
         Ok(())
+    }
+
+    /// 禁用账号（离职 / 封禁）。
+    ///
+    /// 同时写下 `departed_at` —— 「为什么被禁用」要能查（离职 vs 封禁）。
+    pub async fn disable_user(&self, ctx: &RequestContext, user_id: &str) -> DbResult<u64> {
+        let query = TenantQuery::new(format!(
+            "UPDATE {table} SET status = ?, departed_at = now(), updated_at = now() \
+             WHERE tenant_id = {{tenant}} AND id = ?",
+            table = self.table(USER_TABLE)
+        ))
+        .bind(STATUS_DISABLED)
+        .bind(user_id.to_string());
+        self.db.execute(ctx, &query).await
+    }
+
+    /// 设置直属上级（**汇报关系是人的属性**，REQ-008 D3）。
+    pub async fn set_user_manager(
+        &self,
+        ctx: &RequestContext,
+        user_id: &str,
+        manager_id: Option<&str>,
+    ) -> DbResult<u64> {
+        let query = TenantQuery::new(format!(
+            "UPDATE {table} SET manager_id = ?, updated_at = now() \
+             WHERE tenant_id = {{tenant}} AND id = ?",
+            table = self.table(USER_TABLE)
+        ))
+        .bind(manager_id.map(str::to_string))
+        .bind(user_id.to_string());
+        self.db.execute(ctx, &query).await
+    }
+
+    /// 写一个账号的档案字段（**白名单**，不拼 SQL 片段）。
+    ///
+    /// 供同步冲突的人工裁决使用（REQ-008 D8）：裁决结果按字段落到本地。
+    pub async fn update_user_profile_field(
+        &self,
+        ctx: &RequestContext,
+        user_id: &str,
+        field: UserProfileField,
+        value: Option<&str>,
+    ) -> DbResult<u64> {
+        let column = match field {
+            UserProfileField::Username => "username",
+            UserProfileField::Email => "email",
+            UserProfileField::DisplayName => "display_name",
+        };
+        let query = TenantQuery::new(format!(
+            "UPDATE {table} SET {column} = ?, updated_at = now() \
+             WHERE tenant_id = {{tenant}} AND id = ?",
+            table = self.table(USER_TABLE)
+        ))
+        .bind(value.map(str::to_string))
+        .bind(user_id.to_string());
+        self.db.execute(ctx, &query).await
     }
 
     /// 记录一次登录失败（累加失败次数，可选锁定）。

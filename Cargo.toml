@@ -6,6 +6,7 @@ members = [
     "crates/platform-contracts-macros",
     "crates/platform-db",
     "crates/platform-iam",
+    "crates/platform-org",
     "crates/platform-server",
     "crates/xtask",
     "modules/sandbox",
@@ -24,6 +25,7 @@ platform-contracts = { path = "crates/platform-contracts" }
 platform-contracts-macros = { path = "crates/platform-contracts-macros" }
 platform-db = { path = "crates/platform-db" }
 platform-iam = { path = "crates/platform-iam" }
+platform-org = { path = "crates/platform-org" }
 platform-server = { path = "crates/platform-server" }
 
 axum = "0.8"
@@ -80,6 +82,24 @@ chacha20poly1305 = "0.11"
 tower = { version = "0.5", features = ["util"] }
 # 读 axum 响应体。
 http-body-util = "0.1"
+
+# ---------------------------------------------------------------------------
+# REQ-008：用户与组织架构（SCIM 出站 / LDAP 入站）
+# ---------------------------------------------------------------------------
+# LDAP/AD 入站（design-summary §4）。
+# ⚠️ **必须** `default-features = false`：默认特性带 `tls`（native-tls → openssl-sys，
+#    私有化机常常没有 OpenSSL 开发包），而且 TLS 后端会拉进 ring / aws-lc-rs
+#    —— 本期依赖预算要求两者 0 命中。本期 LDAP 只走明文 ldap://。
+ldap3 = { version = "0.11", default-features = false }
+# SCIM 出站：**复用树里已有的 HTTP 栈**，不引 reqwest。
+# ⚠️ `hyper-util` 的 `client-legacy` 特性所需的传递依赖（tower-service /
+#    pin-project-lite / futures-util / http-body-util / socket2）**全部已在锁文件里**，
+#    打开它不新增任何 crate。
+hyper = "1"
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+http = "1"
+# http_body_util::Full 的载荷类型（已在锁文件里，不新增 crate）。
+bytes = "1"
 
 # 低配开发基线：见 docs/dev-environment.md 与 BA/plan/dev-guide-low-spec.md
 # 第三方依赖一律不优化、不带调试信息，省编译时间与磁盘。

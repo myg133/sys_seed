@@ -289,11 +289,18 @@ async fn serve() -> Result<(), Failure> {
         let iam_state = build_iam_state(&config).await?;
         app = app
             .nest("/api/iam", platform_iam::http::router(iam_state.clone()))
-            .merge(platform_iam::http::jwks_router(iam_state));
-        tracing::info!("认证与账号体系已启用：/api/iam/* 与 /.well-known/jwks.json");
+            .merge(platform_iam::http::jwks_router(iam_state.clone()));
+
+        // 用户与组织架构（REQ-008）：`/api/org/*`。
+        //
+        // **依赖 IAM**：组织数据是租户数据，接口必须验令牌（否则改个请求头就能读别人的组织树）。
+        // 所以 IAM 没配 → 不提供 /api/org/*。
+        let org_state = build_org_state(&config, iam_state.service.clone()).await?;
+        app = app.nest("/api/org", platform_org::http::router(org_state));
+        tracing::info!("用户与组织架构已启用：/api/org/*");
     } else {
         tracing::warn!(
-            "未检测到 IAM 环境变量（BASE_JWT_* / BASE_IAM_*）：平台不提供 /api/iam/* 认证接口"
+            "未检测到 IAM 环境变量（BASE_JWT_* / BASE_IAM_*）：平台不提供 /api/iam/* 与 /api/org/* 接口"
         );
     }
 
@@ -340,9 +347,39 @@ async fn build_iam_state(config: &DeployConfig) -> Result<Arc<IamState>, Failure
             .await
             .map_err(|err| Failure::Runtime(format!("数据库连接串非法：{err}")))?;
 
-    let service = IamService::new(IamStore::new(tenant_db), iam_config)
-        .map_err(|err| Failure::Runtime(format!("认证与账号体系初始化失败：{err}")))?;
+    let service = Arc::new(
+        IamService::new(IamStore::new(tenant_db), iam_config)
+            .map_err(|err| Failure::Runtime(format!("认证与账号体系初始化失败：{err}")))?,
+    );
     Ok(Arc::new(IamState { service }))
+}
+
+/// 构建用户与组织架构的状态（数据访问 + 服务 + 令牌校验）。
+///
+/// 组织接口**必须**验令牌（组织数据是租户数据）—— 所以它依赖 IAM 的认证服务。
+async fn build_org_state(
+    config: &DeployConfig,
+    iam: Arc<platform_iam::service::IamService>,
+) -> Result<Arc<platform_org::http::OrgState>, Failure> {
+    // 数据访问走 `platform-db` 的租户作用域入口（**不得**直连池）。
+    let tenant_db =
+        platform_db::TenantDb::connect(&config.database_url, platform_db::DbOptions::default())
+            .await
+            .map_err(|err| Failure::Runtime(format!("数据库连接串非法：{err}")))?;
+
+    let service = platform_org::OrgService::new(
+        platform_org::OrgStore::new(tenant_db.clone()),
+        platform_iam::store::IamStore::new(tenant_db),
+        // 通知通道（REQ-015）还没落地：事件照常产生，先写日志。
+        std::sync::Arc::new(platform_org::notify::LoggingNotifier),
+        // 审计落库（REQ-014）还没落地：事件照常产生，先用空实现。
+        std::sync::Arc::new(platform_org::audit::NoopAuditRecorder),
+    );
+
+    Ok(Arc::new(platform_org::http::OrgState {
+        service,
+        tokens: std::sync::Arc::new(platform_org::http::IamTokenVerifier::new(iam)),
+    }))
 }
 
 /// 执行租户作用域策略的生成 / 校验。

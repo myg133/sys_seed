@@ -189,7 +189,11 @@ impl TenantDb {
             .execute(&mut *tx)
             .await?;
 
-        Ok(TenantTx { tx, tenant_id })
+        Ok(TenantTx {
+            tx,
+            tenant_id,
+            schema: self.schema.clone(),
+        })
     }
 }
 
@@ -200,12 +204,21 @@ impl TenantDb {
 pub struct TenantTx {
     tx: Transaction<'static, Postgres>,
     tenant_id: String,
+    schema: String,
 }
 
 impl TenantTx {
     /// 本事务的租户 ID。
     pub fn tenant_id(&self) -> &str {
         &self.tenant_id
+    }
+
+    /// 当前 schema 名。
+    ///
+    /// 与 [`TenantDb::schema`] 一致 —— 事务里的表名要用它拼，
+    /// 否则 schema 不是默认值时就会查错表。
+    pub fn schema(&self) -> &str {
+        &self.schema
     }
 
     /// 查询：返回全部行。
