@@ -1,0 +1,106 @@
+{
+  "id": "config",
+  "name": "配置与品牌",
+  "version": "0.1.0",
+  "enabled": true,
+  "permissions": [
+    { "code": "config:entry:write", "name": "写租户级/空间级配置", "type": "button" },
+    { "code": "config:flag:write", "name": "改功能开关", "type": "button" },
+    { "code": "config:platform:write", "name": "写平台级配置", "type": "button" },
+    { "code": "config:platform:read", "name": "读平台级配置", "type": "button" }
+  ],
+  "menus": [],
+  "dependencies": [],
+  "config": {
+    "logo": {
+      "type": "string",
+      "default": "/branding/default.svg",
+      "scope": "space",
+      "label": "Logo 路径"
+    },
+    "favicon": {
+      "type": "string",
+      "default": "/favicon-default.svg",
+      "scope": "space",
+      "label": "站点图标路径"
+    },
+    "title": {
+      "type": "string",
+      "default": "示例平台",
+      "scope": "space",
+      "label": "站点标题"
+    },
+    "loginBackground": {
+      "type": "string",
+      "default": "",
+      "scope": "space",
+      "label": "登录页背景"
+    },
+    "footer": {
+      "type": "string",
+      "default": "示例平台",
+      "scope": "space",
+      "label": "页脚文案"
+    },
+    "copyright": {
+      "type": "string",
+      "default": "© 2026",
+      "scope": "space",
+      "label": "版权信息"
+    },
+    "primaryColor": {
+      "type": "string",
+      "default": "#111111",
+      "scope": "space",
+      "label": "主色"
+    },
+    "theme.radius": {
+      "type": "number",
+      "default": 4,
+      "scope": "space",
+      "label": "圆角（px）"
+    },
+    "theme.mode": {
+      "type": "string",
+      "default": "light",
+      "scope": "space",
+      "label": "颜色模式"
+    },
+    "theme.density": {
+      "type": "string",
+      "default": "comfortable",
+      "scope": "space",
+      "label": "组件密度"
+    },
+    "theme.fontStack": {
+      "type": "array",
+      "default": ["system-ui"],
+      "scope": "space",
+      "label": "字体栈"
+    },
+    "loginBanner": {
+      "type": "string",
+      "default": "",
+      "scope": "space",
+      "label": "登录页横幅（登记为 space 但**不在**品牌白名单内 —— D66 的判据夹具）"
+    },
+    "theme.tokens": {
+      "type": "object",
+      "default": {},
+      "scope": "tenant",
+      "label": "主题令牌（对象类型）"
+    },
+    "newInvoice": {
+      "type": "boolean",
+      "default": false,
+      "scope": "tenant",
+      "label": "新发票功能开关"
+    },
+    "beta": {
+      "type": "boolean",
+      "default": false,
+      "scope": "tenant",
+      "label": "Beta 功能开关（配合派生键做灰度）"
+    }
+  }
+}

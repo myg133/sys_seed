@@ -1,88 +1,49 @@
-# REQ-009 追溯矩阵：AC-S-033 ~ AC-S-048
+# REQ-010 追溯矩阵：AC-S-049 ~ AC-S-063
 
-- **需求**: REQ-009「RBAC 权限与数据范围」
-- **分支**: `feature/REQ-009`（基线 `develop` @ `400cefa`）
-- **验收基线**: `BA/demands/REQ-009-rbac/acceptance.md`（2026-11-18 21:40 修订版）
-- **契约**: `api-conventions v1`（C4 / C5 / C6 / C7）、`extension-points v2`（C-1 ~ C-5）
-- **开发者**: myg133-dev-1
+- **需求**: REQ-010「配置、品牌与 Feature Flag」
+- **分支**: `feature/REQ-010`（基线 `develop` @ `12366e9`）
+- **验收基线**: `BA/demands/REQ-010-config-branding/acceptance.md`（**rev 3**，15 条 AC）
+- **契约**: `api-conventions v2`（C3 / C6 / C9 / C10）、`extension-points v2`（C-5）
+- **开发者**: myg133-dev-1（Worker 会话）
 - **更新时间**: 2026-11-18
 
 > 判据口径：测试名后的括号是「**测了什么**」，不是「跑没跑」。
-> 所有真实库用例都在 `base_test` 库上跑（应用连接用**普通角色 `base_app`**）。
+> 真实库用例都在 `base_test` 上跑（应用连接用**普通角色 `base_app`**）；
+> 平台级造数 / DDL 核对用管理员连接。
 
 ## 1. 矩阵
 
 | AC | 实现位置 | 测试位置（用例名 → 断言要点） |
 |----|----------|------------------------------|
-| **AC-S-033**<br>注册表双向对账，不一致即启动失败 | `crates/platform-rbac/src/registry.rs`<br>（`collect_manifest_permissions` / `reconcile` / `require_consistent`）<br>`crates/platform-server/src/main.rs::reconcile_permissions`（**启动时**对账 → `Failure::Runtime` → 退出码非 0）<br>`migrations/20261118000901_rbac_permission_seed.up.sql`（库侧权限点由**迁移**写入） | `platform-rbac/tests/rbac_real_db.rs::the_registry_matches_the_manifests_and_a_difference_is_reported`（一致 → 通过；多一条 → 逐条报出；少一条 → **带来源 manifest 路径**；`require_consistent` 必须 **Err**）<br>`platform-rbac/src/registry.rs::tests::*`（4 条） |
-| **AC-S-034**<br>角色/授权/绑定可用且带租户维度（★ 自举防护） | `crates/platform-rbac/src/service.rs`（角色 CRUD / 授权 / 绑定 / 内置角色）<br>`crates/platform-rbac/src/http.rs`（`/api/rbac/*`，**每个路由绑定管理权限点**）<br>`crates/platform-rbac/src/store.rs`（`{tenant}` 强制）<br>`migrations/20261118000900_rbac_schema.up.sql`（四张表都带 `tenant_id`）<br>`crates/platform-rbac/manifest.json`（4 个管理权限点） | `platform-rbac/tests/http_admin.rs::a_plain_user_cannot_reach_the_management_api`（普通用户写 / 读接口 → **403 `INSUFFICIENT_PERMISSION`** 且**不落库**；注册表查询**豁免** → 200）<br>`::a_manager_can_reach_the_management_api`（对照组 → 201 / 200）<br>`::a_role_of_another_tenant_is_not_found`（跨租户 id → **404**，与不存在**字段集合一致**，别人的数据没被删）<br>`platform-rbac/tests/rbac_real_db.rs::the_role_tables_are_tenant_scoped_and_rls_protected`（三张表都有 `tenant_id`；`pg_policies` **逐张列出**；换租户上下文看不到别租的行） |
-| **AC-S-035**<br>角色继承展开且成环被拒 | `crates/platform-rbac/src/service.rs::detect_cycle` / `RoleGraph::ancestors` / `expand_user_permissions`<br>`crates/platform-rbac/src/error.rs::InheritanceCycle` | `platform-rbac/tests/rbac_real_db.rs::inheritance_expands_and_cycles_are_rejected`（传递展开；成环被拒且**指出是哪两个角色**）<br>`platform-rbac/src/service.rs::tests::*`（4 条：传递继承 / 管理员全集 / 成环 / 自继承） |
-| **AC-S-036**<br>通配语义正确且禁止全通过 | `crates/platform-rbac/src/entity.rs::PermissionPattern::parse` / `expand`<br>`crates/platform-rbac/src/service.rs::grant_permission`（拒绝时写不进库） | `platform-rbac/tests/rbac_real_db.rs::wildcards_work_and_the_full_wildcard_is_rejected`（`sandbox:*` 覆盖本模块、`org:*` **不覆盖**；`*:*` 与 `*:demo:read` → `WILDCARD_FORBIDDEN`）<br>`platform-rbac/src/entity.rs::tests::*`（6 条） |
-| **AC-S-037**<br>内置角色不可删除也不可降权 | `crates/platform-rbac/src/entity.rs::BUILTIN_ADMIN` / `BUILTIN_USER`<br>`crates/platform-rbac/src/service.rs::ensure_builtin_roles`（按租户物化）<br>`::delete_role` / `::update_role_scope` / `::grant_permission`（`builtin` → `BUILTIN_ROLE_PROTECTED`）<br>`::expand_user_permissions`（管理员 = **注册表全集**，动态） | `platform-rbac/tests/rbac_real_db.rs::the_built_in_roles_cannot_be_deleted_or_downgraded`（删 / 降权 / 减权**全被拒**；管理员**逐个**拥有注册表全集；普通用户**一个都没有**） |
-| **AC-S-038**<br>数据范围五种语义求值正确 | `crates/platform-rbac/src/scope.rs::combine_scopes` / `ScopeResolver::resolve`<br>`crates/platform-rbac/src/checker.rs::load`（每个权限点的有效范围） | `platform-rbac/tests/rbac_real_db.rs::the_five_data_scopes_resolve_to_the_expected_record_sets`（**五个不同的探针用户**；每种 scope 的**期望记录 id 逐条列出**；五个集合**两两不相等**） |
-| **AC-S-039**<br>兼岗默认按主部门，取并集必须显式开启 | `crates/platform-rbac/src/scope.rs::org_nodes`（默认只取 `is_primary` 的节点；`use_all_memberships` 才取全部成员节点）<br>`crates/platform-rbac/src/service.rs::contributions_for`（并集开关取自角色） | `platform-rbac/tests/rbac_real_db.rs::the_part_time_membership_defaults_to_the_primary_department`（默认 OWN_ORG / OWN_ORG_AND_BELOW **不含** dept-b、dept-b-1；显式开启后 = 主部门 ∪ 兼岗部门（含子树）） |
-| **AC-S-040**<br>主部门缺失或歧义 → fail closed 到 `SELF` | `crates/platform-rbac/src/scope.rs::primary_department` + `org_nodes`（→ `OrgNodes::DegradeToSelf` → `self_filter`）<br>`migrations/20261118000900_rbac_schema.up.sql`：`user_org_one_primary_idx`（**预防层**） | `platform-rbac/tests/rbac_real_db.rs::a_missing_or_ambiguous_primary_department_falls_back_to_self`（① 第二个主部门被**数据库拒绝**；② 主部门缺失 → 只看到本人创建的记录；③ **绕过索引**造出歧义 → **同样**退化为 `SELF`） |
-| **AC-S-041**<br>数据范围优先级与多角色组合 | `crates/platform-rbac/src/service.rs::contributions_for`（**权限点级 scope 覆盖角色级**）<br>`crates/platform-rbac/src/scope.rs::combine_scopes`（`ALL` 最宽松 / `OWN_ORG` ⊂ `OWN_ORG_AND_BELOW` / `SELF` 最严 / `CUSTOM` 取自己那一路） | `platform-rbac/tests/rbac_real_db.rs::multiple_roles_take_the_most_permissive_scope`（普通读 → 最宽松；export → 权限点级 `SELF`；解绑 R3 → 退为 `OWN_ORG`，**与第 1 步不同** → 证明是并集不是交集） |
-| **AC-S-042**<br>受限表达式 DSL 拒绝越界写法且不产生拼接 SQL | `crates/platform-core/src/extension/expr.rs`（词法 / 语法 / 白名单 / 编译）<br>`crates/platform-db/src/query.rs::with_condition`（参数绑定） | `platform-core/src/extension/expr.rs::tests::*`（10 条：合法式**只含占位符**、白名单外字段、函数调用、多语句、注入串**当普通值**、类型错配、空数组、裸标识符、未闭合字符串、非法列名）<br>`platform-db/src/query.rs::tests::*`（范围条件插进 WHERE、字面值不出现、占位符数量不符被拒） |
-| **AC-S-043**<br>属性级校验（RBAC + ABAC 混合）生效 | `crates/platform-core/src/extension/manifest.rs::PermissionSpec::condition`（**可选**字段）<br>`crates/platform-rbac/src/checker.rs::load`（条件编译；白名单外 → **永不匹配** = fail closed）<br>`modules/sandbox/manifest.json`（`sandbox:scope-item:approve` 携带 `$record.amount <= 10000`）<br>`modules/sandbox/backend/src/http.rs::approve_scope_item`（参考实现） | `platform-core/src/extension/expr.rs::tests::*`（条件解析 / 编译 / 白名单）<br>`modules/sandbox/backend/src/http.rs`（approve 端点：范围外 → 404，条件不满足 → 403）<br>`platform-rbac/src/checker.rs`（条件随注册表装载） |
-| **AC-S-044**<br>鉴权中间件的三种拒绝语义与错误体形状 | `crates/platform-core/src/extension/permission.rs::require_permission`（**唯一入口**）<br>`crates/platform-core/src/problem.rs`（RFC 9457 错误体，**唯一一份**） | `platform-core/tests/authz_entry.rs`（7 条：401 `UNAUTHENTICATED` / 403 `INSUFFICIENT_PERMISSION` / 放行 / **判定实现缺失 → fail closed** / `detail` 英文 ASCII / `trace_id` 必带 / `instance` 是请求路径 / 合并子路由与 `with_state` 后鉴权层仍生效）<br>`modules/sandbox/tests/http_authz.rs::a_request_without_a_token_is_unauthenticated` / `::a_user_without_the_permission_is_forbidden` / `::a_record_outside_the_data_scope_is_not_found` |
-| **AC-S-045**<br>404 不泄露资源存在性 | `modules/sandbox/backend/src/scope_item.rs`（范围过滤后查不到 → 当不存在）<br>`modules/sandbox/backend/src/http.rs::get_scope_item`（404 `NOT_FOUND`） | `modules/sandbox/tests/http_authz.rs::an_unreadable_record_and_a_missing_record_are_indistinguishable`（无权资源 vs 不存在资源：**状态码相同**、**错误体字段集合相同**、**响应头集合相同**；对照组：范围内的记录 → 200） |
-| **AC-S-046**<br>已登记权限点必须有鉴权调用点，且入口唯一 | `crates/platform-contracts/src/authz_scan.rs`（**扫调用**，不是扫字面量；剥注释 + 剥字符串内容）<br>`crates/platform-contracts/src/checks.rs::check_c5`<br>`crates/platform-contracts-macros/src/lib.rs`（生成 **5** 项契约测试） | `modules/sandbox/tests/contracts.rs::contract_c5_declared_permissions_have_authorization_call_sites`<br>`platform-contracts/src/authz_scan.rs::tests::*`（8 条：字面量调用 / 常量调用被拒 / **常量不是调用点** / 自建入口被报 / 注释不是调用点 / 方法调用不算 / 定义检测）<br>**破坏性验证**：4 类违规逐个造出来并确认被拦住（见 `verification-report.md` §4） |
-| **AC-S-047**<br>权限撤销在下一个请求即生效，不等 TTL | `crates/platform-rbac/src/checker.rs::ensure_fresh`（epoch 不一致 → 重算）<br>`crates/platform-rbac/src/store.rs::current_epoch` / `bump_epoch`（**写操作同事务** epoch+1）<br>`crates/platform-rbac/src/service.rs`（所有写路径都 bump） | `platform-rbac/tests/rbac_real_db.rs::a_revocation_takes_effect_on_the_next_request`（**两个独立实例**：实例 1 撤销 → 实例 2 的下一个请求即被拒）<br>`::a_revoked_data_scope_takes_effect_on_the_next_request`（**撤销数据范围**同样立即生效） |
-| **AC-S-048**<br>数据范围过滤在 SQL 层生效且业务模块无法绕过 | `crates/platform-db/src/query.rs::with_scope` / `with_condition`（条件插进 WHERE 子句 + 参数绑定）<br>`crates/platform-core/src/extension/permission.rs::ScopeFilter`（**没有「跳过范围」的变体**）<br>`modules/sandbox/backend/src/scope_item.rs`（业务模块只提供范围条件） | `platform-db/src/query.rs::tests::*`（渲染出的 SQL **含** `org_node_id = ANY($n)`、**不含**字面值）<br>`modules/sandbox/tests/http_authz.rs::the_data_scope_is_applied_in_the_sql_layer`（SQL 文本含范围条件、值走绑定、结果确实被过滤、**平台构造器上没有跳过范围的入口**）<br>`platform-rbac/tests/rbac_real_db.rs::the_scope_filter_is_rendered_into_the_sql` |
+| **AC-S-049**<br>三层覆盖与 `source` 如实反映命中层级 | `crates/platform-config/src/resolver.rs`（`DbConfigResolver::resolve`：空间 > 租户 > 平台 > default）<br>`crates/platform-config/src/service.rs`（`read_entries`：注册表 / 平台键 / 去重）<br>`crates/platform-core/src/extension/config.rs`（`ConfigSource` 四值）<br>`platform_tenant_config` / `platform_space_config` 的 RLS | `config_real_db.rs::three_layer_resolution_reports_the_hit_layer`（无租户→platform / T1→tenant / T1+S1→space / T2+S1→另一行 / T2→tenant / T1+S2 局部性）<br>`::source_default_is_distinct_from_an_explicit_platform_value`（title→default；primaryColor 值=默认但来源=platform；未登记→None；混合批量 404 + `params.unknownKeys`；重复键去重）<br>`http_authz.rs::read_authorization_splits_platform_scoped_keys`（HTTP：租户键 200 / 平台键 403 / 混合 403 / 未登记 404） |
+| **AC-S-050**<br>作用域越级写入被拒（含 D66 白名单门） | `crates/platform-config/src/service.rs::write_entries`（stage 4 作用域 / stage 5 白名单）<br>`crates/platform-config/src/store.rs::write_scoped` | `config_real_db.rs::scope_escalation_is_rejected_and_leaves_no_rows`（platform 键租户/空间写 400、tenant 键空间写 400、space 键三层可写、平台级正对照、越级写不留行）<br>`::space_writes_require_the_branding_whitelist`（`loginBanner` 空间写 400 且 `reason=whitelist`；租户写 200；白名单内 space 键 200；库侧 0 行）<br>`http_authz.rs::scope_type_and_key_errors_keep_the_exact_codes_over_http` |
+| **AC-S-051**<br>未声明键不得写入、按登记类型校验、校验顺序写死 | `crates/platform-config/src/registry.rs`（注册表来自全部 manifest）<br>`crates/platform-config/src/service.rs`（阶段化校验：格式→注册表→flag 命名空间→作用域→类型/范围） | `config_real_db.rs::unknown_keys_and_type_errors_follow_the_fixed_order`（未登记 400；`"20"`/`true` 类型错；混合批注册表优先；注册表先于作用域；作用域先于类型；键名先于注册表；三张表均无未登记行）<br>`::five_registered_types_are_checked_by_json_type`（5 种类型正反例；库侧 `jsonb_typeof`）<br>`::invalid_key_names_are_rejected_with_the_exact_code` |
+| **AC-S-052**<br>配置变更在下一个请求生效（跨实例） | `resolver.rs::refresh`（读一对 epoch；不一致即重算）<br>`store.rs::bump_tenant_epoch` / `write_platform`（同事务 bump）<br>`crates/platform-config/src/http.rs::authenticate`（每请求 refresh） | `config_real_db.rs::a_platform_change_invalidates_every_tenant_and_survives_a_higher_tenant_epoch`（TTL=300s；实例 1 写 → 实例 2 下一次读即新值；实例 1 也更新）<br>`http_authz.rs::a_platform_write_is_visible_on_the_next_request`（HTTP：写后 T1/T2 立刻读到新值） |
+| **AC-S-053**<br>平台级变更使所有租户失效（抓 `max(epoch)` 掩蔽） | `resolver.rs::refresh`：`(platform_epoch, tenant_epoch)` **逐一相等**才算新鲜<br>`store.rs::epochs`（一条查询两行）<br>`migrations/20261118001000_config_schema.up.sql`（`platform_config_epoch`，`scope_key` 主键） | `config_real_db.rs::a_platform_change_invalidates_every_tenant_and_survives_a_higher_tenant_epoch`（先 5 次租户写把 tenant epoch 推到 5 > platform 1，再改平台 → 仍读到新值；平台写入不改 tenant epoch）<br>`::every_tenant_sees_a_platform_change_on_the_next_request`（T1 / T2 / T1+S1 同一请求内都更新） |
+| **AC-S-054**<br>品牌公开接口白名单 fail closed（扁平 map） | `crates/platform-config/src/whitelist.rs`（枚举 11 键）<br>`resolver.rs::branding`（忽略空间级）<br>`http.rs::branding`（公开、扁平 map）<br>`crates/platform-config/manifest.json`（品牌键显式 `scope: space`） | `config_real_db.rs::branding_returns_only_whitelisted_keys_and_resolves_the_tenant`（T1=PB / T2=PC / 无租户=PA / 未知租户=PA / 空间值 ≠ PS / 运维键缺席 / 与 entries 一致）<br>`http_authz.rs::branding_over_http_is_whitelisted_and_ignores_the_space_header`（无令牌 200；空间头不改变；键 ⊆ 白名单）<br>`registry.rs::tests::every_branding_whitelist_key_is_registered_as_space`（不变式：白名单 ⊆ `scope: space`） |
+| **AC-S-055**<br>前端无硬编码品牌（同源 + 测试同步） | `apps/shell/index.html`（空 `<title>`）<br>`apps/shell/src/App.svelte`（`onMount` 读接口）<br>`apps/shell/src/lib/branding.ts`（同源相对路径 / 十六进制校验）<br>`apps/shell/src/app.css`（`var(--base-primary)`）<br>`e2e/shell.spec.ts` / `playwright.config.ts` / `scripts/e2e-server.sh`（同源） | `branding_static.rs::*`（4 条：`底座壳`/`#1677ff`/`示例平台`/`#0055aa` 命中 0；品牌接口被调用；`<title>` 留空；e2e 不再断言旧值）<br>`apps/shell/test/branding.test.ts`（5 条：标题 / 主色校验 / 缺字段 / 同源路径 / 失败抛错）<br>E2E（浏览器，同源）：`e2e/shell.spec.ts` —— **实际执行 2 passed**（标题 = 接口值；计算色 ≠ `#1677ff`；菜单过滤） |
+| **AC-S-056**<br>Feature Flag 按租户隔离（`source=default`） | `resolver.rs::flag`（租户 > 平台 > default；无身份 fail closed）<br>`service.rs::read_flag` / `read_flags`<br>`http.rs`（`GET /api/feature-flags*`） | `config_real_db.rs::flags_are_tenant_isolated_and_close_returns_200_semantics`（T1 true/tenant；T2 false/default；无身份 false）<br>`http_authz.rs::flag_routes_are_gated_and_unknown_flags_degrade_to_disabled`（HTTP 200 + false + default；无令牌 401）<br>`::flags_cannot_be_written_through_the_generic_config_route`（D70） |
+| **AC-S-057**<br>灰度确定性、单调性与边界（派生键） | `crates/platform-config/src/flag.rs`（`sha256("<flag>:<user>")` 前 4 字节大端 % 100）<br>`resolver.rs::rollout_percent`（租户 > 平台 > 默认 100；脏数据 fail closed）<br>`service.rs::write_flag`（范围 0..=100）<br>`registry.rs`（派生键 `flags.<F>.rolloutPercent`） | `config_real_db.rs::rollout_is_deterministic_monotonic_and_bounded`（10 次一致；200 用户命中 104 ∈ [70,130]；S50 ⊊ S60；S50'==S50；S10⊆S50；p=0/100；两个独立实例 + **独立公式**逐用户比对；无身份 p=100 仍 false）<br>`::rollout_across_two_processes_is_identical`（**真子进程**；捕捉 `RandomState`）<br>`::rollout_out_of_range_is_rejected_on_write_and_fails_closed_on_read`（101/-1/50.5 写时 400；库内脏数据读时 false）<br>`flag.rs::tests::*`（公式 / 单调性 / 边界 / 10 次一致） |
+| **AC-S-058**<br>无用户身份时灰度 fail closed | `resolver.rs::flag`（`ctx.user_id().is_none()` → false；在比例判定之前） | `config_real_db.rs::rollout_is_deterministic_monotonic_and_bounded` 第 6 段（tenant-only／空 ctx → false；p=100 不变）<br>`http_authz.rs::unauthenticated_requests_are_401_and_branding_is_public`（HTTP 无令牌 401，不是 200） |
+| **AC-S-059**<br>未声明 flag 不 404；flag 名受字符集约束 | `flag.rs::is_valid_flag_name` / `display_name`<br>`resolver.rs::flag`（未登记 → WARN + false + default）<br>`service.rs::ensure_valid_flag_name` | `config_real_db.rs::unknown_and_invalid_flag_names_follow_the_contract`（`newinvoce`/`newinvoice` → 200 false default；`new-invoice` + 换行 + 1KB → 400 `FLAG_NAME_INVALID`；对照 `newInvoice` 为 true）<br>`http_authz.rs::flag_routes_are_gated_and_unknown_flags_degrade_to_disabled`<br>`flag.rs::tests::valid_flag_names_follow_the_camel_case_rule` |
+| **AC-S-060**<br>写接口必须鉴权（独立路由 + 401/404 + D70） | `http.rs`：`PUT /api/config/entries` → `config:entry:write`；`PUT /api/config/platform-entries` → `config:platform:write`；`PUT /api/feature-flags/{flag}` → `config:flag:write`<br>`authenticate`（令牌 / 跨租头 404 / 注入 checker）<br>`service.rs`（flag 命名空间 → `CONFIG_FLAG_USE_FLAG_ENDPOINT`）<br>`crates/platform-config/manifest.json` + `migrations/20261118000902_config_permission_seed.up.sql` | `http_authz.rs::write_permission_matrix_has_no_implicit_hierarchy`（M 403 / A 租户写 200 + 平台写 403 / P 平台写 200 / O 只有平台写 → 租户写与开关 403 / R 只读）<br>`::unauthenticated_requests_are_401_and_branding_is_public`（7 条路由 401）<br>`::a_cross_tenant_header_is_404_and_writes_nothing`（404 + 库侧无写入）<br>`::the_generic_write_route_rejects_the_flag_namespace`（400 `CONFIG_FLAG_USE_FLAG_ENDPOINT`）<br>`contract_c5.rs::every_config_permission_has_an_authorization_call_site`（4 个调用点） |
+| **AC-S-061**<br>新权限点有调用点；既有缺口不扩围 | `crates/platform-contracts/src/checks.rs::check_c5_for`（**不依赖 `ContractFixture`**）<br>`crates/platform-contracts/src/authz_scan.rs`（顺带修生命周期误判）<br>`crates/platform-config/tests/contract_c5.rs` | `contract_c5.rs::every_config_permission_has_an_authorization_call_site`（4 个逐个；调用点集合恰好 4）<br>`::removing_one_call_site_fails_and_names_the_permission`（删 1 → 1 条点名；删 2 → 2 条；不误报另外 2 个）<br>`::the_existing_platform_crate_baseline_does_not_get_worse`（org 9 登记 / 0 调用点；rbac 4 登记 / ≥3 调用点、`rbac:permission:read` 仍缺；sandbox 无 `config:`） |
+| **AC-S-062**<br>三表分离 + REVOKE 直接 DML + `jsonb` 可逆 + 保留值 | `migrations/20261118001000_config_schema.{up,down}.sql`（三表 / RLS / epoch / REVOKE / `SECURITY DEFINER` 函数同事务 bump）<br>`deploy/seed/02-app-role.sql`（重跑时再收一次）<br>`store.rs`（伪租户 `"platform"` + `{tenant} IS NOT NULL`）<br>`service.rs::ensure_tenant_not_reserved`（D72） | `config_real_db.rs::base_app_can_read_but_cannot_write_the_platform_table_directly`（SELECT 可；INSERT/UPDATE/DELETE 均 42501；函数可写且 epoch +1；权限矩阵 5 项）<br>`::tenant_and_space_rows_are_isolated_by_rls`（T1/T2 只见自己；未设上下文 0 行；复合 `(tenant, space)`；policy 的 USING/WITH CHECK 引用 tenant_id）<br>`::all_three_value_columns_are_jsonb`<br>`::the_schema_migration_is_reversible_without_dropping_the_historical_table`（独立库 up/down/up，插 3 种 JSON 类型；down 转 TEXT 但**不删表**；类型/值复原）<br>`::the_reserved_tenant_id_is_rejected_on_every_entry_point`（读写 / 品牌 / refresh 全拒）<br>`::the_platform_read_endpoint_only_serves_platform_scoped_keys` |
+| **AC-S-063**<br>平台级配置的读走独立路由并单独授权 | `http.rs`：`GET /api/config/platform-entries` → `config:platform:read`（独立路由）<br>`service.rs::read_entries`（平台级键 → 整请求 403）<br>`service.rs::read_platform_entries`（只服务 platform 作用域键；未登记 404） | `http_authz.rs::read_authorization_splits_platform_scoped_keys`（M 读租户键 200 / 平台键 403 / 混合 403 无 entries / favicon 返回平台值不需要平台读权限 / 未登记 404；独立路由 M 403、P 200）<br>`config_real_db.rs::the_platform_read_endpoint_only_serves_platform_scoped_keys`（平台值；租户键 → 400；未登记 → 404）<br>`::branding_returns_only_whitelisted_keys_and_resolves_the_tenant`（匿名白名单与登录后权限点是两道门） |
 
-## 2. 真实库用例（`base_test`，应用角色 `base_app`）
-
-| 用例文件 | 条数 | 覆盖 AC |
-|----------|------|----------|
-| `crates/platform-rbac/tests/rbac_real_db.rs` | 12 | AC-S-033 / 034 / 035 / 036 / 037 / 038 / 039 / 040 / 041 / 047 / 048 |
-| `crates/platform-rbac/tests/http_admin.rs` | 3 | AC-S-034（★ 自举防护、跨租 404） |
-| `modules/sandbox/tests/http_authz.rs` | 6 | AC-S-044 / 045 / 048 |
-| `modules/sandbox/tests/c3_real_db.rs`（既有） | 4 | 租户隔离（语义未改动） |
-
-## 3. 纯逻辑用例（不连库）
+## 2. 真实库 / 跨进程用例
 
 | 用例文件 | 条数 | 覆盖 AC |
-|----------|------|----------|
-| `crates/platform-core/src/extension/expr.rs::tests` | 10 | AC-S-042 / 043 |
-| `crates/platform-core/src/extension/permission.rs::tests` | 4 | AC-S-044 |
-| `crates/platform-core/tests/authz_entry.rs` | 7 | AC-S-044 |
-| `crates/platform-db/src/query.rs::tests`（整 crate） | 34 | AC-S-048 |
-| `crates/platform-rbac/src/{entity,scope,service,registry}.rs::tests`（整 crate） | 33 | AC-S-035 / 036 / 037 / 038 / 039 / 040 / 041 |
-| `crates/platform-contracts/src/authz_scan.rs::tests` | 8 | AC-S-046 |
-| `modules/sandbox/tests/contracts.rs`（C-1 ~ C-5） | 5 | AC-S-046 |
+|----------|------|---------|
+| `crates/platform-config/tests/config_real_db.rs` | 25（含 1 个默认 ignored 的子进程 helper） | AC-S-049 ~ 053、056 ~ 059、062、063；D55 / D56 / D66 / D70 / D71 / D72 |
+| `crates/platform-config/tests/http_authz.rs` | 10 | AC-S-049、050、051、054、056 ~ 060、063 |
+| `crates/platform-config/tests/contract_c5.rs` | 3 | AC-S-061 |
+| `crates/platform-config/tests/branding_static.rs` | 4 | AC-S-055（静态部分） |
+| `crates/platform-config/src/**` 单元测试 | 30 | 公式 / 注册表 / 类型 / 阶段顺序 / 错误码 |
+| `apps/shell/test/branding.test.ts` | 5 | AC-S-055（前端单元） |
 
-## 4. 权限点 → 鉴权调用点对照（BA 要求逐条列出）
+## 3. 明确不在本矩阵的项
 
-| 权限点 | 鉴权调用点 | 覆盖的路由 |
-|--------|-----------|-----------|
-| `rbac:role:read` | `crates/platform-rbac/src/http.rs`（读路由组） | `GET /api/rbac/roles`、`GET /api/rbac/roles/{id}`、`GET /api/rbac/roles/{id}/permissions` |
-| `rbac:role:write` | `crates/platform-rbac/src/http.rs`（写路由组） | `POST/DELETE /api/rbac/roles`、`POST /api/rbac/roles/{id}/permissions`、`DELETE /api/rbac/roles/{id}/permissions/{code}`、`POST/DELETE /api/rbac/roles/{id}/inherit` |
-| `rbac:user-role:write` | `crates/platform-rbac/src/http.rs`（绑定路由组） | `POST /api/rbac/users/{user_id}/roles`、`DELETE /api/rbac/users/{user_id}/roles/{role_id}` |
-| `rbac:permission:read` | **无调用点** —— 对应 `GET /api/rbac/permissions`，按 BA 裁定**豁免**管理权限点 | `GET /api/rbac/permissions`（任何已认证用户可读） |
-| `sandbox:demo:read` | `modules/sandbox/backend/src/http.rs` | `GET /api/sandbox/demo` |
-| `sandbox:demo:write` | `modules/sandbox/backend/src/http.rs` | `POST /api/sandbox/demo` |
-| `sandbox:scope-item:read` | `modules/sandbox/backend/src/http.rs` | `GET /api/sandbox/scope-item`、`GET /api/sandbox/scope-item/{id}` |
-| `sandbox:scope-item:approve` | `modules/sandbox/backend/src/http.rs` | `POST /api/sandbox/scope-item/approve` |
-| `sandbox:scope-item:export` | `modules/sandbox/backend/src/http.rs` | `POST /api/sandbox/scope-item/export` |
-
-> `rbac:permission:read` 是**唯一**「登记了但没有调用点」的权限点 ——
-> 原因是 BA 明确裁定「注册表查询豁免管理权限点」（否则前端 `can()` 拿不到注册表）。
-> 它**不是**假权限：该接口对任何已认证用户开放。
-
-### `platform-org` 的 9 个权限点（**如实列出，本期未改**）
-
-| 权限点 | 有无 `require_permission` 调用点 | 说明 |
-|--------|----------------------------------|------|
-| `org:org-node:read` / `org:org-node:write` | **无** | `crates/platform-org/src/http.rs` 只有**令牌校验**（`Authenticated` 提取器），**没有权限点判定** |
-| `org:user-org:read` / `org:user-org:write` | **无** | 同上 |
-| `org:user-position:read` / `org:user-position:write` | **无** | 同上 |
-| `org:sync-conflict:read` / `org:sync-conflict:resolve` | **无** | 同上 |
-| `org:scim-sync:run` | **无** | 同上 |
-
-> ⚠️ **这 9 个权限点属于「登记了但从不鉴权」** —— 正是 `extension-points v1` §4 要关掉的那类
-> **假权限**。本期（REQ-009）**不修**（那是 REQ-008 的范围），在此如实登记，
-> 由 BA 决定处理方式（要么补鉴权，要么从 manifest 撤下）。
-> 本期新增的 **C-5 只扫业务模块**（`modules/*/backend/**/*.rs`），
-> 因此**不会**让 `platform-org` 的契约测试变红 —— 但这也意味着
-> **平台 crate 的权限点目前没有机械门禁**（见 `verification-report.md` §7 的建议）。
+- **E2E 浏览器用例**（`e2e/shell.spec.ts`）：**已执行 2 passed**（同源 `platform-server` 静态目录，连跑两轮均绿）。
+- **CI 真跑 / 分支保护 / 真实多实例部署**：与 REQ-009 相同的原因不在本仓库内。
+- **`platform-org` / `platform-rbac` 的 C-5 缺口**：本需求**不扩围**，基线已记录。

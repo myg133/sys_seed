@@ -1,14 +1,14 @@
 {
-  "req": "REQ-009",
-  "branch": "feature/REQ-009",
-  "agent_id": "myg133-dev-1",
-  "session_id": "mvs_1242f36deb5c4adeb5c9cec164123807",
+  "req": "REQ-010",
+  "branch": "feature/REQ-010",
+  "agent_id": "myg133-ba-1",
+  "session_id": "proc-83964",
   "owner": "myg133-ba-1",
   "base_branch": "develop",
-  "created_at": "2026-11-18T18:57:34+08:00",
-  "demand_dir": "BA/demands/REQ-009-rbac",
+  "created_at": "2026-11-18T23:21:20+08:00",
+  "demand_dir": "BA/demands/REQ-010-config-branding",
   "contracts": {
-    "api-conventions": "v1",
+    "api-conventions": "v2",
     "extension-points": "v2"
   }
 }

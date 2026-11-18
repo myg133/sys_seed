@@ -10,7 +10,7 @@
 
 use std::collections::BTreeSet;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 
 use platform_core::context::RequestContext;
 use platform_core::extension::repository::{ListQuery, Repository};
@@ -444,6 +444,92 @@ async fn check_delete<F: ContractFixture>(
         outcome.violation(C4, "the record is still readable after delete() succeeded");
     }
     Ok(())
+}
+
+/// C-5 的**不依赖 `ContractFixture`** 入口（REQ-010 D58）。
+///
+/// # 为什么需要它
+///
+/// [`check_c5`] 的形状是 `check_c5<F: ContractFixture>(subject: &ContractSubject<F>)`，
+/// 而 `ContractFixture` 要求 `Repository` + `PlatformModule` —— **平台 crate 没有也不该有**。
+/// 于是「跑平台的契约测试」这个验收手段根本不存在（D58）。
+///
+/// 这个入口只做 C-5 的**调用点**部分：
+///
+/// | 检查 | 说明 |
+/// |------|------|
+/// | 已登记权限点必须有 `require_permission("字面量")` 调用点 | 缺 → **违例**（不是告警） |
+/// | 调用了但未登记 | 违例 |
+/// | 参数不是字面量 | 违例（无法静态确认 → fail closed） |
+/// | 模块自建鉴权入口 | 违例（扫描会被绕过） |
+///
+/// **不做**「鉴权入口定义全仓库唯一」那条 —— 它是**全仓库**性质，
+/// 而本入口的典型用法是把 `crates/<平台 crate>/{manifest.json,src/}` 复制到临时目录做负向用例
+/// （AC-S-061 步骤 3），临时目录里找不到仓库根。全仓库唯一性仍由 [`check_c5`] 覆盖。
+///
+/// # 参数
+///
+/// - `manifest_path`：被测 crate 的 `manifest.json`；
+/// - `source_dir`：被测 crate 的 `src/`（平台 crate 没有 `backend/`）。
+pub fn check_c5_for(
+    manifest_path: &std::path::Path,
+    source_dir: &std::path::Path,
+) -> Result<Vec<ContractViolation>> {
+    let raw = std::fs::read_to_string(manifest_path)
+        .with_context(|| format!("cannot read {}", manifest_path.display()))?;
+    let manifest =
+        platform_core::extension::manifest::Manifest::parse_checked(&raw).map_err(|issues| {
+            let detail = issues
+                .iter()
+                .map(|issue| format!("{}: {}", issue.field(), issue.reason()))
+                .collect::<Vec<_>>()
+                .join("; ");
+            anyhow::anyhow!("{} is invalid: {detail}", manifest_path.display())
+        })?;
+
+    let declared: BTreeSet<&str> = manifest.permission_codes().into_iter().collect();
+    let scan = authz_scan::scan_auth_calls(source_dir)?;
+    let called: BTreeSet<&str> = scan.codes.iter().map(String::as_str).collect();
+
+    let mut violations = Vec::new();
+    for code in &declared {
+        if !called.contains(code) {
+            violations.push(ContractViolation::new(
+                C5,
+                format!(
+                    "the permission point `{code}` is declared in manifest.json but has no authorization call site"
+                ),
+            ));
+        }
+    }
+    for code in &scan.codes {
+        if !declared.contains(code.as_str()) {
+            violations.push(ContractViolation::new(
+                C5,
+                format!(
+                    "the authorization call site uses the permission point `{code}`, which is not declared in manifest.json"
+                ),
+            ));
+        }
+    }
+    for call in &scan.non_literal_calls {
+        violations.push(ContractViolation::new(
+            C5,
+            format!(
+                "the authorization call site at {call} does not use a string literal; it cannot be verified statically"
+            ),
+        ));
+    }
+    for entry in &scan.custom_entries {
+        violations.push(ContractViolation::new(
+            C5,
+            format!(
+                "the custom authorization entry point at {entry} bypasses the platform entry point `{}`",
+                authz_scan::AUTH_ENTRY_POINT
+            ),
+        ));
+    }
+    Ok(violations)
 }
 
 /// C-5：已登记权限点必须有**鉴权调用点**，且鉴权入口**全仓库唯一**。

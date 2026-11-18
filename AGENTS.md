@@ -24,6 +24,7 @@
 
 ```text
 crates/platform-core/        平台核心（**禁止修改**，改动需人工评审）
+crates/platform-config/       配置、品牌与 Feature Flag（/api/config/*、/api/feature-flags/*）
 crates/platform-contracts/   扩展点契约测试套件（**禁止修改**）
 crates/platform-contracts-macros/  契约测试宏（**禁止修改**）
 crates/platform-db/           平台数据访问层（租户作用域入口 + RLS 兜底）
@@ -82,6 +83,17 @@ docs/contracts/              契约正文快照（**勿手改**，正本在 BA �
 
 > 规则 1 与 2 由 CI 机械检查：`cargo xtask check-deps` 扫 `cargo metadata` 的依赖图，
 > 平台 crate 一旦反向依赖业务模块即失败。
+
+## 配置怎么读（REQ-010 起）
+
+- 业务模块用 `platform_core::extension::config::ConfigResolver`（`kind = "platform-capability"`，
+  **不是扩展点**；`extension_point_count` 仍是 5）。实现是 `platform-config` 的 `DbConfigResolver`。
+- 同步方法只读**已刷新的快照**；平台在调用前 `refresh`（`(platform_epoch, tenant_epoch)` **成对比较**，
+  不要用 `max(epoch)` —— 会被更高的租户 epoch 掩蔽）。
+- 写配置只能走 `/api/config/entries`（租户/空间）与 `/api/config/platform-entries`（平台级，独立权限点）；
+  **Feature Flag 只能经 `/api/feature-flags/{flag}` 改**，通用写路由收到 flag 名 / `flags.` 前缀 → 400（D70）。
+- 4 个权限点：`config:entry:write` / `config:flag:write` / `config:platform:write` / `config:platform:read`
+  （manifest + 权限点种子迁移 + 重生成 `capabilities/` 三件套，缺一启动对账 fail-fast）。
 
 ## 鉴权怎么写（REQ-009 起）
 
@@ -169,7 +181,7 @@ bun run dev
 | `notification_sender` | NotificationSender + NotificationMessage/DeliveryResult 提供通知投递接缝，勿自建消息中心 |
 | `workflow_handler` | WorkflowHandler + TransitionEvent 提供工作流接入接缝，勿自建流程引擎 |
 | `transaction_boundary` | TransactionalWrite + WriteBoundary 提供写边界声明，跨表写必须显式开平台事务（C-4 判定依据） |
-| `config` | ConfigScope/ConfigResolver/AppConfig + manifest 的 config 段提供配置分层（platform/tenant/space），勿自建配置读取 |
+| `config` | ConfigScope/ConfigResolver（platform-capability，不是扩展点）/AppConfig + manifest 的 config 段提供三层配置与 Feature Flag（4 个权限点 config:entry:write / config:flag:write / config:platform:write / config:platform:read），勿自建配置读取 |
 | `error_code_i18n` | @base/i18n 的 translate()/hasMessage() 提供错误码到文案映射，勿在后端拼中文句子 |
 | `theme` | @base/theme 的 defaultTheme()/mergeTheme() 提供主题 token，勿另造主题变量 |
 | `ui_token` | @base/ui 的 toneClass()/TONES/defaultRadius() 提供色调与圆角 token，勿另造样式变量 |

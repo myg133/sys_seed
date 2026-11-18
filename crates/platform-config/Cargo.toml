@@ -1,0 +1,36 @@
+[package]
+name = "platform-config"
+description = "平台配置：三层覆盖（平台/租户/空间）、品牌聚合、Feature Flag 与确定性灰度"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# 平台核心：RequestContext / ConfigKey / ConfigScope / ConfigResolver
+platform-core.workspace = true
+# 数据访问：租户作用域入口（`TenantDb` / `TenantQuery`），不直连连接池
+platform-db.workspace = true
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# 确定性灰度：`sha256("<flag>:<user>")`。**已在依赖树里**（REQ-007 引入），不增长锁文件。
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# 测试要驱动 axum 路由（`ServiceExt::oneshot`），不连网络。
+tower.workspace = true
+http-body-util.workspace = true
+sqlx.workspace = true
+# 新 C-5 扫描入口（不依赖 ContractFixture，D58）
+platform-contracts.workspace = true
+# 权限点注册表对账（manifest ↔ platform_permission，D67）
+platform-rbac.workspace = true
+# 每个用例独有的租户 / 空间标识（跨运行也不能撞）
+uuid.workspace = true
+# 日志捕获（AC-S-059：未登记 flag 必须留一条结构化 WARN；非法名不得进日志）
+tracing-subscriber.workspace = true

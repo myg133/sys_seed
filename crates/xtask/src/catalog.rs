@@ -73,7 +73,7 @@ pub const ALREADY_PROVIDED: &[ProvidedCapability] = &[
     },
     ProvidedCapability {
         key: "config",
-        summary: "ConfigScope/ConfigResolver/AppConfig + manifest 的 config 段提供配置分层（platform/tenant/space），勿自建配置读取",
+        summary: "ConfigScope/ConfigResolver（platform-capability，不是扩展点）/AppConfig + manifest 的 config 段提供三层配置与 Feature Flag（4 个权限点 config:entry:write / config:flag:write / config:platform:write / config:platform:read），勿自建配置读取",
     },
     ProvidedCapability {
         key: "error_code_i18n",

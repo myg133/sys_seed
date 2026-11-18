@@ -257,7 +257,11 @@ pub fn strip_comments(source: &str) -> String {
             continue;
         }
         if ch == '\'' {
-            in_char = true;
+            // 生命周期（`'a`）不是字符字面量 —— 不能进入 in_char，否则会把
+            // 后面一大段代码当成字符内容吞掉。
+            if starts_char_literal(&chars, index) {
+                in_char = true;
+            }
             out.push(ch);
             index += 1;
             continue;
@@ -377,6 +381,31 @@ fn defines_auth_entry(source: &str) -> bool {
     false
 }
 
+/// `chars[index] == '\''` 是否开始一个**字符字面量**（而不是生命周期）。
+///
+/// Rust 的 `'a`（生命周期）与 `'a'`（字符字面量）在源码里都以 `'` 开头。
+/// 旧实现把所有 `'` 都当成字符字面量 → 遇到 `fn f<'a>(...)` 时会把后面
+/// 一大段代码当成「字符内容」吞掉。REQ-010 在 `permission.rs` 里新增了带
+/// 生命周期的 trait 后，C-5 一度扫不到 `fn require_permission`（假绿 → 假红）。
+fn starts_char_literal(chars: &[char], index: usize) -> bool {
+    match chars.get(index + 1) {
+        Some('\\') => {
+            // 转义形式：`'\n'` / `'\''` / `'\\'` / `'\u{1F600}'` —— 向后找闭合的 `'`。
+            let mut cursor = index + 3;
+            let limit = (index + 14).min(chars.len());
+            while cursor < limit {
+                if chars[cursor] == '\'' {
+                    return true;
+                }
+                cursor += 1;
+            }
+            false
+        }
+        Some(_) => chars.get(index + 2) == Some(&'\''),
+        None => false,
+    }
+}
+
 /// 把**字符串字面量的内容**换成空格（长度不变）。
 ///
 /// 用于「只看代码」的扫描：字符串里的 `fn require_permission` 不是定义。
@@ -432,7 +461,9 @@ fn blank_strings(source: &str) -> String {
             continue;
         }
         if ch == '\'' {
-            in_char = true;
+            if starts_char_literal(&chars, index) {
+                in_char = true;
+            }
             out.push('\'');
             index += 1;
             continue;
@@ -532,6 +563,39 @@ mod tests {
         let mut scan = AuthCallScan::default();
         scan_source(&stripped, Path::new("demo.rs"), &mut scan);
         assert!(scan.codes.is_empty());
+    }
+
+    /// 生命周期（`'a`）不是字符字面量：不能把后面的代码吞掉。
+    ///
+    /// 这是 REQ-010 暴露的真实回归：`permission.rs` 新增了带生命周期的
+    /// `PermissionRefresher` trait 后，`fn require_permission` 之前出现 `'a`，
+    /// 旧实现把它当字符字面量开始 → 后面整段被当成「字符内容」→
+    /// C-5 报「入口定义 0 处」。
+    #[test]
+    fn lifetimes_do_not_swallow_the_following_code() {
+        let source = "pub trait T { fn f<'a>(&'a self); }\n\
+                      pub fn require_permission(code: impl Into<String>) -> X { }";
+        let stripped = strip_comments(source);
+        assert!(
+            defines_auth_entry(&stripped),
+            "生命周期不得让入口定义消失：{stripped}"
+        );
+        assert!(
+            blank_strings(&stripped).contains("fn require_permission"),
+            "生命周期不得让后面的代码被当成字符串/字符内容"
+        );
+    }
+
+    /// 真正的字符字面量仍然要被当成字符（不误判成生命周期）。
+    #[test]
+    fn real_char_literals_are_still_handled() {
+        let source = "fn f() { let a = '\''; let b = 'x'; }\n\
+                      pub fn require_permission(code: impl Into<String>) -> X { }";
+        let stripped = strip_comments(source);
+        assert!(
+            defines_auth_entry(&stripped),
+            "字符字面量后面的入口定义必须仍能被扫到：{stripped}"
+        );
     }
 
     #[test]

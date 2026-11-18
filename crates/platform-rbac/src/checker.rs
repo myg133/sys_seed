@@ -20,12 +20,16 @@
 //! 缓存里没有该用户 → **判定不通过**（fail closed）。
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use platform_core::RequestContext;
 use platform_core::extension::expr::{CompiledCondition, EvalContext, compile};
-use platform_core::extension::permission::{DataScope, PermissionChecker, ScopeFilter};
+use platform_core::extension::permission::{
+    DataScope, PermissionChecker, PermissionRefresher, ScopeFilter,
+};
 
 use crate::scope::{CombinedScope, ScopeContribution, ScopePolicy, ScopeResolver, combine_scopes};
 use crate::service::RbacService;
@@ -306,6 +310,25 @@ fn fail_closed() -> ScopeFilter {
     ScopeFilter::OrgNodes {
         column: "org_node_id".to_string(),
         nodes: Vec::new(),
+    }
+}
+
+/// 平台能力接缝：让**自带认证中间件**的模块也能在鉴权前刷新判定缓存。
+///
+/// `ensure_fresh` 是异步的、`PermissionChecker` 的方法是同步的 ——
+/// 这个 impl 把异步刷新包成 `Pin<Box<dyn Future>>`，于是
+/// `Arc<dyn PermissionRefresher>` 与 `Arc<dyn PermissionChecker>` 可以用同一个
+/// `Arc<RbacChecker>` 装配。
+impl PermissionRefresher for RbacChecker {
+    fn ensure_fresh<'a>(
+        &'a self,
+        ctx: &'a RequestContext,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async move {
+            RbacChecker::ensure_fresh(self, ctx)
+                .await
+                .map_err(|error| error.to_string())
+        })
     }
 }
 
