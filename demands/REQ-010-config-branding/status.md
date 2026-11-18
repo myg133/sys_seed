@@ -1,9 +1,9 @@
 # 状态：REQ-010 配置、品牌与 Feature Flag
 
-- **状态**: 待验证
+- **状态**: 已完成
 - **更新者**: myg133-ba-1 (mcp:proc-83964)
-- **更新时间**: 2026-11-19 02:15
-- **分支**: `feature/REQ-010` @ `a4af6ee`（修复轮已闭合）
+- **更新时间**: 2026-11-19 03:10
+- **分支**: `develop` @ `a3fae66`（已合并）
 
 ## 状态历史
 
@@ -22,6 +22,11 @@
 | 2026-11-19 00:52 | 待验证 | 已退回 | ba | QA 结论 **FAIL**：HIGH 1（默认日志过滤吞 WARN）/ MEDIUM 1 / LOW 2 / INFO 6。集成 539/539 连跑 3 轮、前端确认 23→28（+5，无退化） |
 | 2026-11-19 01:57 | 已退回 | 进行中 | dev | 修复轮：`f0f0ed0` 根因修日志过滤器（抽到 `platform-core::log`，测试与生产同一函数）+ `a4af6ee` E2E 精确断言与越级写快照比对 |
 | 2026-11-19 02:15 | 进行中 | 待验证 | ba | 派 QA 修复复核（重点：默认部署 WARN 端到端、E2E 断言强度、快照比对、用例漂移） |
+| 2026-11-19 02:37 | 待验证 | 已退回 | ba | QA 复核 **PASS-WITH-RISK**：12.1/12.2/12.4 真修好，但 **12.3（快照）没真修好** —— 取点在被测写之后、SQL 漏 `updated_at` 而注释声称覆盖 |
+| 2026-11-19 02:52 | 已退回 | 进行中 | dev | 修复轮：`0d0a1ee` 取点提前 + 加 `updated_at`；`NOISY_TARGETS` 去掉空转项；新增 `log_filter_ignoring_env` 使测试不受 `RUST_LOG` 劫持 |
+| 2026-11-19 03:04 | 进行中 | 待验证 | ba | 派最终聚焦复核 |
+| 2026-11-19 03:04 | 待验证 | 已完成 | ba | 最终复核 **PASS-WITH-RISK**：三条全真修好（QA 自做变异，红在快照断言 `:359`，只有 `updated_at` 变）。又折出 4 处注释漂移，已修（`9849511`） |
+| 2026-11-19 03:08 | 已完成 | 已完成 | ba | 合并 `develop` @ `a3fae66`；post-merge 回归 **540/540**；worktree 与分支已回收 |
 
 ## rev 2 修掉的 7 条 BA 自己的设计错误（Dev 必读，别再按初版写）
 
@@ -66,10 +71,23 @@
 | 平台级表的先例：`platform_meta` / `platform_permission`（**无 tenant_id、无 RLS**） | `platform_config` 照此办理；但**写入必须靠表级权限挡住租户连接**（AC-S-062 第 2 步） |
 | `sha2` **已在依赖树里**（REQ-007 引入） | 确定性哈希不新增依赖 |
 
-## 下一步
+## 完成记录
 
-1. QA 按 rev 2 修订用例（进行中）
-2. 认领 REQ-010 → Dev 实现 → QA Pre-merge → 合并 → 复盘
+| 项 | 结果 |
+|---|---|
+| 合并 | `develop` @ `a3fae66`，`--no-ff` |
+| 规模 | 58 文件 / +7787 −628（主体）+ 4 个修复提交 |
+| 回归 | Rust **540/540**（28 个二进制，连跑 2 轮；post-merge 复跑 540/540）；前端 **28**（基线 23，+5 新增 branding）；E2E **2** |
+| 依赖 | `Cargo.lock` 294 → **295**（+1 是本地成员 `platform-config`）；**第三方 registry 284 → 284 不变** |
+| 契约 | `api-conventions` **v1 → v2**（C9 的 `source: default` / 作用域约束 / 类型校验 / jsonb / 独立端点 / flag 命名空间；C10 的灰度确定性） |
+| 规格 | 15 条 AC + 51 条用例 + **D45~D91**（47 条决策） |
+| QA 轮次 | 首轮 **FAIL**（HIGH 日志过滤）→ 修复 → 复核 PASS-WITH-RISK → 修复 → 最终复核 PASS-WITH-RISK（4 处注释漂移已修） |
+| 回收 | worktree 与分支已删除；三份 QA 报告已按需求归档到 `BA/demands/REQ-010-config-branding/` |
+| 遗留 | 见 [sprint-03-retro.md](../../sprint/sprint-03-retro.md) §5，**CI 真跑 / 分支保护需用户侧配置** |
+
+## 复盘
+
+[sprint-03-retro.md](../../sprint/sprint-03-retro.md)
 
 ## 阻塞项
 
