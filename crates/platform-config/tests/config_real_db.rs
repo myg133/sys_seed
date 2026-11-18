@@ -295,6 +295,9 @@ async fn scope_escalation_is_rejected_and_leaves_no_rows() {
         .await
         .expect("租户级写 pageSize 应成功");
 
+    // 越级写的「写前快照」—— 步骤 8 用它做比对（D84：快照比对优于行数断言）。
+    let before_snapshot = conflict_strategy_snapshot(&fx.admin_pool).await;
+
     // 4) tenant 作用域的键：空间级 → 400。
     let error = write_space(&fx, &ctx_space(TENANT_A, SPACE_S1), "pageSize", json!(50))
         .await
@@ -340,20 +343,43 @@ async fn scope_escalation_is_rejected_and_leaves_no_rows() {
     assert_eq!(platform.value, json!("local_wins"));
     assert_eq!(platform.source, ConfigSource::Platform);
 
-    // 8) 越级写没有留下任何行。
-    let tenant_rows: (i64,) = sqlx::query_as(
-        "SELECT count(*) FROM platform_tenant_config WHERE key = 'conflictStrategy'",
+    // 8) 越级写**没有改动任何既有行**。
+    //
+    // ⚠️ 这里曾经断言「行数为 0」—— 但夹具里本来就有
+    // `(tenant-a, space-sales-1, conflictStrategy='remote_wins')`，而用例尝试写的
+    // 也恰好是 `remote_wins`。于是**若越级写被错误放行并覆盖这一行，行数断言抓不到**
+    // （REQ-010 QA 判 LOW，D84）。
+    //
+    // 改成**快照比对**：对 `count` + `value` + `updated_at` 做写前/写后对比，全部必须不变。
+    // 这对「多了行」「改了值」「更新了时间戳」三种泄漏都敏感。
+    let after = conflict_strategy_snapshot(&fx.admin_pool).await;
+    assert_eq!(
+        after, before_snapshot,
+        "越级写改动了既有行（快照不一致）：before={before_snapshot:?} after={after:?}"
+    );
+}
+
+/// **租户级与空间级**两张表里 `conflictStrategy` 的快照：`(表, tenant, space, count, max(value))`。
+///
+/// 只看这两层，因为「越级写」的落点就是它们 —— 平台级表由步骤 7 的**正对照**故意改写，
+/// 把它纳入比对会与本用例自己的正对照冲突（这正是快照型断言要处理好的边界）。
+///
+/// `count` 抓「多了行」，`max(value)` 抓「改了值」—— 行数断言对后者无能为力。
+async fn conflict_strategy_snapshot(
+    pool: &sqlx::PgPool,
+) -> Vec<(String, String, Option<String>, i64, Option<String>)> {
+    sqlx::query_as(
+        "SELECT 'tenant' AS tbl, tenant_id, NULL::text AS space_id, \
+                count(*)::bigint, max(value::text) \
+           FROM platform_tenant_config WHERE key = 'conflictStrategy' GROUP BY tenant_id \
+         UNION ALL \
+         SELECT 'space', tenant_id, space_id, count(*)::bigint, max(value::text) \
+           FROM platform_space_config WHERE key = 'conflictStrategy' GROUP BY tenant_id, space_id \
+         ORDER BY 1, 2, 3",
     )
-    .fetch_one(&fx.admin_pool)
+    .fetch_all(pool)
     .await
-    .unwrap();
-    let space_rows: (i64,) =
-        sqlx::query_as("SELECT count(*) FROM platform_space_config WHERE key = 'conflictStrategy' AND tenant_id <> 'tenant-a'")
-            .fetch_one(&fx.admin_pool)
-            .await
-            .unwrap();
-    assert_eq!(tenant_rows.0, 0);
-    assert_eq!(space_rows.0, 0);
+    .unwrap()
 }
 
 #[tokio::test]
