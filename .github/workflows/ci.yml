@@ -145,8 +145,22 @@ jobs:
         run: cargo test -p platform-contracts -- --test-threads=2
       - name: 业务模块契约测试
         run: cargo test -p sandbox -- --test-threads=2
-      - name: 校验 compose 文件
+      - name: 校验 compose 文件（开发）
         run: docker compose -f compose.yaml config --quiet
+      # 私有化 compose 用 env_file 注入配置，docker compose 找不到该文件会直接报错，
+      # 因此校验前先放一份样例（.env 不入库，只在 CI 里临时生成）
+      - name: 准备私有化部署的 .env（校验用）
+        run: cp .env.example deploy/.env
+      - name: 校验 compose 文件（私有化）
+        run: docker compose -f deploy/compose.prod.yaml config --quiet
+      - name: 校验 Helm Chart
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+      - name: Helm lint 与模板渲染
+        run: |
+          helm lint deploy/helm/base-platform
+          helm template base-platform deploy/helm/base-platform > /dev/null
 
   # 6. E2E（Playwright）：前端链路不依赖 Rust 后端常驻
   e2e:

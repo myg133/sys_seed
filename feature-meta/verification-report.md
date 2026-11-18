@@ -15,7 +15,7 @@
 
 | 项 | 结果 |
 |----|------|
-| 改动 | **44 文件 / +4816 -39 行**（基线 `31ca87a` → 本轮；不含本报告与追溯矩阵） |
+| 改动 | **48 文件 / +5111 -574 行**（基线 `31ca87a` → 本轮；删除行主要来自 REQ-004 的 `feature-meta/*.md` 被本轮文档替换） |
 | 新增第三方依赖 | **`sqlx` 0.8**（`runtime-tokio` + `postgres` + `migrate`，**关闭** `macros` / `json` / TLS 特性）；锁文件 107 → 234 个 crate，其中 `sqlx-macros` / `sqlx-mysql` / `sqlx-sqlite` 只进锁文件**不参与编译**（`cargo tree` 实测 0 处引用） |
 | 新增 crate | `crates/platform-server`（交付基线服务：`base` 二进制）——**未改动** `platform-core` / `platform-contracts` |
 | Rust 测试 | **132/132 通过**（原有 99 个全绿，只增不减；新增 33 个：`platform-server` 31 + `xtask` 2） |
