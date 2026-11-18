@@ -2,7 +2,7 @@
 
 - **需求**: REQ-009「RBAC 权限与数据范围」
 - **来源**: [acceptance.md](../acceptance.md) §AC-S-033 ~ AC-S-037、[design-summary.md](../design-summary.md) §2 ~ §3、[api-conventions v1 C1/C4/C5/C6](../../../contracts/api-conventions/v1.md)
-- **用例数**: 14（TC-009-001 ~ TC-009-014）
+- **用例数**: 14（TC-009-001 ~ TC-009-015）
 - **公共夹具**: 见 [index.md](index.md) §3 测试夹具
 
 ## A.0 本域约定
@@ -24,7 +24,10 @@
   | `GET /api/rbac/permissions` | 读权限点注册表（平台级） |
 
 - **错误码**：`NOT_FOUND`(404) / `CONFLICT`(409) / `INSUFFICIENT_PERMISSION`(403) / `UNAUTHENTICATED`(401)；错误体为 RFC 9457 `application/problem+json`。
-- **固定夹具**：租户 `tenant-a` / `tenant-b`；内置角色 `platform-admin`（`builtin=true` / `ALL`）与 `platform-user`（`builtin=true` / `SELF`）—— **按租户物化**（租户初始化时在该租户下各建一行）；测试角色 `rbac-owner` / `rbac-owner-below` / `rbac-self` / `rbac-all` / `rbac-custom` / `rbac-multi-a` / `rbac-multi-b` / `rbac-multi-c` / `rbac-wildcard`。
+- **管理接口的自举防护**（AC-S-034 ★ 条）：`/api/rbac/*` 的**写**接口要求管理权限点 `rbac:role:write`，**读**接口要求 `rbac:role:read`；普通用户一律 403。
+  → 因此**除专门验证自举防护的 TC-009-005 外**，本域所有调用 `/api/rbac/*` 的账号（`u-1001` / 管理员）都**默认已额外绑定角色 `rbac-manager`**（含 `rbac:role:read` + `rbac:role:write`）；专门验证 403 的账号是 `u-1013`（只有内置角色 `platform-user`）。
+  → `rbac:role:read` / `rbac:role:write` 是**平台级**权限点，来源 manifest 为 `crates/platform-rbac/manifest.json`（新建的 platform crate，照 `crates/platform-org/manifest.json` 的先例）；**读接口的权限点编码是本用例集按「如 `rbac:role:write`」推导的**（已登记待确认）。
+- **固定夹具**：租户 `tenant-a` / `tenant-b`；内置角色 `platform-admin`（`builtin=true` / `ALL`）与 `platform-user`（`builtin=true` / `SELF`）—— **按租户物化**（租户初始化时在该租户下各建一行）；测试角色 `rbac-manager` / `rbac-owner` / `rbac-owner-below` / `rbac-self` / `rbac-all` / `rbac-custom` / `rbac-multi-a` / `rbac-multi-b` / `rbac-multi-c` / `rbac-wildcard`。
 - **平台表与列**（design-summary §3，BA 已裁定）：
 
   | 表 | 关键列 |
@@ -124,7 +127,31 @@
 - **自动化**: 可自动化
 - **设计方法**: 正常路径 + 数据落地断言（含 RLS **行为**验证，不止于「policy 存在」）
 
-### TC-009-005: 跨租户角色 id 一律 404，不泄露存在性
+### TC-009-005: 管理接口自身受保护（自举防护）：普通用户调 `/api/rbac/*` 一律 403
+- **关联 AC**: AC-S-034
+- **前置条件**:
+  - **执行位置**: 真实库（`base_test`）+ 真机 HTTP（`/api/rbac/*` 由 `platform-server` 挂载）。
+  - **用户 M** = `u-1013`（`plain@example.com`）：**普通用户**，只绑定内置角色 `platform-user`（`data_scope = SELF`），**没有任何** `rbac:role:*` 管理权限点。
+  - **用户 A** = `u-1014`（`rbacadmin@example.com`）：绑定角色 `rbac-manager`，含 `rbac:role:read` 与 `rbac:role:write`（对照组）。
+  - 平台已实现「`/api/rbac/*` 的写接口要求 `rbac:role:write`、读接口要求 `rbac:role:read`」这一自举防护。
+- **测试步骤**:
+  1. 以**用户 M** 调 `POST /api/rbac/roles`，body `{"code":"m-made","name":"M 建的","dataScope":"ALL"}`。
+  2. 以**用户 M** 调 `POST /api/rbac/roles/{role-t2-1 的同租户角色 id}/permissions`，body `{"permissionCode":"sandbox:scope-item:read"}`（授权）。
+  3. 以**用户 M** 调 `POST /api/rbac/users/u-1001/roles`，body `{"roleId":"<rbac-manager id>"}`（**给自己授权管理角色**）。
+  4. 以**用户 M** 调 `GET /api/rbac/roles`（读接口）。
+  5. 以**用户 A** 重复步骤 1 ~ 4（对照组）。
+  6. 用管理员连接查 `platform_role` 中是否出现 `m-made`，以及 `platform_user_role` 中是否出现 `u-1013 → rbac-manager` 的绑定。
+- **预期结果**:
+  1~3. 三个**写**调用全部返回 HTTP **403** + `code = INSUFFICIENT_PERMISSION`（**不得** 2xx）；响应体 `detail` 可含所需权限点编码，**不得**含租户或角色明细。
+  4. **读**接口同样返回 HTTP **403** + `code = INSUFFICIENT_PERMISSION`（读角色列表也要求管理权限点）。
+  5. 对照组：以用户 A 调同样的三个写接口返回 HTTP **201 / 204**，读接口返回 HTTP **200** 且只含租户内的角色 —— 证明 403 不是因为接口坏了或权限点不存在。
+  6. `platform_role` 中**没有** `m-made` 行；`platform_user_role` 中**没有** `u-1013` 绑定 `rbac-manager` 的行 —— 被拒的写入**不得部分生效**（否则任何登录用户都能给自己提权 → 权限系统被架空）。
+- **类型**: 安全
+- **优先级**: P0
+- **自动化**: 可自动化
+- **设计方法**: 攻击面枚举（自举提权）+ 对照组（管理用户可正常操作）+ 落地断言（被拒写入不落库）
+
+### TC-009-006: 跨租户角色 id 一律 404，不泄露存在性
 - **关联 AC**: AC-S-034
 - **前置条件**:
   - `tenant-b` 下存在角色 `rbac-t2-only`（id 记为 `role-t2-1`，`dataScope=SELF`）。
@@ -144,7 +171,7 @@
 - **自动化**: 可自动化
 - **设计方法**: 攻击面枚举（跨租户 id）+ 存在性泄露对照（存在 vs 不存在）
 
-### TC-009-006: 角色继承展开为并集（逐个列出权限点编码）
+### TC-009-007: 角色继承展开为并集（逐个列出权限点编码）
 - **关联 AC**: AC-S-035
 - **前置条件**:
   - 角色 `rbac-inh-a`（父）、`rbac-inh-b`（子）、`rbac-inh-c`（孙）已建，授权互不相同：`rbac-inh-a` → `sandbox:scope-item:read`；`rbac-inh-b` → `sandbox:scope-item:export`；`rbac-inh-c` → `sandbox:scope-item:approve`。
@@ -162,7 +189,7 @@
 - **自动化**: 可自动化
 - **设计方法**: 正常路径 + 逐元素集合相等断言（明确禁止只比数量）
 
-### TC-009-007: 角色继承成环被拒，且错误信息指出构成环的两个角色
+### TC-009-008: 角色继承成环被拒，且错误信息指出构成环的两个角色
 - **关联 AC**: AC-S-035
 - **前置条件**:
   - 已存在继承链 `rbac-cycle-a` → 父 `rbac-cycle-b` → 父 `rbac-cycle-a` **尚未**建立（当前 `rbac-cycle-a` 无父、`rbac-cycle-b` 无父）。
@@ -182,7 +209,7 @@
 - **自动化**: 可自动化
 - **设计方法**: 异常路径 + 攻击面枚举（成环 → 无限递归 / 自我提权）
 
-### TC-009-008: 自继承与三节点环同样被拒
+### TC-009-009: 自继承与三节点环同样被拒
 - **关联 AC**: AC-S-035
 - **前置条件**:
   - 角色 `rbac-self-inherit`（无父）、`rbac-tri-a` / `rbac-tri-b` / `rbac-tri-c` 已建，继承关系为空。
@@ -199,7 +226,7 @@
 - **自动化**: 可自动化
 - **设计方法**: 边界值（环长 1 / 环长 3）+ 等价类（环长不影响判定）
 
-### TC-009-009: `sandbox:*` 匹配 `sandbox:` 下全部权限点，且不匹配 `org:` 的
+### TC-009-010: `sandbox:*` 匹配 `sandbox:` 下全部权限点，且不匹配 `org:` 的
 - **关联 AC**: AC-S-036
 - **前置条件**:
   - 注册表里已登记 `sandbox:` 前缀的权限点（`sandbox:demo:read`、`sandbox:demo:write`、`sandbox:scope-item:read`、`sandbox:scope-item:approve`、`sandbox:scope-item:export` —— 具体条数**以注册表实际内容为准，不写死**）与 `org:` 前缀的 9 个权限点（`crates/platform-org/manifest.json`）。
@@ -217,10 +244,10 @@
 - **自动化**: 可自动化
 - **设计方法**: 等价类（模块内通配）+ 集合相等断言（逐个比对，不抽样、不写死数字）
 
-### TC-009-010: `sandbox:demo:*` 只匹配 `sandbox:demo:` 下的权限点
+### TC-009-011: `sandbox:demo:*` 只匹配 `sandbox:demo:` 下的权限点
 - **关联 AC**: AC-S-036
 - **前置条件**:
-  - 同 TC-009-009 的注册表夹具。
+  - 同 TC-009-010 的注册表夹具。
   - 测试角色 `rbac-wildcard-res` 已建，**无授权**。
 - **测试步骤**:
   1. 调 `POST /api/rbac/roles/{rbac-wildcard-res id}/permissions`，body `{"permissionCode":"sandbox:demo:*"}`。
@@ -235,10 +262,10 @@
 - **自动化**: 可自动化
 - **设计方法**: 边界值（resource 维度边界）+ 集合相等断言
 
-### TC-009-011: `*:*` 与跨模块通配 `*:demo:read` 写入被拒
+### TC-009-012: `*:*` 与跨模块通配 `*:demo:read` 写入被拒
 - **关联 AC**: AC-S-036
 - **前置条件**:
-  - 测试角色 `rbac-wildcard-bad` 已建，**无授权**；注册表夹具同 TC-009-009。
+  - 测试角色 `rbac-wildcard-bad` 已建，**无授权**；注册表夹具同 TC-009-010。
 - **测试步骤**:
   1. 调 `POST /api/rbac/roles/{rbac-wildcard-bad id}/permissions`，body `{"permissionCode":"*:*"}`。
   2. 调 `POST /api/rbac/roles/{rbac-wildcard-bad id}/permissions`，body `{"permissionCode":"*:demo:read"}`。
@@ -254,7 +281,7 @@
 - **自动化**: 可自动化
 - **设计方法**: 攻击面枚举（全通过 / 跨模块提权）+ 负向用例（失败写入不得部分生效）
 
-### TC-009-012: 内置角色 `platform-admin` 不可删除、不可降权、不可移除权限点
+### TC-009-013: 内置角色 `platform-admin` 不可删除、不可降权、不可移除权限点
 - **关联 AC**: AC-S-037
 - **前置条件**:
   - 租户 `tenant-a` 初始化时已物化内置角色 `platform-admin`（`builtin = true`、`data_scope = ALL`）与 `platform-user`（`builtin = true`、`data_scope = SELF`）（**按租户物化**：租户 B 下另有一份 `platform-admin`）。
@@ -273,7 +300,7 @@
 - **自动化**: 可自动化
 - **设计方法**: 攻击面枚举（删除 / 降权 / 撤权 / 批量删）+ 负向用例
 
-### TC-009-013: `platform-admin` 的权限集合 = 注册表当前全部权限点（逐个比对，动态）
+### TC-009-014: `platform-admin` 的权限集合 = 注册表当前全部权限点（逐个比对，动态）
 - **关联 AC**: AC-S-037
 - **前置条件**:
   - 租户 `tenant-a` 已存在内置角色 `platform-admin`（`builtin = true`、`data_scope = ALL`）。
@@ -296,7 +323,7 @@
 - **自动化**: 可自动化
 - **设计方法**: 集合相等断言（全量逐个比对，**明确禁止**抽样与写死基数）+ 动态性验证（注册表变更后自动跟随）
 
-### TC-009-014: `platform-user` 不可删除且数据范围固定为 SELF
+### TC-009-015: `platform-user` 不可删除且数据范围固定为 SELF
 - **关联 AC**: AC-S-037
 - **前置条件**:
   - 租户 `tenant-a` 已物化内置角色 `platform-user`（`builtin = true`、`data_scope = SELF`）。
