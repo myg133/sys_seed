@@ -23,6 +23,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use clap::{Parser, Subcommand};
+use platform_core::log_filter;
 use platform_core::RequestContext;
 use platform_core::extension::expr::CompiledCondition;
 use platform_core::extension::permission::{
@@ -37,7 +38,6 @@ use platform_server::{db, health, isolation, migrate, policies, probe, static_fi
 use serde::Serialize;
 use sqlx::PgPool;
 use sqlx::migrate::Migrator;
-use tracing_subscriber::EnvFilter;
 
 /// 配置校验失败的退出码（与运行期错误区分开）。
 const EXIT_CONFIG: u8 = 2;
@@ -212,29 +212,19 @@ fn load_config() -> Result<DeployConfig, Failure> {
     DeployConfig::from_env().map_err(Failure::from)
 }
 
-/// 日志事件的 target：**bin crate `base`** 与 lib crate `platform_server`。
+/// 日志过滤器：**复用 `platform-core` 的那一份**（`platform_core::log_filter`）。
 ///
-/// 本服务的日志事件都写在 `main.rs` 里 → tracing 的 target 是 **bin crate 名 `base`**，
-/// 不是 lib crate 名。过滤器只写 `platform_server=…` 时**一条都匹配不上**，
-/// 日志会被静默丢弃（历史 bug：`BASE_LOG_LEVEL` 形同虚设，默认配置下一行日志都不输出）。
-/// 两个 target 都要写进过滤器。
-const LOG_TARGETS: [&str; 2] = ["base", "platform_server"];
-
-/// 生成日志过滤器：`RUST_LOG` 优先，否则按 `BASE_LOG_LEVEL` 生成。
+/// # 为什么不再在这里定义
 ///
-/// `BASE_LOG_LEVEL` 的值会套到**每一个** target 上（见 [`LOG_TARGETS`]），
-/// 保证「级别开关」与「事件所在 target」两件事都覆盖到。
-fn log_filter(level: &str) -> EnvFilter {
-    EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        let mut directives = LOG_TARGETS
-            .iter()
-            .map(|target| format!("{target}={level}"))
-            .collect::<Vec<_>>();
-        directives.push("tower_http=info".to_string());
-        EnvFilter::new(directives.join(","))
-    })
-}
-
+/// 曾经它是本地实现、只给 `["base", "platform_server"]` 生成 directive ——
+/// 于是 `platform_config` 的 WARN 在默认部署下被**静默丢弃**
+/// （REQ-010 QA 判 HIGH）。更根本的问题是：**测试够不着这个函数**，
+/// 只能用自定义 `EnvFilter` 近似 → 测过的东西与线上跑的不是同一份代码 → 假绿。
+///
+/// 抽到 `platform-core` 之后，测试与生产调同一个函数，「测试放行但生产吞掉」结构上不可能。
+/// 形态是「全局默认级别 + 噪音库降级」，**新增 crate 不需要改清单**。
+/// 实现与守护测试见 `crates/platform-core/src/log.rs`。
+///
 /// 初始化日志。
 fn init_tracing(level: &str) {
     tracing_subscriber::fmt()
@@ -711,7 +701,7 @@ mod tests {
     }
 
     /// 用给定过滤器捕获 `emit` 产生的日志，返回格式化后的文本。
-    fn capture_logs(filter: EnvFilter, emit: impl FnOnce()) -> String {
+    fn capture_logs(filter: tracing_subscriber::EnvFilter, emit: impl FnOnce()) -> String {
         let buf = BufWriter::default();
         let subscriber = tracing_subscriber::fmt()
             .with_env_filter(filter)
@@ -768,49 +758,50 @@ mod tests {
         assert!(Cli::try_parse_from(["base", "migrate", "down"]).is_err());
     }
 
+    /// **守护测试**：`platform_config` 的 WARN 经过**生产的**过滤器后仍会输出。
+    ///
+    /// REQ-010 QA 抓到的 HIGH：默认部署（`BASE_LOG_LEVEL=info`、无 `RUST_LOG`）下
+    /// `platform_config::*` 的 WARN 被静默丢弃 —— 旧过滤器只给
+    /// `["base", "platform_server"]` 生成 directive。
+    ///
+    /// ⚠️ 这里调用的是 `init_tracing` 用的**同一个** `log_filter`（`platform_core::log_filter`），
+    /// 不是自定义 `EnvFilter` —— 本 bug 正是靠「测试自己放行」藏住的。
     #[test]
-    fn log_filter_captures_events_from_the_bin_target() {
-        // 本服务的日志事件写在 main.rs 里 → target 是 bin crate 名 `base`。
-        // 过滤器只写 `platform_server=…` 时这条会被丢掉（`BASE_LOG_LEVEL` 形同虚设）。
+    fn log_filter_captures_platform_config_warn() {
         let out = capture_logs(log_filter("info"), || {
-            tracing::warn!(target: "base", code = "MIGRATIONS_PENDING", "运维冒烟：readiness 未通过");
+            // 与 `platform-config/src/resolver.rs:280` 同一条事件（同 target、同文案）。
+            tracing::warn!(
+                target: "platform_config::resolver",
+                flag = "newinvoice",
+                "the feature flag is not registered; returning disabled (fail closed)"
+            );
         });
         assert!(
-            out.contains("运维冒烟：readiness 未通过"),
-            "过滤器没命中 bin target 的日志：{out}"
+            out.contains("the feature flag is not registered"),
+            "生产过滤器吞掉了 platform_config 的 WARN（默认部署会静默）：{out}"
         );
     }
 
+    /// 根因判据：**将来新增的 crate 不需要改任何清单**也能出日志。
+    ///
+    /// 旧实现（逐个列 target）在这条上必然失败 —— 这正是本 bug 的形态。
     #[test]
-    fn log_filter_captures_events_without_an_explicit_target() {
-        // 不写 `target:` 时 tracing 用模块路径（`base::…`）当 target —— 也要能命中。
+    fn log_filter_covers_a_crate_that_nobody_listed() {
         let out = capture_logs(log_filter("info"), || {
-            tracing::info!("底座服务已启动");
+            tracing::warn!(target: "some_future_crate::module", "未来某个 crate 的日志");
         });
         assert!(
-            out.contains("底座服务已启动"),
-            "过滤器没命中默认 target 的日志：{out}"
+            out.contains("未来某个 crate 的日志"),
+            "全局默认级别没覆盖未列出的 crate：{out}"
         );
     }
 
-    #[test]
-    fn log_filter_captures_events_from_the_lib_target() {
-        // lib crate `platform_server` 侧的日志同样要能被命中。
-        let out = capture_logs(log_filter("info"), || {
-            tracing::warn!(target: "platform_server", "lib 侧日志冒烟");
-        });
-        assert!(
-            out.contains("lib 侧日志冒烟"),
-            "过滤器没命中 lib target 的日志：{out}"
-        );
-    }
-
+    /// `BASE_LOG_LEVEL=error` 时 info 要被挡掉，error 要留下（级别开关仍然生效）。
     #[test]
     fn log_filter_respects_the_configured_level() {
-        // `BASE_LOG_LEVEL=error` 时，info 事件要被挡掉，error 事件要留下。
         let out = capture_logs(log_filter("error"), || {
-            tracing::info!(target: "base", "不该出现的 info 日志");
-            tracing::error!(target: "base", "该出现的 error 日志");
+            tracing::info!(target: "platform_config::resolver", "不该出现的 info 日志");
+            tracing::error!(target: "platform_config::resolver", "该出现的 error 日志");
         });
         assert!(!out.contains("不该出现的 info 日志"), "级别没生效：{out}");
         assert!(

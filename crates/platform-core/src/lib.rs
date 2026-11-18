@@ -7,6 +7,7 @@ pub mod config;
 pub mod context;
 pub mod error;
 pub mod extension;
+pub mod log;
 pub mod problem;
 
 pub use config::{AppConfig, ConfigEntry, ConfigKey, ConfigScope, InMemoryConfigResolver};
@@ -17,6 +18,7 @@ pub use extension::{
     NotificationSender, PermissionChecker, PermissionRefresher, PlatformModule, Repository,
     ResolvedConfig, ScopeFilter, WorkflowHandler,
 };
+pub use log::{NOISY_TARGETS, log_filter};
 pub use problem::ProblemDetails;
 
 /// 平台核心版本号，与 `Cargo.toml` 中的 `version` 保持一致。

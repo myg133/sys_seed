@@ -813,9 +813,17 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
     }
 }
 
+/// 用**生产的**过滤器建 subscriber。
+///
+/// ⚠️ 这里曾经写的是 `EnvFilter::new("platform_config=warn")` —— 显式放行了
+/// `platform_config` 的 target。结果：**生产环境的默认配置把那些 WARN 全吞掉**，
+/// 而测试一直绿（REQ-010 QA 判 HIGH）。
+///
+/// 现在走 `platform_core::log_filter`（与 `platform-server` 生产启动**同一个函数**），
+/// 「测试放行但生产吞掉」在结构上不可能。
 fn subscriber(buffer: &LogBuffer) -> impl tracing::Subscriber + Send + Sync + 'static {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::new("platform_config=warn"))
+        .with_env_filter(platform_core::log_filter("info"))
         .with_ansi(false)
         .with_writer(buffer.clone())
         .finish()
