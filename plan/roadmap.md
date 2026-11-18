@@ -24,7 +24,7 @@
 | REQ-004 | AI 引导体系与能力索引 | P0 | 1 | REQ-002, REQ-003 | AC-035~038 | AC-S-004 | **已完成**（Sprint 1） |
 | REQ-005 | 交付基线与发布 | P1 | 1 | REQ-002 | — | AC-S-005/006 | **已完成**（Sprint 1） |
 | REQ-006 | 多租户与隔离 | P0 | 2 | REQ-002 | AC-009/010 | AC-S-007/008 | **已完成**（Sprint 2） |
-| REQ-007 | 认证与账号体系 | P0 | 2 | REQ-002, REQ-006 | AC-003/004/007/008 | AC-S-009/010 | 草稿 |
+| REQ-007 | 认证与账号体系 | P0 | 2 | REQ-002, REQ-006 | AC-003/004/007/008 | AC-S-009/010 | **已完成**（Sprint 2） |
 | REQ-008 | 用户与组织架构 | P0 | 2 | REQ-002, REQ-007 | AC-011/012 | AC-S-011/012 | 草稿 |
 | REQ-009 | RBAC 权限与数据范围 | P0 | 3 | REQ-006, REQ-008 | AC-001/002 | AC-S-013/014 | 草稿 |
 | REQ-010 | 配置、品牌与 Feature Flag | P1 | 3 | REQ-006 | AC-013/014/015 | AC-S-015 | **已完成**（Sprint 2） |
@@ -146,7 +146,7 @@ REQ-002 → REQ-005 (并行)                                          ↓
 | ~~R12~~ | ~~超级用户绕过 RLS —— 租户隔离 fail open~~。开发库的 `base` 是超级用户，超级用户**绕过 RLS**，所以当前环境里 RLS **实际不生效**，只有应用层的租户过滤在挡 | **高** | REQ-006 已加 `deploy/seed/02-app-role.sql`、`require_isolation` 拒绝、`tenant-policies` 接入 compose+Helm。**另发现**：app 容器拿到整包 `.env`/Secret 仍能读到超管串 → 已改为逐个列变量。**✅ REQ-006 已解决**：部署侧 7 处全部切到普通角色；超管启动 → 退出码 3 拒绝；prod 绕过开关 → 退出码 2 |
 | **R13** | 策略重应用曾有「全部拒绝」窗口（`DROP POLICY` + `CREATE POLICY` 分两条语句 → 中间表上没有 policy → 并发读表现为「表是空的」假象，10 次并发跑 3 次偶发失败） | 中 | REQ-006 已改为**在一个事务里应用**，复测 10/10 全绿。但**生产重新应用策略时仍有短暂抖动** → 要么写进 RUNBOOK，要么换更安全的替换方式（先建后删 / `ALTER POLICY`） |
 | **R14** | **`compose.yaml` 的 seed 绑定挂载会随 worktree 回收而失效** —— podman 在创建容器时把 `./deploy/seed` 解析成绝对路径记进容器元数据；若当初从**后来被回收的 feature worktree** 起 compose，目录一删容器就再也起不来（`crun: cannot stat .../deploy/seed`） | 中 | **预防：永远从 `code/`（常驻 develop worktree）起 compose**，不要从 feature worktree 起。已写进 dev-guide §8.5。根治方案（待定）：把 seed 挂载换成 init 容器或命名卷，或在 compose 里显式声明只允许从 `code/` 启动 |
-| **R15** | `ACCOUNT_LOCKED` / `ACCOUNT_DISABLED` 与「账号不存在 → INVALID_CREDENTIALS」**错误码可区分** → 攻击者发够 5 次错密码即可试出账号存在性 | 中（待 QA 定级） | REQ-007 QA 正在判定严重度与改法。既要不泄露账号存在性，又要让被锁用户知道被锁 —— 这两个要求有张力 |
+| ~~R15~~ | ~~`ACCOUNT_LOCKED` 账号枚举面~~ | ✅ **已闭环**：锁定判定挪到**密码校验之后** → 攻击者只得 `INVALID_CREDENTIALS`，**知道密码**的被锁用户仍得 `ACCOUNT_LOCKED`（两约束兼得）。三路径耗时比值 75.3× → **1.126** |
 
 ## 状态流转约定
 
