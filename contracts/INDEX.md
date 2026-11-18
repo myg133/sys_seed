@@ -7,19 +7,25 @@
 
 | 契约 | owner | 当前版本 | status | consumers | 说明 |
 |------|-------|----------|--------|-----------|------|
-| [api-conventions](api-conventions/CURRENT) | myg133-ba-1 | v1 | ratified | REQ-002 ~ REQ-020 | 跨模块共享的接口约定：API 分组、路径形式、上下文请求头、权限点映射、越权码、错误体、分页、幂等、配置键、审计字段、命名规范 |
+| [api-conventions](api-conventions/CURRENT) | myg133-ba-1 | **v2** | ratified | REQ-002 ~ REQ-021 | 跨模块共享的接口约定：API 分组、路径形式、上下文请求头、权限点映射、越权码、错误体、分页、幂等、配置键、审计字段、命名规范 |
 | [extension-points](extension-points/CURRENT) | myg133-ba-1 | **v2** | ratified | REQ-003 ~ REQ-020 | **业务模块与平台之间的接缝**：5 个扩展点 trait 签名、编译期注册、契约检查 C-1~C-5、manifest 结构。含 **dyn 兼容性限制**（RPITIT 形态，不可用于 trait object） |
 
 ### 版本沿革
 
 | 契约 | 版本 | 状态 | 说明 |
 |------|------|------|------|
+| api-conventions | v1 | **deprecated**（保留一个 Sprint） | 首版 13 条约定。C9 / C10 有四处未定死（`source` 缺 `default`、作用域语义含糊、值类型校验未定、灰度确定性未定） |
+| api-conventions | **v2** | ratified（当前） | C9 新增 `source: default` / 作用域约束 / 值类型校验 / `jsonb` 存储；C10 新增灰度确定性、无身份 fail closed、未声明 flag 不 404。**C1~C8、C11~C13 一字未改** |
 | extension-points | v1 | **deprecated**（保留一个 Sprint） | 5 个 trait + C-1~C-4。**已知缺口**：C-2 只验权限点声明完整性，不验服务端是否真的执行鉴权 |
 | extension-points | **v2** | ratified（当前） | 新增 **C-5：已登记权限点必须有鉴权调用点**（关闭 v1 缺口）；manifest 新增可选 `permissions[].condition`。C-1~C-4 与 5 个 trait 签名**不变** |
 
-> ⚠️ **v2 对消费方是破坏性变更**：新增的 C-5 是**失败级**检查。
+> ⚠️ **extension-points v2 对消费方是破坏性变更**：新增的 C-5 是**失败级**检查。
 > `modules/sandbox` 在 v1 下 C-2 全绿但从不鉴权，v2 下会失败 —— 这是预期效果（REQ-009 内已修）。
 > 消费方唯一要做的事：**确保每个已登记权限点都有鉴权调用点**。
+>
+> ⚠️ **api-conventions v2 的 `source` 新增 `default` 取值**。若客户端对 `source` 做了**穷举**
+> （TS 的 `switch` + `never` 兜底、Rust 的 `match` 无 `_`），会编译失败。
+> 消费方要做的事：把 `source` 当**开放枚举**处理，未知取值**原样透传或降级，不得报错**。
 
 ## 消费方 pin 要求
 
