@@ -14,17 +14,17 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use axum::extract::State;
-use axum::http::{header, StatusCode, Uri};
+use axum::http::{StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use clap::{Parser, Subcommand};
 use platform_core::RequestContext;
 use platform_server::config::{ConfigError, DeployConfig, Environment};
-use platform_server::{db, health, migrate, static_files};
+use platform_server::{db, health, migrate, probe, static_files};
 use serde::Serialize;
-use sqlx::migrate::Migrator;
 use sqlx::PgPool;
+use sqlx::migrate::Migrator;
 use tracing_subscriber::EnvFilter;
 
 /// 配置校验失败的退出码（与运行期错误区分开）。
@@ -53,6 +53,12 @@ enum Command {
     Migrate {
         #[command(subcommand)]
         action: MigrateAction,
+    },
+    /// 探针：检查本机健康端点（镜像 HEALTHCHECK 用）。
+    Healthcheck {
+        /// 要检查的地址。
+        #[arg(long, default_value = "http://127.0.0.1:8080/health/ready")]
+        url: String,
     },
 }
 
@@ -100,7 +106,9 @@ async fn main() -> ExitCode {
         Err(Failure::Config(err)) => {
             eprintln!("✗ 配置校验失败，进程退出（fail-fast）：");
             eprintln!("{err}");
-            eprintln!("提示：必填项见 deploy/RUNBOOK.md 与 .env.example；生产用 K8s Secret / compose .env 注入。");
+            eprintln!(
+                "提示：必填项见 deploy/RUNBOOK.md 与 .env.example；生产用 K8s Secret / compose .env 注入。"
+            );
             ExitCode::from(EXIT_CONFIG)
         }
         Err(Failure::Runtime(err)) => {
@@ -141,6 +149,22 @@ async fn run(cli: Cli) -> Result<(), Failure> {
     match cli.command.unwrap_or(Command::Serve) {
         Command::Serve => serve().await,
         Command::Migrate { action } => run_migrate(action).await,
+        Command::Healthcheck { url } => run_healthcheck(&url).await,
+    }
+}
+
+/// 执行健康探针：状态码 200 算通过。
+async fn run_healthcheck(url: &str) -> Result<(), Failure> {
+    match probe::get_status(url).await {
+        Ok(200) => {
+            println!("✓ {url} → 200");
+            Ok(())
+        }
+        Ok(status) => {
+            println!("✗ {url} → {status}");
+            Err(Failure::Runtime(format!("探针 {url} 返回 {status}")))
+        }
+        Err(err) => Err(Failure::Runtime(format!("探针 {url} 失败：{err}"))),
     }
 }
 
@@ -268,6 +292,12 @@ async fn ready(State(state): State<Arc<AppState>>) -> Response {
 
     let code = readiness.error_code.unwrap_or(health::CODE_DB_UNAVAILABLE);
     let detail = readiness.detail.clone().unwrap_or_default();
+    tracing::warn!(
+        code = code,
+        detail = %detail,
+        pending = ?readiness.pending,
+        "readiness 未通过：数据库不可达或迁移未应用"
+    );
     let problem = ProblemDetails {
         kind: "https://errors.base.example/service-not-ready".to_string(),
         title: "服务未就绪".to_string(),
@@ -324,6 +354,17 @@ mod tests {
             panic!("应当解析为 migrate down");
         };
         assert_eq!(target, 0);
+    }
+
+    #[test]
+    fn healthcheck_url_can_be_overridden() {
+        let cli = Cli::parse_from([
+            "base",
+            "healthcheck",
+            "--url",
+            "http://127.0.0.1:9/health/live",
+        ]);
+        assert!(matches!(cli.command, Some(Command::Healthcheck { .. })));
     }
 
     #[test]

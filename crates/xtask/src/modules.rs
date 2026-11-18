@@ -63,7 +63,7 @@ impl ModuleStatus {
             problems.push(format!("缺少目录 {dir}/"));
         }
         for dir in &self.empty_dirs {
-            problems.push(format!("目录 {dir}/ 为空"));
+            problems.push(empty_dir_problem(dir));
         }
         if let Some(reason) = &self.invalid_manifest {
             problems.push(format!("manifest.json 不是合法 JSON：{reason}"));
@@ -74,6 +74,20 @@ impl ModuleStatus {
         }
         problems
     }
+}
+
+/// 目录为空的说明。
+///
+/// `migrations/` 单列一条：本期底座还没有业务 DB 层（数据访问层待 REQ-006/007），
+/// 所以该目录只放说明文件也算合规；**DB 层落地后规则将升级为至少一个 `*.sql`**。
+fn empty_dir_problem(dir: &str) -> String {
+    if dir == "migrations" {
+        return format!(
+            "目录 {dir}/ 为空 —— 本期底座还没有业务 DB 层，暂放说明文件即可；\
+             DB 层落地后规则将升级为至少一个 `*.sql` 迁移文件"
+        );
+    }
+    format!("目录 {dir}/ 为空")
 }
 
 /// 仓库内所有业务模块的校验汇总。
@@ -469,5 +483,20 @@ mod tests {
         assert!(!report.is_valid());
         let status = &report.modules[0];
         assert_eq!(status.empty_dirs, vec!["backend", "frontend", "migrations"]);
+    }
+
+    #[test]
+    fn empty_migrations_dir_explains_the_future_rule() {
+        // DB 层落地后规则会升级为「至少一个 *.sql」，提示语要提前说清楚，
+        // 否则运维只会看到一句干巴巴的「目录为空」。
+        let message = empty_dir_problem("migrations");
+        assert!(message.contains("migrations/"), "message = {message}");
+        assert!(message.contains("*.sql"), "message = {message}");
+        assert!(message.contains("DB 层落地后"), "message = {message}");
+    }
+
+    #[test]
+    fn other_empty_dirs_use_the_plain_message() {
+        assert_eq!(empty_dir_problem("backend"), "目录 backend/ 为空");
     }
 }

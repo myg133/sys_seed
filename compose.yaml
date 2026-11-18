@@ -70,5 +70,24 @@ services:
       timeout: 3s
       retries: 12
 
+  # 迁移：独立步骤，手动触发（profile 未激活时 `up -d` 不会跑它）。
+  #
+  # 本机不构建镜像（内存不够），所以开发环境直接用本地二进制跑迁移：
+  #   DATABASE_URL=postgres://base:base@localhost:5432/base_dev \
+  #     cargo run -p platform-server --bin base -- migrate up
+  # 需要在容器里跑时先构建镜像 base-platform:dev，再：
+  #   podman-compose -f compose.yaml --profile migrate run --rm migrate
+  migrate:
+    image: base-platform:dev
+    profiles: ['migrate']
+    command: ['migrate', 'up']
+    environment:
+      DATABASE_URL: postgres://base:base@postgres:5432/base_dev
+      BASE_MIGRATIONS_DIR: /app/migrations
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: 'no'
+
 volumes:
   pgdata:

@@ -6,7 +6,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use axum::body::Body;
-use axum::http::{header, StatusCode, Uri};
+use axum::http::{StatusCode, Uri, header};
 use axum::response::Response;
 
 /// 根路径默认回落到 `index.html`（单页应用路由）。
@@ -122,10 +122,7 @@ mod tests {
 
     #[test]
     fn root_path_falls_back_to_index() {
-        assert_eq!(
-            safe_relative_path("/"),
-            Some(PathBuf::from("index.html"))
-        );
+        assert_eq!(safe_relative_path("/"), Some(PathBuf::from("index.html")));
     }
 
     #[test]

@@ -1,0 +1,55 @@
+{{- if .Values.migrate.enabled }}
+{{/*
+迁移 Job：独立步骤，install / upgrade 前由 Helm 自动跑。
+
+- 不在 app 的启动流程里跑迁移：多副本并发迁移会冲突。
+- pre-install / pre-upgrade hook：先迁移成功，再滚 app。
+- hook-delete-policy: before-hook-creation —— 下次发布前清掉上次的 Job。
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "base-platform.fullname" . }}-migrate
+  labels:
+    {{- include "base-platform.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-upgrade,pre-install
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": {{ .Values.migrate.hookDeletePolicy }}
+spec:
+  backoffLimit: {{ .Values.migrate.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "base-platform.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "base-platform.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "base-platform.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          command: ['migrate', 'up']
+          envFrom:
+            - configMapRef:
+                name: {{ include "base-platform.fullname" . }}
+            - secretRef:
+                name: {{ .Values.secret.existingSecret }}
+          env:
+            - name: {{ .Values.secret.databaseUrlKey }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secret.existingSecret }}
+                  key: {{ .Values.secret.databaseUrlKey }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+{{- end }}

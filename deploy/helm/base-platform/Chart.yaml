@@ -1,0 +1,19 @@
+apiVersion: v2
+name: base-platform
+description: 通用管理系统底座 —— 部署基线（Deployment / Service / Ingress / ConfigMap / Secret 引用 / 迁移 Job）
+type: application
+# 图表版本（Chart 自身的版本）
+version: 0.1.0
+# 底座应用版本（默认打镜像 tag 用）
+appVersion: "0.1.0"
+keywords:
+  - platform
+  - base
+home: https://example.internal/base-platform
+sources:
+  - https://example.internal/base-platform
+maintainers:
+  - name: myg133-dev-1
+annotations:
+  # 契约 pin：与 feature-meta/manifest.json 一致
+  contracts: api-conventions/v1

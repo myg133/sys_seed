@@ -3,8 +3,8 @@
 //! readiness **必须**查数据库 —— 否则滚动更新时流量会打到还没迁移好的实例，
 //! 表现为「偶发 500」，且极难定位（REQ-005 AC-S-006）。
 
-use sqlx::migrate::Migrator;
 use sqlx::PgPool;
+use sqlx::migrate::Migrator;
 
 /// 数据库不可达时的错误码。
 pub const CODE_DB_UNAVAILABLE: &str = "DATABASE_UNAVAILABLE";
@@ -49,7 +49,7 @@ pub async fn check_readiness(pool: &PgPool, migrator: &Migrator) -> Readiness {
             pending: expected_versions(migrator),
             dirty: None,
             error_code: Some(CODE_DB_UNAVAILABLE),
-            detail: Some(format!("数据库不可达：{err}")),
+            detail: Some(format!("database is unreachable: {err}")),
         };
     }
 
@@ -62,7 +62,9 @@ pub async fn check_readiness(pool: &PgPool, migrator: &Migrator) -> Readiness {
                 pending: expected_versions(migrator),
                 dirty: None,
                 error_code: Some(CODE_MIGRATIONS_PENDING),
-                detail: Some(format!("迁移状态不可读（迁移尚未执行？）：{err}")),
+                detail: Some(format!(
+                    "migration state is unreadable, migrations may not have run: {err}"
+                )),
             };
         }
     };

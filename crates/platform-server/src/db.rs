@@ -5,8 +5,8 @@
 use std::str::FromStr;
 use std::time::Duration;
 
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use sqlx::PgPool;
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
 /// 连接池默认上限。低配机与私有化单机场景够用。
 pub const DEFAULT_MAX_CONNECTIONS: u32 = 5;

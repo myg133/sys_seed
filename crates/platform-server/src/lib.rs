@@ -10,4 +10,5 @@ pub mod config;
 pub mod db;
 pub mod health;
 pub mod migrate;
+pub mod probe;
 pub mod static_files;

@@ -201,7 +201,11 @@ impl DeployConfig {
         let tenant_mode = match optional(&lookup, "BASE_TENANT_MODE") {
             None => TenantMode::Shared,
             Some(raw) => TenantMode::parse(&raw).unwrap_or_else(|| {
-                problems.push(invalid("BASE_TENANT_MODE", &raw, "shared | schema | database"));
+                problems.push(invalid(
+                    "BASE_TENANT_MODE",
+                    &raw,
+                    "shared | schema | database",
+                ));
                 TenantMode::Shared
             }),
         };
@@ -331,7 +335,8 @@ mod tests {
 
     #[test]
     fn missing_database_url_is_reported_with_stable_code() {
-        let err = DeployConfig::from_lookup(lookup_from(&[])).expect_err("缺 DATABASE_URL 必须失败");
+        let err =
+            DeployConfig::from_lookup(lookup_from(&[])).expect_err("缺 DATABASE_URL 必须失败");
         assert_eq!(err.problems.len(), 1);
         assert_eq!(err.problems[0].code, CODE_MISSING);
         assert_eq!(err.problems[0].key, "DATABASE_URL");

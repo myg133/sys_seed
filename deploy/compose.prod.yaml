@@ -1,0 +1,94 @@
+# 私有化部署（企业内网单机）：docker compose 交付。
+#
+# 与开发 compose.yaml 的差别：
+#   - 用发布镜像（base-platform:${TAG}），不本地构建
+#   - 配置从 .env 注入（.env 不入库）
+#   - **迁移是独立服务**：走 profile，手动触发，`up -d` 不会自动跑迁移
+#
+# 交付物：把本文件与 .env 放在同一目录，整体拷给客户即可。
+#
+# 用法：
+#   cp .env.example .env && 编辑 .env
+#   docker compose -f deploy/compose.prod.yaml up -d
+#   docker compose -f deploy/compose.prod.yaml --profile migrate run --rm migrate
+#   docker compose -f deploy/compose.prod.yaml up -d --no-deps app   # 迁移成功后滚 app
+#
+# 完整发布流程（备份 → 迁移 → 滚动 → 健康检查 → 回滚）见 deploy/RUNBOOK.md。
+name: base-platform-prod
+
+services:
+  postgres:
+    # 镜像地址可覆盖：企业内网请指向自己的镜像仓库
+    # （国内直连 docker.io 超时，默认值沿用仓库既有约定）
+    image: ${POSTGRES_IMAGE:-docker.m.daocloud.io/library/postgres:17-alpine}
+    container_name: base-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-base}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-base}
+      POSTGRES_DB: ${POSTGRES_DB:-base}
+    # 只绑本机回环：数据库不对外暴露
+    ports:
+      - '127.0.0.1:5432:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-base} -d ${POSTGRES_DB:-base}']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  redis:
+    image: ${REDIS_IMAGE:-docker.m.daocloud.io/library/redis:7-alpine}
+    container_name: base-redis
+    restart: unless-stopped
+    command: ['redis-server', '--appendonly', 'yes']
+    ports:
+      - '127.0.0.1:6379:6379'
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  # 迁移：独立步骤，手动触发。
+  # `up -d` 不会启动它（profile 未激活）；发布时显式跑：
+  #   docker compose -f deploy/compose.prod.yaml --profile migrate run --rm migrate
+  migrate:
+    image: base-platform:${TAG:-latest}
+    container_name: base-migrate
+    profiles: ['migrate']
+    command: ['migrate', 'up']
+    env_file:
+      - ${ENV_FILE:-.env}
+    environment:
+      BASE_MIGRATIONS_DIR: /app/migrations
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: 'no'
+
+  app:
+    image: base-platform:${TAG:-latest}
+    container_name: base-app
+    restart: unless-stopped
+    env_file:
+      - ${ENV_FILE:-.env}
+    environment:
+      BASE_MIGRATIONS_DIR: /app/migrations
+      BASE_STATIC_DIR: /app/static
+      HOST: 0.0.0.0
+      SERVER_PORT: '8080'
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - '${APP_PORT:-8080}:8080'
+    # 健康检查用镜像内置的 `base healthcheck`（就绪探针：数据库连通 + 迁移已应用）
+
+volumes:
+  pgdata:
+  redisdata:

@@ -4,6 +4,43 @@
 
 ## Unreleased
 
+### REQ-005 交付基线与发布
+
+- **交付形态**：同一套镜像 + 同一套配置，三处复用 —— 开发（本机 compose）/
+  私有化部署（企业内网 compose）/ 云上（K8s Helm）
+- **多阶段镜像** `Dockerfile`：`builder`（`rust:lld`，cargo-chef 分层缓存依赖）/
+  `frontend`（Node + pnpm）/ `runtime`（`debian:12-slim`，非 root，uid 10001），
+  体积目标 < 100MB（CI `build-image` job 硬校验）；**本机不构建**，镜像构建交给 CI
+- **私有化部署** `deploy/compose.prod.yaml`：镜像走 tag、不本地构建；
+  **迁移是独立服务**（`profiles: ["migrate"]`），`up -d` 不会自动跑迁移
+- **Helm Chart** `deploy/helm/base-platform/`：Deployment / Service / Ingress /
+  ConfigMap / Secret **引用**（Chart 不生成 Secret）/ 迁移 Job
+  （`helm.sh/hook: pre-upgrade,pre-install`）；探针 `/health/live` 与 `/health/ready`
+- **配置外置**（AC-S-005）：`crates/platform-server` 的 `DeployConfig` 读环境变量，
+  启动时校验、**缺必填项 fail-fast**（退出码 2，稳定错误码
+  `CONFIG_MISSING_REQUIRED` / `CONFIG_INVALID_VALUE` / `CONFIG_FORBIDDEN_COMBINATION`）；
+  `.env.example` 入库、`.env` 不入库，Secret 不进镜像
+- **迁移独立化**（AC-S-006）：`base migrate up|down|status`，迁移文件用 sqlx 可逆格式
+  `<版本>_<描述>.up.sql` + `.down.sql`；不可逆迁移拒绝回滚；`scripts/rollback.sh <版本>`
+  （回滚前自动备份）
+- **健康检查**：`/health/live`（进程活着）与 `/health/ready`（**数据库连通 + 迁移已应用**）；
+  未就绪返回 503 + 稳定错误码（`DATABASE_UNAVAILABLE` / `MIGRATIONS_PENDING` /
+  `MIGRATION_DIRTY`），错误体按 RFC 9457（契约 C6）
+- **备份恢复**：`scripts/backup.sh`（pg_dump + gzip，只留最近 5 份）/
+  `scripts/restore.sh` / `scripts/backup-verify.sh`（恢复到临时库 + 冒烟）；
+  `deploy/RUNBOOK.md` 含**真实演练记录**与故障排查（迁移失败 / 容器起不来 /
+  数据库连不上 / 磁盘满）
+- **CI 增补**：`build-image`（构建 + 体积校验 + 健康检查冒烟）、`image-scan`
+  （Trivy）、`migration-test`（up → 校验 → down → 再 up）；基础镜像一律官方地址
+- **顺带修的 4 项遗留技术债**：`sync-contracts.sh` 拿不到 BA 正本时**明确失败**
+  （不再静默跳过）；`core-change-review` 改用 **merge-base** 口径（不再被 base.sha 拖偏）；
+  核心路径清单确认覆盖 `platform-core` / `platform-contracts` / `platform-contracts-macros`
+  （并加自检，防新增平台 crate 漏进门禁）；`migrations/` 规则在 README 与
+  `check-modules` 错误提示里写明「DB 层落地后升级为至少一个 `*.sql`」
+- **新增第三方依赖**：`sqlx` 0.8（仅 `runtime-tokio` / `postgres` / `migrate`，
+  关闭 `macros` 与 `json` 以压低编译开销）—— 只用于部署期健康检查与迁移，
+  业务数据访问层仍待 REQ-006/007
+
 ### REQ-004 AI 引导体系与能力索引
 
 - 仓库级 `AGENTS.md`（agents.md 开放规范）：目录 / 硬规则 / 真实可用的命令 /

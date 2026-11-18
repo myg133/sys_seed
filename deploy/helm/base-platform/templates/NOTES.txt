@@ -1,0 +1,25 @@
+底座 {{ .Chart.Name }} {{ .Chart.AppVersion }} 已部署（release: {{ .Release.Name }}）。
+
+端点：
+{{- if .Values.ingress.enabled }}
+  {{- range .Values.ingress.hosts }}
+  - http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+  {{- end }}
+{{- else }}
+  - 集群内：{{ include "base-platform.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
+  - 端口转发：kubectl port-forward svc/{{ include "base-platform.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.port }}
+{{- end }}
+
+探针：
+  - liveness : /health/live  （进程活着）
+  - readiness: /health/ready （数据库连通 + 迁移已应用）
+
+检查：
+  kubectl rollout status deployment/{{ include "base-platform.fullname" . }} -n {{ .Release.Namespace }}
+  kubectl get job {{ include "base-platform.fullname" . }}-migrate -n {{ .Release.Namespace }}
+
+{{- if not .Values.secret.existingSecret }}
+
+⚠️ Secret {{ .Values.secret.existingSecret }} 不存在：服务会因缺 {{ .Values.secret.databaseUrlKey }} 而 fail-fast。
+   先创建 Secret（见 deploy/RUNBOOK.md），再重新 helm upgrade。
+{{- end }}

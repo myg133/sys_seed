@@ -6,8 +6,8 @@
 //! 迁移文件采用 sqlx 的可逆格式：`<版本>_<描述>.up.sql` + `<版本>_<描述>.down.sql`。
 //! 没有 `.down.sql` 的迁移视为**不可逆**，`down` 命令会拒绝回滚越过它。
 
-use sqlx::migrate::{MigrateError, Migrator};
 use sqlx::PgPool;
+use sqlx::migrate::{MigrateError, Migrator};
 
 /// 迁移命令的错误。
 #[derive(Debug, thiserror::Error)]
@@ -40,14 +40,14 @@ pub struct MigrationStatus {
 }
 
 /// 执行待应用的迁移（`up`），返回本次新应用的版本。
-pub async fn migrate_up(
-    pool: &PgPool,
-    migrator: &Migrator,
-) -> Result<Vec<i64>, MigrationError> {
+pub async fn migrate_up(pool: &PgPool, migrator: &Migrator) -> Result<Vec<i64>, MigrationError> {
     let before = applied_versions(pool).await?;
     migrator.run(pool).await?;
     let after = applied_versions(pool).await?;
-    Ok(after.into_iter().filter(|version| !before.contains(version)).collect())
+    Ok(after
+        .into_iter()
+        .filter(|version| !before.contains(version))
+        .collect())
 }
 
 /// 回滚到目标版本（`down`）：撤销版本号大于 `target` 的迁移，返回被撤销的版本。
