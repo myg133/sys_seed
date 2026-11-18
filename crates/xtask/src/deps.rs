@@ -38,10 +38,11 @@ use serde::Deserialize;
 /// 必须不依赖业务模块的平台 crate（显式清单）。
 ///
 /// 清单之外的平台 crate 由「`crates/` 下的工作区成员」这条规则兜底。
-pub const PLATFORM_CRATES: [&str; 3] = [
+pub const PLATFORM_CRATES: [&str; 4] = [
     "platform-core",
     "platform-contracts",
     "platform-contracts-macros",
+    "platform-db",
 ];
 
 /// `cargo metadata` 的最小结构（只取用得到的字段）。
@@ -425,6 +426,22 @@ mod tests {
         assert!(
             violations.is_empty(),
             "平台 crate 不得依赖业务模块：{violations:?}"
+        );
+    }
+
+    /// REQ-006 新建的 `platform-db` 必须**自动**被纳入平台 crate 集合。
+    ///
+    /// 集合 = 显式清单 ∪ `crates/` 下的工作区成员。
+    /// 业务模块将来要依赖 `platform-db` —— 它一旦反向依赖业务模块，
+    /// 就等于开了个绕过门禁的口子，所以「自动纳管」必须真的生效。
+    #[test]
+    fn platform_db_is_covered_by_the_platform_crate_rules() {
+        let metadata = load_metadata(&crate::workspace_root()).expect("cargo metadata 应可读");
+        let graph = DependencyGraph::build(&metadata);
+        let platform_crates = graph.platform_crates();
+        assert!(
+            platform_crates.iter().any(|name| name == "platform-db"),
+            "platform-db 必须被纳入平台 crate 集合（自动纳管失效 = 门禁被绕过）：{platform_crates:?}"
         );
     }
 }

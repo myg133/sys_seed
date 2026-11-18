@@ -16,7 +16,8 @@
 通用管理系统底座。业务方在此之上开发自己的业务模块，**不修改底座本身**。
 
 底座目前提供的是**骨架**：请求上下文、扩展点 trait、契约测试套件、目录规范校验、
-能力索引。HTTP 层、DB 访问层、鉴权中间件、组件库都还没落地（见「尚未提供」）。
+能力索引、**租户作用域数据访问层**（`platform-db`）。
+HTTP 层、通用 CRUD 脚手架、鉴权中间件、组件库都还没落地（见「尚未提供」）。
 
 ## 目录
 
@@ -24,6 +25,7 @@
 crates/platform-core/        平台核心（**禁止修改**，改动需人工评审）
 crates/platform-contracts/   扩展点契约测试套件（**禁止修改**）
 crates/platform-contracts-macros/  契约测试宏（**禁止修改**）
+crates/platform-db/           平台数据访问层（租户作用域入口 + RLS 兜底）
 crates/xtask/                任务运行器（cargo xtask）
 modules/<name>/              业务模块（在这里写业务代码）
 packages/<name>/             前端占位包（@base/ui、@base/sdk、@base/auth …）
@@ -41,13 +43,18 @@ docs/contracts/              契约正文快照（**勿手改**，正本在 BA �
    `platform-contracts` 只能出现在 `[dev-dependencies]`。
 3. **数据访问必须走 `RequestContext`**，不要手写 `tenant_id` 过滤条件
    （租户只能从 `ctx` 取，漏传就编译不过）。
-4. **权限点必须在 `manifest.json` 声明**，不要硬编码角色名；
+4. **数据访问必须走 `platform-db` 的租户作用域入口**（`TenantDb`），
+   **不得直连连接池、不得自己建连接池、不得绕过 `{tenant}` 占位符** ——
+   `platform-db` 的公开 API 拿不到裸连接，就是为了让这件事在编译期做不到。
+   租户作用域表在 `manifest.json` 的 `tenantScoped` 段声明，
+   **RLS 策略由平台统一生成**（`cargo xtask tenant-policies`），模块不手写 policy。
+5. **权限点必须在 `manifest.json` 声明**，不要硬编码角色名；
    编码固定为 `module:resource:action`（`api-conventions v1` C4）。
-5. **错误响应只返回错误码 + 参数**，不要拼面向用户的中文句子
+6. **错误响应只返回错误码 + 参数**，不要拼面向用户的中文句子
    （文案由前端 `@base/i18n` 渲染，`api-conventions v1` C6）。
-6. **时间存 UTC，金额用最小单位整数**（`api-conventions v1` C13）。
-7. **新增模块用 `cargo xtask create-module`**，不要手建目录。
-8. **验收命令必须真的跑到用例**：`cargo test` 的参数分隔符 `--` **只写一次**。
+7. **时间存 UTC，金额用最小单位整数**（`api-conventions v1` C13）。
+8. **新增模块用 `cargo xtask create-module`**，不要手建目录。
+9. **验收命令必须真的跑到用例**：`cargo test` 的参数分隔符 `--` **只写一次**。
    多写一个，libtest 会把后面的 flag 当成「用例名过滤串」的一部分，
    结果是**一个用例都没跑、但退出码仍是 0** —— 假绿，验收形同虚设。
    - ✅ `cargo test -p <模块名> -- --test-threads=2 --nocapture`
@@ -72,6 +79,10 @@ cargo xtask capabilities --check
 cargo xtask check-modules
 cargo xtask check-deps
 
+# 租户作用域的 RLS 策略：按 manifest 的 tenantScoped 段统一生成 / 校验
+DATABASE_URL=postgres://... cargo xtask tenant-policies
+DATABASE_URL=postgres://... cargo xtask tenant-policies --check
+
 # 契约快照（正本在 BA 分支 demand）：校验 / 同步
 ./scripts/sync-contracts.sh            # 校验：快照与 BA 正本不一致则失败
 ./scripts/sync-contracts.sh --sync     # 同步：用 BA 正本更新 docs/contracts/
@@ -93,7 +104,7 @@ bun run dev
 ## 已有能力
 
 **先查 `capabilities/index.json`，别重写。** 下表与索引的 `already_provided` 段
-**内容完全一致**（18 条，key 与说明逐条相同）；**行的顺序不同** ——
+**内容完全一致**（19 条，key 与说明逐条相同）；**行的顺序不同** ——
 下表按「后端接缝 → 前端包」的语义序，索引按字典序输出。
 机器守卫 `cargo test -p xtask` 的 `agents_doc_matches_catalog` 比对的是下表与能力目录
 （同序），不覆盖索引的排序。
@@ -102,6 +113,7 @@ bun run dev
 |---|---|
 | `request_context` | RequestContext 携带租户/空间/追踪 ID；Repository 每个方法强制传 ctx，租户隔离是编译期保证，勿自建租户上下文 |
 | `repository` | Repository<T> 提供 find/list/insert/update/delete，业务模块实现它即可，勿另造 DAO 基类或数据访问框架 |
+| `tenant_scoped_db` | platform-db 的 TenantDb 提供带 RequestContext 的租户作用域数据访问（事务内 SET LOCAL app.tenant_id + RLS 兜底），公开 API 拿不到裸连接，勿自建连接池或直连数据库 |
 | `list_query` | ListQuery/SortSpec/FilterSpec 已定义游标分页（limit 默认 20、上限 200）与过滤算子白名单，勿自造分页参数 |
 | `module_registry` | register_platform_module! + discover()/discover_enabled() 做编译期模块注册，勿自建插件或动态加载 |
 | `manifest` | Manifest 解析与字段校验 + capabilities/schema/manifest.schema.json 已提供，勿手写 manifest 校验 |
@@ -129,7 +141,7 @@ key 与说明逐条相同）；行的顺序同样与索引不同（语义序 vs 
 | `ui_table_component` | @base/ui 尚无表格与分页组件，列表页要自己实现（REQ-012 补） |
 | `permission_can` | 前端 can() 与服务端鉴权中间件尚未落地（REQ-009 补），权限判定别自己写一套 |
 | `http_api_layer` | HTTP 接口层尚未就绪（REQ-011/012 补），capabilities/api.json 目前为空 |
-| `db_access_layer` | 平台没有 DB 访问层（sqlx 推迟到 REQ-006/007），模块仓储当前是内存实现 |
+| `crud_scaffolding` | 平台没有通用 CRUD/分页脚手架（模块的仓储要自己实现），但数据访问必须走 platform-db 的租户作用域入口 |
 | `audit_sink` | 审计只到事件声明面，落库与查询待 REQ-014 |
 | `notification_dispatch` | 通知只到 trait，通道投递与模板待 REQ-015 |
 | `workflow_engine` | 工作流只到 trait，流程定义与实例待 REQ-017 |
@@ -137,12 +149,15 @@ key 与说明逐条相同）；行的顺序同样与索引不同（语义序 vs 
 ## 新增一个业务模块
 
 1. `cargo xtask create-module <name>` —— 生成骨架并登记进工作区成员。
-2. 实现 `backend/`：entity / repository / service，repository 必须走 `RequestContext`。
-3. 在 `manifest.json` 声明权限点与菜单，不要硬编码角色名。
+2. 实现 `backend/`：entity / repository / service，repository 必须走 `RequestContext`；
+   落库的实现走 `platform-db` 的 `TenantDb`（租户作用域入口），语句里必须带 `{tenant}`。
+3. 在 `manifest.json` 声明权限点与菜单，不要硬编码角色名；
+   有租户作用域表就在 `tenantScoped` 段声明（平台据此生成 RLS 策略，模块不手写 policy）。
 4. 实现 `frontend/`：优先用 `@base/ui` 与 `@base/schema`，只有特殊布局才写自定义组件。
 5. 接入 `tests/contracts.rs` 的契约测试（骨架已生成，直接填业务实体）。
 6. 更新 `modules/<name>/AGENTS.md`（领域模型、扩展点、权限点）。
 7. `cargo xtask capabilities` —— 让能力索引包含本模块。
+8. `cargo xtask tenant-policies` —— 让平台按 manifest 生成该模块的 RLS 策略。
 
 ## 提示词
 

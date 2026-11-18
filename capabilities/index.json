@@ -14,6 +14,7 @@
     "request_context": "RequestContext 携带租户/空间/追踪 ID；Repository 每个方法强制传 ctx，租户隔离是编译期保证，勿自建租户上下文",
     "schema_field_meta": "@base/schema 的 FieldMeta/describeField()/findField() 提供字段元数据形状，勿另造元数据结构",
     "sdk_client": "@base/sdk 的 createApiClient() 提供 baseUrl 规范化与 URL 拼接，勿另造 HTTP 基类",
+    "tenant_scoped_db": "platform-db 的 TenantDb 提供带 RequestContext 的租户作用域数据访问（事务内 SET LOCAL app.tenant_id + RLS 兜底），公开 API 拿不到裸连接，勿自建连接池或直连数据库",
     "theme": "@base/theme 的 defaultTheme()/mergeTheme() 提供主题 token，勿另造主题变量",
     "transaction_boundary": "TransactionalWrite + WriteBoundary 提供写边界声明，跨表写必须显式开平台事务（C-4 判定依据）",
     "ui_token": "@base/ui 的 toneClass()/TONES/defaultRadius() 提供色调与圆角 token，勿另造样式变量",
@@ -64,7 +65,7 @@
   "generated_by": "cargo xtask capabilities",
   "not_yet_provided": {
     "audit_sink": "审计只到事件声明面，落库与查询待 REQ-014",
-    "db_access_layer": "平台没有 DB 访问层（sqlx 推迟到 REQ-006/007），模块仓储当前是内存实现",
+    "crud_scaffolding": "平台没有通用 CRUD/分页脚手架（模块的仓储要自己实现），但数据访问必须走 platform-db 的租户作用域入口",
     "http_api_layer": "HTTP 接口层尚未就绪（REQ-011/012 补），capabilities/api.json 目前为空",
     "notification_dispatch": "通知只到 trait，通道投递与模板待 REQ-015",
     "permission_can": "前端 can() 与服务端鉴权中间件尚未落地（REQ-009 补），权限判定别自己写一套",
@@ -77,5 +78,5 @@
     ],
     "version": "0.1.0"
   },
-  "source_fingerprint": "fnv1a64:4a8e42ceadc45329"
+  "source_fingerprint": "fnv1a64:7da6a42f1d7c6c36"
 }

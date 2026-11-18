@@ -15,6 +15,10 @@ serde.workspace = true
 serde_json.workspace = true
 # manifest 的 Schema 校验复用平台核心的解析器，避免两套实现
 platform-core.workspace = true
+# 租户作用域策略的统一生成 / 校验（复用平台数据访问层的 RLS 逻辑）
+platform-db.workspace = true
+# tenant-policies 子命令要连库（异步）
+tokio.workspace = true
 
 [lib]
 name = "xtask"

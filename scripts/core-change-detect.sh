@@ -8,10 +8,11 @@
 #   用它做 diff 会把「base 上已经合入的核心改动」也算成本次 PR 的改动（偏严，
 #   不会漏放，但会让正常的 PR 反复触发核心评审）。
 #
-# 核心路径清单覆盖（REQ-005 确认）：
+# 核心路径清单覆盖（REQ-005 确认，REQ-006 增补 platform-db）：
 #   crates/platform-core/            平台核心
 #   crates/platform-contracts/       扩展点契约套件
 #   crates/platform-contracts-macros/ 契约测试宏（REQ-003 新增，同样算核心）
+#   crates/platform-db/              平台数据访问层（业务模块的数据访问都走它）
 #
 # 判定标准：**改动是否影响所有业务模块**（CODEOWNERS 的口径）。
 #   平台服务与工程工具不满足这条 —— 业务模块不依赖它们，
@@ -33,6 +34,7 @@ CORE_PATHS=(
   crates/platform-core
   crates/platform-contracts
   crates/platform-contracts-macros
+  crates/platform-db
 )
 
 # 不属于核心的平台 crate（显式豁免，附理由）
