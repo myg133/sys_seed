@@ -11,10 +11,6 @@
   ],
   "menus": [],
   "dependencies": [],
-  "tenantScoped": {
-    "tables": ["platform_space_config"],
-    "column": "tenant_id"
-  },
   "config": {
     "logo": {
       "type": "string",
