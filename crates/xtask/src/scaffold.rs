@@ -767,7 +767,7 @@ const CONTRACTS_RS: &str = r#"//! {{name}} 模块契约测试：C-1 ~ C-4 由 `#
 //! ```
 //!
 //! C-2 的告警（manifest 声明了代码没用到的权限点）默认被测试框架捕获，
-//! 需要看到时加 `-- --nocapture`。
+//! 需要看到时加 `--nocapture`（注意：`cargo test` 的参数分隔符 `--` 只写一次）。
 
 use std::path::PathBuf;
 

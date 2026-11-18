@@ -30,6 +30,7 @@ packages/<name>/             前端占位包（@base/ui、@base/sdk、@base/auth
 apps/shell/                  前端应用外壳
 prompts/                     按任务的提示词模板
 capabilities/                机器可读能力索引（自动生成，**勿手改**）
+docs/contracts/              契约正文快照（**勿手改**，正本在 BA 分支）
 ```
 
 ## 硬规则
@@ -46,6 +47,12 @@ capabilities/                机器可读能力索引（自动生成，**勿手�
    （文案由前端 `@base/i18n` 渲染，`api-conventions v1` C6）。
 6. **时间存 UTC，金额用最小单位整数**（`api-conventions v1` C13）。
 7. **新增模块用 `cargo xtask create-module`**，不要手建目录。
+8. **验收命令必须真的跑到用例**：`cargo test` 的参数分隔符 `--` **只写一次**。
+   多写一个，libtest 会把后面的 flag 当成「用例名过滤串」的一部分，
+   结果是**一个用例都没跑、但退出码仍是 0** —— 假绿，验收形同虚设。
+   - ✅ `cargo test -p <模块名> -- --test-threads=2 --nocapture`
+   - ❌ `cargo test -p <模块名> -- --test-threads=2 -- --nocapture`
+   验收前先看输出里的「N passed」，**N 必须 > 0**。
 
 > 规则 1 与 2 由 CI 机械检查：`cargo xtask check-deps` 扫 `cargo metadata` 的依赖图，
 > 平台 crate 一旦反向依赖业务模块即失败。
@@ -65,6 +72,10 @@ cargo xtask capabilities --check
 cargo xtask check-modules
 cargo xtask check-deps
 
+# 契约快照（正本在 BA 分支 demand）：校验 / 同步
+./scripts/sync-contracts.sh            # 校验：快照与 BA 正本不一致则失败
+./scripts/sync-contracts.sh --sync     # 同步：用 BA 正本更新 docs/contracts/
+
 # 日常主力检查命令
 cargo check
 cargo fmt --all --check
@@ -81,8 +92,11 @@ bun run dev
 
 ## 已有能力
 
-**先查 `capabilities/index.json`，别重写。** 下表与索引的 `already_provided` 段逐行一致
-（由 `cargo test -p xtask` 的 `agents_doc_matches_catalog` 守住）。
+**先查 `capabilities/index.json`，别重写。** 下表与索引的 `already_provided` 段
+**内容完全一致**（18 条，key 与说明逐条相同）；**行的顺序不同** ——
+下表按「后端接缝 → 前端包」的语义序，索引按字典序输出。
+机器守卫 `cargo test -p xtask` 的 `agents_doc_matches_catalog` 比对的是下表与能力目录
+（同序），不覆盖索引的排序。
 
 | 能力 | 说明 |
 |---|---|
@@ -107,7 +121,8 @@ bun run dev
 
 ## 尚未提供
 
-**别当成已有。** 下表与索引的 `not_yet_provided` 段逐行一致。
+**别当成已有。** 下表与索引的 `not_yet_provided` 段**内容完全一致**（7 条，
+key 与说明逐条相同）；行的顺序同样与索引不同（语义序 vs 字典序）。
 
 | 能力 | 说明 |
 |---|---|
@@ -151,7 +166,15 @@ bun run dev
 
 | 文档 | 位置 |
 |---|---|
-| API 约定（路径、错误码、分页、命名） | `BA/contracts/api-conventions/v1.md` |
-| 扩展点契约（5 个 trait 的冻结签名） | `BA/contracts/extension-points/v1.md` |
+| API 约定（路径、错误码、分页、命名） | 快照 `docs/contracts/api-conventions/v1.md`；正本 `git show demand:contracts/api-conventions/v1.md` |
+| 扩展点契约（5 个 trait 的冻结签名） | 快照 `docs/contracts/extension-points/v1.md`；正本 `git show demand:contracts/extension-points/v1.md` |
 | 示例模块（扩展点实现的标准范例） | `modules/sandbox/` |
 | 能力索引 | `capabilities/index.json` |
+
+> **契约正本在 BA 分支，不在代码仓库里** —— `BA/` 是 workspace 里 `demand` 分支的 worktree，
+> 契约正文在它的 `contracts/` 下。上面「正本」列的 `git show demand:...` 就是同一个文件，
+> 本地没有 `demand` 分支时先 `git fetch origin demand`。
+>
+> `docs/contracts/` 里的是**随版本发布的快照**（与正本逐字节相同），给只拿到代码仓库的人用。
+> 它由 `scripts/sync-contracts.sh --sync` 从正本生成、由 `scripts/sync-contracts.sh` 校验，
+> CI 强制执行 —— **不要手改**，改了契约请改 BA 分支上的正本再同步。

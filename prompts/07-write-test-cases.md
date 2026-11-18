@@ -15,7 +15,7 @@
 
 1. **先读** `AGENTS.md` 与 `modules/<模块名>/AGENTS.md`，
    确认这个模块的约定（尤其是「易踩的坑」）。
-2. **先看现有测试**：`cargo test -p <模块名> -- --test-threads=2 -- --list`
+2. **先看现有测试**：`cargo test -p <模块名> -- --test-threads=2 --list`
    列出已有用例，**不要重复写已经覆盖的场景**。
    模块的 `tests/contracts.rs` 已经覆盖了 C-1 ~ C-4
    （manifest 一致、权限点声明、租户隔离、事务边界）。

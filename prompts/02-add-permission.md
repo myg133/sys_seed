@@ -32,7 +32,7 @@
 5. **更新能力索引**：`cargo xtask capabilities`。
 6. **自验**：
    ```bash
-   cargo test -p <模块名> -- --test-threads=2 -- --nocapture
+   cargo test -p <模块名> -- --test-threads=2 --nocapture
    cargo xtask capabilities --check
    ```
 
@@ -50,7 +50,7 @@
 
 - [ ] `manifest.json` 与 `permission.rs` 里的权限点编码完全一致
 - [ ] `cargo test -p <模块名> -- --test-threads=2` 全绿，且 C-2 **无告警**
-      （加 `-- --nocapture` 确认）
+      （加 `--nocapture` 确认）
 - [ ] `cargo xtask capabilities --check` 通过，`capabilities/permissions.json`
       里出现新权限点
 - [ ] 前端没有第二份权限点字面量（同一编码只出现在 manifest / permission.rs）

@@ -17,7 +17,8 @@
 ## 步骤
 
 1. **先读** `AGENTS.md`、`capabilities/index.json` 与
-   `BA/contracts/api-conventions/v1.md`，确认接口路径与错误码约定。
+   `docs/contracts/api-conventions/v1.md`（契约正本在 BA 分支，用
+   `git show demand:contracts/api-conventions/v1.md` 读原文），确认接口路径与错误码约定。
 2. **确认边界**：平台的账号、令牌、会话能力在 `/api/iam` 分组下（**REQ-007** 落地），
    而 HTTP 层本身**本期尚未就绪**（见 `capabilities/index.json` 的
    `not_yet_provided.http_api_layer`）。因此本任务应当：

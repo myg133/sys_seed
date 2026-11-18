@@ -5,6 +5,12 @@ on:
     branches: [main, develop, 'feature/**']
   pull_request:
     branches: [main, develop]
+    # review_requested：请求评审时也要跑一次，让「强制人工评审」门禁有初始状态
+    types: [opened, synchronize, reopened, review_requested]
+  # 评审事件：评审者批准后必须能重跑门禁，否则 core-change-review 永远停在旧状态
+  # （本仓库无 remote 时无法实跑验证，判定逻辑见 feature-meta/verification-report.md）
+  pull_request_review:
+    types: [submitted, edited, dismissed]
 
 env:
   CARGO_TERM_COLOR: always
@@ -165,12 +171,15 @@ jobs:
       - run: pnpm exec playwright install --with-deps chromium
       - run: bun run test:e2e
 
-  # 7. 护栏：能力索引一致性 + 依赖方向单向
+  # 7. 护栏：能力索引一致性 + 依赖方向单向 + 契约快照一致性
   guardrails:
     name: guardrails
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # 需要拿到 BA 分支（demand）才能校验契约快照
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.98.1
@@ -181,6 +190,11 @@ jobs:
       # 依赖方向单向：平台 crate 不得反向依赖业务模块
       - name: 校验依赖方向
         run: cargo xtask check-deps
+      # 契约快照必须与 BA 分支的正本一致
+      # （不一致就同步：scripts/sync-contracts.sh --sync）
+      # 本地没有 demand 分支时脚本会明确跳过，不会误报。
+      - name: 校验契约快照与 BA 正本一致
+        run: ./scripts/sync-contracts.sh
 
   # 8. 平台核心变更：自动打标
   #
@@ -241,9 +255,16 @@ jobs:
   # 「批准（approved）+ 评审人不是 PR 作者 + 评审的 commit 就是当前 HEAD」的评审。
   # 作者自己批准不算数；推了新 commit 之后旧批准自动失效（commit_id 对不上）。
   #
-  # 触发时机：PR 打开 / 更新 / 重新打开，以及每次评审提交。
-  # 需要在仓库的分支保护规则里把 `core-change-review` 设为 required check，
-  # 并打开「Require review from Code Owners」，门禁才真正生效。
+  # 触发时机：PR 打开 / 更新 / 重新打开 / 请求评审，以及每次评审提交
+  # （pull_request_review: submitted / edited / dismissed）。
+  # 没有 pull_request_review 触发器时，评审者批准后 workflow 不会重跑，
+  # 这个检查会永远停在「未批准」的旧状态，「强制评审」形同虚设。
+  #
+  # ⚠️ 以下两步**在仓库设置里、不在代码里**，必须人工配置，代码无法代劳：
+  #   1. 把 `core-change-review` 设为 required check；
+  #   2. 打开「Require review from Code Owners」（配合 .github/CODEOWNERS）。
+  # 另外：GitHub 规定 pull_request_review 事件只在「工作流文件已存在于默认分支」时触发，
+  # 所以本文件合并进默认分支（main）之后，评审触发的门禁才会生效。
   core-change-review:
     name: core-change-review
     runs-on: ubuntu-latest
