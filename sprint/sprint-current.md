@@ -1,81 +1,69 @@
 # 当前迭代计划
 
-- **迭代编号**: Sprint 1 —— 地基 ✅ **已完成**
-- **时间范围**: 2026-11-17 23:15 → 2026-11-18 10:50（含一次断电重启）
+- **迭代编号**: Sprint 2 —— 身份 ✅ **已完成**
+- **时间范围**: 2026-11-18 08:20 → 2026-11-18 18:55（含一次断电重启）
 - **父需求**: [REQ-001 通用项目底座](../demands/REQ-001-platform-foundation/demand.md)
-- **路线图**: [roadmap.md](../plan/roadmap.md) ｜ **复盘**: [sprint-01-retro.md](sprint-01-retro.md)
-- **下一个迭代**: Sprint 2 —— 身份（REQ-006 多租户 → REQ-007 认证 → REQ-008 用户与组织）
+- **路线图**: [roadmap.md](../plan/roadmap.md) ｜ **复盘**: [sprint-02-retro.md](sprint-02-retro.md) ｜ 前一轮: [sprint-01-retro.md](sprint-01-retro.md)
+- **下一个迭代**: Sprint 3 —— 权限与界面（REQ-009 RBAC → REQ-010 配置品牌 → REQ-011 前端 SDK → REQ-012 元数据驱动渲染）
 
 ## 迭代目标
 
-> 打通「二次开发友好」这条主线：**用 `create-module` 生成一个业务模块 → AI 按提示词补全代码 → 契约测试通过 → 平台核心零改动 → 能部署起来。**
-
-这条链路跑通后，后续 19 个子需求都是在稳定的接缝上填内容。
+按依赖顺序把「身份」这一层建起来：**多租户 → 认证 → 组织架构**。
+顺序不可调换 —— 认证的会话与令牌必须从第一行就带租户维度；
+组织架构是权限模型的一个维度，必须先有稳定的租户与账号。
 
 ## 需求列表
 
 | 需求编号 | 名称 | 优先级 | 状态 | 负责人 | Worktree | 合并点 |
 |---------|------|--------|------|--------|----------|--------|
-| REQ-002 | 平台骨架与工程基线 | P0 | ✅ 已完成 | Dev (myg133-ba-1 认领) | 已回收 | `develop` @ `eacff21` |
-| REQ-003 | 扩展点框架与契约测试 | P0 | ✅ 已完成 | Dev (myg133-ba-1 认领) | 已回收 | `develop` @ `c8236b0` |
-| REQ-004 | AI 引导体系与能力索引 | P0 | ✅ 已完成 | Dev (myg133-ba-1 认领) | 已回收 | `develop` @ `37a93c5` |
-| REQ-005 | 交付基线与发布 | P1 | ✅ 已完成 | Dev (myg133-ba-1 认领) | 已回收 | `develop` @ `806bb66` |
+| REQ-006 | 多租户与隔离 | P0 | ✅ 已完成 | Dev (myg133-ba-1 认领) | 已回收 | `develop` @ `91d8e09` |
+| REQ-007 | 认证与账号体系 | P0 | ✅ 已完成 | Dev (myg133-ba-1 认领) | 已回收 | `develop` @ `a0a8d7a` |
+| REQ-008 | 用户与组织架构 | P0 | ✅ 已完成 | Dev (myg133-ba-1 认领) | 已回收 | `develop` @ `400cefa` |
 
-**承接父 AC**：AC-031~AC-039、AC-009 的基础设施部分（租户上下文机制的桩）。
+**承接父 AC**：AC-009/010（租户隔离）、AC-003/004/007/008（账号与令牌）、AC-011/012（组织同步）。
 
 ## 进度
 
-- 总需求: 4 | **已完成: 4** | 进行中: 0 | 待开始: 0
-- 合计：241 文件 / +24548 行；Rust **142/142**、前端 23/23、E2E 1/1
+- 总需求: 3 | **已完成: 3** | 进行中: 0 | 待开始: 0
+- 合计：300 文件 / +20045 行；Rust 测试 142 → **303**（含 ignored **341/341**，8 轮全绿）、前端 23/23、E2E 1/1
 
 ## 迭代出口标准
 
 | 出口标准 | 状态 | 证据 |
 |---|---|---|
-| `bun run dev` 一条命令起全栈 | ✅ | 后端 `/api/health` 200 + 前端 5173 200（Dev 与 QA 均实测） |
-| `cargo build --workspace` 通过 | ✅ | 冷编译 21s / 峰值 1087MB |
-| `create-module` 生成的模块立即可编译运行 | ✅ | **本迭代最关键的验收点** —— 直接过 `check-modules` 与契约 C-1~C-4（QA 用 `demo-qa-check` 与长名 `order-management` 各验一遍） |
-| 故意漏掉租户上下文的模块实现被契约测试拦截 | ✅ | C-3 破坏性验证：报出 6 条跨租户细节 |
-| `cargo xtask capabilities` 自动生成能力索引 | ✅ | 13 文件，逐字节可复现；手改即失败（`E_CAPABILITIES_OUTDATED`） |
-| 仓库级 AGENTS.md + 模块级 AGENTS.md + `prompts/` 齐备 | ✅ | AGENTS.md 里 13 条命令逐条实测过；prompts 8 套 |
-| `docker compose up` 可起完整环境 | ✅ | rootless podman，双容器 **81MB** |
-| Helm 渲染 | ✅ | `helm lint` + `helm template` 过（默认 5 类，`ingress.enabled=true` 才 6 类）；**真实集群部署未验** |
-| 数据库迁移与回滚演练通过 | ✅ | 无 `down.sql` 的版本被拒绝回滚（exit 1），表未动 |
-| 备份恢复演练 | ✅ | 真实计时：备份 307ms / 恢复 704ms / 校验演练 1509ms（QA 复测同量级） |
-| 健康检查异常路径 | ✅ | PG 停 → live 200 / ready **503**（**2.002s**） |
-| 配置外置 + fail-fast | ✅ | 缺/空 `DATABASE_URL` → exit 2；prod compose 缺口令 → exit 1 |
-| CI 六个 job 全绿 | ⚠️ | 已写但**未实跑**（仓库无 remote）；本地等价命令全绿 |
+| 租户隔离双保险 | ✅ | 应用层强制 `{tenant}` 占位符 + PG RLS **fail closed**；三路径耗时比 1.126 |
+| 部署侧用普通角色（否则 RLS 形同虚设） | ✅ | 超管启动 → **退出码 3 拒绝**；prod 绕过开关 → 退出码 2 |
+| app 容器拿不到超管连接串 | ✅ | 逐个 `secretKeyRef`，Deployment 块 grep `envFrom\|MIGRATION_` → 0 命中 |
+| 账号枚举面消失 | ✅ | 存在/不存在账号各 6 次错密码 → **逐次不可区分**；锁定期内正确密码 → `ACCOUNT_LOCKED` |
+| refresh 轮换 + 重放检测 | ✅ | 重放 → `TOKEN_REUSE_DETECTED`，**整个 family 作废**（DB 级证据：0 行未作废） |
+| TOTP 防重放 | ✅ | 同时间步二次 → 401；恢复码一次性 |
+| 设备会话与撤销 | ✅ | 踢 B → B 立即失效；登出全端 → 全部作废 |
+| JWKS 只暴露公钥 | ✅ | 逐成员检查无私钥成员；全仓 + 全历史无私钥 |
+| 组织树（邻接表 + 递归 CTE） | ✅ | 移动即反映；`path_labels` 写坏能报出能重建；成员不破 |
+| SCIM 出站幂等 | ✅ | 真 HTTP mock：PUT×2 → 1 条；两次全量条目不变；入队 < 100ms |
+| LDAP 离位判定 | ✅ | 位运算 7 取值全对（布尔比较会误判 `660`） |
+| 冲突字段级、不静默覆盖 | ✅ | `field`/`local_value`/`remote_value`；`manual` 下本地不被覆盖 |
+| 离职自动禁用 | ✅ | 禁用 + 旧 refresh 立即 401 `TOKEN_REVOKED` + 解绑 + 审计 + 通知 |
+| 回归确定性 | ✅ | 含 ignored 连跑 **8 轮全绿**（此前 2/4 死锁） |
 
 ## 环境备注（低配机）
 
-- 开发机 8 线程 i7-8550U / 7.7G 内存 / 4.6G 可用 —— **Rust 编译串行执行，不并行**
-- 日常主力命令 `cargo check`（增量 < 1s）；依赖树仅 91 个 crate
-- 容器用 rootless podman，**不用 docker**（省 ~375M 常驻内存）
+- 开发机 8 线程 i7-8550U / 7.7G 内存 / **4.7G 可用** / 磁盘剩 114G
+- **Rust 编译串行执行，不并行**
+- 日常主力命令 `cargo check`（增量 0.98s）
+- 容器用 rootless podman，**不用 docker**（数据库栈 81MB）
 - 镜像必须用 `docker.m.daocloud.io/` 显式前缀（docker.io 直连超时）
-- 磁盘预算 20G，实际只用了约 2G
-- **断电重启后必须手工恢复**：bus watcher + podman 容器（详见 dev-guide-low-spec.md §8.5）
-- 详见 [dev-guide-low-spec.md](../plan/dev-guide-low-spec.md)
-
-## 依赖顺序（已完成部分）
-
-```text
-REQ-002 平台骨架
-   ├─→ REQ-003 扩展点框架 ──→ REQ-004 AI 引导体系
-   └─→ REQ-005 交付基线
-```
-
-## 风险（实际发生的）
-
-| # | 风险 | 实际结果 |
-|---|------|---------|
-| R1 | 扩展点签名定不下来导致后续返工 | ✅ 已冻结 5 个 trait，写入 [extension-points v1](../../contracts/extension-points/v1.md)；发现 RPITIT 形态**不可用于 trait object**，已登记为 REQ-015/017 的决策项 |
-| R2 | 能力索引手工维护必然过期 | ✅ 由 `xtask capabilities` 自动生成 + `--check` 校验 + `source_fingerprint` 保证可复现 |
-| R3 | 私有化部署与 K8s 环境不具备 | ⚠️ compose + Helm Chart 齐备，**真实集群部署与镜像实构建未验**（本机内存不够 / 仓库无 remote） |
-| R4 | 机器断电导致进行中的 Agent 静默死亡 | ⚠️ 实际发生一次（REQ-005 修复轮），恢复成本约 20 分钟；已写恢复流程 |
+- 第三方依赖树 **273**，冷编译 check 46s/1039MB、含链接 75s/1471~1763MB
+- **断电后必须手工恢复**：bus watcher + podman 容器（都不会自启）
+  → 见 [dev-guide-low-spec.md](../plan/dev-guide-low-spec.md) §8.5
+- ⚠️ `cargo test` **只能有一个 `--`**（双 `--` → libtest 把 flag 当过滤串 → 0 passed 假绿）
 
 ## 下一步
 
-1. 加 remote（GitHub / Gitea）→ CI 跑起来 → 验证 6 个 job 与镜像体积门禁
-2. 在仓库设置里配置分支保护：`core-change-review` 设为 required check + 打开 Require review from Code Owners
-3. 进入 Sprint 2（身份）：REQ-006 → REQ-007 → REQ-008，**顺序不可调换**（认证的会话与令牌必须从第一行就带租户维度）
-4. 把复盘里的 9 项流程改进落到各子需求的模板里
+1. **加 remote**（GitHub / Gitea）→ CI 跑起来 → 验证 6 个 job 与镜像体积门禁（当前最大的验证缺口）
+2. 仓库设置里配分支保护：`core-change-review` 设为 required check + 打开 Code Owners 评审
+3. **Sprint 3（权限与界面）**：REQ-009 → REQ-010 → REQ-011 → REQ-012
+   - REQ-009 要第一次真正实现 REQ-006 的数据范围判定（多节点兼岗场景必须算对）
+   - REQ-011 要开始管前端 bundle 体积（SDK 分包的收益在这里第一次体现）
+   - REQ-012 元数据驱动渲染是「快速开发」目标的核心兑现点，建议本迭代就有最小可演示版本
+4. 把 Sprint 2 复盘里的 7 项流程改进落到各需求模板里
