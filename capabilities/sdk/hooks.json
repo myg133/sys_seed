@@ -1,0 +1,24 @@
+{
+  "entry": "./dist/index.js",
+  "exports": [
+    {
+      "declaration": "export interface Toggle {",
+      "description": "通用状态钩子占位包。",
+      "kind": "interface",
+      "name": "Toggle"
+    },
+    {
+      "declaration": "export function createToggle(initial = false): Toggle {",
+      "description": "创建布尔开关状态。",
+      "kind": "function",
+      "name": "createToggle"
+    }
+  ],
+  "generated_by": "cargo xtask capabilities",
+  "package": "@base/hooks",
+  "source": "packages/hooks/src/index.ts",
+  "usage": {
+    "example": "import { createToggle } from '@base/hooks';\n\nconst toggle = createToggle(false);\ntoggle.toggle();"
+  },
+  "version": "0.1.0"
+}

@@ -1,0 +1,154 @@
+{
+  "contract": "extension-points v1",
+  "extension_point_count": 5,
+  "generated_by": "cargo xtask capabilities",
+  "source": "crates/platform-core/src/extension/",
+  "traits": [
+    {
+      "associated_types": [],
+      "description": "审计埋点扩展点。",
+      "generics": "",
+      "kind": "extension-point",
+      "methods": [
+        {
+          "declaration": "fn audit_events(&self) -> &[AuditEventSpec]",
+          "has_default": false,
+          "name": "audit_events"
+        }
+      ],
+      "name": "Auditable",
+      "supertraits": "Send + Sync"
+    },
+    {
+      "associated_types": [],
+      "description": "通知投递扩展点。",
+      "generics": "",
+      "kind": "extension-point",
+      "methods": [
+        {
+          "declaration": "fn channel(&self) -> &str",
+          "has_default": false,
+          "name": "channel"
+        },
+        {
+          "declaration": "fn send(&self, ctx: &RequestContext, msg: &NotificationMessage) -> impl Future<Output = Result<DeliveryResult>> + Send",
+          "has_default": false,
+          "name": "send"
+        }
+      ],
+      "name": "NotificationSender",
+      "supertraits": "Send + Sync"
+    },
+    {
+      "associated_types": [],
+      "description": "模块注册扩展点。",
+      "generics": "",
+      "kind": "extension-point",
+      "methods": [
+        {
+          "declaration": "fn id(&self) -> &'static str",
+          "has_default": false,
+          "name": "id"
+        },
+        {
+          "declaration": "fn version(&self) -> &'static str",
+          "has_default": false,
+          "name": "version"
+        },
+        {
+          "declaration": "fn dependencies(&self) -> &[&'static str]",
+          "has_default": true,
+          "name": "dependencies"
+        },
+        {
+          "declaration": "fn setup(&self, ctx: &ModuleContext) -> Result<()>",
+          "has_default": true,
+          "name": "setup"
+        },
+        {
+          "declaration": "fn enabled(&self) -> bool",
+          "has_default": true,
+          "name": "enabled"
+        }
+      ],
+      "name": "PlatformModule",
+      "supertraits": "Send + Sync + 'static"
+    },
+    {
+      "associated_types": [
+        {
+          "declaration": "type Id: Send + Sync",
+          "has_default": false,
+          "name": "Id"
+        }
+      ],
+      "description": "数据访问扩展点。",
+      "generics": "<T: Send + Sync + 'static>",
+      "kind": "extension-point",
+      "methods": [
+        {
+          "declaration": "fn find(&self, ctx: &RequestContext, id: &Self::Id) -> impl Future<Output = Result<Option<T>>> + Send",
+          "has_default": false,
+          "name": "find"
+        },
+        {
+          "declaration": "fn list(&self, ctx: &RequestContext, q: &ListQuery) -> impl Future<Output = Result<List<T>>> + Send",
+          "has_default": false,
+          "name": "list"
+        },
+        {
+          "declaration": "fn insert(&self, ctx: &RequestContext, item: &T) -> impl Future<Output = Result<T>> + Send",
+          "has_default": false,
+          "name": "insert"
+        },
+        {
+          "declaration": "fn update(&self, ctx: &RequestContext, item: &T) -> impl Future<Output = Result<T>> + Send",
+          "has_default": false,
+          "name": "update"
+        },
+        {
+          "declaration": "fn delete(&self, ctx: &RequestContext, id: &Self::Id) -> impl Future<Output = Result<()>> + Send",
+          "has_default": false,
+          "name": "delete"
+        }
+      ],
+      "name": "Repository",
+      "supertraits": "Send + Sync"
+    },
+    {
+      "associated_types": [],
+      "description": "写边界声明扩展点。",
+      "generics": "",
+      "kind": "platform-capability",
+      "methods": [
+        {
+          "declaration": "fn write_boundary(&self) -> WriteBoundary",
+          "has_default": false,
+          "name": "write_boundary"
+        }
+      ],
+      "name": "TransactionalWrite",
+      "supertraits": "Send + Sync"
+    },
+    {
+      "associated_types": [],
+      "description": "工作流接入扩展点。",
+      "generics": "",
+      "kind": "extension-point",
+      "methods": [
+        {
+          "declaration": "fn workflow_key(&self) -> &'static str",
+          "has_default": false,
+          "name": "workflow_key"
+        },
+        {
+          "declaration": "fn on_transition(&self, ctx: &RequestContext, ev: &TransitionEvent) -> impl Future<Output = Result<()>> + Send",
+          "has_default": false,
+          "name": "on_transition"
+        }
+      ],
+      "name": "WorkflowHandler",
+      "supertraits": "Send + Sync"
+    }
+  ]
+}

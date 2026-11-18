@@ -1,0 +1,30 @@
+{
+  "entry": "./dist/index.js",
+  "exports": [
+    {
+      "declaration": "export interface ThemeTokens {",
+      "description": "主题占位包。",
+      "kind": "interface",
+      "name": "ThemeTokens"
+    },
+    {
+      "declaration": "export function defaultTheme(): ThemeTokens {",
+      "description": "默认主题 token。",
+      "kind": "function",
+      "name": "defaultTheme"
+    },
+    {
+      "declaration": "export function mergeTheme(overrides: Partial<ThemeTokens>): ThemeTokens {",
+      "description": "主题 token 覆盖一层（未覆盖的项沿用默认值）。",
+      "kind": "function",
+      "name": "mergeTheme"
+    }
+  ],
+  "generated_by": "cargo xtask capabilities",
+  "package": "@base/theme",
+  "source": "packages/theme/src/index.ts",
+  "usage": {
+    "example": "import { mergeTheme } from '@base/theme';\n\nconst theme = mergeTheme({ primaryColor: '#ff0000' });"
+  },
+  "version": "0.1.0"
+}

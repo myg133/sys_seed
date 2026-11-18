@@ -4,20 +4,38 @@ use std::process::ExitCode;
 
 use anyhow::Result;
 use clap::Parser;
+use xtask::capabilities;
 use xtask::cli::{Cli, Command};
+use xtask::deps::dependency_direction_violations;
 use xtask::modules::check_modules;
+use xtask::scaffold::create_module;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
         Command::CheckModules(args) => match run_check_modules(std::path::Path::new(&args.root)) {
             Ok(code) => code,
-            Err(err) => {
-                eprintln!("错误：{err:#}");
-                ExitCode::FAILURE
-            }
+            Err(err) => fail(err),
+        },
+        Command::CheckDeps(args) => match run_check_deps(std::path::Path::new(&args.root)) {
+            Ok(code) => code,
+            Err(err) => fail(err),
+        },
+        Command::Capabilities(args) => match run_capabilities(&args) {
+            Ok(code) => code,
+            Err(err) => fail(err),
+        },
+        Command::CreateModule(args) => match run_create_module(&args) {
+            Ok(code) => code,
+            Err(err) => fail(err),
         },
     }
+}
+
+/// 统一的错误出口：打印错误链并返回失败退出码。
+fn fail(err: anyhow::Error) -> ExitCode {
+    eprintln!("错误：{err:#}");
+    ExitCode::FAILURE
 }
 
 /// 执行目录规范校验。
@@ -50,4 +68,77 @@ fn run_check_modules(root: &std::path::Path) -> Result<ExitCode> {
         }
     }
     Ok(ExitCode::FAILURE)
+}
+
+/// 执行依赖方向校验：平台 crate 不得反向依赖业务模块。
+fn run_check_deps(root: &std::path::Path) -> Result<ExitCode> {
+    let violations = dependency_direction_violations(root)?;
+    if violations.is_empty() {
+        println!("依赖方向校验通过：平台 crate 未反向依赖业务模块");
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    eprintln!("依赖方向校验失败：错误码 E_DEPENDENCY_DIRECTION");
+    for violation in &violations {
+        eprintln!("  ✗ {violation}");
+    }
+    Ok(ExitCode::FAILURE)
+}
+
+/// 执行能力索引的生成或校验。
+fn run_capabilities(args: &xtask::cli::CapabilitiesArgs) -> Result<ExitCode> {
+    let root = std::path::Path::new(&args.root);
+    let generated = capabilities::generate(root)?;
+
+    if args.check {
+        let report = capabilities::check(root, &generated)?;
+        if report.is_consistent() {
+            println!("能力索引校验通过：{} 个文件与源码一致", generated.len());
+            return Ok(ExitCode::SUCCESS);
+        }
+        eprintln!("能力索引校验失败：错误码 E_CAPABILITIES_OUTDATED");
+        for name in &report.missing {
+            eprintln!("  ✗ 缺失：capabilities/{name}");
+        }
+        for name in &report.changed {
+            eprintln!("  ✗ 内容不一致：capabilities/{name}");
+        }
+        for name in &report.extra {
+            eprintln!("  ✗ 多余文件（源码里已无对应产物）：capabilities/{name}");
+        }
+        eprintln!("  修复方式：运行 `cargo xtask capabilities` 重新生成");
+        eprintln!("    缺失 / 内容不一致的文件会被重新写出，多余文件会被自动删除");
+        return Ok(ExitCode::FAILURE);
+    }
+
+    let pruned = capabilities::write_files(root, &generated)?;
+    println!("能力索引已生成：{} 个文件", generated.len());
+    for name in generated.keys() {
+        println!("  ✓ capabilities/{name}");
+    }
+    for name in &pruned {
+        println!("  ✓ 已清理多余文件：capabilities/{name}");
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// 执行模块骨架生成。
+fn run_create_module(args: &xtask::cli::CreateModuleArgs) -> Result<ExitCode> {
+    let root = std::path::Path::new(&args.root);
+    let report = create_module(root, &args.name, args.perm_prefix.as_deref())?;
+    println!("模块骨架已生成：{}", report.module_dir.display());
+    for path in &report.files {
+        println!("  ✓ {}", path.display());
+    }
+    for note in &report.notes {
+        println!("  ! {note}");
+    }
+    println!("下一步：");
+    println!("  1. cargo xtask check-modules");
+    println!(
+        "  2. cargo test -p {} -- --test-threads=2",
+        report.crate_name
+    );
+    println!("  3. cargo xtask capabilities");
+    Ok(ExitCode::SUCCESS)
 }

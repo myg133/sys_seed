@@ -1,0 +1,20 @@
+# 代码归属（CODEOWNERS）
+#
+# 作用：改动这些路径的 PR，GitHub 会自动请求这些维护者评审。
+# 配合仓库分支保护规则里的「Require review from Code Owners」，
+# 就能**强制人工评审** —— 不评审就合不进去。
+#
+# ⚠️ 维护者账号请按实际情况调整（本仓库当前用 @myg133 作为占位）。
+
+# 平台核心：改动影响所有业务模块，必须人工评审
+/crates/platform-core/ @myg133
+/crates/platform-contracts/ @myg133
+/crates/platform-contracts-macros/ @myg133
+
+# 引导文件与能力索引：改动会直接影响 AI 的产出质量
+/AGENTS.md @myg133
+/prompts/ @myg133
+/capabilities/ @myg133
+
+# 工程护栏（CI 规则本身）
+/.github/ @myg133

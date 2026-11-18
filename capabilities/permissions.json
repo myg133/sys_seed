@@ -1,0 +1,22 @@
+{
+  "generated_by": "cargo xtask capabilities",
+  "modules": [
+    {
+      "manifest": "modules/sandbox/manifest.json",
+      "module": "sandbox",
+      "permissions": [
+        {
+          "code": "sandbox:demo:read",
+          "name": "查看沙箱示例",
+          "type": "menu"
+        },
+        {
+          "code": "sandbox:demo:write",
+          "name": "编辑沙箱示例",
+          "type": "button"
+        }
+      ]
+    }
+  ],
+  "total": 2
+}

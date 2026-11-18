@@ -1,0 +1,30 @@
+{
+  "entry": "./dist/index.js",
+  "exports": [
+    {
+      "declaration": "export type MessageDict = Record<string, string>",
+      "description": "国际化占位包。",
+      "kind": "type",
+      "name": "MessageDict"
+    },
+    {
+      "declaration": "export function translate(dict: MessageDict, key: string, fallback: string = key): string {",
+      "description": "取文案；未命中时回落到 `fallback`（默认回落到 key 本身）。",
+      "kind": "function",
+      "name": "translate"
+    },
+    {
+      "declaration": "export function hasMessage(dict: MessageDict, key: string): boolean {",
+      "description": "判断错误码在字典中是否有对应文案。",
+      "kind": "function",
+      "name": "hasMessage"
+    }
+  ],
+  "generated_by": "cargo xtask capabilities",
+  "package": "@base/i18n",
+  "source": "packages/i18n/src/index.ts",
+  "usage": {
+    "example": "import { translate } from '@base/i18n';\n\nconst text = translate({ INSUFFICIENT_PERMISSION: '权限不足' }, 'INSUFFICIENT_PERMISSION');"
+  },
+  "version": "0.1.0"
+}

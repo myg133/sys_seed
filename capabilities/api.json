@@ -1,0 +1,7 @@
+{
+  "generated_by": "cargo xtask capabilities",
+  "note": "HTTP 层未就绪：接口清单由 REQ-011（接口层）与 REQ-012（元数据 schema）落地后并入本索引",
+  "openapi": null,
+  "paths": [],
+  "status": "not-ready"
+}

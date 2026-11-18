@@ -1,6 +1,6 @@
 # 低配开发环境指南
 
-本文是 [BA 低配开发指南](../../BA/plan/dev-guide-low-spec.md) 的仓库正式版，供所有开发者按同一套参数工作。
+本文是 BA 低配开发指南（正本在 BA 分支 `demand`，用 `git show demand:plan/dev-guide-low-spec.md` 读）的仓库正式版，供所有开发者按同一套参数工作。
 
 ## 0. 目标机器画像
 

@@ -5,6 +5,12 @@ on:
     branches: [main, develop, 'feature/**']
   pull_request:
     branches: [main, develop]
+    # review_requested：请求评审时也要跑一次，让「强制人工评审」门禁有初始状态
+    types: [opened, synchronize, reopened, review_requested]
+  # 评审事件：评审者批准后必须能重跑门禁，否则 core-change-review 永远停在旧状态
+  # （本仓库无 remote 时无法实跑验证，判定逻辑见 feature-meta/verification-report.md）
+  pull_request_review:
+    types: [submitted, edited, dismissed]
 
 env:
   CARGO_TERM_COLOR: always
@@ -164,3 +170,137 @@ jobs:
       # 低配机只装 chromium，不装全套浏览器
       - run: pnpm exec playwright install --with-deps chromium
       - run: bun run test:e2e
+
+  # 7. 护栏：能力索引一致性 + 依赖方向单向 + 契约快照一致性
+  guardrails:
+    name: guardrails
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 需要拿到 BA 分支（demand）才能校验契约快照
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+      # 索引必须与源码一致：手改 capabilities/ 即失败（AC-S-004）
+      - name: 校验能力索引与源码一致
+        run: cargo xtask capabilities --check
+      # 依赖方向单向：平台 crate 不得反向依赖业务模块
+      - name: 校验依赖方向
+        run: cargo xtask check-deps
+      # 契约快照必须与 BA 分支的正本一致
+      # （不一致就同步：scripts/sync-contracts.sh --sync）
+      # 本地没有 demand 分支时脚本会明确跳过，不会误报。
+      - name: 校验契约快照与 BA 正本一致
+        run: ./scripts/sync-contracts.sh
+
+  # 8. 平台核心变更：自动打标
+  #
+  # 触发条件：PR 改动了 crates/platform-core/ / crates/platform-contracts/ /
+  # crates/platform-contracts-macros/。
+  # 本 job 只负责「打标 + 摘要」；真正的强制人工评审由
+  # `core-change-review`（required check）与 `.github/CODEOWNERS` 共同保证。
+  core-change-label:
+    name: core-change-label
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 检测平台核心变更
+        id: core
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          changed=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- \
+            crates/platform-core \
+            crates/platform-contracts \
+            crates/platform-contracts-macros)
+          if [ -n "$changed" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            {
+              echo "### 平台核心变更"
+              echo ""
+              echo "以下路径被修改，按 \`.github/CODEOWNERS\` 必须由核心维护者人工评审："
+              echo ""
+              echo '```'
+              echo "$changed"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: 打上 platform-core-change 标签
+        if: steps.core.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh label create platform-core-change \
+            --description "修改了平台核心，需要核心维护者人工评审" \
+            --color B60205 2>/dev/null || true
+          gh pr edit "$PR_NUMBER" --add-label platform-core-change
+
+  # 9. 平台核心变更：强制人工评审
+  #
+  # 判定口径：PR 改了平台核心路径时，必须存在一条
+  # 「批准（approved）+ 评审人不是 PR 作者 + 评审的 commit 就是当前 HEAD」的评审。
+  # 作者自己批准不算数；推了新 commit 之后旧批准自动失效（commit_id 对不上）。
+  #
+  # 触发时机：PR 打开 / 更新 / 重新打开 / 请求评审，以及每次评审提交
+  # （pull_request_review: submitted / edited / dismissed）。
+  # 没有 pull_request_review 触发器时，评审者批准后 workflow 不会重跑，
+  # 这个检查会永远停在「未批准」的旧状态，「强制评审」形同虚设。
+  #
+  # ⚠️ 以下两步**在仓库设置里、不在代码里**，必须人工配置，代码无法代劳：
+  #   1. 把 `core-change-review` 设为 required check；
+  #   2. 打开「Require review from Code Owners」（配合 .github/CODEOWNERS）。
+  # 另外：GitHub 规定 pull_request_review 事件只在「工作流文件已存在于默认分支」时触发，
+  # 所以本文件合并进默认分支（main）之后，评审触发的门禁才会生效。
+  core-change-review:
+    name: core-change-review
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request' || github.event_name == 'pull_request_review'
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: 核心变更必须有非作者的批准
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          changed=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- \
+            crates/platform-core \
+            crates/platform-contracts \
+            crates/platform-contracts-macros)
+          if [ -z "$changed" ]; then
+            echo "本次 PR 未修改平台核心，无需核心评审。"
+            exit 0
+          fi
+          echo "::warning::本 PR 修改了平台核心：$changed"
+          approved=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/reviews" --paginate \
+            | jq -s --arg head "$HEAD_SHA" --arg author "$PR_AUTHOR" \
+                '[add[] | select(.state == "APPROVED" and .commit_id == $head and .user.login != $author)] | length')
+          if [ "$approved" -ge 1 ]; then
+            echo "平台核心变更已由非作者评审者批准 ✓"
+            exit 0
+          fi
+          echo "::error::本 PR 修改了平台核心（$changed），但当前 HEAD 上没有来自非 PR 作者的批准评审。"
+          echo "::error::按 .github/CODEOWNERS，必须由核心维护者评审并批准后才能合并。"
+          exit 1
