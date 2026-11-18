@@ -5,9 +5,11 @@
 //! base migrate up            # 应用待执行迁移
 //! base migrate down --target 0   # 回滚到指定版本
 //! base migrate status        # 查看迁移状态
+//! base tenant-policies       # 按 manifest 生成租户作用域表的 RLS 策略
 //! ```
 //!
 //! 配置校验失败时**立即退出**（退出码 2），不进入监听状态。
+//! 租户隔离前提不成立时（连接角色绕过 RLS）同样**立即退出**（退出码 3）。
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -21,7 +23,7 @@ use axum::{Json, Router};
 use clap::{Parser, Subcommand};
 use platform_core::RequestContext;
 use platform_server::config::{ConfigError, DeployConfig, Environment};
-use platform_server::{db, health, migrate, probe, static_files};
+use platform_server::{db, health, isolation, migrate, policies, probe, static_files};
 use serde::Serialize;
 use sqlx::PgPool;
 use sqlx::migrate::Migrator;
@@ -31,6 +33,8 @@ use tracing_subscriber::EnvFilter;
 const EXIT_CONFIG: u8 = 2;
 /// 运行期失败的退出码。
 const EXIT_RUNTIME: u8 = 1;
+/// 租户隔离前提不成立的退出码（连接角色绕过 RLS）。
+const EXIT_ISOLATION: u8 = 3;
 
 /// CLI。
 #[derive(Parser, Debug)]
@@ -59,6 +63,20 @@ enum Command {
         /// 要检查的地址。
         #[arg(long, default_value = "http://127.0.0.1:8080/health/ready")]
         url: String,
+    },
+    /// 租户作用域策略：按业务模块 manifest 统一生成 / 校验 RLS 策略。
+    ///
+    /// 部署期用（镜像里没有 cargo，但策略必须能落地）。
+    /// **必须先跑迁移再跑它** —— 策略是对已建好的表做的。
+    TenantPolicies {
+        /// 只校验，不改数据库；前提不成立时退出码非 0（让部署失败）。
+        #[arg(long)]
+        check: bool,
+        /// manifest 根目录（其下是 `modules/<模块>/manifest.json`）。
+        ///
+        /// 缺省用 `BASE_MANIFEST_ROOT`（再缺省是当前目录）。
+        #[arg(long)]
+        manifest_root: Option<String>,
     },
 }
 
@@ -115,6 +133,11 @@ async fn main() -> ExitCode {
             eprintln!("✗ {err}");
             ExitCode::from(EXIT_RUNTIME)
         }
+        Err(Failure::Isolation(err)) => {
+            eprintln!("✗ 租户隔离前提不成立，进程退出（fail-fast）：");
+            eprintln!("{err}");
+            ExitCode::from(EXIT_ISOLATION)
+        }
     }
 }
 
@@ -124,6 +147,8 @@ enum Failure {
     Config(ConfigError),
     /// 运行期失败。
     Runtime(String),
+    /// 租户隔离前提不成立。
+    Isolation(isolation::IsolationError),
 }
 
 impl From<ConfigError> for Failure {
@@ -150,6 +175,10 @@ async fn run(cli: Cli) -> Result<(), Failure> {
         Command::Serve => serve().await,
         Command::Migrate { action } => run_migrate(action).await,
         Command::Healthcheck { url } => run_healthcheck(&url).await,
+        Command::TenantPolicies {
+            check,
+            manifest_root,
+        } => run_tenant_policies(check, manifest_root).await,
     }
 }
 
@@ -220,6 +249,22 @@ async fn serve() -> Result<(), Failure> {
         .await
         .map_err(|err| Failure::Runtime(format!("数据库连接串非法：{err}")))?;
 
+    // 租户隔离前提自检：连接角色**不得**绕过 RLS（超级用户 / BYPASSRLS）。
+    // 命中即拒绝启动 —— 否则 RLS 在部署里等于没开（租户隔离 fail open）。
+    // 见 deploy/RUNBOOK.md「应用角色与 RLS」。
+    let isolation =
+        isolation::verify_startup_isolation(&config.database_url, config.allow_superuser)
+            .await
+            .map_err(Failure::Isolation)?;
+    if isolation.superuser_allowed {
+        tracing::warn!(
+            role = %isolation.report.role,
+            "BASE_ALLOW_SUPERUSER=true：放行了绕过 RLS 的连接角色 —— 租户隔离会 fail open（仅限本地开发）"
+        );
+    } else {
+        tracing::info!(role = %isolation.report.role, "租户隔离前提自检通过：连接角色不绕过 RLS");
+    }
+
     let state = Arc::new(AppState {
         pool,
         migrator,
@@ -248,6 +293,20 @@ async fn serve() -> Result<(), Failure> {
         .await
         .map_err(|err| Failure::Runtime(format!("HTTP 服务退出：{err}")))?;
     Ok(())
+}
+
+/// 执行租户作用域策略的生成 / 校验。
+///
+/// 部署期用（镜像里没有 cargo，但策略必须能落地）。
+/// 连接串用**迁移（管理员）连接** —— 建策略需要表的属主权限。
+async fn run_tenant_policies(check: bool, manifest_root: Option<String>) -> Result<(), Failure> {
+    let config = load_config()?;
+    init_tracing(&config.log_level);
+
+    let root = manifest_root.unwrap_or_else(|| config.manifest_root.clone());
+    policies::run(&root, &config.database_url, check)
+        .await
+        .map_err(|err| Failure::Runtime(format!("{err:#}")))
 }
 
 /// 执行迁移子命令。

@@ -9,6 +9,7 @@ use xtask::cli::{Cli, Command};
 use xtask::deps::dependency_direction_violations;
 use xtask::modules::check_modules;
 use xtask::scaffold::create_module;
+use xtask::tenant_policies;
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -26,6 +27,10 @@ fn main() -> ExitCode {
             Err(err) => fail(err),
         },
         Command::CreateModule(args) => match run_create_module(&args) {
+            Ok(code) => code,
+            Err(err) => fail(err),
+        },
+        Command::TenantPolicies(args) => match run_tenant_policies(&args) {
             Ok(code) => code,
             Err(err) => fail(err),
         },
@@ -140,5 +145,44 @@ fn run_create_module(args: &xtask::cli::CreateModuleArgs) -> Result<ExitCode> {
         report.crate_name
     );
     println!("  3. cargo xtask capabilities");
+    Ok(ExitCode::SUCCESS)
+}
+
+/// 执行租户作用域策略的统一生成 / 校验。
+///
+/// 业务模块在 manifest 的 `tenantScoped` 段声明表，**平台统一生成** RLS 策略 ——
+/// 模块不手写（漏建一张表 = 该表完全无隔离）。
+fn run_tenant_policies(args: &xtask::cli::TenantPoliciesArgs) -> Result<ExitCode> {
+    let root = std::path::Path::new(&args.root);
+    let scopes = tenant_policies::collect_scopes(root)?;
+    if scopes.is_empty() {
+        println!("没有模块声明 tenantScoped：无需生成策略");
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let database_url = args
+        .database_url
+        .clone()
+        .or_else(|| std::env::var("DATABASE_URL").ok())
+        .ok_or_else(|| {
+            anyhow::anyhow!("缺少数据库连接串：传 --database-url 或设置环境变量 DATABASE_URL")
+        })?;
+
+    let runtime = tokio::runtime::Runtime::new()?;
+
+    if args.check {
+        runtime.block_on(tenant_policies::check(&scopes, &database_url))?;
+        println!(
+            "租户隔离前提校验通过：{} 个模块声明的表都开了 RLS 且有策略",
+            scopes.len()
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    runtime.block_on(tenant_policies::apply(&scopes, &database_url))?;
+    println!("已为 {} 个模块生成 RLS 策略：", scopes.len());
+    for scope in &scopes {
+        println!("  ✓ {}：{}", scope.module, scope.spec.tables.join(", "));
+    }
     Ok(ExitCode::SUCCESS)
 }

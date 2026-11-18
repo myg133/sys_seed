@@ -1,0 +1,23 @@
+[package]
+name = "platform-db"
+description = "平台数据访问层：租户作用域入口 + PostgreSQL RLS 兜底"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# 平台核心：RequestContext（租户的唯一来源）+ 错误类型风格
+platform-core.workspace = true
+# 收集业务模块 manifest 里的租户作用域声明（RLS 策略的唯一来源）
+anyhow.workspace = true
+# sqlx：**不开 macros feature** —— 运行时校验查询，避免拉进 proc-macro 编译链
+# （低配机冷编译对新增依赖敏感，见 design-summary §2）。
+sqlx.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+# 契约与集成测试要读模块 manifest（走 platform-core 的解析器，不引 serde_json）
+anyhow.workspace = true

@@ -9,6 +9,8 @@
 pub mod config;
 pub mod db;
 pub mod health;
+pub mod isolation;
 pub mod migrate;
+pub mod policies;
 pub mod probe;
 pub mod static_files;

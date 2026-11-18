@@ -36,6 +36,10 @@ pub const ALREADY_PROVIDED: &[ProvidedCapability] = &[
         summary: "Repository<T> 提供 find/list/insert/update/delete，业务模块实现它即可，勿另造 DAO 基类或数据访问框架",
     },
     ProvidedCapability {
+        key: "tenant_scoped_db",
+        summary: "platform-db 的 TenantDb 提供带 RequestContext 的租户作用域数据访问（事务内 SET LOCAL app.tenant_id + RLS 兜底），公开 API 拿不到裸连接，勿自建连接池或直连数据库",
+    },
+    ProvidedCapability {
         key: "list_query",
         summary: "ListQuery/SortSpec/FilterSpec 已定义游标分页（limit 默认 20、上限 200）与过滤算子白名单，勿自造分页参数",
     },
@@ -116,8 +120,8 @@ pub const NOT_YET_PROVIDED: &[ProvidedCapability] = &[
         summary: "HTTP 接口层尚未就绪（REQ-011/012 补），capabilities/api.json 目前为空",
     },
     ProvidedCapability {
-        key: "db_access_layer",
-        summary: "平台没有 DB 访问层（sqlx 推迟到 REQ-006/007），模块仓储当前是内存实现",
+        key: "crud_scaffolding",
+        summary: "平台没有通用 CRUD/分页脚手架（模块的仓储要自己实现），但数据访问必须走 platform-db 的租户作用域入口",
     },
     ProvidedCapability {
         key: "audit_sink",

@@ -7,7 +7,7 @@
 #   **口令既不落到命令行、也不落到进程列表**。
 #
 # 环境变量：
-#   DATABASE_URL   必填，数据库连接串
+#   DATABASE_URL   必填，数据库连接串（缺省时用 MIGRATION_DATABASE_URL）
 #   PG_CONTAINER   数据库容器名（默认 base-postgres）
 #   PG_ENGINE      容器运行时（默认自动探测 podman / docker）
 
@@ -45,7 +45,7 @@ PGDATABASE=""
 pg_parse_url() {
   local url="${1:-}"
   if [ -z "$url" ]; then
-    echo "✗ 缺少 DATABASE_URL" >&2
+    echo "✗ 缺少 DATABASE_URL（或 MIGRATION_DATABASE_URL）" >&2
     exit 1
   fi
 

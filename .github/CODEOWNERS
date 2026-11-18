@@ -11,6 +11,9 @@
 /crates/platform-contracts/ @myg133
 /crates/platform-contracts-macros/ @myg133
 
+# 平台数据访问层：业务模块的数据访问都走它（租户作用域入口），改动影响所有业务模块
+/crates/platform-db/ @myg133
+
 # 交付基线服务：配置校验 / 健康检查 / 迁移命令（部署链路，改动要人工过一眼）
 /crates/platform-server/ @myg133
 

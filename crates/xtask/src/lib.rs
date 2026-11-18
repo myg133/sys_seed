@@ -6,6 +6,7 @@
 //! | `check-deps` | 校验依赖方向：平台 crate 不得反向依赖业务模块 |
 //! | `capabilities` | 生成 / 校验能力索引（`capabilities/`） |
 //! | `create-module` | 生成业务模块骨架（开箱即过契约检查） |
+//! | `tenant-policies` | 按 manifest 的 `tenantScoped` 段统一生成 / 校验 RLS 策略 |
 
 pub mod capabilities;
 pub mod catalog;
@@ -14,6 +15,7 @@ pub mod deps;
 pub mod modules;
 pub mod rustscan;
 pub mod scaffold;
+pub mod tenant_policies;
 
 use std::path::{Path, PathBuf};
 

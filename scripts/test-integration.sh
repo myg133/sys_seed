@@ -129,7 +129,9 @@ reset_test_db
 
 # 测试失败也必须继续执行下面的容器数量比对，所以这里不让 set -e 直接中断
 status=0
-cargo test --workspace --tests -- --test-threads=2 || status=$?
+# --include-ignored：真实库用例（C-3 真实库层）默认是 #[ignore] 的，
+# 这里必须真正跑到 —— 「跳过」也算通过的话，这条用例就形同虚设。
+cargo test --workspace --tests -- --test-threads=2 --include-ignored || status=$?
 
 after="$(container_count)"
 

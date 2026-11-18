@@ -78,16 +78,31 @@ impl ModuleStatus {
 
 /// 目录为空的说明。
 ///
-/// `migrations/` 单列一条：本期底座还没有业务 DB 层（数据访问层待 REQ-006/007），
-/// 所以该目录只放说明文件也算合规；**DB 层落地后规则将升级为至少一个 `*.sql`**。
+/// `migrations/` 单列一条：**DB 层落地后（REQ-006 起）**，`migrations/` 下
+/// 必须至少有一个 `*.sql` 迁移文件 —— 只放说明文件不再算合规
+/// （模块声明了租户作用域表却没有迁移 = 表根本不存在）。
 fn empty_dir_problem(dir: &str) -> String {
     if dir == "migrations" {
         return format!(
-            "目录 {dir}/ 为空 —— 本期底座还没有业务 DB 层，暂放说明文件即可；\
-             DB 层落地后规则将升级为至少一个 `*.sql` 迁移文件"
+            "目录 {dir}/ 为空 —— 业务 DB 层已落地，模块必须在 {dir}/ 下放至少一个 \
+             `*.sql` 迁移文件（命名与平台迁移目录一致：<版本>_<描述>.up.sql + .down.sql）"
         );
     }
     format!("目录 {dir}/ 为空")
+}
+
+/// `migrations/` 目录里是否有 `*.sql` 迁移文件。
+fn has_sql_migration(dir: &Path) -> bool {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        entry
+            .path()
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("sql"))
+    })
 }
 
 /// 仓库内所有业务模块的校验汇总。
@@ -157,7 +172,7 @@ fn check_module(module_dir: &Path, name: String) -> ModuleStatus {
         .map(|required| (*required).to_string())
         .collect();
 
-    let empty_dirs = REQUIRED_DIRS
+    let mut empty_dirs: Vec<String> = REQUIRED_DIRS
         .iter()
         .filter(|required| module_dir.join(required).is_dir())
         .filter(|required| is_empty_dir(&module_dir.join(required)))
@@ -168,6 +183,15 @@ fn check_module(module_dir: &Path, name: String) -> ModuleStatus {
     let invalid_manifest = check_manifest(&manifest_path);
     let manifest_issues = check_manifest_schema(&manifest_path);
     let id_mismatch = check_manifest_id(&manifest_path, &name);
+
+    // `migrations/` 不能只有说明文件：DB 层落地后，模块必须真的有迁移。
+    let migrations_dir = module_dir.join("migrations");
+    if !empty_dirs.iter().any(|dir| dir == "migrations")
+        && migrations_dir.is_dir()
+        && !has_sql_migration(&migrations_dir)
+    {
+        empty_dirs.push("migrations".to_string());
+    }
 
     ModuleStatus {
         name,
@@ -299,7 +323,13 @@ mod tests {
         std::fs::write(dir.join("README.md"), "# demo\n").expect("写入应成功");
         for required in REQUIRED_DIRS {
             std::fs::create_dir_all(dir.join(required)).expect("目录应可创建");
-            std::fs::write(dir.join(required).join("placeholder.txt"), "x\n").expect("写入应成功");
+            // `migrations/` 必须有 `*.sql`（DB 层落地后的规则），其余目录放占位文件。
+            let file = if required == "migrations" {
+                "1_demo.up.sql"
+            } else {
+                "placeholder.txt"
+            };
+            std::fs::write(dir.join(required).join(file), "x\n").expect("写入应成功");
         }
         dir
     }
@@ -476,7 +506,8 @@ mod tests {
         let dir = make_module(temp.path(), "demo");
         for required in REQUIRED_DIRS {
             let path = dir.join(required).join("placeholder.txt");
-            std::fs::remove_file(&path).expect("删除应成功");
+            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_file(dir.join(required).join("1_demo.up.sql"));
         }
 
         let report = check_modules(temp.path());
@@ -485,14 +516,40 @@ mod tests {
         assert_eq!(status.empty_dirs, vec!["backend", "frontend", "migrations"]);
     }
 
+    /// DB 层落地后：`migrations/` 只放说明文件**不再**算合规。
     #[test]
-    fn empty_migrations_dir_explains_the_future_rule() {
-        // DB 层落地后规则会升级为「至少一个 *.sql」，提示语要提前说清楚，
-        // 否则运维只会看到一句干巴巴的「目录为空」。
+    fn migrations_dir_without_a_sql_file_is_reported() {
+        let temp = TempDir::new("migrations-no-sql");
+        let dir = make_module(temp.path(), "demo");
+        std::fs::remove_file(dir.join("migrations").join("1_demo.up.sql")).expect("删除应成功");
+        std::fs::write(dir.join("migrations").join("README.md"), "# 说明\n").expect("写入应成功");
+
+        let report = check_modules(temp.path());
+        assert!(!report.is_valid(), "只有说明文件的 migrations 必须判失败");
+        let status = &report.modules[0];
+        assert!(
+            status.empty_dirs.iter().any(|dir| dir == "migrations"),
+            "status = {status:?}"
+        );
+    }
+
+    /// `migrations/` 里有 `*.sql` → 合规。
+    #[test]
+    fn migrations_dir_with_a_sql_file_is_accepted() {
+        let temp = TempDir::new("migrations-with-sql");
+        make_module(temp.path(), "demo");
+
+        let report = check_modules(temp.path());
+        assert!(report.is_valid(), "report = {:?}", report.modules);
+    }
+
+    #[test]
+    fn empty_migrations_dir_explains_the_sql_requirement() {
+        // 提示语要说清楚「要放什么」，否则运维只会看到一句干巴巴的「目录为空」。
         let message = empty_dir_problem("migrations");
         assert!(message.contains("migrations/"), "message = {message}");
         assert!(message.contains("*.sql"), "message = {message}");
-        assert!(message.contains("DB 层落地后"), "message = {message}");
+        assert!(message.contains("DB 层已落地"), "message = {message}");
     }
 
     #[test]

@@ -9,6 +9,10 @@
   ],
   "menus": [{ "label": "沙箱", "icon": "flask", "route": "/sandbox", "perm": "sandbox:demo:read" }],
   "dependencies": [],
+  "tenantScoped": {
+    "tables": ["sandbox_tenant_item"],
+    "column": "tenant_id"
+  },
   "config": {
     "pageSize": { "type": "number", "default": 20, "scope": "tenant", "label": "每页条数" }
   }

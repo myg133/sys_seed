@@ -21,6 +21,8 @@ pub enum Command {
     Capabilities(CapabilitiesArgs),
     /// 生成业务模块骨架。
     CreateModule(CreateModuleArgs),
+    /// 按 manifest 的 `tenantScoped` 段统一生成 / 校验 RLS 策略。
+    TenantPolicies(TenantPoliciesArgs),
 }
 
 /// `check-modules` 参数。
@@ -61,6 +63,23 @@ pub struct CreateModuleArgs {
     /// 仓库根目录，默认为本工作区根。
     #[arg(long, default_value_t = default_root())]
     pub root: String,
+}
+
+/// `tenant-policies` 参数。
+#[derive(Debug, Args)]
+pub struct TenantPoliciesArgs {
+    /// 仓库根目录，默认为本工作区根。
+    #[arg(long, default_value_t = default_root())]
+    pub root: String,
+    /// 只校验不写入：有表漏建 policy 时以非零码退出（CI 用）。
+    #[arg(long)]
+    pub check: bool,
+    /// 数据库连接串；默认取环境变量 `DATABASE_URL`。
+    ///
+    /// 生成策略需要**表的属主权限** → 用管理员角色；
+    /// 校验隔离前提可用应用角色（超级用户会给出「绕过 RLS」告警）。
+    #[arg(long)]
+    pub database_url: Option<String>,
 }
 
 /// 默认仓库根目录（字符串形式，便于 clap 生成帮助信息）。

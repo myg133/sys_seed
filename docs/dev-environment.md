@@ -179,14 +179,32 @@ cargo build --tests                  # 只在要跑测试时 build
 
 `cargo check` 跳过代码生成与链接，在本机比 `cargo build` 快 40-50%、内存低 60%。
 
-### 2.3 本机实测（REQ-002 交付时）
+### 2.3 本机实测（REQ-006 交付时）
 
 | 操作 | 耗时 | 峰值内存 |
 |---|---|---|
-| 冷 `cargo check --workspace --all-targets`（77 个依赖 crate） | 17s | 931 MB |
-| 冷 `cargo test --workspace`（含链接） | 16s | 862 MB |
+| 冷 `cargo check --workspace --all-targets`（**179 个 crate**，其中第三方 172） | **63.7s / 66.0s**（两次实测） | **925 MB / 940 MB** |
 
 依赖的 `opt-level = 0` + `debug = 0` 是这两个数字能这么低的主要原因。
+
+> **依赖树的变化（91 → 175 → 179）**
+>
+> | 阶段 | 工作区成员 | 第三方 crate | 变化 |
+> |------|-----------|------------|------|
+> | REQ-002 工程基线 | 5 | 91 | — |
+> | REQ-005 交付基线（引入 sqlx） | 6 | 172 | **+81**（sqlx 及其传递依赖） |
+> | REQ-006 多租户（新建 `platform-db`） | 7 | **172** | **+0 第三方**（只多了工作区成员自己） |
+>
+> 口径：`cargo tree --workspace --prefix none --all-features | sed 's/ (.*//' | sort -u | wc -l`
+> （含工作区成员；第三方数 = 总数 − 工作区成员数）。
+>
+> **REQ-006 没有引入任何新的第三方依赖**：复用 REQ-005 引入的 `sqlx`，
+> **不开 `macros` feature**（`sqlx-macros` 不参与编译）——
+> `FromRow` 用 `platform_db::tenant_row!` 声明宏手写实现。
+>
+> **峰值内存 925–940 MB < 1.5 GB** → `.cargo/config.toml` 的 `jobs` **保持 3**（无需下调）。
+> 口径：采样 `cargo` 及其 `rustc` 子进程的 `VmHWM` 求和（偏保守的上界）。
+> 本机没有 `/usr/bin/time`（`time` 是 bash 内建），所以用 `VmHWM` 采样口径。
 
 ## 3. 容器与镜像加速
 
@@ -227,6 +245,56 @@ CI 在境外，直接用官方地址 `postgres:17-alpine`，不需要国内镜�
 
 - 编译期校验需要活库：开发期保持 PG 常驻（120-180M，很便宜）。
 - 离线缓存 `.sqlx` **入库**，CI 里 `SQLX_OFFLINE=true` 编译。
+
+### 4.1 租户隔离的应用角色（RLS 的前提）
+
+⚠️ **PostgreSQL 的 RLS 对超级用户与带 `BYPASSRLS` 属性的角色不生效。**
+
+开发库的 `base` 是**超级用户**（compose 的 `POSTGRES_USER=base`）——
+用它连应用，RLS 形同虚设，**租户隔离会 fail open**（数据库层兜底失效）。
+
+所以应用连接必须用**普通角色**：
+
+| 角色 | 用途 |
+|------|------|
+| `base` | 超级用户：迁移、运维、备份（**不是**应用连接角色） |
+| `base_platform_app` | 组角色（NOLOGIN）：持有租户作用域表的权限 |
+| `base_app` | 登录角色（开发环境）：`base_app` 是 `base_platform_app` 的成员 |
+
+初始化：`deploy/seed/02-app-role.sql`（幂等；容器首次初始化时自动执行，
+存量环境手工执行一次即可 —— **只在数据卷首次创建时跑**，已有卷要补建，
+命令见 `deploy/RUNBOOK.md` §3.4.3）。生产环境由部署流程创建自己的登录角色，
+并 `GRANT base_platform_app TO <角色>`。
+
+> **应用连接角色的权限来源**：组角色 + `ALTER DEFAULT PRIVILEGES`
+> （之后由 `base` 创建的表自动授权）+ 平台按 manifest 生成的策略里附带的 `GRANT`。
+>
+> ⚠️ `ALTER DEFAULT PRIVILEGES` 是**按库**生效的：脚本在哪个库执行，权限就落在哪个库。
+> 存量环境补建时**要对着目标库执行**（开发库是 `base_dev`），否则应用角色会缺表权限。
+
+**应用启动会自检连接角色**：绕过 RLS（超级用户 / `BYPASSRLS`）就**拒绝启动**
+（退出码 3）。本地临时用超级用户调试时加 `BASE_ALLOW_SUPERUSER=true`。
+
+### 4.2 租户作用域策略的生成
+
+```bash
+# 生成 / 补齐（按各模块 manifest 的 tenantScoped 段）
+DATABASE_URL=postgres://... cargo xtask tenant-policies
+
+# 只校验：有表漏建 policy 就失败（漏建 = 该表完全无隔离）
+DATABASE_URL=postgres://... cargo xtask tenant-policies --check
+
+# 部署期（镜像里没有 cargo）：交付二进制能做同样的事
+base tenant-policies
+base tenant-policies --check
+```
+
+> 策略要用**超级用户**连接（建策略需要表的属主权限）；应用连接用**普通角色**。
+> 部署流程里它是**独立于迁移的一步**，且**必须排在迁移之后**（见 `deploy/RUNBOOK.md` §0.1）。
+
+⚠️ 策略应用在**一个事务**里完成：`DROP POLICY` + `CREATE POLICY` 分两条语句执行时，
+中间有一个「表上没有 policy」的窗口 —— 那一瞬间 RLS 变成**全部拒绝**
+（fail closed，不泄漏，但读写全挂）。
 
 ```bash
 # 改了迁移之后重新生成离线缓存（一次性，约 10-20 分钟）

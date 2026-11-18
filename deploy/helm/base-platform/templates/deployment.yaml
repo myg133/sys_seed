@@ -46,20 +46,37 @@ spec:
             - name: http
               containerPort: {{ .Values.service.targetPort }}
               protocol: TCP
-          envFrom:
-            - configMapRef:
-                name: {{ include "base-platform.fullname" . }}
-            # Secret 只引用，不在 Chart 里生成 —— 口令不入库
-            - secretRef:
-                name: {{ .Values.secret.existingSecret }}
+          # ⚠️ **不用 `envFrom` 整包注入**：Secret 里含
+          #    `MIGRATION_DATABASE_URL`（**超级用户**连接串）与 `APP_ROLE_PASSWORD`，
+          #    整包注入 = 应用 Pod 的环境变量里躺着超管凭据 ——
+          #    Pod 一旦被拿下（环境变量泄露 / 崩溃转储 / 某个依赖读环境变量），
+          #    攻击者就能拿超管连库，**RLS 被绕过 → 跨租户全量可读**，
+          #    等于把「应用用普通角色」这层白做。
+          #    所以下面逐个点名：只给应用真正需要的键。
           env:
             # 必填项单独点名：Secret 里缺 DATABASE_URL 时容器 fail-fast，
-            # 这里显式声明让「谁提供」一目了然
+            # 这里显式声明让「谁提供」一目了然。
+            #
+            # ⚠️ 这里必须是**普通角色**的连接串：超级用户会绕过 PostgreSQL 的 RLS，
+            #    租户隔离会 fail open。应用启动时会自检连接角色，绕过 RLS 就拒绝启动。
             - name: {{ .Values.secret.databaseUrlKey }}
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.secret.existingSecret }}
                   key: {{ .Values.secret.databaseUrlKey }}
+            # 缓存（可选）：Secret 里没这个键也不该让 Pod 起不来
+            # （键名 = 应用读的变量名，见 values.yaml 的 secret.redisUrlKey）
+            - name: {{ .Values.secret.redisUrlKey }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secret.existingSecret }}
+                  key: {{ .Values.secret.redisUrlKey }}
+                  optional: true
+            # 非敏感运行配置：逐个列出来（不再整包 envFrom ConfigMap）
+            {{- range $key, $value := .Values.config }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

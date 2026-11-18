@@ -30,7 +30,7 @@ if [ -z "$backup_file" ] || [ ! -f "$backup_file" ]; then
   exit 1
 fi
 
-pg_parse_url "${DATABASE_URL:-}"
+pg_parse_url "${DATABASE_URL:-${MIGRATION_DATABASE_URL:-}}"
 pg_detect_mode psql
 
 # 临时库名：与业务库隔离，验完必删

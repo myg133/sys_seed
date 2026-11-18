@@ -10,7 +10,8 @@
 | 扩展点 | 实现位置 | 说明 |
 |--------|----------|------|
 | `PlatformModule` | `backend/src/mod.rs` | 模块注册：`id` / `version` / `dependencies` / `setup` / `enabled`，并做编译期注册 |
-| `Repository<DemoItem>` | `backend/src/repository.rs` | 内存存储；**严格按 `ctx` 里的租户过滤** |
+| `Repository<DemoItem>` | `backend/src/repository.rs` | 内存存储；**严格按 `ctx` 里的租户过滤**（契约层的语义范例） |
+| `Repository<TenantItem>` | `backend/src/tenant_repository.rs` | **落库的范例**：走 `platform-db` 的租户作用域入口（`TenantDb`），语句里带 `{tenant}` |
 
 配套类型（`Auditable` / `NotificationSender` / `WorkflowHandler`）本期只在平台侧定义，
 消费方分别落在 REQ-015 / REQ-017，沙箱模块不提前实现。
@@ -20,6 +21,7 @@
 ```toml
 [dependencies]
 platform-core = { path = "../../crates/platform-core" }   # 扩展点 trait
+platform-db = { path = "../../crates/platform-db" }       # 租户作用域数据访问入口
 
 [dev-dependencies]
 platform-contracts = { path = "../../crates/platform-contracts" }   # 契约测试套件
@@ -39,6 +41,43 @@ tenant_b  user_b@example.com  demo-2  "同名记录"   ← 唯一区别是租户
 
 - 用 tenant_a 的 ctx 调 `list()` → 只返回 tenant_a 的记录
 - 用 tenant_a 的 ctx 调 `find(tenant_b 的 id)` → 返回 `None`
+
+### 落库怎么做（照抄这段）
+
+```rust
+// ① 平台入口：每次访问都在事务内 SET LOCAL app.tenant_id
+let db = TenantDb::connect(&url, DbOptions::default()).await?;
+
+// ② 语句里必须带 {tenant}：平台强制，缺了直接报错
+let query = TenantQuery::new(format!(
+    "SELECT tenant_id, id, title, revision FROM {table} \
+     WHERE tenant_id = {{tenant}} AND id = ?",
+    table = db.table(TENANT_ITEM_TABLE),
+))
+.bind(id.clone());
+
+// ③ 访问入口必须带 ctx —— 租户只能从 ctx 拿
+let found = db.fetch_optional(&ctx, &query).await?;
+```
+
+三条规矩：
+
+1. **租户只从 `ctx` 取**；
+2. **每条语句都带 `{tenant}`**；
+3. **拿不到裸连接** —— `platform-db` 的公开 API 里没有「拿连接」的方法。
+
+### 数据库层还有一道兜底
+
+模块在 `manifest.json` 的 `tenantScoped` 段声明自己的租户作用域表，
+**RLS policy 由平台统一生成**（模块不手写 —— 漏建一张表 = 该表完全无隔离）：
+
+```json
+"tenantScoped": { "tables": ["sandbox_tenant_item"], "column": "tenant_id" }
+```
+
+即使应用层完全失守（漏写租户条件、漏设 `app.tenant_id`），
+数据库层也**查不到任何行**（RLS fail closed）——
+真实库层的第三条断言就在验这件事（`tests/c3_real_db.rs`）。
 
 ## 排序与过滤字段白名单
 

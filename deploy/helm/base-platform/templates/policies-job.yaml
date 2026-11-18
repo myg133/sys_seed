@@ -1,0 +1,57 @@
+{{- if .Values.tenantPolicies.enabled }}
+{{/*
+租户作用域策略 Job：按业务模块 manifest 的 tenantScoped 段统一生成 RLS 策略。
+
+- 为什么必须有：业务模块的表**不手写** policy，由平台按 manifest 生成
+  （`cargo xtask tenant-policies`）。漏跑这一步 = 租户作用域表
+  **完全没有隔离**（RLS 没开、policy 不存在）。
+- **顺序**：必须**先跑迁移（建表）再跑它**（策略是对已建好的表做的）。
+  迁移 Job 的 hook-weight 是 -5，这里是 -4 → 迁移先跑。
+- 连接用**超级用户**（建策略需要表的属主权限）。
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "base-platform.fullname" . }}-policies
+  labels:
+    {{- include "base-platform.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-upgrade,pre-install
+    "helm.sh/hook-weight": "-4"
+    "helm.sh/hook-delete-policy": {{ .Values.tenantPolicies.hookDeletePolicy }}
+spec:
+  backoffLimit: {{ .Values.tenantPolicies.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "base-platform.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: policies
+    spec:
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "base-platform.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: policies
+          image: {{ include "base-platform.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          command: ['tenant-policies']
+          env:
+            # 超级用户连接：建策略需要表的属主权限
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secret.existingSecret }}
+                  key: {{ .Values.secret.migrationDatabaseUrlKey }}
+            # manifest 在镜像里的位置：/app/modules/<模块>/manifest.json
+            - name: BASE_MANIFEST_ROOT
+              value: /app
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+{{- end }}

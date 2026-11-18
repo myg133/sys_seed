@@ -1,0 +1,89 @@
+{{- if .Values.appRole.enabled }}
+{{/*
+应用角色 Job：建「普通角色」（RLS 生效的前提）。
+
+- 为什么必须有：应用连接若用超级用户 / BYPASSRLS 角色，PostgreSQL 的 RLS
+  **不生效** → 租户隔离 fail open（数据库层兜底完全失效）。
+  应用启动时会自检连接角色并拒绝启动，所以角色必须**先**存在。
+- 组角色 base_platform_app（NOLOGIN）持有各租户作用域表的权限；
+  登录角色（appRole.name）是它的成员。
+- 幂等：可重复执行（已存在就只补 GRANT）。
+- hook-weight 比迁移 Job 更小 → **先于**迁移执行。
+- Chart 不生成 Secret：口令从 appRole.passwordSecret 引用。
+*/}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "base-platform.fullname" . }}-app-role
+  labels:
+    {{- include "base-platform.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": pre-upgrade,pre-install
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": {{ .Values.appRole.hookDeletePolicy }}
+spec:
+  backoffLimit: {{ .Values.appRole.backoffLimit }}
+  template:
+    metadata:
+      labels:
+        {{- include "base-platform.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: app-role
+    spec:
+      restartPolicy: Never
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "base-platform.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: app-role
+          image: {{ .Values.appRole.psqlImage | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            # 超级用户连接：建角色需要 ADMIN 权限
+            - name: MIGRATION_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.secret.existingSecret }}
+                  key: {{ .Values.secret.migrationDatabaseUrlKey }}
+            - name: APP_ROLE_NAME
+              value: {{ .Values.appRole.name | quote }}
+            - name: APP_ROLE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.appRole.passwordSecret }}
+                  key: {{ .Values.appRole.passwordKey }}
+          command:
+            - sh
+            - -c
+            - |
+              set -eu
+              psql "$MIGRATION_DATABASE_URL" -v ON_ERROR_STOP=1 \
+                -v role_name="$APP_ROLE_NAME" -v role_password="$APP_ROLE_PASSWORD" <<'SQL'
+              DO $do$
+              BEGIN
+                IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'base_platform_app') THEN
+                  CREATE ROLE base_platform_app NOLOGIN;
+                END IF;
+              END
+              $do$;
+              SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', :'role_name', :'role_password')
+               WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'role_name')
+              \gexec
+              GRANT base_platform_app TO :"role_name";
+              -- **存量对象**显式授权：ALTER DEFAULT PRIVILEGES 只影响**之后**创建的表，
+              -- 对已存在的表无效 —— 而补建场景恰恰是「表早就建好了」。
+              -- 两套都要有：这几句管存量，下面的默认权限管增量。
+              GRANT USAGE ON SCHEMA public TO base_platform_app;
+              GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO base_platform_app;
+              GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO base_platform_app;
+              ALTER DEFAULT PRIVILEGES IN SCHEMA public
+                GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO base_platform_app;
+              SQL
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+{{- end }}

@@ -4,6 +4,72 @@
 
 ## Unreleased
 
+### REQ-006 多租户与隔离
+
+- **租户隔离双保险**：应用层每次查询都带租户条件，数据库层用 PostgreSQL RLS 再兜一遍
+  —— 任一层失效都不至于跨租户泄漏
+- **新建 `crates/platform-db`**（不改 `platform-core` 的既有语义）：
+  - 租户作用域入口：每次访问在**显式事务**内 `SET LOCAL app.tenant_id`（等价写法
+    `set_config('app.tenant_id', $1, true)` —— `SET` 命令不接受绑定参数）
+  - **公开 API 表面拿不到裸连接**：只有带 `&RequestContext` 的入口能被业务模块用
+    （源码扫描测试守着公开签名里不出现 `PgPool` / `PgConnection` / `Transaction`）
+  - 事务封装：单次操作（`fetch_all` / `fetch_optional` / `fetch_one` / `execute`）
+    与多操作（`begin` → `TenantTx` → `commit` / `rollback`）两种形态
+  - 配额用量计数**写 DB**（`platform_tenant_quota`）+ 限额查询（重启不丢）
+  - crate 级文档写清「为什么是 `SET LOCAL` 而不是 `SET`」（连接池串租户风险）
+- **RLS 策略由平台统一生成**：模块在 manifest 的 `tenantScoped` 段声明表，
+  平台按声明生成 `ENABLE ROW LEVEL SECURITY` + policy
+  （`current_setting('app.tenant_id', true)` = **fail closed**），
+  **模块不手写 policy**（漏建一张表 = 该表完全无隔离）
+  - `cargo xtask tenant-policies`（生成 / `--check` 校验）
+  - 策略应用**在一个事务里**完成：`DROP` + `CREATE` 分两条语句会有一个
+    「表上没有 policy」的窗口（那一瞬间 RLS 变成全部拒绝）
+- **manifest 新增 `tenantScoped` 段**（`crates/platform-core`，CODEOWNERS 保护目录）：
+  字段与 JSON Schema 同步，平台校验器与 schema 口径一致
+- **C-3 契约检查叠加真实库层**（`base_test` 库）：内存层保留，新增三条断言 ——
+  ① tenant_a 的 `list()` 只返本租户行；② tenant_a 的 `find(tenant_b 的 id)` 返回 `None`；
+  ③ **绕过应用层**（不设 `app.tenant_id`）**查不到任何行**（RLS fail closed）
+- **串租户用例**：tenant_a 查完立刻用**同一个连接池**查 tenant_b（连接池只开一条连接，
+  保证复用同一条物理连接）—— 专门验「用的是 `SET LOCAL` 而不是 `SET`」
+- **应用角色是 RLS 的前提**：超级用户与 `BYPASSRLS` 角色会**绕过 RLS**
+  （租户隔离 fail open）—— 新增 `deploy/seed/02-app-role.sql`，
+  应用连接必须用普通角色（组 `base_platform_app` 的成员）
+- **部署侧切到普通角色**（QA Pre-merge 复核后的修复）：
+  - **角色分工写清楚**：`POSTGRES_USER`（超级用户）只用来建库 / 迁移 / 建策略；
+    **应用连接串一律用普通角色**（`APP_DATABASE_URL`）；迁移 / 策略用 `MIGRATION_DATABASE_URL`
+  - 开发 compose、私有化 compose、Helm Chart、`.env.example` 全部改成普通角色连接；
+    生产新增 `app-role` 步骤（幂等）建角色 —— 生产库不挂 `deploy/seed`（弱口令）
+  - **应用启动自检连接角色**：绕过 RLS 就**拒绝启动**（退出码 3）；
+    `BASE_ALLOW_SUPERUSER=true` 只在本地开发用（生产环境配它直接启动失败）
+  - `prod-preflight.sh` 增加硬闸：应用连接串的用户名**是超级用户就直接拒绝部署**
+- **部署流程跑租户作用域策略**：新增 `base tenant-policies`（交付二进制，
+  镜像里没有 cargo 也能按 manifest 生成 RLS 策略）；compose 加 `policies` 服务，
+  Helm 加 `policies` hook Job（**排在迁移之后**）—— 漏跑这一步 = 租户作用域表
+  **完全没有隔离**
+- **C-3 真实库层不再假绿**：缺 `DATABASE_URL_TEST` 时**判为失败**（不是「跳过」）
+  —— 以前「安静地跳过」会让框架报 "3 passed"，断言一条没跑却被当成通过；
+  新增护栏用例：缺环境变量时子进程**必须非零退出**且不得报 "3 passed"
+- **应用容器不再拿到超管凭据**（QA 复核后的修复 —— 拆变量名不够，得断在凭据层）：
+  - compose 的 `app` 服务**不再 `env_file: .env` 整包注入**，改为**逐个列**它真正需要的
+    变量（`DATABASE_URL` ← `APP_DATABASE_URL` + 10 个非敏感项）
+  - Helm 的 Deployment **不再 `envFrom` 整包 Secret**，改为逐个 `env:` +
+    `valueFrom.secretKeyRef`；迁移 Job 也不再整包引用 Secret
+  - 理由：整包 = 应用进程里躺着超管连接串 —— 应用被拿下（环境变量泄露 / 崩溃转储 /
+    某个依赖读环境变量）就能拿超管连库，**RLS 被绕过 → 跨租户全量可读**
+- **补建命令救得了存量表**（`ALTER DEFAULT PRIVILEGES` **只管未来表**）：
+  三处建角色的地方（`02-app-role.sql` / compose `app-role` / Helm `app-role` Job）
+  都补上 `GRANT … ON ALL TABLES IN SCHEMA public`（存量）与 `ALTER DEFAULT PRIVILEGES`
+  （增量）**两套并存**；RUNBOOK §3.4.3 重写（可直接复制执行的 SQL + 自查命令）
+- **配额有了自动化用例**（真实库层 `crates/platform-db/tests/quota_real_db.rs`）：
+  计数 → 超限判定 → **重启后计数仍在**（换全新连接池 = 内存态全丢，用量不变），
+  外加防假绿护栏（缺 `DATABASE_URL_TEST` 必须非零退出）
+- **沙箱模块升级为标准范例**：新增 `tenant_id` 作用域表（`tenantScoped` 声明）
+  与走 `platform-db` 租户入口的仓储实现
+- **能力索引与门禁**：能力目录新增 `tenant_scoped_db`；
+  `check-deps` 的平台 crate 集合收录 `platform-db`（自动纳管生效，有测试守着）
+- **新增第三方依赖：无**（`sqlx` 沿用 REQ-005 引入的版本，**不开 `macros` feature**；
+  `sqlx-macros` 不参与编译）
+
 ### REQ-005 交付基线与发布
 
 - **交付形态**：同一套镜像 + 同一套配置，三处复用 —— 开发（本机 compose）/

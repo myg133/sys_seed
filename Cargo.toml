@@ -4,6 +4,7 @@ members = [
     "crates/platform-core",
     "crates/platform-contracts",
     "crates/platform-contracts-macros",
+    "crates/platform-db",
     "crates/platform-server",
     "crates/xtask",
     "modules/sandbox",
@@ -20,6 +21,7 @@ publish = false
 platform-core = { path = "crates/platform-core" }
 platform-contracts = { path = "crates/platform-contracts" }
 platform-contracts-macros = { path = "crates/platform-contracts-macros" }
+platform-db = { path = "crates/platform-db" }
 platform-server = { path = "crates/platform-server" }
 
 axum = "0.8"

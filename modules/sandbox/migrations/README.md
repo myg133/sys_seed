@@ -1,19 +1,24 @@
 # 沙箱模块数据库迁移
 
-沙箱模块用**内存存储**实现 `Repository`，没有真实数据表，因此本目录暂时没有迁移文件。
+本目录放**模块自己的建表迁移**（`20261118000300_sandbox_tenant_item.up.sql` +
+配套 `.down.sql`）。
 
-本目录不能为空 —— `cargo xtask check-modules` 会校验 `backend/`、`frontend/`、`migrations/` 三个目录非空。
+## 迁移文件里**只有建表**，没有 RLS policy
+
+租户作用域表的 policy **由平台统一生成**（`manifest.json` 的 `tenantScoped` 段 →
+`cargo xtask tenant-policies`）。模块手写 policy 迟早会漏 ——
+**漏一张表 = 该表完全无隔离**（不是「少一个条件」，是「谁都能查」）。
+
+## 命名与可逆性
+
+- 文件名与平台迁移目录保持一致：`<版本>_<描述>.up.sql` + `<版本>_<描述>.down.sql`；
+- 每个迁移必须配套 `down`，否则需在 PR 里标注 ⚠️ 不可逆。
 
 ## 规则何时升级
 
-本期（REQ-005）底座还没有业务 DB 层 —— 平台的数据访问层推迟到 REQ-006/007，
-所以 `migrations/` 目录只放这份说明文件也算合规。
+REQ-005 时期底座还没有业务 DB 层，`migrations/` 只放说明文件也算合规，
+并写明「**DB 层落地后规则将升级为至少一个 `*.sql`**」。
 
-**DB 层落地后规则将升级为至少一个 `*.sql`**：
-
-- `cargo xtask check-modules` 的校验口径从「目录非空」改为「`migrations/` 下至少有一个 `*.sql` 迁移文件」；
-- 迁移文件命名与平台迁移目录保持一致（`<版本>_<描述>.up.sql` + `<版本>_<描述>.down.sql`）；
-- 可逆性要求同步生效：每个迁移必须配套 `down`，否则需在 PR 里标注 ⚠️ 不可逆。
-
-REQ-006 / REQ-007 的平台数据访问层落地后，业务模块的迁移文件放在本目录，
-命名与平台的迁移目录保持一致；届时本说明文件可以删除。
+**REQ-006 起 DB 层已落地**（`crates/platform-db`）——
+`cargo xtask check-modules` 的校验口径已升级为「`migrations/` 下至少有一个 `*.sql` 迁移文件」。
+本说明文件可以删除。
