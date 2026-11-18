@@ -6,7 +6,7 @@
 - **设计依据**: `BA/demands/REQ-008-user-org/design-summary.md`（D1–D12 照做）
 - **契约**: api-conventions v1（C1 路径前缀 / C3 租户上下文 / C5 越权 404 / C6 错误体 / C13 命名与时间）、extension-points v1（`NotificationSender` / `Auditable`）
 - **开发者**: myg133-dev-1
-- **更新时间**: 2026-11-18
+- **更新时间**: 2026-11-18（第一轮：实现 + 自验；**修复轮**：QA `PASS-WITH-RISK` 的 2 中 + 3 低，见 §5）
 
 图例：**PASS** = 已实现且有自动化验证证据；**未验证** = 没有证据（如实标注）；**部分** = 本期只做了一部分。
 
@@ -35,7 +35,7 @@
 | AC-S-015 | 离职自动禁用并撤销会话：账号禁用；**旧 refresh token 立即失效**；角色与成员关系解绑；产生审计事件 | `crates/platform-org/src/service.rs`（`disable_departed_user`：**6 步**，第 2 步是撤销全部会话）、`crates/platform-iam/src/store.rs`（`disable_user` / `revoke_all_refresh_tokens` / `revoke_all_sessions` —— **复用 REQ-007 的 family 作废**）、`crates/platform-org/src/audit.rs`（`AUDIT_EVENTS` 声明 + `AuditRecorder` 接缝）、`crates/platform-org/src/notify.rs` | ① 真实库层 `departure_disables_the_account_and_revokes_every_session`：`status=disabled` + `departed_at` 非空；`refresh_tokens_revoked=1` / `sessions_revoked=1`；**直查库**：旧 refresh 记录 `revoked_at` **非空**（**立即失效**，不是等 access TTL）；会话**全部** `revoked_at` 非空；成员关系**已解绑**；审计事件 `org.user.departed` **已产生**；通知**已发出**；② 真实库层 `the_ad_disabled_bit_triggers_the_departure_flow`（AD 位 → 离职 → 账号禁用）；③ ⚠️ **角色解绑属 REQ-009**（角色表本期还不存在）—— 见 §4 | **PASS**（角色解绑部分属 REQ-009，见 §4） |
 | AC-S-016 | AD 离职位运算识别正确：按**位运算**判定，不是简单布尔比较 | `crates/platform-org/src/ldap.rs`（`AttrExpression::BitAnd` / `BitNot`；`LdapSourceConfig::map_entry` → `value_of`）、`crates/platform-org/src/entity.rs` | ① 单测 `ldap.rs::the_ad_disabled_flag_is_decided_by_bitwise_operations`：`512`→在职、`514`→离职、`546`→离职、`4098`→离职、`660`→**在职**（布尔比较会误判）、`402653184`→在职、`2`→离职；② 单测 `ldap.rs::bit_not_expresses_the_inverted_flag`（`bit_not` 语义 = 被掩码位**未**置上）；③ 真实库层 `the_ad_disabled_bit_triggers_the_departure_flow`（`userAccountControl=514` → 自动禁用） | **PASS** |
 | AC-S-017 | 组织变更事件通知受影响人；**节点删除前成员已被处理**（不留悬空成员） | `crates/platform-org/src/notify.rs`（`PlatformNotifier`：**只转发**平台的 `NotificationSender`；`OrgEvent` / `OrgEventKind`）、`crates/platform-org/src/service.rs`（`add_member` / `remove_member` / `move_node` / `rename_node` / `delete_node` → `notify`；`delete_node`：**有成员且未指定迁移目标 → 拒绝删除**）、`crates/platform-org/src/entity.rs` | ① 真实库层 `members_receive_a_notification_when_their_node_moves`：节点移动 → 通知**已发出**；② 真实库层 `deleting_a_node_with_members_requires_handling_them_first`：有成员的节点 → **422 `ORG_NODE_HAS_MEMBERS`**（节点没被删）；指定 `move_members_to` → 成员**迁到目标节点** → 节点才删得掉；③ 单测 `notify.rs::the_platform_sender_is_forwarded_through_the_adapter` / `an_org_event_carries_its_recipients_and_payload` | **PASS** |
-| AC-S-018 | 组织数据带租户维度：只返回本租户节点；**跨租户 id 访问被拒**；组织表按 `tenantScoped` 声明生成 policy | `crates/platform-org/src/store.rs`（全部语句带 `{tenant}`）、`crates/platform-org/manifest.json`（`tenantScoped.tables` = 6 张表）、`crates/platform-db/src/scopes.rs`（`collect_scopes`：**平台 crate 的 manifest 也参与收集**）、`crates/platform-db/src/rls.rs`（策略生成）、`migrations/20261118000700_org_schema.up.sql`（6 张表，跨表外键**带 tenant_id** → 结构上杜绝跨租户引用） | ① 真实库层 `organization_data_is_isolated_per_tenant`：两租户**同名**节点 → 各自只看到自己的；`find(tenant_b 的 id)` 在 tenant_a 下 → **`None`**；**绕过应用层**（不设 `app.tenant_id`）→ **0 行**（管理员连接能看到数据 → 对照组有效）；② 真实库层 `every_organization_table_has_a_tenant_policy`：**直查 `pg_class`** → 6 张表**全部** `relrowsecurity=true` 且**有 policy**；③ `cargo xtask tenant-policies --check` ✅「2 个模块声明的表都开了 RLS 且有策略」 | **PASS** |
+| AC-S-018 | 组织数据带租户维度：只返回本租户节点；**跨租户 id 访问被拒**；组织表按 `tenantScoped` 声明生成 policy | `crates/platform-org/src/store.rs`（全部语句带 `{tenant}`）、`crates/platform-org/manifest.json`（`tenantScoped.tables` = 6 张表）、`crates/platform-db/src/scopes.rs`（`collect_scopes`：**平台 crate 的 manifest 也参与收集**）、`crates/platform-db/src/rls.rs`（策略生成）、`migrations/20261118000700_org_schema.up.sql`（6 张表，跨表外键**带 tenant_id** → 结构上杜绝跨租户引用）、**`migrations/20261118000800_org_user_fk.up.sql`（修复轮：用户侧复合外键 `(tenant_id, user_id)` → `platform_iam_user (tenant_id, id)`）** | ① 真实库层 `organization_data_is_isolated_per_tenant`：两租户**同名**节点 → 各自只看到自己的；`find(tenant_b 的 id)` 在 tenant_a 下 → **`None`**；**绕过应用层**（不设 `app.tenant_id`）→ **0 行**（管理员连接能看到数据 → 对照组有效）；② 真实库层 `every_organization_table_has_a_tenant_policy`：**直查 `pg_class`** → 6 张表**全部** `relrowsecurity=true` 且**有 policy**；③ `cargo xtask tenant-policies --check` ✅「2 个模块声明的表都开了 RLS 且有策略」；④ **修复轮**：真实库层 `the_database_refuses_a_ghost_user_id` / `the_database_refuses_a_cross_tenant_user_id` —— 幽灵 / 跨租户 `user_id` 被**数据库**拒绝（`user_org_user_fk` 违约） | **PASS** |
 | AC-S-019 | 结构可供 REQ-009 消费：`org_node` / `user_org` / `user_position` / 汇报关系**足以支撑**数据范围判定；且 REQ-008 **不实现任何权限判定逻辑** | `crates/platform-org/src/entity.rs`（`OrgNode` / `UserOrg`（`is_primary`）/ `UserPosition`）、`crates/platform-org/src/service.rs`（`subtree` / `members_of_subtree`：**本部门及下级**判定所需；`set_manager` / `manager_of`：**我的下属**判定所需）、`crates/platform-iam/src/store.rs`（`manager_id` 列） | ① 真实库层 `moving_a_node_updates_the_subtree_immediately_and_keeps_memberships`：`members_of_subtree` **按新结构**返回成员（「本部门及下级」的结构齐备）；② `platform_org::service` **无任何**「能不能访问 / 有没有权限」的判定分支（判定在 REQ-009）；③ 单测 `entity.rs::positions_are_not_an_organization_node_type`（岗位不是节点） | **PASS** |
 
 ---
@@ -54,10 +54,10 @@
 | D1 | 组织树 = 邻接表 + **递归 CTE**，**不用 ltree** | `store.rs::subtree_in`（`WITH RECURSIVE`）；迁移里**没有** `CREATE EXTENSION` | **PASS** |
 | D2 | 节点类型 `company`/`dept`/`team`；**岗位不是节点** | `entity.rs::NodeType`（`all()` 只有 3 个）；`user_position` 表；`entity.rs::positions_are_not_an_organization_node_type` | **PASS** |
 | D3 | 汇报关系是**人的属性**（`user.manager_id`）；用户↔节点多对多 | `platform_iam_user.manager_id`（迁移 `20261118000600`）；`user_org` 表（含 `is_primary`） | **PASS**（⚠️ 见 §4 的设计摘要内部冲突） |
-| D4 | 5 张表全部带 `tenant_id` + RLS | `migrations/20261118000700_org_schema.up.sql`（6 张：5 张 + `sync_source_state`） | **PASS**（多 1 张，见 §4） |
+| D4 | 5 张表全部带 `tenant_id` + RLS | `migrations/20261118000700_org_schema.up.sql`（6 张：5 张 + `sync_source_state`）；**修复轮** `migrations/20261118000800_org_user_fk.up.sql`（补用户侧复合外键） | **PASS**（多 1 张，见 §4） |
 | D5 | `path_labels` 是加速字段，权威是 `parent_id`，可重建 | `tree.rs` + `service.rs::verify_path_labels` / `rebuild_path_labels` | **PASS** |
 | D6 | SCIM 出站**自己实现**、**PUT 幂等**、**推送异步** | `scim.rs`（无 SCIM 库依赖）；`ScimOutbox` | **PASS** |
-| D7 | LDAP 入站用 `ldap3`；映射**外置**；离职用**位运算** | `ldap.rs` + `Cargo.toml`（`ldap3` `default-features = false`） | **PASS**（TLS 边界见 §4） |
+| D7 | LDAP 入站用 `ldap3`；映射**外置**；离职用**位运算** | `ldap.rs` + `Cargo.toml`（`ldap3` `default-features = false`）；**修复轮** `ldap.rs::validate_ldap_url`（scheme **连接前**校验） | **PASS**（TLS 边界见 §4） |
 | D8 | 冲突默认 `manual`、**字段级**、**绝不静默覆盖** | `sync.rs::ConflictStrategy`（`Default = Manual`）、`entity.rs::SyncConflict` | **PASS** |
 | D9 | 离职：禁用 + **撤销全部 session** + 解绑 + 审计 + 通知 | `service.rs::disable_departed_user` | **PASS** |
 | D10 | 组织变更事件 → `NotificationSender` | `notify.rs`（`PlatformNotifier` 适配） | **PASS** |
@@ -78,3 +78,20 @@
 | 8 | **同步的管理界面** | 按 D12 不做（数据层 + API 已做） |
 | 9 | **`platform-iam` 的测试夹具被本需求改动** | `crates/platform-iam/tests/iam_real_db.rs` 的「所有会话记录都带 tenant_id」断言原本检查**整张表** —— 测试库 `base_test` 是共享的，本需求的离职用例也会写会话 → 断言误判。已改成**只看本用例的租户前缀**（`iam-test-%`） |
 | 10 | **`platform-db` / `platform-iam` / `platform-server` 的改动** | `platform-db`：`TenantTx` 增 `schema()`、`collect_scopes` 增扫 `crates/`；`platform-iam`：`UserRecord` 增 3 列 + 增 `disable_user` / `set_user_manager` / `update_user_profile_field` / `list_users`、`IamState.service` 改 `Arc`；`platform-server`：挂 `/api/org/*`。**均未改 `platform-core` / `platform-contracts`**（CODEOWNERS 保护目录） |
+
+---
+
+## 5. 修复轮（QA `PASS-WITH-RISK` → 2 中 + 3 低）
+
+> 输入：`feature-meta/qa-report.md`（QA 独立复现，无阻塞合并项）。范围：**只修 QA 登记的 2 中 + 3 低**。
+
+| # | 级别 | 问题 | 实现位置 | 验证方式与证据 | 结论 |
+|---|------|------|----------|----------------|------|
+| **中 1** | 中 | 同步错误计数是**死代码**（失败路径不写 `sync_source_state`） | `crates/platform-org/src/store.rs::record_sync_failure` / `record_sync_failure_in`（`error_count = error_count + 1`、`last_error` 写入、`last_sync_at` **不动**）；`crates/platform-org/src/service.rs::sync_ldap`（外壳留痕）+ `sync_ldap_inner`（本体）；成功路径仍走 `upsert_sync_state`（`error_count = 0` / `last_error = NULL` / `last_sync_at = now`） | 真实库层 `a_failed_sync_records_the_error_and_a_successful_one_clears_it`：失败后 `error_count=1`、`last_error=Some("[INTERNAL_ERROR] … ldap connection failed: the directory server is unreachable")`、`last_sync_at=None`；成功一次后 `error_count=0`、`last_error=None`、`last_sync_at=Some(…)` | **已修** |
+| **中 2** | 中 | `user_id` 侧**没有外键**（幽灵 / 跨租户 `user_id` 可写入） | `migrations/20261118000800_org_user_fk.up.sql`：`platform_iam_user` 加 `UNIQUE (tenant_id, id)`（复合外键的必要前提，**REQ-007 遗留缺口**）；`user_org` / `user_position` / `external_identity` 各加 `(tenant_id, user_id)` → `platform_iam_user (tenant_id, id)`。`sync_conflict` **无 `user_id` 列** → 不需要 | 真实库层 `the_database_refuses_a_ghost_user_id` / `the_database_refuses_a_cross_tenant_user_id`：**应用角色 `base_app`** 直插 → `ERROR: insert or update on table "user_org" violates foreign key constraint "user_org_user_fk"`（拒绝发生在**数据库**） | **已修** |
+| **低 1** | 低 | 依赖归属不准（「SCIM 出站零新增依赖」不成立） | 无代码改动 | `verification-report.md` §3.1.2：**ldap3 = 8、SCIM 出站 = 2**（`want` / `try-lock`）；`git show a0a8d7a:Cargo.lock \| grep -cE 'name = "(want\|try-lock)"'` → **0**（基线没有） | **已更正** |
+| **低 2** | 低 | 构建图绝对值口径不一致 | 无代码改动 | `verification-report.md` §3.1.1：**四个口径 + 逐字命令**（第三方去重名 263→273 / package 条目 272→284 / 构建图去重 `name vX` 239→253 / tree 行数 607→682） | **已写清** |
+| **低 3** | 低 | LDAP 源缺**前置** URL 校验（`ldaps://` 落到底层 `UnknownScheme`） | `crates/platform-org/src/ldap.rs::validate_ldap_url` + `Ldap3Source::validate`；`connect()` **连接前**校验；`service.rs::map_ldap_error`（`LdapError::Config` → `INVALID_ARGUMENT` 422，与 SCIM 的 `baseUrl` 校验对称） | 单测 `the_plaintext_scheme_is_accepted` / `the_ldaps_scheme_is_rejected_with_a_clear_message` / `any_other_scheme_is_rejected_with_a_clear_message` / `the_ldap_source_rejects_an_unsupported_scheme_before_connecting`；实测三条错误信息见 `verification-report.md` §9.3（**均不含** `UnknownScheme`） | **已修** |
+
+**修复轮回归**：Rust **299 / 299**（非 ignored）、**336 / 336**（含 ignored，真实库层 14/14）· 前端 **23/23** · E2E **1/1** ·
+`scripts/test-integration.sh` **exit 0**（容器 2 → 2）· clippy **0 告警** · fmt ✅ · 4 个 xtask 门禁 ✅。
