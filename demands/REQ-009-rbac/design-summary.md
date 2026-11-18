@@ -25,7 +25,7 @@ REQ-009 交付：角色与权限点模型、数据范围求值、鉴权中间件
 - 鉴权中间件要挂在 `platform-server` 上 → 平台 crate 才能被 server 依赖（`check-deps` 禁止 server 依赖业务模块）
 - 业务模块**通过扩展点**用权限能力，不直接依赖 `platform-rbac` 的内部
 
-业务模块侧只需要一个能力接口（放在 `platform-core` 的扩展点里）：
+业务模块侧只需要一个能力接口。**它放在 `platform-core`，但不放在 `platform-core::extension` 下**：
 
 ```rust
 pub trait PermissionChecker: Send + Sync + 'static {
@@ -35,6 +35,13 @@ pub trait PermissionChecker: Send + Sync + 'static {
     fn scope(&self, ctx: &RequestContext, scope: DataScope) -> ScopeFilter;
 }
 ```
+
+**为什么不是第 6 个扩展点**：扩展点的方向是「**业务模块实现、平台调用**」
+（`PlatformModule` / `Repository` / `Auditable` / `NotificationSender` / `WorkflowHandler` 全是这个方向）。
+`PermissionChecker` 的方向正好相反 —— **平台实现、业务模块调用**。
+它属于「平台能力 API」而不是「业务 ↔ 平台的接缝」，
+放进 `platform-core::extension` 会改变已冻结的扩展点集合的形状，逼所有消费方改契约。
+**`extension-points v2` 因此不动那 5 个 trait**。
 
 **依赖方向**：`platform-core`（定义 trait）← `platform-rbac`（实现）← `platform-server`（装配）。
 业务模块 ← `platform-core`（只用 trait）。
