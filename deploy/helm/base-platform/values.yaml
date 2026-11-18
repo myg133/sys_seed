@@ -1,0 +1,102 @@
+# 底座部署参数。
+#
+# 原则：
+#   - 非敏感配置进 ConfigMap；敏感配置（数据库口令等）走 Secret **引用**，
+#     Chart 不生成 Secret、不写口令 —— Secret 由运维在集群外创建。
+#   - 同一镜像靠环境变量切分 dev / staging / prod，不重新构建。
+
+# 副本数。滚动更新时 readiness 不通过的新实例不会进流量。
+replicaCount: 2
+
+image:
+  repository: base-platform
+  # 留空则用 .Chart.AppVersion
+  tag: ""
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+# 附加注解与安全上下文
+podAnnotations: {}
+podLabels: {}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: base.example.internal
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+# 非敏感运行配置（进 ConfigMap）
+config:
+  BASE_ENV: prod
+  BASE_TENANT_MODE: shared
+  BASE_LOG_LEVEL: info
+  BASE_AUTH_MODE: local
+  BASE_SEED_ON_START: "false"
+  HOST: "0.0.0.0"
+  SERVER_PORT: "8080"
+  BASE_MIGRATIONS_DIR: /app/migrations
+  BASE_STATIC_DIR: /app/static
+
+# Secret 引用：Chart **不创建** Secret，只引用集群里已存在的 Secret。
+# 创建方式见 deploy/RUNBOOK.md：
+#   kubectl create secret generic base-platform-secret \
+#     --from-literal=DATABASE_URL='postgres://...' \
+#     --from-literal=REDIS_URL='redis://...'
+secret:
+  existingSecret: base-platform-secret
+  # Secret 内必须存在的键名
+  databaseUrlKey: DATABASE_URL
+  redisUrlKey: REDIS_URL
+
+# 额外环境变量（覆盖 ConfigMap 里的同名项）
+extraEnv: []
+
+# 迁移 Job：Helm hook，每次 install / upgrade 前跑一次
+migrate:
+  enabled: true
+  backoffLimit: 3
+  hookDeletePolicy: before-hook-creation
+
+# 优雅停机：给滚动更新留时间
+terminationGracePeriodSeconds: 30
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: "1"
+    memory: 512Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

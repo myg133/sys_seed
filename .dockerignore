@@ -1,0 +1,25 @@
+# 构建上下文瘦身：本地产物与密钥一律不进镜像层
+.git
+.github
+.local
+.aw
+node_modules
+**/node_modules
+dist
+**/dist
+.svelte-kit
+**/.svelte-kit
+.vite
+**/.vite
+coverage
+**/coverage
+target
+**/target
+playwright-report
+test-results
+backup
+**/backup
+*.log
+.env
+.env.*
+!.env.example

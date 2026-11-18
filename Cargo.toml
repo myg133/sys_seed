@@ -4,6 +4,7 @@ members = [
     "crates/platform-core",
     "crates/platform-contracts",
     "crates/platform-contracts-macros",
+    "crates/platform-server",
     "crates/xtask",
     "modules/sandbox",
 ]
@@ -19,6 +20,7 @@ publish = false
 platform-core = { path = "crates/platform-core" }
 platform-contracts = { path = "crates/platform-contracts" }
 platform-contracts-macros = { path = "crates/platform-contracts-macros" }
+platform-server = { path = "crates/platform-server" }
 
 axum = "0.8"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
@@ -33,6 +35,14 @@ uuid = { version = "1", features = ["v4"] }
 time = { version = "0.3", features = ["formatting"] }
 # 编译期注册：本期唯一新增的第三方依赖（约 3KB，无额外传递依赖）
 inventory = "0.3"
+# 部署期数据库客户端：只用于健康检查与迁移，不承担业务数据访问
+# （业务数据访问层仍待 REQ-006/007，见 AGENTS.md「尚未提供」段）。
+# 关掉默认特性里的 macros/json，避免拉进 proc-macro 编译链：低配机编译开销敏感。
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "postgres",
+    "migrate",
+] }
 
 # 低配开发基线：见 docs/dev-environment.md 与 BA/plan/dev-guide-low-spec.md
 # 第三方依赖一律不优化、不带调试信息，省编译时间与磁盘。

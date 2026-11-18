@@ -11,6 +11,9 @@
 /crates/platform-contracts/ @myg133
 /crates/platform-contracts-macros/ @myg133
 
+# 交付基线服务：配置校验 / 健康检查 / 迁移命令（部署链路，改动要人工过一眼）
+/crates/platform-server/ @myg133
+
 # 引导文件与能力索引：改动会直接影响 AI 的产出质量
 /AGENTS.md @myg133
 /prompts/ @myg133

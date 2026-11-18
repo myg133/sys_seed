@@ -1,0 +1,14 @@
+{{/*
+非敏感运行配置（ConfigMap）。
+Secret（数据库口令等）不在这里 —— 见 templates/deployment.yaml 的 secretRef。
+*/}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "base-platform.fullname" . }}
+  labels:
+    {{- include "base-platform.labels" . | nindent 4 }}
+data:
+  {{- range $key, $value := .Values.config }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}

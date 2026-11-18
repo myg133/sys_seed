@@ -145,8 +145,27 @@ jobs:
         run: cargo test -p platform-contracts -- --test-threads=2
       - name: 业务模块契约测试
         run: cargo test -p sandbox -- --test-threads=2
-      - name: 校验 compose 文件
+      - name: 校验 compose 文件（开发）
         run: docker compose -f compose.yaml config --quiet
+      # 私有化 compose 用 env_file 注入配置，docker compose 找不到该文件会直接报错，
+      # 因此校验前先放一份样例（.env 不入库，只在 CI 里临时生成）
+      - name: 准备私有化部署的 .env（校验用）
+        run: cp .env.example deploy/.env
+      - name: 校验 compose 文件（私有化）
+        env:
+          # 私有化 compose 的生产口令**没有默认值**（${POSTGRES_PASSWORD:?…}），
+          # 缺失时 compose 解析阶段就报错退出 —— 校验时必须显式给一个值。
+          # 这是 CI 专用的占位值，不是任何环境的真实口令。
+          POSTGRES_PASSWORD: ci-validation-only-not-a-real-secret
+        run: docker compose -f deploy/compose.prod.yaml config --quiet
+      - name: 校验 Helm Chart
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.4
+      - name: Helm lint 与模板渲染
+        run: |
+          helm lint deploy/helm/base-platform
+          helm template base-platform deploy/helm/base-platform > /dev/null
 
   # 6. E2E（Playwright）：前端链路不依赖 Rust 后端常驻
   e2e:
@@ -171,7 +190,140 @@ jobs:
       - run: pnpm exec playwright install --with-deps chromium
       - run: bun run test:e2e
 
-  # 7. 护栏：能力索引一致性 + 依赖方向单向 + 契约快照一致性
+  # 7. 迁移：up → 校验 → down（回到空 schema）→ 再 up（AC-S-006）
+  #
+  # 迁移进 CI：可回滚性必须每次发布前验证，不能靠人工记忆。
+  migration-test:
+    name: migration-test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: base
+          POSTGRES_PASSWORD: base
+          POSTGRES_DB: base_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U base -d base_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgres://base:base@127.0.0.1:5432/base_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+      - name: 迁移 up
+        run: cargo run --locked -p platform-server --bin base -- migrate up
+      - name: 校验平台表已建立
+        run: |
+          count=$(psql -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='platform_meta'")
+          echo "platform_meta 表数量：$count"
+          [ "$count" = "1" ]
+      - name: 迁移 down（回到空 schema）
+        run: cargo run --locked -p platform-server --bin base -- migrate down --target 0
+      - name: 校验 down 之后平台表已删除
+        run: |
+          count=$(psql -Atc "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='platform_meta'")
+          echo "platform_meta 表数量：$count"
+          [ "$count" = "0" ]
+      - name: 迁移 up（可重复执行）
+        run: cargo run --locked -p platform-server --bin base -- migrate up
+
+  # 8. 构建镜像：多阶段 Dockerfile（builder / frontend / runtime）
+  #
+  # ⚠️ CI 在境外：基础镜像一律用**官方地址**（rust:lld / node / debian），
+  #    不要加国内镜像前缀（国内直连 docker.io 超时那是本机问题，见 docs/dev-environment.md）。
+  build-image:
+    name: build-image
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: base
+          POSTGRES_PASSWORD: base
+          POSTGRES_DB: base_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U base -d base_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: 构建镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: base-platform:ci
+          build-args: |
+            CARGO_BUILD_JOBS=2
+            NPM_REGISTRY=https://registry.npmjs.org/
+      - name: 镜像体积检查（目标 < 100MB）
+        run: |
+          size=$(docker image inspect base-platform:ci --format '{{.Size}}')
+          echo "镜像大小：$((size / 1024 / 1024)) MB（上限 100 MB）"
+          if [ "$size" -gt $((100 * 1024 * 1024)) ]; then
+            echo "::error::镜像超过 100MB 目标"
+            exit 1
+          fi
+      - name: 迁移 up（容器内）
+        run: |
+          docker run --rm --network host \
+            -e DATABASE_URL=postgres://base:base@127.0.0.1:5432/base_test \
+            base-platform:ci migrate up
+      - name: 冒烟：健康检查端点
+        run: |
+          docker run -d --name base-ci --network host \
+            -e DATABASE_URL=postgres://base:base@127.0.0.1:5432/base_test \
+            base-platform:ci
+          for _ in $(seq 1 30); do
+            if docker exec base-ci /usr/local/bin/base healthcheck; then
+              break
+            fi
+            sleep 2
+          done
+          docker exec base-ci /usr/local/bin/base healthcheck
+          docker exec base-ci /usr/local/bin/base healthcheck --url http://127.0.0.1:8080/health/live
+          docker logs base-ci
+
+  # 9. 镜像漏洞扫描（依赖漏洞扫描 job 的镜像侧）
+  image-scan:
+    name: image-scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: 构建待扫描镜像
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: base-platform:scan
+          build-args: |
+            CARGO_BUILD_JOBS=2
+            NPM_REGISTRY=https://registry.npmjs.org/
+      - name: 扫描镜像漏洞
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: base-platform:scan
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
+
+  # 10. 护栏：能力索引一致性 + 依赖方向单向 + 契约快照一致性
   guardrails:
     name: guardrails
     runs-on: ubuntu-latest
@@ -192,11 +344,14 @@ jobs:
         run: cargo xtask check-deps
       # 契约快照必须与 BA 分支的正本一致
       # （不一致就同步：scripts/sync-contracts.sh --sync）
-      # 本地没有 demand 分支时脚本会明确跳过，不会误报。
+      # ⚠️ 拿不到 demand 分支时脚本**明确失败**（退出码 2），不再静默跳过：
+      #    静默跳过会让这道门禁空转，快照漂移了也没人知道。
+      - name: 拉取 BA 正本分支
+        run: git fetch --no-tags origin demand
       - name: 校验契约快照与 BA 正本一致
         run: ./scripts/sync-contracts.sh
 
-  # 8. 平台核心变更：自动打标
+  # 11. 平台核心变更：自动打标
   #
   # 触发条件：PR 改动了 crates/platform-core/ / crates/platform-contracts/ /
   # crates/platform-contracts-macros/。
@@ -217,13 +372,11 @@ jobs:
       - name: 检测平台核心变更
         id: core
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: origin/${{ github.base_ref }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          changed=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- \
-            crates/platform-core \
-            crates/platform-contracts \
-            crates/platform-contracts-macros)
+          # 共享脚本：merge-base 口径 + 核心路径清单（清单与 core-change-review 同源）
+          changed=$(./scripts/core-change-detect.sh)
           if [ -n "$changed" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
             {
@@ -249,7 +402,7 @@ jobs:
             --color B60205 2>/dev/null || true
           gh pr edit "$PR_NUMBER" --add-label platform-core-change
 
-  # 9. 平台核心变更：强制人工评审
+  # 12. 平台核心变更：强制人工评审
   #
   # 判定口径：PR 改了平台核心路径时，必须存在一条
   # 「批准（approved）+ 评审人不是 PR 作者 + 评审的 commit 就是当前 HEAD」的评审。
@@ -280,15 +433,15 @@ jobs:
       - name: 核心变更必须有非作者的批准
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BASE_REF: origin/${{ github.base_ref }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
-          changed=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA" -- \
-            crates/platform-core \
-            crates/platform-contracts \
-            crates/platform-contracts-macros)
+          # 判定口径：merge-base(base 分支最新提交, PR head)。
+          # 不用 pull_request.base.sha —— 它不随 base 前进，会把 base 上已合入的
+          # 核心改动也算成本次 PR 的改动（偏严）。
+          changed=$(./scripts/core-change-detect.sh)
           if [ -z "$changed" ]; then
             echo "本次 PR 未修改平台核心，无需核心评审。"
             exit 0

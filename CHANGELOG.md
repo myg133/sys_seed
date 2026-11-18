@@ -4,6 +4,70 @@
 
 ## Unreleased
 
+### REQ-005 交付基线与发布
+
+- **交付形态**：同一套镜像 + 同一套配置，三处复用 —— 开发（本机 compose）/
+  私有化部署（企业内网 compose）/ 云上（K8s Helm）
+- **多阶段镜像** `Dockerfile`：`builder`（`rust:lld`，cargo-chef 分层缓存依赖）/
+  `frontend`（Node + pnpm）/ `runtime`（`debian:12-slim`，非 root，uid 10001），
+  体积目标 < 100MB（CI `build-image` job 硬校验）；**本机不构建**，镜像构建交给 CI
+- **私有化部署** `deploy/compose.prod.yaml`：镜像走 tag、不本地构建；
+  **迁移是独立服务**（`profiles: ["migrate"]`），`up -d` 不会自动跑迁移
+- **Helm Chart** `deploy/helm/base-platform/`：Deployment / Service / Ingress /
+  ConfigMap / Secret **引用**（Chart 不生成 Secret）/ 迁移 Job
+  （`helm.sh/hook: pre-upgrade,pre-install`）；探针 `/health/live` 与 `/health/ready`
+- **配置外置**（AC-S-005）：`crates/platform-server` 的 `DeployConfig` 读环境变量，
+  启动时校验、**缺必填项 fail-fast**（退出码 2，稳定错误码
+  `CONFIG_MISSING_REQUIRED` / `CONFIG_INVALID_VALUE` / `CONFIG_FORBIDDEN_COMBINATION`）；
+  `.env.example` 入库、`.env` 不入库，Secret 不进镜像
+- **迁移独立化**（AC-S-006）：`base migrate up|down|status`，迁移文件用 sqlx 可逆格式
+  `<版本>_<描述>.up.sql` + `.down.sql`；不可逆迁移拒绝回滚；`scripts/rollback.sh <版本>`
+  （回滚前自动备份）
+- **健康检查**：`/health/live`（进程活着）与 `/health/ready`（**数据库连通 + 迁移已应用**）；
+  未就绪返回 503 + 稳定错误码（`DATABASE_UNAVAILABLE` / `MIGRATIONS_PENDING` /
+  `MIGRATION_DIRTY`），错误体按 RFC 9457（契约 C6）
+- **备份恢复**：`scripts/backup.sh`（pg_dump + gzip，只留最近 5 份）/
+  `scripts/restore.sh` / `scripts/backup-verify.sh`（恢复到临时库 + 冒烟）；
+  `deploy/RUNBOOK.md` 含**真实演练记录**与故障排查（迁移失败 / 容器起不来 /
+  数据库连不上 / 磁盘满）
+- **CI 增补**：`build-image`（构建 + 体积校验 + 健康检查冒烟）、`image-scan`
+  （Trivy）、`migration-test`（up → 校验 → down → 再 up）；基础镜像一律官方地址
+- **顺带修的 4 项遗留技术债**：`sync-contracts.sh` 拿不到 BA 正本时**明确失败**
+  （不再静默跳过）；`core-change-review` 改用 **merge-base** 口径（不再被 base.sha 拖偏）；
+  核心路径清单确认覆盖 `platform-core` / `platform-contracts` / `platform-contracts-macros`
+  （并加自检，防新增平台 crate 漏进门禁）；`migrations/` 规则在 README 与
+  `check-modules` 错误提示里写明「DB 层落地后升级为至少一个 `*.sql`」
+- **新增第三方依赖**：`sqlx` 0.8（仅 `runtime-tokio` / `postgres` / `migrate`，
+  关闭 `macros` 与 `json` 以压低编译开销）—— 只用于部署期健康检查与迁移，
+  业务数据访问层仍待 REQ-006/007
+- **修复轮（QA 退回 5 项）**：
+  - **契约 C6**：健康检查三个错误路径的 `detail` 统一改为**英文**（此前
+    `MIGRATIONS_PENDING` / `MIGRATION_DIRTY` 塞的是中文句子），并统一过
+    `dev_detail()`（只保留可打印 ASCII —— 数据库服务端消息会随 `lc_messages` 本地化）；
+    面向运维的中文说明移到日志。5 条单测守着
+  - **探针超时**：连接池 `acquire_timeout` 由 5s 降到 **2s**（K8s readinessProbe
+    与镜像 HEALTHCHECK 仍是 5s）—— 数据库不可达时 ready 在 **2.0s** 返回 503，
+    探针不再先超时、拿不到 `DATABASE_UNAVAILABLE`
+  - **私有化 compose**：生产口令**无默认值**（`${POSTGRES_PASSWORD:?…}`，缺失即报错
+    退出），基础镜像默认值改**官方地址**；新增 `scripts/prod-preflight.sh`
+    拒绝弱口令与库名不一致
+  - **Helm 口径**：RUNBOOK 与验证产物改为「默认渲染 **5 类资源，不含 Ingress**」
+    （`ingress.enabled` 默认 false），并给出 `--set ingress.enabled=true` 的开法
+  - **`core-change-detect.sh`**：「平台 crate 必须登记」的检查并进 `--self-test` 入口
+- **微修轮（QA 复核新发现 2 项低问题）**：
+  - **日志过滤器**：`BASE_LOG_LEVEL` 此前**完全无效** —— 过滤器只写
+    `platform_server={level}`，而日志事件实际来自 **bin target `base`**，
+    默认配置下一行日志都不输出（RUNBOOK「运维中文说明在日志里」这条兜底通道是死的）。
+    现在过滤器同时覆盖 **bin target `base`** 与 **lib target `platform_server`**，
+    `info` / `warn` / `error` 三档实测符合预期，**+4 条单测**守着。
+    契约 C6 未动：响应体 `detail` 仍是纯 ASCII 英文，中文只在日志里；
+    RUNBOOK §5.1 补了「`detail` 英文 / 日志中文」的语言边界表，§5.3 补日志级别说明
+  - **RUNBOOK §3.1 的 `env_file` 口径**：此前把 `podman-compose` 的解析基准**说反了**
+    （写成按当前目录，实际按 **compose 文件所在目录**），
+    且给出的 `ENV_FILE=deploy/.env` 备选写法实测报 `deploy/deploy/.env does not exist`。
+    本轮按实测改正（两种 compose 实现一致，附官方文档与源码佐证）、删掉坏的备选写法，
+    推荐用法统一为**在 `deploy/` 目录里执行**并实跑通过
+
 ### REQ-004 AI 引导体系与能力索引
 
 - 仓库级 `AGENTS.md`（agents.md 开放规范）：目录 / 硬规则 / 真实可用的命令 /

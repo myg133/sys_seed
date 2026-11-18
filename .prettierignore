@@ -9,3 +9,6 @@ bun.lock
 
 # 能力索引是生成物：格式由 `cargo xtask capabilities` 决定，不参与 prettier 校验
 capabilities/
+
+# Helm 模板是 Go 模板不是 YAML，prettier 的 YAML 解析器读不了
+deploy/helm/
