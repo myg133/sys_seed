@@ -7,7 +7,7 @@
 - **契约**: api-conventions v1（尤其 C3 / C6 / C8 / C13）、extension-points v1
 - **开发者**: myg133-dev-1
 - **更新时间**: 2026-11-18
-- **本轮改动**: 见 §6
+- **本轮改动**: **29 文件 / +7806 -191 行**（提交 `c66605f` 实现 + `6ad3f95` 文档）
 
 图例：**PASS** = 已实现且有自动化或可复现的验证证据；**未验证** = 没有证据，如实标注；
 **部分** = 本期只做了一部分（范围外的部分写清楚）。
@@ -29,7 +29,7 @@
 | AC-S-017 | 登录限流与账号锁定：达阈值后锁定并返回 `ACCOUNT_LOCKED`；锁定期内即使密码正确也拒；成功登录后计数清零 | `crates/platform-iam/src/service.rs`（`check_ip_rate_limit` 滑动窗口、`on_password_failure` 累加与锁定、`reset_login_failures`）、`crates/platform-iam/src/store.rs`（`count_login_attempts_since` 按时间倒推 = **滑动窗口**）、`crates/platform-iam/src/config.rs`（`LoginSettings`） | 真实库层 `repeated_failures_lock_the_account`：连续 5 次失败 → 第 6 次用**正确密码** → **403** + `code=ACCOUNT_LOCKED`。⚠️ 阈值与锁定时长可配（`BASE_IAM_LOGIN_ACCOUNT_LIMIT` / `BASE_IAM_ACCOUNT_LOCKOUT_MINUTES`）。**未验证项**：锁定期**过后**自动解锁与「成功登录后计数清零」两条**未写自动化用例**（见 §4） | **部分**（见 §4） |
 | AC-S-018 | 设备会话可管理：列表展示设备 / IP / 最近活跃；从 A 下线 B 后 **B 的 refresh token 立即失效**；「登出全端」作废该用户全部 family | `crates/platform-iam/src/service.rs`（`list_sessions` / `revoke_session` / `logout_all`）、`crates/platform-iam/src/store.rs`（`revoke_family` / `revoke_all_sessions` / `revoke_all_refresh_tokens`） | 真实库层 `sessions_can_be_revoked_and_logout_all_revokes_every_family`：① 列表 **2 条**，每条都有 `deviceLabel` / `ip` / `lastUsedAt`；② 逐个踢下线直到 **B 的 refresh 失效**（**立即**失效）；③ 登出全端 → **A 的 refresh 也失效**（全部 family 作废） | **PASS** |
 | AC-S-019 | 错误体符合契约 C6：`detail` **必须是英文 ASCII**；中文文案由前端 i18n 按 `code` 渲染 | `crates/platform-iam/src/error.rs`（每个错误的 `detail()` / `code()` / `status()`）、`crates/platform-iam/src/http.rs`（`ProblemDetails`：RFC 9457 形状 + `params`） | ① 单测 `error.rs::every_detail_is_english_ascii`（**全部 17 个错误路径**逐个断言 ASCII）；② 单测 `every_error_code_is_upper_snake_case`；③ 真实库层 `every_error_path_returns_an_english_ascii_detail`：**逐个 HTTP 错误路径**实测并打印 `detail`（`INVALID_CREDENTIALS` → `invalid username or password`；`PASSWORD_POLICY_VIOLATION` → `the password does not satisfy the password policy: min_length`；`UNAUTHENTICATED` → `authentication is required`；`TENANT_CONTEXT_MISSING` → `the tenant context is missing`）；④ `detail` 与设计摘要 §5.1 **逐字一致**（单测 `invalid_credentials_detail_matches_the_design_summary`） | **PASS** |
-| AC-S-020 | 依赖预算与编译资源在可控范围：依赖树增长在预算内；**冷编译峰值内存 < 1.5G**；日常增量 `cargo check` < 60 秒 | 根 `Cargo.toml`（依赖声明与注释）、`crates/platform-iam/Cargo.toml` | 见验证报告 §4：**依赖树 179 → 226**（**超出预估的 200~210**，原因见 §5 偏离清单）；**冷编译实测**见验证报告 §4.2；`.cargo/config.toml` 的 `jobs` **保持 3**（峰值 < 1.5G 时不下调） | **部分**（依赖树超预估，见 §5） |
+| AC-S-020 | 依赖预算与编译资源在可控范围：依赖树增长在预算内；**冷编译峰值内存 < 1.5G**；日常增量 `cargo check` < 60 秒 | 根 `Cargo.toml`（依赖声明与注释）、`crates/platform-iam/Cargo.toml` | 见验证报告 §3.1：**依赖树 179 → 240**（**超出预估的 200~210**，原因见 §5 偏离清单）；**冷编译实测**见验证报告 §3.2；`.cargo/config.toml` 的 `jobs` **保持 3**（峰值 < 1.5G 时不下调） | **部分**（依赖树超预估，见 §5） |
 
 ## 2. 承接的父 AC（REQ-001）
 
@@ -78,7 +78,7 @@
 
 | 偏离 | 原计划 | 实际 | 原因与影响 |
 |------|--------|------|-----------|
-| **依赖树超出预算** | 179 → 约 215（AC-S-020 写 200~210） | **179 → 226**（+47） | `jsonwebtoken` 10 的 `rust_crypto` feature 是**全量**的（`ed25519-dalek` + `p256` + `p384` + `rsa` + `hmac` + `sha2`），不能只挑 P-256；jsonwebtoken 9.x 的默认后端是 **ring**（要编 C/汇编，任务明确禁止）。另加 `chacha20poly1305`（TOTP secret 静态加密，设计摘要 §3「安全模块不省依赖，自制密码学绝不可接受」）。**影响**：冷编译峰值仍在 1.5G 以内（见验证报告 §4.2），但增量编译时间变长 |
+| **依赖树超出预算** | 179 → 约 215（AC-S-020 写 200~210） | **179 → 240**（+61） | `jsonwebtoken` 10 的 `rust_crypto` feature 是**全量**的（`ed25519-dalek` + `p256` + `p384` + `rsa` + `hmac` + `sha2`），不能只挑 P-256；jsonwebtoken 9.x 的默认后端是 **ring**（要编 C/汇编，任务明确禁止）。另加 `chacha20poly1305`（TOTP secret 静态加密，设计摘要 §3「安全模块不省依赖，自制密码学绝不可接受」）。**影响**：冷编译峰值仍在 1.5G 以内（见验证报告 §3.2），但增量编译时间变长 |
 | **按 IP 的限流用 DB 计数而不是 Redis** | 设计摘要 §6：Redis 滑动窗口 | DB 滑动窗口（`occurred_at >= now() - window`） | 任务书明确允许「登录限流/配额若需 DB 计数则复用 `platform-db` 的配额能力」；引入 `redis` 客户端会再加一批依赖（与依赖预算冲突）。**语义等价**（都是滑动窗口），**存储位置不同**（DB vs Redis） |
 | **登录失败计数写在用户表而不是独立表** | 设计摘要 §6：Redis 快计数 + DB 持久 | 用户表的 `failed_attempts` + `locked_until` | 同上；账号锁定必须**持久**（重启不能丢），DB 是唯一可靠位置；快计数层（Redis）留待后续 |
 | **恢复码用 SHA-256 而不是慢哈希** | 设计摘要 §4：只说「存 hash」 | SHA-256（base64url） | 恢复码是 **80 位熵**（16 字符 × 5 bit）的高熵值，快哈希就够（慢哈希只对低熵的密码必要）。已在代码注释里写明口径 |
