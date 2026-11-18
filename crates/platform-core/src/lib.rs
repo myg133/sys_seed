@@ -18,7 +18,7 @@ pub use extension::{
     NotificationSender, PermissionChecker, PermissionRefresher, PlatformModule, Repository,
     ResolvedConfig, ScopeFilter, WorkflowHandler,
 };
-pub use log::{NOISY_TARGETS, log_filter};
+pub use log::{NOISY_TARGETS, log_filter, log_filter_ignoring_env};
 pub use problem::ProblemDetails;
 
 /// 平台核心版本号，与 `Cargo.toml` 中的 `version` 保持一致。

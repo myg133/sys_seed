@@ -265,6 +265,12 @@ async fn scope_escalation_is_rejected_and_leaves_no_rows() {
     let _guard = serial().await;
     let fx = setup().await;
 
+    // 「写前快照」—— 必须在**任何**越级写之前取。
+    //
+    // ⚠️ 这里曾经取在步骤 1/2 **之后**（QA 复核折出）：那样前两次越级写若真的泄漏，
+    // 污染已经进了「写前」快照 → 快照必然「一致」→ **漏检**。
+    let before_snapshot = conflict_strategy_snapshot(&fx.admin_pool).await;
+
     // 1) platform 作用域的键，租户级写 → 400。
     let error = write_tenant(
         &fx,
@@ -294,9 +300,6 @@ async fn scope_escalation_is_rejected_and_leaves_no_rows() {
     write_tenant(&fx, &ctx(TENANT_A), "pageSize", json!(50))
         .await
         .expect("租户级写 pageSize 应成功");
-
-    // 越级写的「写前快照」—— 步骤 8 用它做比对（D84：快照比对优于行数断言）。
-    let before_snapshot = conflict_strategy_snapshot(&fx.admin_pool).await;
 
     // 4) tenant 作用域的键：空间级 → 400。
     let error = write_space(&fx, &ctx_space(TENANT_A, SPACE_S1), "pageSize", json!(50))
@@ -364,16 +367,26 @@ async fn scope_escalation_is_rejected_and_leaves_no_rows() {
 /// 只看这两层，因为「越级写」的落点就是它们 —— 平台级表由步骤 7 的**正对照**故意改写，
 /// 把它纳入比对会与本用例自己的正对照冲突（这正是快照型断言要处理好的边界）。
 ///
-/// `count` 抓「多了行」，`max(value)` 抓「改了值」—— 行数断言对后者无能为力。
+/// `count` 抓「多了行」，`max(value)` 抓「改了值」，**`max(updated_at)` 抓「同值覆盖」**
+/// —— 最后这一项是必需的：越级写把值写成**夹具已有的同一个值**时，
+/// `count` 与 `value` 都不变，只有 `updated_at` 会变。
+/// （QA 复核折出：早期版本漏了 `updated_at`，注释却声称覆盖它 → 同值覆盖漏检。）
 async fn conflict_strategy_snapshot(
     pool: &sqlx::PgPool,
-) -> Vec<(String, String, Option<String>, i64, Option<String>)> {
+) -> Vec<(
+    String,
+    String,
+    Option<String>,
+    i64,
+    Option<String>,
+    Option<String>,
+)> {
     sqlx::query_as(
         "SELECT 'tenant' AS tbl, tenant_id, NULL::text AS space_id, \
-                count(*)::bigint, max(value::text) \
+                count(*)::bigint, max(value::text), max(updated_at)::text \
            FROM platform_tenant_config WHERE key = 'conflictStrategy' GROUP BY tenant_id \
          UNION ALL \
-         SELECT 'space', tenant_id, space_id, count(*)::bigint, max(value::text) \
+         SELECT 'space', tenant_id, space_id, count(*)::bigint, max(value::text), max(updated_at)::text \
            FROM platform_space_config WHERE key = 'conflictStrategy' GROUP BY tenant_id, space_id \
          ORDER BY 1, 2, 3",
     )
@@ -845,11 +858,13 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
 /// `platform_config` 的 target。结果：**生产环境的默认配置把那些 WARN 全吞掉**，
 /// 而测试一直绿（REQ-010 QA 判 HIGH）。
 ///
-/// 现在走 `platform_core::log_filter`（与 `platform-server` 生产启动**同一个函数**），
+/// 现在走 `platform_core::log_filter_ignoring_env` —— 它构造的是**没有 `RUST_LOG` 时**
+/// 与 `platform-server` 生产启动**完全相同的 directive 集合**（生产用 `log_filter`，
+/// 它优先读 `RUST_LOG`；本测试断言的是「默认部署形态」，所以要用不受环境影响的入口）。
 /// 「测试放行但生产吞掉」在结构上不可能。
 fn subscriber(buffer: &LogBuffer) -> impl tracing::Subscriber + Send + Sync + 'static {
     tracing_subscriber::fmt()
-        .with_env_filter(platform_core::log_filter("info"))
+        .with_env_filter(platform_core::log_filter_ignoring_env("info"))
         .with_ansi(false)
         .with_writer(buffer.clone())
         .finish()

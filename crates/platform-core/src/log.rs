@@ -36,18 +36,45 @@ use tracing_subscriber::EnvFilter;
 
 /// 已知噪音库：全局默认级别不适用于它们，单独压到 `info`。
 ///
-/// 这些 crate 的 `debug` / `trace` 在全局默认是 `debug` 时会产生大量逐请求日志。
-pub const NOISY_TARGETS: [&str; 3] = ["tower_http", "hyper", "sqlx"];
+/// # 这个清单只放**真的会产生噪音**的库
+///
+/// 曾经这里写着 `["tower_http", "hyper", "sqlx"]`，但 QA 复核指出：
+/// `tower_http` **根本不在本仓依赖树里**、`hyper` 未启用 `tracing` feature ——
+/// **两条是空转**。空转的 directive 不会出错，但它会让人误以为「噪音已处理」，
+/// 而真正的噪音源没被点名。
+///
+/// 保留的都是**核实过会在 `debug` 下大量输出**的：
+///
+/// | crate | 为什么压 |
+/// |---|---|
+/// | `sqlx` | 每次查询打 `query=` 与耗时；`debug` 下一屏全是 SQL |
+///
+/// 今后发现新的噪音源**加进来即可**（`hyper` / `hyper_util` 若哪天开了 tracing feature，
+/// 就该在这里加一条）。
+pub const NOISY_TARGETS: [&str; 1] = ["sqlx"];
 
 /// 生成日志过滤器：`RUST_LOG` 优先，否则按级别生成「全局默认 + 噪音库降级」。
 ///
 /// `RUST_LOG` 存在时**完全接管**（标准 tracing 过滤语法），不再看 `level`。
 pub fn log_filter(level: &str) -> EnvFilter {
-    EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        let mut directives = vec![level.to_string()];
-        directives.extend(NOISY_TARGETS.iter().map(|target| format!("{target}=info")));
-        EnvFilter::new(directives.join(","))
-    })
+    match EnvFilter::try_from_default_env() {
+        Ok(filter) => filter,
+        Err(_) => log_filter_ignoring_env(level),
+    }
+}
+
+/// 与 [`log_filter`] 同形态，但**完全不看 `RUST_LOG`**。
+///
+/// 存在的理由：`log_filter` 会优先读 `RUST_LOG`，这让**依赖它的测试在
+/// `RUST_LOG` 被设置时行为漂移**（QA 复核折出：`RUST_LOG=base=info` 会让
+/// 平台侧 5 条测试变红）。测试要断言的正是「没有 `RUST_LOG` 时的默认形态」，
+/// 所以必须有一条不受环境影响的入口。
+///
+/// 生产**不使用**它 —— 生产必须尊重 `RUST_LOG`。
+pub fn log_filter_ignoring_env(level: &str) -> EnvFilter {
+    let mut directives = vec![level.to_string()];
+    directives.extend(NOISY_TARGETS.iter().map(|target| format!("{target}=info")));
+    EnvFilter::new(directives.join(","))
 }
 
 #[cfg(test)]
@@ -61,7 +88,7 @@ mod tests {
     fn filter_has_a_global_default_directive() {
         // 形态判据：第一条 directive 必须是**无 target 的级别**。
         // 若哪天有人改回「逐个列 target」，这里会失败。
-        let filter = log_filter("info");
+        let filter = log_filter_ignoring_env("info");
         let rendered = filter.to_string();
         assert!(
             rendered.split(',').any(|part| !part.contains('=')),
@@ -71,7 +98,7 @@ mod tests {
 
     #[test]
     fn noisy_targets_are_pinned_to_info() {
-        let rendered = log_filter("debug").to_string();
+        let rendered = log_filter_ignoring_env("debug").to_string();
         for target in NOISY_TARGETS {
             assert!(
                 rendered.contains(&format!("{target}=info")),

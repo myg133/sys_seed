@@ -23,12 +23,12 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use clap::{Parser, Subcommand};
-use platform_core::log_filter;
 use platform_core::RequestContext;
 use platform_core::extension::expr::CompiledCondition;
 use platform_core::extension::permission::{
     DataScope, PermissionChecker, PermissionRefresher, ScopeFilter,
 };
+use platform_core::log_filter;
 use platform_iam::config::IamConfig;
 use platform_iam::http::IamState;
 use platform_iam::service::IamService;
@@ -675,6 +675,8 @@ async fn static_fallback(State(state): State<Arc<AppState>>, uri: Uri) -> Respon
 #[cfg(test)]
 mod tests {
     use super::*;
+    // 测试断言的是「没有 RUST_LOG 时的默认形态」，所以用不受环境影响的入口。
+    use platform_core::log_filter_ignoring_env;
     use std::io::Write;
     use std::sync::{Arc, Mutex};
 
@@ -768,7 +770,7 @@ mod tests {
     /// 不是自定义 `EnvFilter` —— 本 bug 正是靠「测试自己放行」藏住的。
     #[test]
     fn log_filter_captures_platform_config_warn() {
-        let out = capture_logs(log_filter("info"), || {
+        let out = capture_logs(log_filter_ignoring_env("info"), || {
             // 与 `platform-config/src/resolver.rs:280` 同一条事件（同 target、同文案）。
             tracing::warn!(
                 target: "platform_config::resolver",
@@ -787,7 +789,7 @@ mod tests {
     /// 旧实现（逐个列 target）在这条上必然失败 —— 这正是本 bug 的形态。
     #[test]
     fn log_filter_covers_a_crate_that_nobody_listed() {
-        let out = capture_logs(log_filter("info"), || {
+        let out = capture_logs(log_filter_ignoring_env("info"), || {
             tracing::warn!(target: "some_future_crate::module", "未来某个 crate 的日志");
         });
         assert!(
@@ -799,7 +801,7 @@ mod tests {
     /// `BASE_LOG_LEVEL=error` 时 info 要被挡掉，error 要留下（级别开关仍然生效）。
     #[test]
     fn log_filter_respects_the_configured_level() {
-        let out = capture_logs(log_filter("error"), || {
+        let out = capture_logs(log_filter_ignoring_env("error"), || {
             tracing::info!(target: "platform_config::resolver", "不该出现的 info 日志");
             tracing::error!(target: "platform_config::resolver", "该出现的 error 日志");
         });
