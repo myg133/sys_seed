@@ -107,13 +107,17 @@ fn run_capabilities(args: &xtask::cli::CapabilitiesArgs) -> Result<ExitCode> {
             eprintln!("  ✗ 多余文件（源码里已无对应产物）：capabilities/{name}");
         }
         eprintln!("  修复方式：运行 `cargo xtask capabilities` 重新生成");
+        eprintln!("    缺失 / 内容不一致的文件会被重新写出，多余文件会被自动删除");
         return Ok(ExitCode::FAILURE);
     }
 
-    capabilities::write_files(root, &generated)?;
+    let pruned = capabilities::write_files(root, &generated)?;
     println!("能力索引已生成：{} 个文件", generated.len());
     for name in generated.keys() {
         println!("  ✓ capabilities/{name}");
+    }
+    for name in &pruned {
+        println!("  ✓ 已清理多余文件：capabilities/{name}");
     }
     Ok(ExitCode::SUCCESS)
 }

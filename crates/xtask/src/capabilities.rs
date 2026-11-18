@@ -150,7 +150,15 @@ fn on_disk_files(capabilities_dir: &Path) -> Result<Vec<String>> {
 }
 
 /// 把生成结果写进磁盘。
-pub fn write_files(root: &Path, files: &GeneratedFiles) -> Result<()> {
+///
+/// **多余文件会被剪除**：`check` 把「磁盘上有、生成器不产出」的文件判为多余
+/// （例如删掉一个前端包之后残留的 `capabilities/sdk/<pkg>.json`）。
+/// 如果这里只写不删，`--check` 报的「多余文件」就永远修不好 ——
+/// 提示语说「重新生成」，而重新生成根本不会删掉它。
+/// 因此写盘按 `check` 的**同一口径**剪除多余文件，让提示语真正可执行。
+///
+/// 返回被剪除的文件名（相对 `capabilities/`），供命令行回显。
+pub fn write_files(root: &Path, files: &GeneratedFiles) -> Result<Vec<String>> {
     let capabilities_dir = root.join("capabilities");
     for (name, content) in files {
         let path = capabilities_dir.join(name);
@@ -161,7 +169,48 @@ pub fn write_files(root: &Path, files: &GeneratedFiles) -> Result<()> {
         std::fs::write(&path, content)
             .with_context(|| format!("cannot write {}", path.display()))?;
     }
-    Ok(())
+    let pruned = prune_extra_files(&capabilities_dir, files)?;
+    Ok(pruned)
+}
+
+/// 剪除 `capabilities/` 下生成器不再产出的文件，并清理随之空掉的目录。
+///
+/// 返回被剪除的文件名（相对 `capabilities/`）。
+fn prune_extra_files(capabilities_dir: &Path, files: &GeneratedFiles) -> Result<Vec<String>> {
+    let mut pruned = Vec::new();
+    for name in on_disk_files(capabilities_dir)? {
+        if files.contains_key(&name) {
+            continue;
+        }
+        let path = capabilities_dir.join(&name);
+        std::fs::remove_file(&path)
+            .with_context(|| format!("cannot remove stale artifact {}", path.display()))?;
+        pruned.push(name);
+    }
+    prune_empty_dirs(capabilities_dir)?;
+    Ok(pruned)
+}
+
+/// 递归删除空目录（保留 `capabilities/` 本身）。
+fn prune_empty_dirs(dir: &Path) -> Result<bool> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Ok(false);
+    };
+    let mut empty = true;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if prune_empty_dirs(&path)? {
+                std::fs::remove_dir(&path)
+                    .with_context(|| format!("cannot remove empty directory {}", path.display()))?;
+            } else {
+                empty = false;
+            }
+        } else {
+            empty = false;
+        }
+    }
+    Ok(empty)
 }
 
 /// 权限点索引：扫描全部模块的 `manifest.json`。
@@ -712,5 +761,45 @@ mod tests {
             serde_json::from_str(platform_core::extension::manifest_schema::MANIFEST_JSON_SCHEMA)
                 .expect("内置 Schema 必须是合法 JSON");
         assert_eq!(parsed, constant);
+    }
+
+    /// 「源码里已删掉一个包」之后，残留的产物必须能被重新生成清掉。
+    ///
+    /// 这条用例守住 `--check` 的提示语「运行 `cargo xtask capabilities` 重新生成」
+    /// 是**真能解决问题**的 —— 只写不删的话，CI 会一直红。
+    #[test]
+    fn write_files_prunes_stale_artifacts() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+
+        let root = std::env::temp_dir().join(format!(
+            "xtask-capabilities-prune-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("临时目录应能创建");
+
+        let mut files = GeneratedFiles::new();
+        files.insert("index.json".into(), "{}\n".to_string());
+        files.insert("sdk/ui.json".into(), "{}\n".to_string());
+        write_files(&root, &files).expect("首次写盘应成功");
+        // 模拟：源码里删掉了一个前端包，但磁盘上残留着它的产物
+        std::fs::write(root.join("capabilities/sdk/rogue.json"), "{}\n").expect("残留文件应能写入");
+
+        let report = check(&root, &files).expect("校验应成功");
+        assert_eq!(report.extra, vec!["sdk/rogue.json".to_string()]);
+        assert!(!report.is_consistent());
+
+        // 重新生成必须把残留清掉（与 --check 同一口径）
+        write_files(&root, &files).expect("重新生成应成功");
+        let report = check(&root, &files).expect("校验应成功");
+        assert!(
+            report.is_consistent(),
+            "重新生成后应完全一致，实际：{report:?}"
+        );
+        assert!(!root.join("capabilities/sdk/rogue.json").exists());
+
+        std::fs::remove_dir_all(&root).expect("临时目录应能清理");
     }
 }
