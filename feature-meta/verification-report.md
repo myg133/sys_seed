@@ -363,6 +363,41 @@ test result: FAILED. 0 passed; 1 failed; 10 ignored
 
 ---
 
+## 8. 真机冒烟（**跑的是真的 `base` 二进制**，不是测试夹具）
+
+> 上面 §2 的证据来自**真实库层**（`tower::ServiceExt::oneshot` 驱动 axum Router）。
+> 这一节是**端到端**的：真的起进程、真的发 HTTP 请求、真的连 `base_test` 库
+> （**应用角色** `base_app` → RLS 真正生效）。
+
+```bash
+export DATABASE_URL=postgres://base_app:base@127.0.0.1:5432/base_test
+export BASE_JWT_PRIVATE_KEY="$(cat jwt.pem)" BASE_JWT_KID=kid-smoke
+export BASE_IAM_SECRET_KEY="$(cat secret.txt)"
+./target/debug/base serve &        # SERVER_PORT=18080
+```
+
+| 步骤 | 实测输出 |
+|---|---|
+| `GET /health/live` | `{"status":"alive","traceId":"…","version":"0.1.0"}` |
+| `GET /health/ready` | `{"appliedMigrations":[20261118000100,20261118000200,20261118000400],"status":"ready"}` ← **IAM 迁移已应用** |
+| `GET /.well-known/jwks.json` | `{"keys":[{"use":"sig","alg":"ES256","kid":"kid-smoke","kty":"EC","crv":"P-256","x":"…","y":"…"}]}` ← **只有公钥** |
+| `POST /api/iam/login`（**无租户头**） | **401**（`TENANT_CONTEXT_MISSING`） |
+| `POST /api/iam/register`（`X-Tenant-Id`） | **201** + 账号视图（`tenantId` 回显） |
+| `POST /api/iam/login` | **200** + `accessToken` / `refreshToken` / `user` |
+| `GET /api/iam/sessions` | `[{"id":"…","deviceLabel":"unknown","ip":"","userAgent":"curl/8.23.0","createdAt":"…","lastUsedAt":"…"}]` |
+| `POST /api/iam/refresh` | **200** + **新**的令牌对（轮换） |
+| **重放**旧 refresh | **401** `{"code":"TOKEN_REUSE_DETECTED","detail":"refresh token reuse was detected and the token family has been revoked",…}` ← `detail` **英文 ASCII** |
+| 跨租户（令牌 A + 租户头 B） | **404** |
+
+**占位符密钥 fail-fast**（R3）：
+
+```bash
+BASE_JWT_PRIVATE_KEY="changeme-private-key" … ./target/debug/base serve
+→ EXIT=2
+✗ 配置校验失败，进程退出（fail-fast）：
+  - [IAM_CONFIG_PLACEHOLDER_SECRET] BASE_JWT_PRIVATE_KEY：密钥看起来是占位符；生产密钥必须是真实生成的（P-256 / PKCS#8）
+```
+
 ## 8. 关键实现取舍（供 QA 复核）
 
 | 取舍 | 选择 | 理由 |
