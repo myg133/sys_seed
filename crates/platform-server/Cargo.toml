@@ -1,0 +1,31 @@
+[package]
+name = "platform-server"
+description = "交付基线服务：部署期配置校验、健康检查探针、数据库迁移与前端静态托管"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+axum.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+# 复用平台核心的请求上下文（健康检查响应带 traceId）
+platform-core.workspace = true
+# 部署期数据库客户端：迁移 + 健康检查；不承担业务数据访问
+sqlx.workspace = true
+
+[lib]
+name = "platform_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "base"
+path = "src/main.rs"
