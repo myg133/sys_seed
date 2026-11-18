@@ -5,10 +5,20 @@
 - **基线**: `develop` @ `a0a8d7a`（REQ-002 ~ REQ-007 已合并）
 - **状态**: **待验证**（本状态由 Dev 按任务要求置位，**最终状态机由 BA 推进**）
 - **开发者**: myg133-dev-1
-- **完成时间**: 2026-11-18（**第一轮：实现 + 自验完成**；**第二轮：修复轮完成** —— QA `PASS-WITH-RISK` 的 2 中 + 3 低）
-- **改动**: 第一轮 44 文件 / +10214 -775 行（新建 `crates/platform-org`）；**修复轮 9 文件 / +614 -58 行**（代码 6：2 份迁移 + 3 个源文件 + 1 个测试文件；文档 3 份）
+- **完成时间**: 2026-11-18（**第一轮：实现 + 自验完成**；**第二轮：修复轮完成** —— QA `PASS-WITH-RISK` 的 2 中 + 3 低；**第三轮：复核轮完成** —— QA 复核的 **低 1 回归不稳定** + **信息 1 `add_member` 500→4xx**）
+- **改动**: 第一轮 44 文件 / +10214 -775 行（新建 `crates/platform-org`）；修复轮 9 文件 / +614 -58 行（代码 6：2 份迁移 + 3 个源文件 + 1 个测试文件；文档 3 份）；**复核轮 6 文件 / +463 -51 行**（代码 3：`platform-db/src/error.rs`、`platform-org/src/error.rs`、`platform-org/tests/org_real_db.rs`；文档 3 份）
 - **产物**: `feature-meta/traceability.md`、`feature-meta/verification-report.md`
 - **设计依据**: `BA/demands/REQ-008-user-org/design-summary.md`（D1–D12 照做）
+
+## 复核轮（QA 复核 `PASS-WITH-RISK` → **低 1 回归不稳定** + **信息 1**）
+
+> QA 复核：5 个改动点**全部复现为真**（中 1 / 中 2 的功能目标已达成），但登记了 **1 个新的低危问题**：
+> 全量含 ignored 回归**间歇性 `deadlock detected`**（QA 4 次里红 2 次）。**必修**。
+
+| # | 级别 | 问题 | 处理 | 证据 |
+|---|------|------|------|------|
+| 1 | **低** | 全量含 ignored 回归**间歇性死锁**（2/4 次失败） | **已修**：根因是**测试之间的并发竞态**（不是生产代码 bug）—— 用例体 `INSERT INTO user_org` 要 `org_node` 的 `RowShareLock`，另一用例 `setup()` 的 `ALTER TABLE … ENABLE ROW LEVEL SECURITY` 要 `AccessExclusiveLock` 且**先**锁 `org_node` → **加锁顺序相反 → 锁环**。修法：**库结构准备整个测试二进制只做一次**（`SCHEMA_READY: tokio::sync::OnceCell<()>`）→ **DDL 一定发生在任何用例体开始之前**，DDL 与数据写入不再并发。**没有**用超时/重试盖，**也没有**把全套测试改成单线程（用例体仍真并发） | 修复前第 1 次跑就红（PG 日志锁环 `org_node` ↔ `user_org`）；修复后 **连跑 8 次 8/8 全绿**（每轮 341 passed / 0 failed）· `verification-report.md` §10.1 |
+| 2 | **信息** | `add_member` 传**不存在的 `user_id`** → 服务层表现 **500 `INTERNAL_ERROR`** | **已修**：DB 层拒绝保留（结构保证），服务层把**外键违约**映射成 **404 `NOT_FOUND`**（`params.resource="user"`）—— 外键违约 = 「引用的那一行不存在」= 客户端错误 | 真实库层 `adding_a_member_for_an_unknown_user_is_a_client_error`：`code=NOT_FOUND` / `status=404` / `params={"resource":"user"}` · `verification-report.md` §10.2 |
 
 ## 修复轮（QA `PASS-WITH-RISK` → 2 中 + 3 低）
 
@@ -46,11 +56,12 @@
 | **修复轮**：用户侧复合外键（`(tenant_id, user_id)` → `platform_iam_user (tenant_id, id)`）+ `platform_iam_user` 的 `UNIQUE (tenant_id, id)` | `migrations/20261118000800_org_user_fk.*.sql` |
 | 平台 crate 的 manifest 进镜像（否则部署期看不到组织表的租户声明） | `Dockerfile` |
 
-## 自验结论（**实测**，2026-11-18；**修复轮复跑**）
+## 自验结论（**实测**，2026-11-18；**复核轮复跑**）
 
 - `cargo check --workspace --all-targets` ✅
-- `cargo test --workspace -- --test-threads=2` ✅ **299/299**（第一轮 295 → **+4**，只增不减）
-- 带 `--include-ignored` ✅ **336/336**（第一轮 329 → **+7**；真实库层 **14/14**，SCIM **7/7**）
+- `cargo test --workspace -- --test-threads=2` ✅ **303/303**（修复轮 299 → **+4**，只增不减）
+- 带 `--include-ignored` ✅ **341/341**（修复轮 336 → **+5**；真实库层 **15/15**，SCIM **7/7**）
+- ★ **连跑 8 次** `cargo test --workspace -- --include-ignored --test-threads=2` ✅ **8/8 全绿**（每轮 341 passed / 0 failed，**无 deadlock**）—— 复核轮的间歇性死锁已消除
 - `cargo clippy --workspace --all-targets -- -D warnings` ✅ **0 告警** / `cargo fmt --all --check` ✅
 - `cargo xtask capabilities --check` ✅ 13 文件一致 / `check-deps` ✅ / `check-modules` ✅ / `tenant-policies --check` ✅
 - `bash scripts/test-integration.sh` ✅ **exit 0**（容器 **2 → 2**）
@@ -77,5 +88,7 @@
 - **设计摘要 §1.2 与 D3 自相矛盾**（`org_node.manager_id` vs `user.manager_id`）→ 本实现按 **D3**，**请 BA 确认**
 - **多 1 张表 `sync_source_state`**（§9 要求「同步状态的可见性」，D4 的 5 张表里没有承载位置）
 - **链接峰值内存 1638 MB**（比 REQ-007 的 1250 MB 高 388 MB；`ldap3` → `nom`），仍在余量内但越过 1.5G 参考线
-- **修复轮新增**：`add_member` 传**不存在的 user_id** 现在被数据库拒绝 → 表现为 **500**（服务层没有 404 校验）→ 留后续需求
+- **修复轮遗留（本轮已修）**：`add_member` 传**不存在的 user_id** → 曾表现为 **500**；复核轮已改成 **404 `NOT_FOUND`**（外键违约 → 客户端错误）
+- **复核轮发现的既有小缺口（未修，不在本轮范围）**：`platform-org/src/error.rs` 的 `From<DbError>` 里匹配的是 `"MISSING_TENANT"`，而 `DbError::MissingTenant.code()` 返回的是 `"TENANT_CONTEXT_MISSING"` → **缺租户时仍会落成 500**（应为 401）。**先于本轮存在**，未改动
+- **复核轮新增**：`user_org_uq` 等**唯一约束**违约（如重复加同一个成员）目前仍落成 **500**（应 409 `CONFLICT`）—— 本轮只按任务书修**外键违约**这一类，唯一约束留后续需求
 - **第一轮未做变异验证**（护栏沿用 REQ-006/007 的成熟模式；缺 `DATABASE_URL_TEST` 时确实会失败，已实测）—— **QA 已补做并通过**

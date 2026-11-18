@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use platform_core::RequestContext;
-use platform_core::extension::manifest::Manifest;
+use platform_core::extension::manifest::{Manifest, TenantScopedSpec};
 use platform_core::extension::notification::{DeliveryResult, NotificationMessage};
 use platform_db::{
     DbOptions, TenantDb, TenantQuery, apply_policies, require_isolation, unscoped_row_count,
@@ -47,6 +47,27 @@ const ORG_NODE_TABLE: &str = "org_node";
 
 /// 部署准备用的 advisory lock 键（两个测试并行时不互相踩）。
 const SETUP_LOCK: i64 = 6_008_001;
+
+/// 库结构准备（迁移 + RLS 策略）—— **整个测试二进制只做一次**。
+///
+/// # 为什么必须只做一次（这是间歇性 `deadlock detected` 的根因）
+///
+/// 准备过程里的 `apply_policies` 跑的是 **DDL**（`ALTER TABLE … ENABLE ROW LEVEL SECURITY`），
+/// 它要目标表的 **AccessExclusiveLock**；而**另一个用例的用例体**此刻可能正在
+/// `INSERT INTO user_org` —— 外键检查要 `org_node` 的 **RowShareLock**。
+/// 两条路径的**加锁顺序相反**（DDL：先 `org_node` 后 `user_org`；
+/// 写入：先 `user_org` 后 `org_node`）→ **锁环** → `deadlock detected`（间歇性出现）。
+///
+/// 锁环里只有 `user_org` ↔ `org_node`（第一轮就有的 `user_org_node_fk`），
+/// 不是新外键引入的；但**用例体直接写 `user_org`** 让这条既有竞态变成了可见的随机失败。
+///
+/// # 为什么「只做一次」就够了
+///
+/// 每个用例都要先过 `setup()` 才能进用例体，而 `setup()` 里等着这次准备 ——
+/// 于是 **DDL 一定发生在任何用例体开始之前**，DDL 与数据写入**不再并发**，
+/// 竞态被**消除**（不是用「调大超时」或「重试几次」把它盖住）。
+/// 用例体之间仍然**真并发**（`--test-threads=2`），其它真实竞态照样暴露。
+static SCHEMA_READY: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
 
 /// 防假绿护栏的子进程标记（防止护栏自己递归拉起子进程）。
 const GUARD_CHILD: &str = "ORG_GUARD_CHILD";
@@ -165,7 +186,7 @@ impl Fixture {
 
 /// 准备真实库环境。
 ///
-/// 顺序：应用角色 → 平台迁移 → **平台按 manifest 生成 RLS 策略** → 应用角色连接。
+/// 顺序：**库结构准备（整个测试二进制只做一次）** → 应用角色连接。
 async fn setup() -> Fixture {
     let url = required_test_database_url();
 
@@ -177,8 +198,54 @@ async fn setup() -> Fixture {
     };
 
     let root = repo_root();
+    let manifest = Manifest::from_path(&root.join("crates/platform-org/manifest.json"))
+        .expect("组织架构 manifest 应可读");
+    let spec = manifest
+        .tenant_scoped
+        .clone()
+        .expect("组织架构 manifest 必须声明 tenantScoped");
 
-    // 整段准备过程串行化（两个测试并行时不会互相踩 DDL / policy）。
+    // 库结构**只准备一次**：DDL 与数据写入不再并发（根因修复，见 SCHEMA_READY）。
+    SCHEMA_READY
+        .get_or_init(|| prepare_schema(&admin_pool, &root, &spec))
+        .await;
+
+    // 应用角色连接（**不绕过 RLS** 的普通角色）。
+    let app_url = app_role_url(&url);
+    let app_db = TenantDb::connect(
+        &app_url,
+        DbOptions {
+            // 只开一条连接 → 「串租户」用例能确定复用的是**同一条物理连接**。
+            max_connections: 1,
+            ..DbOptions::default()
+        },
+    )
+    .await
+    .expect("应用角色连接串应能解析");
+
+    // 隔离前提自检：角色不绕过 RLS + 声明的表真的有 policy。
+    require_isolation(&app_db, &[spec])
+        .await
+        .expect("RLS 隔离前提必须成立（角色不绕过 RLS + 表有 policy）");
+
+    let store = OrgStore::new(app_db.clone());
+    let iam = IamStore::new(app_db.clone());
+    Fixture {
+        admin_db: TenantDb::from_pool(admin_pool.clone(), DbOptions::default()),
+        admin_pool: admin_pool.clone(),
+        app_db,
+        store,
+        iam,
+        notifier: Arc::new(RecordingNotifier::default()),
+        audit: Arc::new(RecordingAuditRecorder::new()),
+    }
+}
+
+/// 准备库结构：应用角色 → 平台迁移 → **平台按 manifest 生成 RLS 策略**。
+///
+/// **整个测试二进制只跑一次**（理由见 [`SCHEMA_READY`]）。
+async fn prepare_schema(admin_pool: &sqlx::PgPool, root: &Path, spec: &TenantScopedSpec) {
+    // 整段准备过程串行化（跨进程也不互相踩 DDL / policy）。
     let mut conn = admin_pool.acquire().await.expect("应当能取到连接");
     sqlx::query("SELECT pg_advisory_lock($1)")
         .bind(SETUP_LOCK)
@@ -201,14 +268,8 @@ async fn setup() -> Fixture {
     migrator.run(&mut *conn).await.expect("平台迁移应能应用");
 
     // 3) **平台按 manifest 的 tenantScoped 段统一生成 RLS 策略**（模块不手写）。
-    let manifest = Manifest::from_path(&root.join("crates/platform-org/manifest.json"))
-        .expect("组织架构 manifest 应可读");
-    let spec = manifest
-        .tenant_scoped
-        .clone()
-        .expect("组织架构 manifest 必须声明 tenantScoped");
     let admin_db = TenantDb::from_pool(admin_pool.clone(), DbOptions::default());
-    apply_policies(&admin_db, &spec)
+    apply_policies(&admin_db, spec)
         .await
         .expect("RLS 策略生成应能应用");
 
@@ -217,37 +278,6 @@ async fn setup() -> Fixture {
         .execute(&mut *conn)
         .await
         .expect("应当能释放部署锁");
-    drop(conn);
-
-    // 4) 应用角色连接（**不绕过 RLS** 的普通角色）。
-    let app_url = app_role_url(&url);
-    let app_db = TenantDb::connect(
-        &app_url,
-        DbOptions {
-            // 只开一条连接 → 「串租户」用例能确定复用的是**同一条物理连接**。
-            max_connections: 1,
-            ..DbOptions::default()
-        },
-    )
-    .await
-    .expect("应用角色连接串应能解析");
-
-    // 隔离前提自检：角色不绕过 RLS + 声明的表真的有 policy。
-    require_isolation(&app_db, &[spec])
-        .await
-        .expect("RLS 隔离前提必须成立（角色不绕过 RLS + 表有 policy）");
-
-    let store = OrgStore::new(app_db.clone());
-    let iam = IamStore::new(app_db.clone());
-    Fixture {
-        admin_db,
-        admin_pool: admin_pool.clone(),
-        app_db,
-        store,
-        iam,
-        notifier: Arc::new(RecordingNotifier::default()),
-        audit: Arc::new(RecordingAuditRecorder::new()),
-    }
 }
 
 /// 造一个本地账号（ID 与用户名都带唯一后缀 —— 测试共享同一个库）。
@@ -1197,6 +1227,49 @@ async fn the_database_refuses_a_cross_tenant_user_id() {
         "应指出是哪条外键违约：{message}"
     );
     assert!(message.contains("foreign key"), "应是外键违约：{message}");
+}
+
+/// 信息 1：`add_member` 传**不存在的 user_id** → **4xx**（不是 500）。
+///
+/// 外键违约 = 「引用的那一行不存在」——这是**客户端错误**：
+/// 服务层要把它映射成 404 `NOT_FOUND`，而不是 500 `INTERNAL_ERROR`
+/// （500 会把「用户不存在」说成「服务端坏了」）。
+#[tokio::test]
+#[ignore = "需要 base_test 库：scripts/test-integration.sh 会用 --include-ignored 跑到"]
+async fn adding_a_member_for_an_unknown_user_is_a_client_error() {
+    let fixture = setup().await;
+    let ctx = RequestContext::new().with_tenant(TENANT_A);
+    let service = fixture.service();
+    let (_company, _dept, team) = seed_tree(&service, &ctx).await;
+
+    let error = service
+        .add_member(
+            &ctx,
+            NewMembership {
+                id: None,
+                user_id: format!("ghost-user-{}", unique()),
+                org_node_id: team,
+                role: None,
+                is_primary: false,
+            },
+        )
+        .await
+        .expect_err("不存在的用户必须被拒绝");
+
+    assert_eq!(error.code(), "NOT_FOUND", "错误码：{error}");
+    assert_eq!(
+        error.status(),
+        axum::http::StatusCode::NOT_FOUND,
+        "状态码：{error}"
+    );
+    assert_eq!(
+        error
+            .params()
+            .get("resource")
+            .and_then(|value| value.as_str()),
+        Some("user"),
+        "应说明缺的是用户：{error}"
+    );
 }
 
 /// 防假绿护栏：缺 `DATABASE_URL_TEST` 时**不得**报 "N passed"。

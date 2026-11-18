@@ -7,7 +7,7 @@
 - **契约**: api-conventions v1（C1 / C3 / C5 / C6 / C13）、extension-points v1
 - **开发者**: myg133-dev-1
 - **日期**: 2026-11-18
-- **轮次**: 第一轮（实现 + 自验）+ **第二轮（修复轮：QA `PASS-WITH-RISK` 的 2 中 + 3 低，见 §9）**
+- **轮次**: 第一轮（实现 + 自验）+ 第二轮（修复轮：QA `PASS-WITH-RISK` 的 2 中 + 3 低，见 §9）+ **第三轮（复核轮：QA 复核的 **低 1 回归不稳定** + **信息 1 `add_member` 500→4xx**，见 §10）**
 
 ---
 
@@ -18,11 +18,12 @@
 | 分支 | `feature/REQ-008` |
 | 改动 | **44 文件 / +10214 -775 行**（其中 `Cargo.lock` +181 -11；去掉锁文件是 **43 文件 / +10033 -764**）；**新建 crate `crates/platform-org`**（13 个源文件 + 3 个测试文件） |
 | **★ 修复轮** | QA 结论 **PASS-WITH-RISK**（无阻塞合并项）→ 本轮修 **2 中 + 3 低**：<br>**中 1** 同步错误计数不再是死代码（失败留痕 / 成功清零）· **中 2** `user_id` 侧补复合外键（幽灵 / 跨租户 user_id 被 **DB 层**拒绝）· **低 1** 依赖归属更正（**ldap3 = 8、SCIM 出站 = 2**）· **低 2** 计数口径写死 · **低 3** LDAP scheme **连接前**校验。详见 **§9** |
+| **★ 复核轮** | QA 复核结论 **PASS-WITH-RISK**（5 个改动点**全部复现为真**），但登记了 **1 个新的低危问题（回归不稳定）** → 本轮修：<br>**低 1** 全量含 ignored 回归的**间歇性 `deadlock detected`**（2/4 次失败）—— **根因是测试之间的并发竞态**（一个用例在改 schema / 持锁，另一个在插数据），**不是生产代码的 bug**；修法 = **库结构准备整个测试二进制只做一次**（DDL 一定发生在任何用例体开始之前 → DDL 与数据写入不再并发）。**不是**用「调大超时」或「重试几次」盖住。<br>**信息 1** `add_member` 传不存在的 `user_id` → 由 **500 `INTERNAL_ERROR`** 改为 **404 `NOT_FOUND`**（外键违约 = 「引用的那一行不存在」= 客户端错误）。详见 **§10** |
 | 新增第三方依赖 | **仅 `ldap3 0.11`（`default-features = false`）**。SCIM 出站**没有新增直接依赖**，但**间接引入了 2 个 crate**（`want` / `try-lock` —— `hyper-util` 的 `client-legacy` → `hyper` 的 http1 **客户端**）。⚠️ 第一轮报告写的「SCIM 出站零新增依赖」**不成立**，见 §3.1 |
 | **ring / aws-lc-rs** | **0 命中** —— `cargo metadata` 里 `ring` / `aws-lc-rs` / `aws-lc-sys` 均**不存在**；唯一含 “ring” 字样的是 `stringprep`（Unicode 库，非加密库） |
 | 依赖树 | **口径 A（第三方 crate 去重名）**：**263 → 273（+10）**；**口径 B（第三方 package 条目，含多版本）**：**272 → 284（+12）**；**口径 C（构建图去重 `name vX`）**：**239 → 253（+14）**；**口径 D（`cargo tree` 原始行数）**：**607 → 682（+75 行）**。**四个口径的命令都写在 §3.1**，可逐字复算 |
 | TLS 方案 | **选 (a) 只支持明文**。理由：树里**无任何 TLS 栈**，引入会带 30~50 个 crate，且 `rustls` 默认后端带 `ring` / `aws-lc-rs`（依赖预算要求 0 命中）。SCIM `https://` 与 LDAP `ldaps://` **明确报错**（不静默降级），配置项已留口。**修复轮补上了 LDAP 侧的前置校验**（`ldaps://` 不再落到底层 `UnknownScheme`） |
-| Rust 测试 | **299 passed / 0 failed**（非 ignored 口径；基线 225 → **+74**）；**带 `--include-ignored`：336 passed / 0 failed**（真实库层 **14/14** + SCIM **7/7**） |
+| Rust 测试 | **303 passed / 0 failed**（非 ignored 口径；第二轮 299 → **+4**，只增不减）；**带 `--include-ignored`：341 passed / 0 failed**（第二轮 336 → **+5**；真实库层 **15/15** + SCIM **7/7**）· ★ **复核轮：含 ignored 的全量回归连跑 8 次，8/8 全绿**（第二轮的间歇性 `deadlock detected` 已消除，见 §10.1） |
 | 前端测试 | **23/23**（`pnpm -r test`） |
 | E2E | **1/1**（`bun run test:e2e`，chromium） |
 | lint | `cargo fmt --all --check` ✅ / `cargo clippy --workspace --all-targets -- -D warnings` ✅ **0 告警** |
@@ -327,20 +328,20 @@ comm -23 /tmp/tree-base.txt /tmp/tree-head.txt     # → 空（没有节点消�
 
 ---
 
-## 7. 回归与门禁（**修复轮实测**，2026-11-18）
+## 7. 回归与门禁（**复核轮实测**，2026-11-18）
 
 | 门禁 | 结果 |
 |------|------|
 | `cargo check --workspace --all-targets` | ✅ |
-| `cargo test --workspace -- --test-threads=2` | ✅ **299 passed / 0 failed / 37 ignored**（第一轮 295 → **+4**，只增不减） |
-| `cargo test --workspace -- --include-ignored --test-threads=2` | ✅ **336 passed / 0 failed**（第一轮 329 → **+7**；真实库层 **14/14**，SCIM **7/7**） |
+| `cargo test --workspace -- --test-threads=2` | ✅ **303 passed / 0 failed / 38 ignored**（第二轮 299 → **+4**，只增不减） |
+| `cargo test --workspace -- --include-ignored --test-threads=2` | ✅ **341 passed / 0 failed**（第二轮 336 → **+5**；真实库层 **15/15**，SCIM **7/7**）· ★ **连跑 8 次 8/8 全绿**（见 §10.1） |
 | `cargo clippy --workspace --all-targets -- -D warnings` | ✅ **0 告警** |
 | `cargo fmt --all --check` | ✅ |
 | `cargo xtask capabilities --check` | ✅ 13 文件一致 |
 | `cargo xtask check-deps` | ✅ 平台 crate 未反向依赖业务模块 |
 | `cargo xtask check-modules` | ✅ |
 | `cargo xtask tenant-policies --check` | ✅ 2 个模块声明的表都开了 RLS 且有策略 |
-| `scripts/test-integration.sh` | ✅ **exit 0**（容器 **2 → 2**；该脚本 `--tests` 口径 = **331 passed / 0 failed**） |
+| `scripts/test-integration.sh` | ✅ **exit 0**（容器 **2 → 2**；该脚本 `--tests` 口径 = **336 passed / 0 failed**） |
 | `pnpm -r test` | ✅ **23/23** |
 | `bun run test:e2e` | ✅ **1/1** |
 
@@ -446,3 +447,128 @@ https://dir.example.com => ldap configuration is invalid: the ldap url must star
 - `ldaps://` → **明确报错**（写清「本期只支持明文、TLS 留后续需求」）；
 - 其它 scheme → **明确报错**（写清实际用的 scheme）；
 - 三条都**不含**底层的 `UnknownScheme`。
+
+---
+
+## 10. 复核轮（QA 复核 → **低 1 回归不稳定** + **信息 1 `add_member` 500**）
+
+- **输入**: `feature-meta/qa-report-recheck.md`（QA 复核结论 **PASS-WITH-RISK**；5 个改动点**全部复现为真**）
+- **本轮范围**: **低 1（必修）** —— 全量含 ignored 回归的**间歇性 `deadlock detected`**；**信息 1（建议修，一并做）** —— `add_member` 传不存在的 `user_id` 返回 500 → 4xx。
+
+### 10.1 低 1：间歇性死锁 —— 根因、修法与实测
+
+#### 根因（**不是生产代码的 bug**，是**测试之间的并发竞态**）
+
+复现（本机第一轮实测，**第一次就撞上**）：
+
+```
+$ cargo test --workspace -- --include-ignored --test-threads=2
+test the_database_refuses_a_cross_tenant_user_id ... FAILED
+---- the_database_refuses_a_cross_tenant_user_id stdout ----
+panicked at crates/platform-org/tests/org_real_db.rs:1195:5:
+应指出是哪条外键违约：数据库访问失败：error returned from database: deadlock detected
+test result: FAILED. 13 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+```
+
+PostgreSQL 日志（`podman logs base-postgres`）把锁环写得很清楚：
+
+```
+ERROR:  deadlock detected
+DETAIL:  Process 10372 waits for RowShareLock on relation 25761 of database 16385; blocked by process 10373.
+        Process 10373 waits for AccessExclusiveLock on relation 25778 of database 16385; blocked by process 10372.
+        Process 10372: INSERT INTO public.user_org (tenant_id, id, user_id, org_node_id) VALUES ($1, $2, $3, $4)
+        Process 10373: ALTER TABLE public.user_org ENABLE ROW LEVEL SECURITY
+```
+
+OID 对照（`SELECT oid, relname FROM pg_class WHERE oid IN (25761, 25778)`）：
+
+```
+25761 | org_node
+25778 | user_org
+```
+
+→ **锁环 = `user_org` ↔ `org_node`**：
+
+| 角色 | 语句 | 持锁 | 等锁 |
+|------|------|------|------|
+| A（用例体） | `INSERT INTO user_org` | `RowExclusiveLock` on `user_org` | `RowShareLock` on `org_node`（`user_org_node_fk` 的外键检查） |
+| B（**另一个用例的 `setup()`**） | `ALTER TABLE … ENABLE ROW LEVEL SECURITY` | `AccessExclusiveLock` on `org_node`（同一事务里**先**改的 `org_node`） | `AccessExclusiveLock` on `user_org` |
+
+**两条路径的加锁顺序正好相反**（DDL：`org_node` → `user_org`；写入：`user_org` → `org_node`）→ 锁环。
+锁环里**只有第一轮就有的 `user_org_node_fk`**，不含本轮新增的用户侧外键 —— **不是新外键引入的**；
+是「新增用例是第一个在用例体里早期直插 `user_org` 的」把这条**既有**竞态变成了可见的随机失败。
+
+#### 修法：**库结构准备整个测试二进制只做一次**（DDL 与数据写入不再并发）
+
+`crates/platform-org/tests/org_real_db.rs`：
+
+- 新增 `static SCHEMA_READY: tokio::sync::OnceCell<()>`；
+- `setup()` 里把「应用角色 → 平台迁移 → 按 manifest 生成 RLS 策略」整段挪进
+  `prepare_schema()`，由 `SCHEMA_READY.get_or_init(...)` 保证**整个测试二进制只跑一次**；
+- **为什么这样就够**：每个用例都要**先过 `setup()`** 才能进用例体，而 `setup()` 里等着这次准备 ——
+  于是 **DDL 一定发生在任何用例体开始之前**，**DDL 与数据写入不再并发**，竞态被**消除**；
+- **为什么不是「调大超时」或「重试几次」**：那只是把随机失败**藏起来**，竞态还在，下一轮还会翻车；
+- **为什么不是「全套单线程」**：那会**掩盖**其它真实竞态。本修法只让**改 schema 的那一步**串行，
+  **用例体之间仍然真并发**（`--test-threads=2` 不变），其它竞态照样暴露；
+- **跨进程**：`prepare_schema()` 仍在原有的 `pg_advisory_lock(SETUP_LOCK)` 里（跨进程不互相踩 DDL / policy）。
+
+> 副作用（正向）：真实库用例二进制从 **3.10s → 1.47s**（DDL 不再每个用例重跑一遍）。
+
+#### 实测：**连跑 8 次，8/8 全绿**
+
+```bash
+for i in $(seq 1 8); do
+  cargo test --workspace -- --include-ignored --test-threads=2 2>&1 | tail -3
+  echo "=== 第 $i 轮结束 ==="
+done
+```
+
+| 轮次 | exit | 汇总（passed / failed / ignored） | `deadlock` |
+|------|------|----------------------------------|-----------|
+| 1 | 0 | 341 / 0 / 0 | 无 |
+| 2 | 0 | 341 / 0 / 0 | 无 |
+| 3 | 0 | 341 / 0 / 0 | 无 |
+| 4 | 0 | 341 / 0 / 0 | 无 |
+| 5 | 0 | 341 / 0 / 0 | 无 |
+| 6 | 0 | 341 / 0 / 0 | 无 |
+| 7 | 0 | 341 / 0 / 0 | 无 |
+| 8 | 0 | 341 / 0 / 0 | 无 |
+
+> 复核轮之前：QA 实测 **4 次里 2 次红**（`deadlock detected`）；Dev 本轮修复前第 1 次跑就红。
+> 修复后 **8/8 全绿**。
+
+### 10.2 信息 1：`add_member` 传不存在的 `user_id` → **404**（不再是 500）
+
+| 层 | 改动 |
+|----|------|
+| **platform-db** | `DbError::foreign_key_constraint()` —— 从底层错误里**认出**外键违约（SQLSTATE `23503`）并返回**约束名**；`None` = 不是外键违约 |
+| **platform-org** | `From<DbError> for OrgError`：**外键违约 → `OrgError::NotFound { resource }` → 404 `NOT_FOUND`**（契约 C5：不泄露资源存在性）；其它数据库错误仍是 500 |
+| 资源类型映射 | `user_org_user_fk` / `user_position_user_fk` / `external_identity_user_fk` → `resource="user"`；`user_org_node_fk` / `user_position_node_fk` / `org_node_parent_fk` → `resource="org_node"`；对不上 → `record` |
+
+**为什么外键违约是 4xx**：外键违约的含义是「**引用的那一行不存在**」（幽灵 `user_id` / 跨租户 `user_id`）——
+这是**客户端错误**（该资源查不到），500 会把「用户不存在」说成「服务端坏了」。
+
+**实测**（真实库层 `adding_a_member_for_an_unknown_user_is_a_client_error`）：
+
+```
+PROBE add_member 幽灵 user → code=NOT_FOUND status=404 detail=the user was not found params={"resource": String("user")}
+```
+
+（同一次运行里 PostgreSQL 侧仍记录着**数据库层**的拒绝 —— 404 是把**真实的外键违约**映射过来的，
+不是服务层自己先查了一遍再报错：
+
+```
+ERROR:  insert or update on table "user_org" violates foreign key constraint "user_org_user_fk"
+```
+
+）
+
+**新增用例 / 单测**：
+
+| 用例 | 位置 | 断言 |
+|------|------|------|
+| `adding_a_member_for_an_unknown_user_is_a_client_error` | `crates/platform-org/tests/org_real_db.rs`（真实库层） | 404 + `NOT_FOUND` + `params.resource == "user"` |
+| `a_foreign_key_violation_is_a_client_error_not_an_internal_one` | `crates/platform-org/src/error.rs` | 外键违约 → 404 `NOT_FOUND` |
+| `other_database_errors_stay_internal` | `crates/platform-org/src/error.rs` | 其它数据库错误 → 500 `INTERNAL_ERROR` |
+| `a_foreign_key_violation_is_recognized_by_its_constraint` | `crates/platform-db/src/error.rs` | 外键违约 → 拿到约束名 |
+| `other_database_errors_are_not_foreign_key_violations` | `crates/platform-db/src/error.rs` | 非外键违约 → `None` |

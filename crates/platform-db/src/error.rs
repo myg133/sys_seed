@@ -59,6 +59,22 @@ impl DbError {
             Self::RlsBypassed { .. } => "RLS_BYPASSED_BY_ROLE",
         }
     }
+
+    /// 外键违约时的**约束名**（`None` = 不是外键违约）。
+    ///
+    /// 外键违约的含义是「**引用的那一行不存在**」——幽灵 id、跨租户 id 都落在这一类。
+    /// 对调用方来说这是**客户端错误**（该资源查不到 → 404），不是服务端错误（500），
+    /// 所以必须能把它从「数据库访问失败」里**认出来**，而不是当成普通错误码。
+    pub fn foreign_key_constraint(&self) -> Option<&str> {
+        let Self::Database(error) = self else {
+            return None;
+        };
+        let database_error = error.as_database_error()?;
+        if !database_error.is_foreign_key_violation() {
+            return None;
+        }
+        database_error.constraint()
+    }
 }
 
 /// 平台数据访问层统一的返回类型。
@@ -99,5 +115,76 @@ mod tests {
         let source = sqlx::Error::RowNotFound;
         let error: DbError = source.into();
         assert_eq!(error.code(), "DATABASE_ERROR");
+    }
+
+    /// 外键违约的替身（只为测「能不能认出它是外键违约」）。
+    #[derive(Debug)]
+    struct FakeDatabaseError {
+        code: &'static str,
+        constraint: Option<&'static str>,
+    }
+
+    impl std::fmt::Display for FakeDatabaseError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "fake database error")
+        }
+    }
+
+    impl std::error::Error for FakeDatabaseError {}
+
+    impl sqlx::error::DatabaseError for FakeDatabaseError {
+        fn message(&self) -> &str {
+            "fake database error"
+        }
+
+        fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+            Some(std::borrow::Cow::Borrowed(self.code))
+        }
+
+        fn constraint(&self) -> Option<&str> {
+            self.constraint
+        }
+
+        fn kind(&self) -> sqlx::error::ErrorKind {
+            match self.code {
+                "23503" => sqlx::error::ErrorKind::ForeignKeyViolation,
+                _ => sqlx::error::ErrorKind::Other,
+            }
+        }
+
+        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            self
+        }
+    }
+
+    #[test]
+    fn a_foreign_key_violation_is_recognized_by_its_constraint() {
+        let source = sqlx::Error::Database(Box::new(FakeDatabaseError {
+            code: "23503",
+            constraint: Some("user_org_user_fk"),
+        }));
+        let error: DbError = source.into();
+        assert_eq!(error.foreign_key_constraint(), Some("user_org_user_fk"));
+    }
+
+    #[test]
+    fn other_database_errors_are_not_foreign_key_violations() {
+        let source = sqlx::Error::Database(Box::new(FakeDatabaseError {
+            code: "23505",
+            constraint: Some("user_org_uq"),
+        }));
+        let error: DbError = source.into();
+        assert_eq!(error.foreign_key_constraint(), None);
+
+        let not_a_database_error: DbError = sqlx::Error::RowNotFound.into();
+        assert_eq!(not_a_database_error.foreign_key_constraint(), None);
     }
 }

@@ -257,10 +257,30 @@ impl From<platform_db::DbError> for OrgError {
         match error.code() {
             "MISSING_TENANT" => OrgError::TenantContextMissing,
             "ROW_NOT_FOUND" => OrgError::NotFound { resource: "record" },
-            _ => OrgError::Internal {
-                reason: error.code().to_string(),
+            _ => match error.foreign_key_constraint() {
+                // 外键违约 = **引用的那一行不存在**（幽灵 user_id / 跨租户 user_id）——
+                // 这是**客户端错误**：该资源查不到 → 404（契约 C5：不泄露存在性），
+                // 绝不是 500（那是「服务端坏了」，会把结构保证说成故障）。
+                Some(constraint) => OrgError::NotFound {
+                    resource: referenced_resource(constraint),
+                },
+                None => OrgError::Internal {
+                    reason: error.code().to_string(),
+                },
             },
         }
+    }
+}
+
+/// 外键约束名 → **资源类型**（进 `params.resource`）。
+///
+/// 约束名来自迁移（`migrations/20261118000*_org_*.sql`）；对不上就退回通用的 `record`
+/// —— 宁可粗一点，也不要猜错资源类型。
+fn referenced_resource(constraint: &str) -> &'static str {
+    match constraint {
+        "user_org_user_fk" | "user_position_user_fk" | "external_identity_user_fk" => "user",
+        "user_org_node_fk" | "user_position_node_fk" | "org_node_parent_fk" => "org_node",
+        _ => "record",
     }
 }
 
@@ -349,5 +369,82 @@ mod tests {
         };
         assert_eq!(error.code(), code::ORG_CYCLE);
         assert_eq!(error.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// 外键违约的替身（只为测「服务层能不能把它认成 404」）。
+    #[derive(Debug)]
+    struct FakeDatabaseError {
+        code: &'static str,
+        constraint: Option<&'static str>,
+    }
+
+    impl std::fmt::Display for FakeDatabaseError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "fake database error")
+        }
+    }
+
+    impl std::error::Error for FakeDatabaseError {}
+
+    impl sqlx::error::DatabaseError for FakeDatabaseError {
+        fn message(&self) -> &str {
+            "fake database error"
+        }
+
+        fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+            Some(std::borrow::Cow::Borrowed(self.code))
+        }
+
+        fn constraint(&self) -> Option<&str> {
+            self.constraint
+        }
+
+        fn kind(&self) -> sqlx::error::ErrorKind {
+            match self.code {
+                "23503" => sqlx::error::ErrorKind::ForeignKeyViolation,
+                _ => sqlx::error::ErrorKind::Other,
+            }
+        }
+
+        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            self
+        }
+    }
+
+    fn db_error(code: &'static str, constraint: Option<&'static str>) -> platform_db::DbError {
+        platform_db::DbError::Database(sqlx::Error::Database(Box::new(FakeDatabaseError {
+            code,
+            constraint,
+        })))
+    }
+
+    #[test]
+    fn a_foreign_key_violation_is_a_client_error_not_an_internal_one() {
+        // 幽灵 user_id / 跨租户 user_id → 外键违约 → 404（不是 500）。
+        let error = OrgError::from(db_error("23503", Some("user_org_user_fk")));
+        assert_eq!(error.code(), code::NOT_FOUND);
+        assert_eq!(error.status(), StatusCode::NOT_FOUND);
+        assert_eq!(
+            error
+                .params()
+                .get("resource")
+                .and_then(|value| value.as_str()),
+            Some("user")
+        );
+    }
+
+    #[test]
+    fn other_database_errors_stay_internal() {
+        let error = OrgError::from(db_error("23505", Some("user_org_uq")));
+        assert_eq!(error.code(), code::INTERNAL_ERROR);
+        assert_eq!(error.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

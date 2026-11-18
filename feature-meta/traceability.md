@@ -95,3 +95,19 @@
 
 **修复轮回归**：Rust **299 / 299**（非 ignored）、**336 / 336**（含 ignored，真实库层 14/14）· 前端 **23/23** · E2E **1/1** ·
 `scripts/test-integration.sh` **exit 0**（容器 2 → 2）· clippy **0 告警** · fmt ✅ · 4 个 xtask 门禁 ✅。
+
+---
+
+## 6. 复核轮（QA 复核 → **低 1 回归不稳定** + **信息 1 `add_member` 500**）
+
+> 输入：`feature-meta/qa-report-recheck.md`（QA 复核结论 **PASS-WITH-RISK**；5 个改动点**全部复现为真**，
+> 登记了 **1 个新的低危问题**：全量含 ignored 回归**间歇性死锁**（2/4 次失败）+ 2 条信息项）。
+> 本轮范围：**低 1 必修** + **信息 1 一并做**。
+
+| # | 级别 | 问题 | 实现位置 | 验证方式与证据 | 结论 |
+|---|------|------|----------|----------------|------|
+| **低 1** | 低 | ★ 全量含 ignored 回归**间歇性 `deadlock detected`**（QA 实测 4 次里 2 次红）。**根因不在被测逻辑**，而是**测试之间的并发竞态**：用例 A 在 `INSERT INTO user_org`（外键检查要 `org_node` 的 `RowShareLock`），用例 B 的 `setup()` 在跑 `ALTER TABLE … ENABLE ROW LEVEL SECURITY`（要 `AccessExclusiveLock`，且**先**锁 `org_node`）→ **两条路径加锁顺序相反 → 锁环** | `crates/platform-org/tests/org_real_db.rs`：新增 `static SCHEMA_READY: tokio::sync::OnceCell<()>`；`setup()` 把「应用角色 → 迁移 → RLS 策略」整段挪进 `prepare_schema()`，由 `SCHEMA_READY.get_or_init(...)` 保证**整个测试二进制只做一次**（跨进程仍受原有 `pg_advisory_lock(SETUP_LOCK)` 保护）。**DDL 因此一定发生在任何用例体开始之前 → DDL 与数据写入不再并发** | 修复前：第 1 次跑就红（`13 passed; 1 failed`，PG 日志锁环 `24320=org_node` ↔ `24337=user_org`）。修复后：**连跑 8 次，8/8 全绿**（每轮 341 passed / 0 failed，见 `verification-report.md` §10.1）。**用例体之间仍真并发**（`--test-threads=2` 不变）—— 只让**改 schema 的那一步**串行，没有把全套测试改成单线程，也没有用超时/重试盖问题 | **已修** |
+| **信息 1** | 信息 | `add_member` 传**不存在的 `user_id`** → 数据库层拒绝（对的），但服务层把 FK 违反映射成 **500 `INTERNAL_ERROR`** —— 用户视角应是「这个用户不存在」 | `crates/platform-db/src/error.rs`：新增 `DbError::foreign_key_constraint()`（认出 SQLSTATE `23503` 并给出**约束名**）；`crates/platform-org/src/error.rs`：`From<DbError> for OrgError` 把外键违约映射成 **`OrgError::NotFound` → 404 `NOT_FOUND`**（`params.resource = "user"` / `"org_node"`），其它数据库错误仍是 500 | 真实库层 `adding_a_member_for_an_unknown_user_is_a_client_error`：`code=NOT_FOUND`、`status=404`、`params={"resource":"user"}`；单测 `a_foreign_key_violation_is_a_client_error_not_an_internal_one` / `other_database_errors_stay_internal`（platform-org）+ `a_foreign_key_violation_is_recognized_by_its_constraint` / `other_database_errors_are_not_foreign_key_violations`（platform-db） | **已修** |
+
+**复核轮回归**：Rust **303 / 303**（非 ignored）、**341 / 341**（含 ignored，**连跑 8 次 8/8 全绿**）· 前端 **23/23** · E2E **1/1** ·
+`scripts/test-integration.sh` **exit 0**（容器 2 → 2）· clippy **0 告警** · fmt ✅ · 4 个 xtask 门禁 ✅。
