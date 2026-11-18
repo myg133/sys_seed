@@ -112,6 +112,28 @@
       },
       "type": "array"
     },
+    "tenantScoped": {
+      "additionalProperties": false,
+      "properties": {
+        "column": {
+          "default": "tenant_id",
+          "pattern": "^[a-z][a-z0-9_]*$",
+          "type": "string"
+        },
+        "tables": {
+          "items": {
+            "pattern": "^[a-z][a-z0-9_]*$",
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "tables"
+      ],
+      "type": "object"
+    },
     "version": {
       "pattern": "^\\d+\\.\\d+\\.\\d+$",
       "type": "string"

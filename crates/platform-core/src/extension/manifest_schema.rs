@@ -71,6 +71,19 @@ pub const MANIFEST_JSON_SCHEMA: &str = r##"{
           "label":   { "type": "string" }
         }
       }
+    },
+    "tenantScoped": {
+      "type": "object",
+      "required": ["tables"],
+      "additionalProperties": false,
+      "properties": {
+        "tables": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" }
+        },
+        "column": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "default": "tenant_id" }
+      }
     }
   }
 }"##;
@@ -187,6 +200,69 @@ mod tests {
             exported, constant,
             "capabilities/schema/manifest.schema.json 与内置常量不一致"
         );
+    }
+
+    #[test]
+    fn schema_declares_the_tenant_scoped_section() {
+        let parsed = schema_json();
+        let spec = &parsed["properties"]["tenantScoped"];
+        assert_eq!(spec["type"], "object");
+        assert_eq!(spec["additionalProperties"], serde_json::json!(false));
+        let required = spec["required"].as_array().expect("required 必须是数组");
+        assert!(
+            required.iter().any(|value| value == "tables"),
+            "tenantScoped 必须要求声明 tables"
+        );
+        let table_pattern = spec["properties"]["tables"]["items"]["pattern"]
+            .as_str()
+            .expect("tables[] 必须声明 pattern");
+        let column_pattern = spec["properties"]["column"]["pattern"]
+            .as_str()
+            .expect("column 必须声明 pattern");
+        for sample in ["order_item", "t1"] {
+            assert!(
+                pattern::matches(table_pattern, sample),
+                "schema 的表名 pattern 对 `{sample}` 的判定与样本不符"
+            );
+        }
+        for sample in ["Order_Item", "order-item", "1order"] {
+            assert!(
+                !pattern::matches(table_pattern, sample),
+                "schema 的表名 pattern 不该接受 `{sample}`"
+            );
+        }
+        assert!(
+            pattern::matches(column_pattern, "tenant_id"),
+            "schema 的列名 pattern 必须接受 tenant_id"
+        );
+    }
+
+    /// 平台实现与 schema 对标识符的判定必须一致（表名 / 列名）。
+    #[test]
+    fn schema_and_implementation_agree_on_sql_identifier_samples() {
+        use crate::extension::manifest::is_sql_identifier;
+        let parsed = schema_json();
+        let table_pattern =
+            parsed["properties"]["tenantScoped"]["properties"]["tables"]["items"]["pattern"]
+                .as_str()
+                .expect("tables[] 必须声明 pattern");
+        let column_pattern =
+            parsed["properties"]["tenantScoped"]["properties"]["column"]["pattern"]
+                .as_str()
+                .expect("column 必须声明 pattern");
+        for sample in ["order_item", "t1", "Order_Item", "order-item", "1order", ""] {
+            let expected = is_sql_identifier(sample);
+            assert_eq!(
+                pattern::matches(table_pattern, sample),
+                expected,
+                "schema 的表名 pattern 对 `{sample}` 的判定与平台实现不符"
+            );
+            assert_eq!(
+                pattern::matches(column_pattern, sample),
+                expected,
+                "schema 的列名 pattern 对 `{sample}` 的判定与平台实现不符"
+            );
+        }
     }
 
     #[test]

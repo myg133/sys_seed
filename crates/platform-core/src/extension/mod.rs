@@ -48,6 +48,7 @@ pub mod workflow;
 pub use auditable::{AuditEventSpec, Auditable};
 pub use manifest::{
     ConfigSpec, ConfigType, Manifest, ManifestError, MenuSpec, PermissionSpec, PermissionType,
+    TenantScopedSpec, is_sql_identifier,
 };
 pub use notification::{DeliveryResult, NotificationMessage, NotificationSender};
 pub use platform_module::{ModuleContext, PlatformModule};

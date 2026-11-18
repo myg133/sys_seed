@@ -17,6 +17,8 @@
 //! | `permissions[].name` | 非空（去掉首尾空白后不得为空） |
 //! | `menus[].route` | `^/[a-z0-9/-]*$` |
 //! | `dependencies[]` | 与 `id` 同规则 |
+//! | `tenantScoped.tables[]` | `^[a-z][a-z0-9_]*$`（表名；会被拼进 DDL，不能放宽） |
+//! | `tenantScoped.column` | `^[a-z][a-z0-9_]*$`（租户列名，默认 `tenant_id`） |
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -154,6 +156,24 @@ pub struct ConfigSpec {
     pub label: Option<String>,
 }
 
+/// 租户作用域声明：哪些表按租户隔离。
+///
+/// 平台据此**统一生成** RLS 策略（`ENABLE ROW LEVEL SECURITY` + policy），
+/// 业务模块不手写 policy —— 手写迟早会漏（漏一张表 = 该表完全无隔离）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TenantScopedSpec {
+    /// 租户作用域表的表名（不含 schema）。
+    pub tables: Vec<String>,
+    /// 租户列名；默认 `tenant_id`。
+    #[serde(default = "default_tenant_column")]
+    pub column: String,
+}
+
+fn default_tenant_column() -> String {
+    "tenant_id".to_string()
+}
+
 /// 业务模块 manifest。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -176,6 +196,9 @@ pub struct Manifest {
     /// 配置项声明。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config: Option<BTreeMap<String, ConfigSpec>>,
+    /// 租户作用域声明：平台据此统一生成 RLS 策略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tenant_scoped: Option<TenantScopedSpec>,
 }
 
 fn default_enabled() -> bool {
@@ -260,6 +283,26 @@ impl Manifest {
             }
         }
 
+        if let Some(spec) = &self.tenant_scoped {
+            if spec.tables.is_empty() {
+                issues.push(field_error("tenantScoped.tables", "must not be empty"));
+            }
+            for (index, table) in spec.tables.iter().enumerate() {
+                if !is_sql_identifier(table) {
+                    issues.push(field_error(
+                        &format!("tenantScoped.tables[{index}]"),
+                        "must match ^[a-z][a-z0-9_]*$",
+                    ));
+                }
+            }
+            if !is_sql_identifier(&spec.column) {
+                issues.push(field_error(
+                    "tenantScoped.column",
+                    "must match ^[a-z][a-z0-9_]*$",
+                ));
+            }
+        }
+
         issues
     }
 
@@ -331,6 +374,20 @@ fn is_lower_alnum_segment(value: &str) -> bool {
     match chars.next() {
         Some(first) if first.is_ascii_lowercase() => {
             chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        }
+        _ => false,
+    }
+}
+
+/// SQL 标识符（表名 / 列名）：`^[a-z][a-z0-9_]*$`。
+///
+/// 标识符会被拼进 DDL（`ALTER TABLE` / `CREATE POLICY`），放宽就会变成 SQL 注入面 ——
+/// 所以这里比业务侧的命名规则更严：**不允许大写、不允许连字符、不允许以数字开头**。
+pub fn is_sql_identifier(value: &str) -> bool {
+    let mut chars = value.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_lowercase() => {
+            chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
         }
         _ => false,
     }
@@ -420,5 +477,86 @@ mod tests {
         let err = Manifest::parse_str("{ not json").expect_err("非法 JSON 应被拒绝");
         assert_eq!(err.code(), "MANIFEST_JSON_INVALID");
         assert!(err.field().is_empty());
+    }
+
+    /// 租户作用域声明：解析 + 校验。
+    #[test]
+    fn tenant_scoped_is_parsed_and_validated() {
+        let raw = valid_manifest_json().replace(
+            r#""config": {"#,
+            r#""tenantScoped": { "tables": ["order_item", "order_log"], "column": "tenant_id" },
+            "config": {"#,
+        );
+        let manifest = Manifest::parse_checked(&raw).expect("合法的 tenantScoped 应通过");
+        let spec = manifest
+            .tenant_scoped
+            .as_ref()
+            .expect("tenantScoped 应被解析");
+        assert_eq!(spec.tables, vec!["order_item", "order_log"]);
+        assert_eq!(spec.column, "tenant_id");
+    }
+
+    /// 租户列缺省时用 `tenant_id`。
+    #[test]
+    fn tenant_scoped_column_defaults_to_tenant_id() {
+        let raw = valid_manifest_json().replace(
+            r#""config": {"#,
+            r#""tenantScoped": { "tables": ["order_item"] },
+            "config": {"#,
+        );
+        let manifest = Manifest::parse_checked(&raw).expect("合法的 tenantScoped 应通过");
+        let spec = manifest
+            .tenant_scoped
+            .as_ref()
+            .expect("tenantScoped 应被解析");
+        assert_eq!(spec.column, "tenant_id");
+    }
+
+    /// 空表清单、非法表名、非法列名都要被报出来（附字段路径）。
+    #[test]
+    fn invalid_tenant_scoped_is_reported_with_field_path() {
+        let raw = valid_manifest_json().replace(
+            r#""config": {"#,
+            r#""tenantScoped": { "tables": ["Order Item"], "column": "Tenant-ID" },
+            "config": {"#,
+        );
+        let issues = Manifest::parse_checked(&raw).expect_err("非法的 tenantScoped 应被报告");
+        let fields: Vec<&str> = issues.iter().map(|issue| issue.field()).collect();
+        assert!(
+            fields.contains(&"tenantScoped.tables[0]"),
+            "fields = {fields:?}"
+        );
+        assert!(
+            fields.contains(&"tenantScoped.column"),
+            "fields = {fields:?}"
+        );
+    }
+
+    /// 表清单为空 → 报告（漏一张表 = 该表完全无隔离，不能当没声明）。
+    #[test]
+    fn empty_tenant_scoped_tables_are_reported() {
+        let raw = valid_manifest_json().replace(
+            r#""config": {"#,
+            r#""tenantScoped": { "tables": [] },
+            "config": {"#,
+        );
+        let issues = Manifest::parse_checked(&raw).expect_err("空表清单应被报告");
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.field() == "tenantScoped.tables"),
+            "issues = {issues:?}"
+        );
+    }
+
+    /// 标识符规则：只允许小写字母开头的字母数字与下划线。
+    #[test]
+    fn sql_identifier_rule_is_strict() {
+        assert!(is_sql_identifier("order_item"));
+        assert!(is_sql_identifier("t1"));
+        assert!(!is_sql_identifier("Order_Item"));
+        assert!(!is_sql_identifier("order-item"));
+        assert!(!is_sql_identifier("1order"));
+        assert!(!is_sql_identifier(""));
     }
 }
