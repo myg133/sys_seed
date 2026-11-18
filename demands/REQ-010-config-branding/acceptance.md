@@ -11,10 +11,17 @@
 
 ## 编号说明与修订记录
 
-- 编号段：**`AC-S-049` ~ `AC-S-063`**（17 条，全局唯一段，规则见 D23）
+- 编号段：**`AC-S-049` ~ `AC-S-063`**（**15 条**，全局唯一段，规则见 D23）
 - 原占位 `AC-S-015` 已被 `AC-S-052` 取代
 - **rev 2** 经 QA 用例评审挑出 **36 条**问题（12 条硬伤），逐条裁定并修订。
   逐条裁定结果见 [test-cases/index.md](test-cases/index.md) §8 与决策 **D55~D68**。
+
+**rev 3**（2026-11-18 23:30）：QA 复核 rev 2 时又挑出 **14 条**新问题，其中两条是**真正的权限漏洞**：
+- **读侧与写侧同构**：AC-S-063 要按 key 授权，但读只有一条路由 → `config:platform:read`
+  要么挡住所有读、要么没有调用点。**对称拆读路由**（D69）
+- **flag 可绕过专用权限点**：flag 本体与派生键都是普通 config 键，
+  `PUT /api/config/entries` 只要求 `config:entry:write` → **持该权限点即可改开关**（D70）
+其余 12 条见 D71~D76 与 `test-cases/index.md` §8.9。
 
 **rev 2 的关键修订**（都是 rev 1 的错）：
 
@@ -108,16 +115,18 @@
 - **类型**: 功能 / 安全
 
 ### AC-S-052: 配置变更在**下一个请求**生效（原 AC-S-015 写实版）
-- **前置条件**: 平台级 `logo` = `A` 已被读过一次（缓存已填充）；缓存 TTL 设为 **300s**
+- **前置条件**: 平台级 **`loginBackground`** = `L`（**该键三层只有平台级值**，
+  T1/T2 都**没有**覆盖 —— 否则读到的是覆盖值，验不到平台级失效）；
+  已读过一次（缓存已填充）；缓存 TTL 设为 **300s**
 - **测试步骤**:
-  1. 读 `logo` 确认是 `A`
-  2. 把平台级 `logo` 改为 `A2`（**不重启、不清缓存、不等待**）
-  3. **立刻**再读 `logo`（间隔 < 1s）
+  1. 读 `loginBackground` 确认是 `L`
+  2. 把平台级 `loginBackground` 改为 `L2`（**不重启、不清缓存、不等待**）
+  3. **立刻**再读 `loginBackground`（间隔 < 1s）
   4. 用**两个独立的解析器实例**（各自持缓存、共享同一 DB）重复 1~3
 - **预期结果**:
-  - 3 → `value=A2` —— **不得**出现「改完仍返回旧值」
+  - 3 → `value=L2` —— **不得**出现「改完仍返回旧值」
   - **生效上界 = 下一个请求**（可判定：第 3 步在 1 秒内完成且返回新值）
-  - 4 → 实例 1 写入后，**实例 2** 下一次读也必须返回 `A2`
+  - 4 → 实例 1 写入后，**实例 2** 下一次读也必须返回 `L2`
     —— 失效信号来自**共享的数据库**，不是进程内广播
   - TTL 明知很长也不影响结论（证明失效不依赖 TTL 到期）
 - **类型**: 功能 / 安全
@@ -233,7 +242,8 @@
 - **类型**: 安全
 
 ### AC-S-059: 未声明的 flag 不返回 404；flag 名受字符集约束
-- **前置条件**: 只登记了 `newInvoice`
+- **前置条件**: 夹具里登记了 **两个** flag：`newInvoice`（AC-S-056 用）与 `beta`（AC-S-057 用）；
+  本条用拼错的 `newinvoce`
 - **测试步骤**:
   1. 读**合法但未登记**的名字 `newinvoce`（拼错）
   2. 读含换行的名字 `bad\nINJECTED`
@@ -271,6 +281,12 @@
   - 7 → **404**（借请求头把写入导到别的租户 → 当不存在处理，不泄露存在性）
   - 权限点共 **4 个**，全部在 `crates/platform-config/manifest.json` 登记，
     **并同时写权限点种子迁移**（否则启动对账 fail-fast，进程起不来 —— D67）
+  - **★ 追加步骤 8**：以 A（持有 `config:entry:write`，**不持有** `config:flag:write`）
+    经**通用写路由** `PUT /api/config/entries` 写一个 **flag 键**（`newInvoice`）
+    或其派生键（`flags.newInvoice.rolloutPercent`）
+  - 步骤 8 预期 → **400** `code=CONFIG_FLAG_USE_FLAG_ENDPOINT` ——
+    **flag 只能用 flag 接口改**。否则任何能改配置的人都能改开关，
+    `config:flag:write` 被架空（D70）
 - **类型**: 安全
 
 ### AC-S-061: 新增的权限点必须有鉴权调用点；既有缺口如实登记不扩围
@@ -313,23 +329,36 @@
   - 6 → 三张表 `value` 均为 **`jsonb`**；up/down/up 后 `jsonb_typeof` 与值**完全一致**
   - ⚠️ **down 迁移不得 `DROP TABLE platform_tenant_config`**
     （既有 `20261118000200_tenant_isolation.down.sql` 是 `DROP TABLE`，新迁移照抄会删掉历史表）
+  - **★ 步骤 7**：`platform_config_upsert` 写完一行后，
+    `platform_config_epoch` 里 `scope_key='platform'` 的 epoch **必须 +1**
+    —— 否则「写进去了但缓存失效不掉」，与 AC-S-052 / 053 直接矛盾（D71）
+  - **★ 步骤 8**：伪租户字面量 `"platform"` **不得与任何真实租户 id 冲突**。
+    本仓夹具用 `tenant-a` / `tenant-b`（**不是 UUID**），所以不能靠「UUID 形态」担保。
+    判据：有一个**保留值校验** —— 真实租户 id 为 `"platform"` 时，
+    读写都必须报错（或平台拒绝以该 id 建租户），且要有测试守着。
+    —— 否则「伪租户」会与真租户同 ID，平台级读取会读到该租户的数据（D72）
 - **类型**: 安全 / 可维护性
 
-### AC-S-063: 平台级配置的**读**也要授权
+### AC-S-063: 平台级配置的**读**走独立路由并单独授权
 - **前置条件**: `scimBaseUrl` / `ldapBaseDn` / `conflictStrategy` 均为 `scope: platform`；
-  用户 M 是普通用户；用户 P 持有 `config:platform:read`
+  `pageSize` 为 `scope: tenant`；用户 M 是普通用户；用户 P 持有 `config:platform:read`
 - **测试步骤**:
-  1. 以 M 读 `scimBaseUrl`（平台级键）
-  2. 以 M 读 `pageSize`（租户级键）
-  3. 以 P 读 `scimBaseUrl`
-  4. 不带令牌请求品牌接口，检查是否泄露平台级运维键（**对照 AC-S-054 第 5 步**）
+  1. 以 M 读**租户级**键：`GET /api/config/entries?keys=pageSize`（**通用读路由**）
+  2. 以 M 读**平台级**键：`GET /api/config/platform-entries?keys=scimBaseUrl`（**独立读路由**）
+  3. 以 P 调同一条独立读路由
+  4. 以 M 调通用读路由但**混入**平台级键：`?keys=pageSize,scimBaseUrl`
+  5. 不带令牌请求品牌接口，检查是否泄露平台级运维键（**对照 AC-S-054 第 5 步**）
 - **预期结果**:
-  - 1 → **403** `INSUFFICIENT_PERMISSION` ——
+  - 1 → **200**（租户级键不受限）
+  - 2 → **403** `INSUFFICIENT_PERMISSION` ——
     否则任何租户的普通用户都能读到平台级基础设施配置
     （而 AC-S-054 费力把 `scimBaseUrl` 挡在公开接口外，登录后却能读到，等于白挡）
-  - 2 → 成功（租户级键不受限）
-  - 3 → 成功
-  - 4 → 仍不泄露（品牌白名单与读授权是**两道**独立的门）
+  - 3 → **200**
+  - 4 → **403**（**整请求 fail closed**，不是「返回 `pageSize` 忽略 `scimBaseUrl`」）
+  - 5 → 仍不泄露（品牌白名单与读授权是**两道**独立的门）
+  - **为什么读也要拆路由**（D69）：`require_permission` 是**静态路由层**。
+    若把 `config:platform:read` 挂在**通用**读路由上，M 连租户级键都读不到（与第 1 步冲突）；
+    若不挂，该权限点**没有调用点** → C-5 失败。与写侧（D59）是同一个道理。
 - **类型**: 安全
 
 ---

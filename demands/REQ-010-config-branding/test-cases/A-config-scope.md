@@ -143,7 +143,7 @@
 - **关联 AC**: AC-S-050
 - **前置条件**:
   - **执行位置**: 真实库 + 真机 HTTP。
-  - `loginBanner` 在 `crates/platform-config/manifest.json` 登记为 `scope: space`，但**不在**品牌白名单内（D66 的判据需要一个这样的键 —— 见 [index.md](index.md) §3.4 与 §8.9 N4）。
+  - `loginBanner` 在 `crates/platform-config/manifest.json` 登记为 `scope: space`，但**不在**品牌白名单内（D66 的判据需要一个这样的键 —— 见 [index.md](index.md) §3.4 与 §8.9 N13）。
   - `logo` 登记 `scope: space` **且在白名单内**。
   - 写者 A。
 - **测试步骤**:
@@ -152,7 +152,7 @@
   3. 读 T1 + S1 的 `loginBanner`
   4. A：`{"scope":"space","entries":[{"key":"logo","value":"/branding/space-ok.svg"}]}` + S1（对照：白名单内的 space 键）
 - **预期结果**:
-  1. **400**；`code == "CONFIG_SCOPE_NOT_ALLOWED"`（`params.reason == "key not in branding whitelist"`）—— **不是**「写进去后被忽略」。
+  1. **400**；`code == "CONFIG_SCOPE_NOT_ALLOWED"`；`params.key == "loginBanner"`，且 `detail` / `params` 中能看出拒绝原因是**白名单**（英文 `whitelist`）—— **不是**「写进去后被忽略」。
   2. **200** —— 非白名单只拦**空间级**，租户级仍可写（`scope: space` 的允许最深层含租户层）。
   3. **200**；`value == "/banner-tenant.png"`；`source == "tenant"`（步骤 1 没有产生空间级行）。
   4. **200**；读 T1+S1 `logo` = `/branding/space-ok.svg`、`source="space"` —— 白名单内的空间级写不受影响。
@@ -245,7 +245,7 @@
 - **设计方法**: 判定表（5 种类型 × 正反）
 
 ### TC-010-011: 校验顺序写死：认证 → 权限点 → 键名 → 注册表 → 作用域 → 类型
-- **关联 AC**: AC-S-051（兼 AC-S-050）
+- **关联 AC**: AC-S-051
 - **前置条件**:
   - **执行位置**: 真实库 + 真机 HTTP。
   - A（`u-2002`）有 `config:entry:write`；P（`u-2003`）另有平台权限点。

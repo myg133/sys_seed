@@ -141,6 +141,17 @@ REVOKE ALL ON FUNCTION platform_config_upsert(TEXT, JSONB) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION platform_config_upsert(TEXT, JSONB) TO base_platform_app;
 ```
 
+⚠️ **函数体必须在同一事务里自增 epoch**（D71）：
+
+```sql
+    INSERT INTO platform_config (key, value, updated_at) VALUES (...) ON CONFLICT ...;
+    INSERT INTO platform_config_epoch (scope_key, epoch, updated_at)
+    VALUES ('platform', 1, now())
+    ON CONFLICT (scope_key) DO UPDATE SET epoch = platform_config_epoch.epoch + 1, updated_at = now();
+```
+
+否则「写进去了但缓存失效不掉」—— 与 AC-S-052 / 053 直接矛盾。
+
 **这条设计的实际保证是什么（别说过头）**：
 
 | 保证 | 强度 |
@@ -188,7 +199,7 @@ SQL 条件写成 `{tenant} IS NOT NULL`（恒真）。对**没有 RLS、没有�
 | 注意 | 说明 |
 |---|---|
 | **写入不能只靠 `{tenant} IS NOT NULL`** | 对 INSERT 而言这个条件毫无约束力。平台级配置的**写入控制必须来自表级权限**（只授予平台管理角色）+ **权限点**（`config:platform:write`），**不是**靠 SQL 条件 |
-| 伪租户值 `"platform"` **不能与真实租户 id 撞车** | 租户 id 是 UUID 形态；`"platform"` 不是合法 UUID，不会冲突。**要有一条测试守住**（若哪天允许自选租户 id，这条就得改） |
+| 伪租户值 `"platform"` **不能与真实租户 id 撞车** | ⚠️ 初版这里写「租户 id 是 UUID 形态所以不会撞」——**与真实夹具不符**：本仓夹具是 `tenant-a` / `tenant-b`，不是 UUID。必须有**保留值校验**：真实租户 id 为 `"platform"` 时读写都报错（或拒绝以其建租户），并有测试守着（D72） |
 
 ---
 
@@ -259,7 +270,7 @@ SQL 条件写成 `{tenant} IS NOT NULL`（恒真）。对**没有 RLS、没有�
 
 现有稳定错误码只有 4 个（`UNAUTHENTICATED` / `INSUFFICIENT_PERMISSION` / `NOT_FOUND` /
 `INTERNAL_ERROR`），**没有 400 码**。契约 C6 要求「`code` 是稳定的机器可读错误码，
-前端据此做逻辑判断」—— 所以本需求新增 **5 个**：
+前端据此做逻辑判断」—— 所以本需求新增 **7 个**（含 `CONFIG_FLAG_USE_FLAG_ENDPOINT`）：
 
 | `code` | HTTP | 何时 |
 |---|---|---|
@@ -269,6 +280,7 @@ SQL 条件写成 `{tenant} IS NOT NULL`（恒真）。对**没有 RLS、没有�
 | `CONFIG_TYPE_MISMATCH` | 400 | JSON 类型与登记类型不符 |
 | `CONFIG_VALUE_OUT_OF_RANGE` | 400 | 数值越界（`rolloutPercent` 不在 `0..=100`） |
 | `FLAG_NAME_INVALID` | 400 | flag 名不符合 `^[a-z][a-zA-Z0-9]{0,63}$` |
+| `CONFIG_FLAG_USE_FLAG_ENDPOINT` | 400 | 经通用写路由改 flag（只能走 flag 接口，D70） |
 
 **同一请求同时违反多条 → 返回顺序最靠前的那条的码**（AC-S-051 步骤 5 专门验这个）。
 
@@ -314,7 +326,7 @@ SQL 条件写成 `{tenant} IS NOT NULL`（恒真）。对**没有 RLS、没有�
 
 | 配置 | 判定 |
 |---|---|
-| 无任何配置 | `enabled = false`，`source = "platform"`（**未声明的功能默认关闭**，fail closed） |
+| 无任何配置 | `enabled = false`，**`source = "default"`**（用 manifest 登记的默认值 —— 与 C9 的四值口径一致；**不是** `platform`，那是「平台显式配了」的意思） |
 | 平台级 `true` / `false`，且无灰度 | 直接取该值 |
 | 有灰度比例 `rolloutPercent` | 见 §5.2 |
 
@@ -385,7 +397,8 @@ Flag 本体仍登记在 `config` 段（`type: boolean`），语义是「总开�
 
 | 路由 | 鉴权 | 说明 |
 |---|---|---|
-| `GET /api/config/entries?keys=a,b` | **需要令牌**；平台级键另需 `config:platform:read` | 批量读配置（带 `source`）；含未登记键 → **整请求 404** |
+| `GET /api/config/entries?keys=a,b` | **需要令牌** | 读**租户级 / 空间级**配置（带 `source`）；含未登记键或平台级键 → **整请求失败** |
+| `GET /api/config/platform-entries?keys=a,b` | 权限点 **`config:platform:read`** | 读**平台级**配置（**独立路由**，D69） |
 | `GET /api/config/branding` | **公开（无令牌）** | 登录页也要用 → 只返回**白名单键**，扁平 map |
 | `PUT /api/config/entries` | 权限点 `config:entry:write` | 写**租户级 / 空间级**配置 |
 | `PUT /api/config/platform-entries` | 权限点 **`config:platform:write`** | 写**平台级**配置（**独立路由**，D59） |
@@ -403,6 +416,21 @@ Flag 本体仍登记在 `config` 段（`type: boolean`），语义是「总开�
   `require_permission` 调用点 → **C-5 失败**（它只认这个形态）
 
 拆成两条路由后两者同时成立，且权限点仍然可被 C-5 静态扫描到。
+
+### 6.0.2 flag 只能经 flag 接口改（D70）
+
+flag 本体与派生键 `flags.<F>.rolloutPercent` **都是普通 config 键**。
+若通用写路由 `PUT /api/config/entries` 不加区分，那么**持 `config:entry:write` 的人就能改开关**
+—— `config:flag:write` 被架空（这是 QA 折出的**权限提升**漏洞）。
+
+规则：
+
+| 请求 | 结果 |
+|---|---|
+| 通用写路由里出现**已登记的 flag 名**或 `flags.` 前缀的键 | **400 `CONFIG_FLAG_USE_FLAG_ENDPOINT`** |
+| 经 `PUT /api/feature-flags/{flag}` 改 | 正常（要求 `config:flag:write`） |
+
+即：**flag 有专用接口，通用配置接口不碰 flag 命名空间。**
 
 ### 6.0.1 `source` 与 `scope` 必须是**两个枚举**（D60）
 
@@ -533,7 +561,8 @@ max(7, 4) = 7  → 与缓存里的 7 相同 → 判「新鲜」→ 继续返回�
       **品牌键显式写 `scope: space`**）
 - [ ] `ConfigResolver` trait + `ConfigSource` + `ResolvedConfig` + `FlagDecision`
       （放 `platform-core/src/extension/config.rs`，§1 的迁移表）
-- [ ] `GET /api/config/entries`（平台级键需 `config:platform:read`）
+- [ ] `GET /api/config/entries`（租户级/空间级；**遇到平台级键或 flag 键 → 整请求失败**）
+- [ ] **`GET /api/config/platform-entries`**（平台级读，**独立路由** + `config:platform:read`，D69）
 - [ ] `GET /api/config/branding`（**公开 + 白名单 + 扁平 map**）
 - [ ] `PUT /api/config/entries`（租户级/空间级）
 - [ ] **`PUT /api/config/platform-entries`**（平台级，**独立路由** + `config:platform:write`）
@@ -559,6 +588,9 @@ max(7, 4) = 7  → 与缓存里的 7 相同 → 判「新鲜」→ 继续返回�
 ---
 
 ## 9. 契约：`api-conventions` **已升 v2**（本需求已完成）
+
+> rev 3 追加：`api-conventions v2` 的 C10 需再补一句「flag 只能经 flag 接口改，通用配置接口拒绝 flag 命名空间」（D70）
+> 与「平台级读写走独立端点」（D69/D59）。两者都是**新增**约束，`breaking: no`。
 
 `BA/contracts/api-conventions/v2.md` 已 ratified，`CURRENT` 指向 v2。
 本需求**已经是 v2 的第一个消费方** —— 初版的 §9 把下面 4 条列为「待本需求内完成」，
