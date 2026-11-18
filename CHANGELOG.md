@@ -4,6 +4,32 @@
 
 ## Unreleased
 
+### REQ-004 AI 引导体系与能力索引
+
+- 仓库级 `AGENTS.md`（agents.md 开放规范）：目录 / 硬规则 / 真实可用的命令 /
+  已有能力 / 尚未提供的能力；「已有能力」段与能力索引逐行一致（由 xtask 测试守住）
+- 任务级提示词库 `prompts/`：8 套成套任务书（新建模块 / 加权限点 / 接 SSO /
+  定义流程 / 通知模板 / 越权测试 / 补测试用例 / 性能优化），
+  每套含目标 / 输入 / 步骤 / 约束 / 验收
+- 能力索引 `capabilities/`（**自动生成，勿手改**）：`index.json`（含 `already_provided`
+  与 `not_yet_provided`）、`permissions.json`、`extension-points.json`、
+  `schema/manifest.schema.json`、`schema/metadata.schema.json`、
+  `sdk/<package>.json`、`api.json`（HTTP 层未就绪，占位并注明 REQ-011/012 补）
+- 生成器 `cargo xtask capabilities`：`--check` 只校验不写入，CI 用它发现手改；
+  产物逐字节可复现（不含墙钟时间戳），**新增第三方依赖：无**
+  （trait 声明用正则 + 约定扫描，不引入 `syn` 等解析框架）
+- 脚手架 `cargo xtask create-module <name> [--perm-prefix <prefix>]`：
+  生成目录 + manifest + backend/frontend/migrations/tests + 模块级 AGENTS.md + README，
+  自动登记进工作区成员，并对生成的 Rust 源文件跑 `rustfmt`；
+  **产出开箱即过 `check-modules` 与契约检查 C-1 ~ C-4**
+- 模块级 `AGENTS.md` 模板由 `create-module` 生成（领域模型 / 扩展点 / 权限点 /
+  如何验证 / 易踩的坑）
+- CI 护栏：新增 `guardrails` job（`capabilities --check` + `check-deps`）、
+  `core-change-label`（平台核心变更自动打标）与 `core-change-review`
+  （平台核心变更必须有非作者的批准评审）+ `.github/CODEOWNERS`
+- `cargo xtask check-deps` 子命令：把 REQ-003 已有的 `cargo metadata` 依赖图
+  遍历暴露给 CI（未重写实现）
+
 ### REQ-003 扩展点框架与契约测试
 
 - 扩展点 trait（`crates/platform-core/src/extension/`）：`PlatformModule` / `Repository` /

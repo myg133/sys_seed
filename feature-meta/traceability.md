@@ -1,86 +1,89 @@
-# REQ-003 追溯性矩阵
+# REQ-004 追溯性矩阵
 
-- **需求**: REQ-003 扩展点框架与契约测试
-- **分支**: `feature/REQ-003`
-- **基线**: `develop` @ `eacff21`（REQ-002 已合并）
-- **契约**: api-conventions v1（已 ratified，见 `BA/contracts/api-conventions/v1.md`）
-- **设计依据**: `BA/demands/REQ-003-extension-framework/design-summary.md`（trait 签名已冻结）
-- **更新时间**: 2026-11-18（修复轮 2：承接 QA Pre-merge 的 PASS-WITH-RISK，修复中 1 / 中 2 / 低 5 / 低 6 / 提示 7）
+- **需求**: REQ-004 AI 引导体系与能力索引
+- **分支**: `feature/REQ-004`
+- **基线**: `develop` @ `c8236b0`（REQ-002 工程基线 + REQ-003 扩展点框架已合并）
+- **契约**: api-conventions v1、extension-points v1（均已 ratified，已在 `feature-meta/manifest.json` pin）
+- **设计依据**: `BA/demands/REQ-004-ai-guidance/design-summary.md`
+- **开发者**: myg133-dev-1
+- **更新时间**: 2026-11-18
 
-图例：**PASS** = 已实现且有自动化验证；**未验证** = 无自动化证据。
+图例：**PASS** = 已实现且有自动化或可复现的验证证据；**未验证** = 没有证据，如实标注。
 
 ---
 
 ## 1. 自有 AC
 
-| AC | 内容 | 实现位置 | 测试位置 | 结论 |
-|----|------|----------|----------|------|
-| AC-S-003 | 扩展点契约随平台分发：业务模块只依赖 `platform-contracts` 即可获得契约测试，无需复制平台内部代码 | `crates/platform-contracts/`（套件）、`crates/platform-contracts-macros/`（宏）、`modules/sandbox/Cargo.toml`（`platform-contracts` 只出现在 `[dev-dependencies]`） | `modules/sandbox/tests/contracts.rs`（4 个契约测试全绿）、`cargo test -p sandbox` | **PASS** |
+| AC | 内容 | 实现位置 | 验证方式与证据 | 结论 |
+|----|------|----------|----------------|------|
+| AC-S-004 | 索引自动生成不可手改：手改 `capabilities/` 后 CI 失败 | `crates/xtask/src/capabilities.rs`（`generate` / `check` / `write_files`）、`crates/xtask/src/main.rs`（`capabilities --check` 子命令）、`.github/workflows/ci.yml` 的 `guardrails` job | ① 手改 `capabilities/index.json` 的 `platform` 段 → `cargo xtask capabilities --check` **失败**（exit 1，报 `E_CAPABILITIES_OUTDATED` + `内容不一致：capabilities/index.json`）→ 还原后通过；② 索引产物**逐字节可复现**（不含墙钟时间戳），任何一处改动都会被检出 | **PASS** |
 
-## 2. 设计摘要 §7 交付清单
+## 2. 父需求 AC（REQ-001）
 
-| 交付项 | 实现位置 | 测试位置 | 结论 |
-|--------|----------|----------|------|
-| 5 个扩展点 trait 定义与文档注释 | `crates/platform-core/src/extension/{platform_module,repository,auditable,notification,workflow}.rs` | `cargo test -p platform-core --lib`（25 个新单测） | **PASS** |
-| `inventory` 编译期注册与 `discover()` | `crates/platform-core/src/extension/registry.rs` | `extension::registry::tests::registered_modules_are_discovered`、`::disabled_modules_are_filtered_out` | **PASS** |
-| `platform-contracts` 套件：C-1 ~ C-4 四项检查 | `crates/platform-contracts/src/checks.rs` | `modules/sandbox/tests/contracts.rs` 生成的 4 个测试；另有破坏性验证（见 §4） | **PASS** |
-| 简化版 `#[platform_module_contract]` 宏 | `crates/platform-contracts-macros/src/lib.rs` | 由 `modules/sandbox/tests/contracts.rs` 实际调用并生成 4 个测试 | **PASS** |
-| manifest JSON Schema + 解析器 | `crates/platform-core/src/extension/manifest.rs`、`manifest_schema.rs`、`capabilities/schema/manifest.schema.json` | `extension::manifest::tests::*`（6 个）、`extension::manifest_schema::tests::*`（5 个） | **PASS** |
-| **Schema 与平台实现的判定一致（修复轮 2）** | 同上（`id` / `dependencies[]` 的 pattern 与 `is_module_id` 等价；名称加 `minLength` + `\S`） | `manifest_schema::tests::schema_and_implementation_agree_on_module_id_samples`、`::schema_and_implementation_agree_on_permission_name_samples` | **PASS** |
-| `xtask check-modules` 完整规则 | `crates/xtask/src/modules.rs` | `crates/xtask/src/modules.rs` 的 12 个单测 + 手工破坏验证（见 §4） | **PASS** |
-| 示例模块 `modules/sandbox/` | `modules/sandbox/**` | `cargo test -p sandbox`（lib 2 + 契约 4）、`cargo xtask check-modules` | **PASS** |
-| **sandbox 排序白名单外字段报错（修复轮 2）** | `modules/sandbox/backend/src/repository.rs::sort_rows` | `repository::tests::list_rejects_a_sort_field_outside_the_whitelist`、`::list_sorts_by_a_declared_field` | **PASS** |
+| AC | 内容 | 实现位置 | 验证方式与证据 | 结论 |
+|----|------|----------|----------------|------|
+| AC-035 | AI 引导文件体系完整且与实际一致 | `AGENTS.md`、`prompts/`（8 套）、`capabilities/`（13 个文件）、`modules/<name>/AGENTS.md` 模板（`crates/xtask/src/scaffold.rs::AGENTS_MD`） | ① `cargo xtask capabilities --check` 通过（13 个文件与源码一致）；② 手改索引后校验失败（见 §1）；③ 「已有能力」段与 `capabilities/index.json` 的 `already_provided` **逐行一致** —— 由 `crates/xtask/src/catalog.rs::tests::agents_doc_matches_catalog` 机械保证 | **PASS** |
+| AC-036 | 提示词库可直接产出合规代码 | `prompts/01-new-crud-module.md` ~ `08-performance-optimization.md` | ① 8 套提示词均按统一结构（目标 / 输入 / 步骤 / 约束 / 验收）写全，步骤引用的是**真实存在的**命令与路径；② 「产出直接通过契约测试与 CI」这半句用**等价方式**验证：提示词第 2 步要求的 `cargo xtask create-module <name>` 产出物实测通过 `check-modules` 与契约测试 C-1 ~ C-4（见 §4）。**未做**「把提示词原样交给一个 AI 助手生成模块」这一步（Dev 会话里没有可复现的 AI 执行环境） | **PASS（等价验证，见验证报告 §5 的说明）** |
+| AC-037 | 脚手架生成的模块开箱即用 | `crates/xtask/src/scaffold.rs`（`cargo xtask create-module <name> [--perm-prefix <prefix>]`） | `cargo xtask create-module demo-test` → ① 标准目录 + `manifest.json` + 模块级 `AGENTS.md` + `tests/contracts.rs` 全部生成；② **立即可编译**（`cargo test -p demo-test` 直接跑通）；③ 自动登记进根 `Cargo.toml` 工作区成员；④ 生成的 Rust 源文件跑 `rustfmt`（开箱即 `cargo fmt --check` 通过） | **PASS** |
+| AC-038 | 能力索引有效防止 AI 重造轮子 | `capabilities/index.json` 的 `already_provided`（17 条）+ `not_yet_provided`（7 条）+ `permissions.json` + `extension-points.json` + `sdk/*.json` | ① 索引条目**逐条对应真实存在的代码**（`@base/i18n` 的 `translate()`、`@base/ui` 的 `toneClass()`、`@base/schema` 的 `FieldMeta`、平台的 `Repository` / `RequestContext` / `ListQuery` …）；② **未提供的能力也如实列出**（如 `@base/ui` 目前**没有**表格组件、`can()` **没有**落地），避免 AI 照着不存在的 API 写代码。**注意**：AC 原文期望「复用 `@base/ui` 表格与 `@base/schema` 渲染器」—— 这两个组件本期**尚未实现**（渲染器在 REQ-012），因此该子句在当前底座状态下**不可能成立**；本轮以 `not_yet_provided` 的诚实口径替代（见验证报告 §6 的偏离登记） | **PASS（口径修正，见验证报告 §6）** |
 
-## 3. 设计摘要 §6 目录规范校验（5 项）
+## 3. 设计摘要 §6 交付清单
 
-| 校验项 | 实现位置 | 测试位置 | 结论 |
-|--------|----------|----------|------|
-| 必备文件齐全 | `crates/xtask/src/modules.rs::check_module` | `modules::tests::missing_entries_are_listed`（断言 5 项缺失）、手工破坏验证 | **PASS** |
-| `manifest.json` 符合 Schema（字段级） | 同上（`check_manifest_schema`，复用 `platform_core::extension::Manifest`） | `modules::tests::manifest_schema_violations_are_reported_with_field_path` | **PASS** |
-| `manifest.json` 符合 Schema（**结构级**，修复轮 2 补齐） | 同上（解析失败时把 serde 错误作为一条 `manifest_issues` 报出） | `modules::tests::manifest_without_required_fields_is_reported`、`modules::tests::manifest_with_unknown_field_is_reported` | **PASS** |
-| `manifest.id` 与目录名一致 | 同上（`check_manifest_id`） | `modules::tests::manifest_id_must_match_the_directory_name` | **PASS** |
-| `backend/`、`frontend/`、`migrations/` 非空 | 同上（`empty_dirs`） | `modules::tests::empty_required_directories_are_reported` | **PASS** |
-| `AGENTS.md`、`README.md` 存在 | 同上（`missing_files`） | `modules::tests::missing_entries_are_listed` | **PASS** |
+| 交付项 | 实现位置 | 验证方式与证据 | 结论 |
+|--------|----------|----------------|------|
+| 仓库级 `AGENTS.md` | `AGENTS.md`（157 行，agents.md 开放规范） | ① `catalog::tests::agents_doc_matches_catalog` 守住「已有能力 / 尚未提供」两段与目录一致；② **每个命令都实跑过**（见验证报告 §4）；③ 目录 / 硬规则与 REQ-002/003 的真实代码一致 | **PASS** |
+| `prompts/` 8 套提示词 | `prompts/01-new-crud-module.md` ~ `08-performance-optimization.md` | 人工审阅：每套含目标 / 输入 / 步骤 / 约束 / 验收；步骤里的命令、目录、包名全部真实存在（逐条核对） | **PASS** |
+| `capabilities/` 目录结构 + `index.json` | `capabilities/`（13 个文件） | `cargo xtask capabilities` 生成成功并落盘；`--check` 通过 | **PASS** |
+| `cargo xtask capabilities` 生成器 + `--check` | `crates/xtask/src/capabilities.rs` | `capabilities::tests`（6 个）+ 手改检测实验（§1） | **PASS** |
+| `cargo xtask create-module` 完整实现 | `crates/xtask/src/scaffold.rs` | `scaffold::tests`（7 个）+ demo-test 实跑（§4） | **PASS** |
+| 模块级 `AGENTS.md` 模板 | `crates/xtask/src/scaffold.rs::AGENTS_MD` | demo-test 生成的 `modules/demo-test/AGENTS.md` 内容已填好模块名 / 权限点 / 扩展点 | **PASS** |
+| CI：索引一致性校验 + 核心改动打标 + 依赖方向检查 | `.github/workflows/ci.yml`（新增 `guardrails` / `core-change-label` / `core-change-review` 三个 job）、`.github/CODEOWNERS` | ① `guardrails` 的两条命令本机实跑通过；② 打标与评审门禁的**判定逻辑**本机用 jq 表达式验证过三种场景（§5）；③ **GitHub Actions 本体未实跑**（本仓库无 remote） | **PASS（逻辑验证）/ 未验证（Actions 实跑）** |
 
-## 4. C-1 ~ C-4 的验证方式与结果
+## 4. ★ 咬合点：create-module 产出必须直接过 REQ-003 的两道关卡
 
-| 检查 | 判定口径 | 正常态 | 破坏性验证（故意违规 → 必须失败） | 结论 |
-|------|----------|--------|-----------------------------------|------|
-| **C-1** manifest 与实现一致 | `id` / `version` / `enabled` / `dependencies` 四项逐一比对 | 通过 | 把 `manifest.json` 的 `id` 改成 `wrong-name` → `contract_c1_manifest_matches_implementation` **FAILED**，报 ``manifest.id is `wrong-name` but module.id() is `sandbox` `` | **PASS** |
-| **C-2** 权限点声明完整 | 代码里用到的权限点（源码扫描）必须都在 manifest；manifest 多余的只警告 | 通过（`--nocapture` 下无告警） | 删掉 manifest 里的 `sandbox:demo:write`、加一个代码没用的 `sandbox:unused:read` → **FAILED**（未声明的 `sandbox:demo:write` 报错）+ 多余的 `sandbox:unused:read` 只打印 warning 不失败 | **PASS** |
-| **C-3** 租户隔离生效 | 用 tenant_a 的 ctx `list()` 只得到 tenant_a 的数据；用 tenant_a 的 ctx `find(tenant_b 的 id)` 返回 `None` | 通过 | 让 repository 的 `find`/`list` 忽略 `ctx.tenant_id()` → `contract_c3_tenant_isolation_holds` **FAILED**，报 6 条越权细节（list 串租户 ×4、find 命中他人记录 ×2） | **PASS** |
-| **C-4** 事务边界 | 单次写全有或全无（重复主键的 insert 必须报错且不覆盖）；跨表写必须显式开平台事务 | 通过 | 夹具声明 2 张表但不声明平台事务 → **FAILED**，报 `cross-table write (tables: sandbox_demo_item, sandbox_demo_log) does not go through the platform transaction helper` | **PASS** |
+| 关卡 | 命令 | 实测输出 | 结论 |
+|------|------|----------|------|
+| 关卡一：目录规范 | `cargo xtask check-modules` | `模块目录校验通过：2 个模块` / `✓ demo-test` / `✓ sandbox`（exit 0） | **PASS** |
+| 关卡二：扩展点契约 | `cargo test -p demo-test -- --test-threads=2` | `contract_c1_manifest_matches_implementation ... ok`、`contract_c2_permission_points_are_declared ... ok`、`contract_c3_tenant_isolation_holds ... ok`、`contract_c4_transaction_boundary_holds ... ok` → `4 passed; 0 failed` | **PASS** |
+| 附带：能力索引纳入新模块 | `cargo xtask capabilities` | `capabilities/permissions.json` 出现 `demo-test: demo-test:item:read, demo-test:item:write` | **PASS** |
+| 附带：开箱即过 lint | `cargo fmt --all --check` / `cargo clippy --workspace --all-targets -- -D warnings` | 生成后**立即**通过（模板对生成的 Rust 源文件跑 `rustfmt`） | **PASS** |
 
-> 所有破坏性验证均已**逐字节还原**（`diff` 确认），还原后 `cargo test -p sandbox --test contracts` 4/4 通过。
+> **长模块名健壮性**：另用 `order-management`（标识符更长，rustfmt 折行决策不同）复跑，
+> 两道关卡同样通过。
+>
+> **清理**：demo-test 与 order-management 验证后**已删除**，仓库里只剩 `modules/sandbox/`；
+> 根 `Cargo.toml` 与 `capabilities/` 均已还原并 `--check` 通过。
 
-## 5. 依赖方向（设计摘要 §1）
+## 5. 护栏（设计摘要 §5）
 
-| 检查 | 实现位置 | 测试位置 | 结论 |
-|------|----------|----------|------|
-| 平台 crate 的依赖图不得出现业务模块 | `crates/xtask/src/deps.rs`（修复轮 2 起读 `cargo metadata --no-deps` 的成员依赖图做可达性判定，不再文本扫描） | `deps::tests::the_real_workspace_has_no_reverse_dependency`（扫真实工作区） | **PASS** |
-| workspace 继承写法（`dep.workspace = true`）也能被拦住 | 同上 | `deps::tests::workspace_inherited_dependency_is_reported` + 手工绕过实验 | **PASS** |
-| 本期新增的平台 crate（`platform-contracts-macros`）受同一约束 | 同上（显式清单 + `crates/` 下的工作区成员） | `deps::tests::macros_crate_is_subject_to_the_direction_rule`、`deps::tests::platform_crate_outside_the_explicit_list_is_also_checked` | **PASS** |
+| 护栏 | 实现位置 | 验证方式与证据 | 结论 |
+|------|----------|----------------|------|
+| 同一套 CI（AI 与人工走同一条） | `.github/workflows/ci.yml` | AI 产出的模块与人工产出的模块走的是同一条 `cargo test --workspace` / `contract-check` 链路；demo-test 实测走通 | **PASS** |
+| 索引一致性 | `guardrails` job → `cargo xtask capabilities --check` | 手改索引 → 失败（§1） | **PASS** |
+| 依赖方向单向 | `guardrails` job → `cargo xtask check-deps` | REQ-003 已有的 `cargo metadata` 图遍历**直接挂到 CI**（未重写），本机实跑通过 | **PASS** |
+| 核心修改打标 | `core-change-label` job + `.github/CODEOWNERS` | 打标逻辑（`git diff --name-only` 判定核心路径）本机用真实提交验证：命中 REQ-003 的合并提交时检出 21 个核心文件，未命中时为空 | **PASS（逻辑验证）/ 未验证（Actions 实跑）** |
+| 强制人工评审 | `core-change-review` job + CODEOWNERS | 判定表达式本机用 3 组样本验证：非作者批准当前 commit → 放行；作者自批 → 拒绝；批准的是旧 commit → 拒绝 | **PASS（逻辑验证）/ 未验证（Actions 实跑）** |
+| 越权测试 | `modules/<name>/tests/contracts.rs`（C-3 已覆盖跨租户） | 提示词 `06-authorization-test.md` 指导业务方补模块自有越权用例；不重复造 C-3 已覆盖的 | **PASS（提示词层）** |
 
-## 6. 父需求承接的 AC（AC-031 ~ AC-034）
+## 6. 索引数据来源（设计摘要 §3.3）
 
-> 父 AC 的完整步骤在 `BA/demands/REQ-001-platform-foundation/acceptance.md`。本需求承担的是
-> 「业务模块 ↔ 平台」接缝这一段，父 AC 的其余部分由 REQ-002 及后续需求承接。
+| 索引 | 来源 | 实现 | 证据 |
+|------|------|------|------|
+| `permissions.json` | 扫描所有 `modules/*/manifest.json` 的 `permissions[].code` | `capabilities::permissions_json`（复用 `platform_core::extension::Manifest` 解析，manifest 不合规直接报错） | 索引内容 = sandbox 的 2 个权限点；demo-test 生成后索引自动纳入 |
+| `extension-points.json` | 解析 `crates/platform-core/src/extension/` 的 trait 定义 | `rustscan::scan_traits`（**正则 + 约定扫描，不引入 `syn` 等解析框架**） | 扫出 6 个 trait，其中 5 个标为 `extension-point`（契约冻结的 5 个），`TransactionalWrite` 标为 `platform-capability` |
+| `schema/manifest.schema.json` | REQ-003 已有的 manifest schema | 直接取 `platform_core::extension::manifest_schema::MANIFEST_JSON_SCHEMA` | 平台核心的 `exported_schema_file_matches_the_constant` 测试仍通过 |
+| `schema/metadata.schema.json` | `@base/schema` 的字段元数据 | `capabilities::string_union` 从 `packages/schema/src/index.ts` 提取 `FieldType` 枚举 | 枚举 = `text/number/boolean/date/reference`，与源码一致 |
+| `sdk/*.json` | 各 `packages/*/package.json` 的导出清单 + 用法示例 | `capabilities::ts_exports` 扫 `src/index.ts` 的 `export` 声明 + 文档注释；示例是人工 curate 的 | 7 个包全部有索引；`catalog::tests::sdk_examples_cover_every_package` 守住「每个包都有示例」 |
+| `api.json` | HTTP 层未就绪 | 固定占位 + 注明「REQ-011/012 补」 | `status: not-ready`、`paths: []` |
 
-| 父 AC | 本需求的承担部分 | 结论 |
-|-------|------------------|------|
-| AC-031 | 扩展点契约随平台分发（见 §1） | **PASS** |
-| AC-032 | 租户上下文随契约强制传递（`Repository` 每个方法都带 `ctx: &RequestContext`，漏传编译不过） | **PASS** |
-| AC-033 | 权限点登记与一致性（C-2） | **PASS** |
-| AC-034 | 事务边界约定（C-4） | **PASS** |
+## 7. 约束核对
 
-## 7. 非功能性要求
-
-| 要求 | 验证方式 | 结论 |
+| 约束 | 核对方式 | 结论 |
 |------|----------|------|
-| REQ-002 的 24 个原有测试不能破 | `cargo test --workspace -- --test-threads=2` → `platform-contracts` 3、`platform-core` 14、`xtask` 7 全部仍在且通过（全量 **73/73**） | **PASS** |
-| 圈复杂度 ≤ 10 / 认知复杂度 ≤ 15 | 逐函数拆分（`checks.rs` 的每个检查拆成独立小函数，`repository.rs` 的排序/过滤拆成 `sort_rows` / `matches_filters` / `matches_filter` / `in_range`） | **PASS**（人工核查；本机无复杂度度量工具可用） |
-| 无 TODO / FIXME / 调试输出 | 对本轮新增文件全量 `grep` 扫描 | **PASS** |
-| 不引入 sqlx / reqwest / aws-sdk / opendal / jsonwebtoken | `Cargo.lock` 与各 `Cargo.toml` 核对 | **PASS** |
-| 本期只新增 `inventory` 一个第三方依赖 | `cargo tree` 核对（见验证报告 §3）；修复轮 2 给 `xtask` 加的 `serde` 已在 `Cargo.lock` 里，未引入新第三方包 | **PASS**（另有零第三方依赖的过程宏 crate） |
-| 不改 `platform-core` 既有内部（`config.rs` / `context.rs` / `error.rs`） | `git diff` 核对 | **PASS**（`lib.rs` 仅新增 `pub mod extension;` 与 1 行 re-export，`Cargo.toml` 仅新增 2 个依赖） |
-| 不改 `crates/platform-core/src/extension/` 下 5 个 trait 的签名 | `git diff` 核对（修复轮 2 只动了 `manifest.rs` / `manifest_schema.rs`，trait 定义文件零改动） | **PASS** |
+| 未修改 `crates/platform-core/` 与 `crates/platform-contracts/` | `git diff c8236b0 -- crates/platform-core crates/platform-contracts crates/platform-contracts-macros` 为空 | **PASS** |
+| 未修改 REQ-003 冻结的 5 个 trait 签名 | 同上（文件未动） | **PASS** |
+| 零新增第三方依赖 | `git diff c8236b0 -- Cargo.lock` 为空 | **PASS** |
+| 不引入代码解析框架 | `crates/xtask/Cargo.toml` 的依赖只有 anyhow / clap / serde / serde_json / platform-core（全是 workspace 已有） | **PASS** |
+| 不改 `.cargo/config.toml` 与 `Cargo.toml` 的 profile | `git diff c8236b0 -- .cargo/config.toml` 为空；`Cargo.toml` 只多了一行工作区成员（`modules/<name>`，由 create-module 写入） | **PASS** |
+| 不写 TODO / FIXME / 调试输出 | `grep -rn "TODO\|FIXME\|dbg!" crates/xtask/src/` 为空；`println!` 只出现在 CLI 的命令回显里（面向用户，不是调试残留） | **PASS** |
+| 圈复杂度 ≤ 10 | 最长的两个函数是 `rustscan::parse_members`（分支 5）与 `capabilities::ts_exports`（分支 6），均在阈值内 | **PASS** |
