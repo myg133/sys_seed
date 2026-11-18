@@ -107,6 +107,10 @@ pub const ALREADY_PROVIDED: &[ProvidedCapability] = &[
         key: "iam_auth",
         summary: "platform-iam 提供 /api/iam/* 认证接口（本地账号 + JWT access / 不透明 refresh + Argon2id + TOTP）与 /.well-known/jwks.json；业务模块要鉴权请用这些接口，勿自造认证",
     },
+    ProvidedCapability {
+        key: "org_structure",
+        summary: "platform-org 提供 /api/org/* 组织架构接口（组织树用邻接表 + 递归 CTE、用户↔节点成员关系、岗位与汇报关系）、SCIM 2.0 出站与 LDAP/AD 入站、字段级同步冲突队列与人工裁决；权限判定在 REQ-009，勿自造组织树或数据范围判定",
+    },
 ];
 
 /// 底座**尚未**提供的能力 —— 别当成已有，别照着不存在的 API 写代码。

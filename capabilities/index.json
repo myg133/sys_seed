@@ -11,6 +11,7 @@
     "manifest": "Manifest 解析与字段校验 + capabilities/schema/manifest.schema.json 已提供，勿手写 manifest 校验",
     "module_registry": "register_platform_module! + discover()/discover_enabled() 做编译期模块注册，勿自建插件或动态加载",
     "notification_sender": "NotificationSender + NotificationMessage/DeliveryResult 提供通知投递接缝，勿自建消息中心",
+    "org_structure": "platform-org 提供 /api/org/* 组织架构接口（组织树用邻接表 + 递归 CTE、用户↔节点成员关系、岗位与汇报关系）、SCIM 2.0 出站与 LDAP/AD 入站、字段级同步冲突队列与人工裁决；权限判定在 REQ-009，勿自造组织树或数据范围判定",
     "repository": "Repository<T> 提供 find/list/insert/update/delete，业务模块实现它即可，勿另造 DAO 基类或数据访问框架",
     "request_context": "RequestContext 携带租户/空间/追踪 ID；Repository 每个方法强制传 ctx，租户隔离是编译期保证，勿自建租户上下文",
     "schema_field_meta": "@base/schema 的 FieldMeta/describeField()/findField() 提供字段元数据形状，勿另造元数据结构",
@@ -29,7 +30,7 @@
       "traits": 5
     },
     "permissions.json": {
-      "total": 2
+      "total": 11
     },
     "schema/manifest.schema.json": {},
     "schema/metadata.schema.json": {},
@@ -79,5 +80,5 @@
     ],
     "version": "0.1.0"
   },
-  "source_fingerprint": "fnv1a64:7da6a42f1d7c6c36"
+  "source_fingerprint": "fnv1a64:5de6498e5aa6332c"
 }

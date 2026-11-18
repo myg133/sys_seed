@@ -214,48 +214,57 @@ fn prune_empty_dirs(dir: &Path) -> Result<bool> {
 }
 
 /// 权限点索引：扫描全部模块的 `manifest.json`。
+///
+/// 扫两处（与 `platform-db::collect_scopes` 的口径一致）：
+///
+/// | 目录 | 谁 |
+/// |------|-----|
+/// | `modules/<模块>/manifest.json` | 业务模块 |
+/// | `crates/<crate>/manifest.json` | 平台 crate（如 `platform-org`） |
 fn permissions_json(root: &Path) -> Result<String> {
-    let modules_dir = root.join("modules");
     let mut modules: Vec<Value> = Vec::new();
     let mut total = 0usize;
 
-    for name in module_dir_names(&modules_dir)? {
-        let module_dir = modules_dir.join(&name);
-        let manifest_path = module_dir.join("manifest.json");
-        if !manifest_path.is_file() {
-            continue;
-        }
-        let raw = std::fs::read_to_string(&manifest_path)
-            .with_context(|| format!("cannot read {}", manifest_path.display()))?;
-        let manifest = platform_core::extension::manifest::Manifest::parse_checked(&raw).map_err(
-            |issues| {
-                let detail = issues
-                    .iter()
-                    .map(|issue| format!("{}: {}", issue.field(), issue.reason()))
-                    .collect::<Vec<_>>()
-                    .join("; ");
-                anyhow::anyhow!("{} 不符合 Schema：{detail}", manifest_path.display())
-            },
-        )?;
+    for (dir_name, manifest_root) in [
+        ("modules", root.join("modules")),
+        ("crates", root.join("crates")),
+    ] {
+        for name in module_dir_names(&manifest_root)? {
+            let manifest_path = manifest_root.join(&name).join("manifest.json");
+            if !manifest_path.is_file() {
+                continue;
+            }
+            let raw = std::fs::read_to_string(&manifest_path)
+                .with_context(|| format!("cannot read {}", manifest_path.display()))?;
+            let manifest = platform_core::extension::manifest::Manifest::parse_checked(&raw)
+                .map_err(|issues| {
+                    let detail = issues
+                        .iter()
+                        .map(|issue| format!("{}: {}", issue.field(), issue.reason()))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    anyhow::anyhow!("{} 不符合 Schema：{detail}", manifest_path.display())
+                })?;
 
-        let permissions: Vec<Value> = manifest
-            .permissions
-            .iter()
-            .map(|permission| {
-                json!({
-                    "code": permission.code,
-                    "name": permission.name,
-                    "type": permission.kind,
+            let permissions: Vec<Value> = manifest
+                .permissions
+                .iter()
+                .map(|permission| {
+                    json!({
+                        "code": permission.code,
+                        "name": permission.name,
+                        "type": permission.kind,
+                    })
                 })
-            })
-            .collect();
-        total += permissions.len();
+                .collect();
+            total += permissions.len();
 
-        modules.push(json!({
-            "module": manifest.id,
-            "manifest": format!("modules/{name}/manifest.json"),
-            "permissions": permissions,
-        }));
+            modules.push(json!({
+                "module": manifest.id,
+                "manifest": format!("{dir_name}/{name}/manifest.json"),
+                "permissions": permissions,
+            }));
+        }
     }
 
     Ok(to_json(&json!({

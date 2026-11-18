@@ -133,6 +133,7 @@ bun run dev
 | `auth_state` | @base/auth 的 isAuthenticated()/tenantId() 提供登录态形状，勿另造登录态模型 |
 | `hooks_toggle` | @base/hooks 的 createToggle() 提供通用布尔开关状态容器，勿另造状态容器 |
 | `iam_auth` | platform-iam 提供 /api/iam/* 认证接口（本地账号 + JWT access / 不透明 refresh + Argon2id + TOTP）与 /.well-known/jwks.json；业务模块要鉴权请用这些接口，勿自造认证 |
+| `org_structure` | platform-org 提供 /api/org/* 组织架构接口（组织树用邻接表 + 递归 CTE、用户↔节点成员关系、岗位与汇报关系）、SCIM 2.0 出站与 LDAP/AD 入站、字段级同步冲突队列与人工裁决；权限判定在 REQ-009，勿自造组织树或数据范围判定 |
 
 ## 尚未提供
 
