@@ -21,6 +21,8 @@ anyhow.workspace = true
 platform-core.workspace = true
 # 平台数据访问层：租户隔离前提自检（require_isolation）+ 部署期 RLS 策略生成
 platform-db.workspace = true
+# 认证与账号体系（REQ-007）：/api/iam/* 路由 + JWKS + 租户上下文中间件
+platform-iam.workspace = true
 # 部署期数据库客户端：迁移 + 健康检查；不承担业务数据访问
 sqlx.workspace = true
 

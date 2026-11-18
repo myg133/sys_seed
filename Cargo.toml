@@ -5,6 +5,7 @@ members = [
     "crates/platform-contracts",
     "crates/platform-contracts-macros",
     "crates/platform-db",
+    "crates/platform-iam",
     "crates/platform-server",
     "crates/xtask",
     "modules/sandbox",
@@ -22,6 +23,7 @@ platform-core = { path = "crates/platform-core" }
 platform-contracts = { path = "crates/platform-contracts" }
 platform-contracts-macros = { path = "crates/platform-contracts-macros" }
 platform-db = { path = "crates/platform-db" }
+platform-iam = { path = "crates/platform-iam" }
 platform-server = { path = "crates/platform-server" }
 
 axum = "0.8"
@@ -44,7 +46,40 @@ sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio",
     "postgres",
     "migrate",
+    # `time`：timestamptz ↔ time::OffsetDateTime（契约 C13：时间一律 UTC 存 timestamptz）。
+    # 只多一个 time-macros proc-macro crate，不开 sqlx 的 macros feature。
+    "time",
 ] }
+
+# ---------------------------------------------------------------------------
+# REQ-007：认证与账号体系（安全模块的依赖例外，见 design-summary §8）
+# ---------------------------------------------------------------------------
+# 密码哈希：Argon2id（PHC 标准串）。纯 Rust，无 C/汇编。
+argon2 = "0.5"
+# JWT：签发 / 验签 / JWKS。
+# ⚠️ **必须** `default-features = false` + `rust_crypto`：
+#    默认的 ring / aws-lc-rs 后端要编 C/汇编，在低配机上又慢又吃内存；
+#    `rust_crypto` 走纯 Rust 的 rsa / ecdsa / p256。
+jsonwebtoken = { version = "10", default-features = false, features = ["rust_crypto", "use_pem"] }
+# TOTP：HMAC-SHA1 + base32。纯 Rust。
+# `otpauth` feature：`get_url()` 要用它（本期要返回 otpauth URI）。
+totp-rs = { version = "5", features = ["otpauth"] }
+# 随机数：refresh token / 恢复码 / TOTP secret 的熵源。
+rand = "0.8"
+# 摘要：refresh token / 重置令牌 / 恢复码的**哈希存储**（高熵值，不需要慢哈希）。
+sha2 = "0.10"
+# P-256：JWT 签名密钥的生成与公钥坐标（JWKS 需要 x / y）。
+p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pem", "std"] }
+# base64url：refresh token 与 JWKS 坐标的编码。
+base64 = "0.22"
+# AEAD：TOTP secret 的**静态加密**（密钥只从环境注入）。
+# ⚠️ 不自制密码学 —— 用成熟库（design-summary §3「安全模块不省依赖」）。
+chacha20poly1305 = "0.11"
+
+# 测试用：直接驱动 axum Router（`ServiceExt::oneshot`），不连网络。
+tower = { version = "0.5", features = ["util"] }
+# 读 axum 响应体。
+http-body-util = "0.1"
 
 # 低配开发基线：见 docs/dev-environment.md 与 BA/plan/dev-guide-low-spec.md
 # 第三方依赖一律不优化、不带调试信息，省编译时间与磁盘。

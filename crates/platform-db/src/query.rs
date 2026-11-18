@@ -50,6 +50,14 @@ pub enum BindValue {
     NullableInt(Option<i64>),
     /// 双精度浮点。
     Float(f64),
+    /// 可空文本（`None` → SQL `NULL`）。
+    NullableText(Option<String>),
+    /// 时间点（`timestamptz`）。
+    ///
+    /// 契约 C13：一律 UTC 存储 —— `OffsetDateTime` 带偏移，绑定时按 UTC 归一。
+    Timestamp(time::OffsetDateTime),
+    /// 可空时间点（`None` → SQL `NULL`）。
+    NullableTimestamp(Option<time::OffsetDateTime>),
 }
 
 impl From<String> for BindValue {
@@ -91,6 +99,24 @@ impl From<bool> for BindValue {
 impl From<f64> for BindValue {
     fn from(value: f64) -> Self {
         Self::Float(value)
+    }
+}
+
+impl From<time::OffsetDateTime> for BindValue {
+    fn from(value: time::OffsetDateTime) -> Self {
+        Self::Timestamp(value)
+    }
+}
+
+impl From<Option<String>> for BindValue {
+    fn from(value: Option<String>) -> Self {
+        Self::NullableText(value)
+    }
+}
+
+impl From<Option<time::OffsetDateTime>> for BindValue {
+    fn from(value: Option<time::OffsetDateTime>) -> Self {
+        Self::NullableTimestamp(value)
     }
 }
 

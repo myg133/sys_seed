@@ -293,6 +293,9 @@ fn bind_row<'q, T>(
         BindValue::Bool(flag) => query.bind(flag),
         BindValue::NullableInt(number) => query.bind(number),
         BindValue::Float(number) => query.bind(number),
+        BindValue::NullableText(text) => query.bind(text),
+        BindValue::Timestamp(moment) => query.bind(moment),
+        BindValue::NullableTimestamp(moment) => query.bind(moment),
     }
 }
 
@@ -308,6 +311,9 @@ fn bind_statement<'q>(
         BindValue::Bool(flag) => query.bind(flag),
         BindValue::NullableInt(number) => query.bind(number),
         BindValue::Float(number) => query.bind(number),
+        BindValue::NullableText(text) => query.bind(text),
+        BindValue::Timestamp(moment) => query.bind(moment),
+        BindValue::NullableTimestamp(moment) => query.bind(moment),
     }
 }
 

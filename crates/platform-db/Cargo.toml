@@ -17,6 +17,8 @@ anyhow.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+# 时间类型：timestamptz ↔ time::OffsetDateTime（契约 C13）
+time.workspace = true
 
 [dev-dependencies]
 # 契约与集成测试要读模块 manifest（走 platform-core 的解析器，不引 serde_json）
