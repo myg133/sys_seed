@@ -32,6 +32,14 @@
 | D26 | 2026-11-18 | **403 的错误码取 `INSUFFICIENT_PERMISSION`**（对齐契约 C6 的示例），不用 `PERMISSION_DENIED`；401/404 沿用 `platform-iam` 已有码 | 初版设计摘要写的是 `PERMISSION_DENIED`，与契约 C6 示例对不上 —— 契约正本是准的，改摘要而不是改契约。`platform-iam/src/error.rs` 已有 `UNAUTHENTICATED` / `NOT_FOUND`，不另造 | 否（已在契约 v1 C6） | Planner 周检 |
 | D27 | 2026-11-18 | **权限点注册表与库不一致 → 启动时断言失败（退出码非 0），不是告警** | 告警 = 静默放行的一种。权限点缺失时表现为「配了权限却不生效」，排查成本极高且易被误判成业务 bug。Sprint 2 的 34 个 QA 问题里 9 个属「静默放行」类 —— 这条不能再走告警 | 否 | Planner 周检 |
 | D28 | 2026-11-18 | **初版 REQ-009 设计摘要把「越权响应码」标成契约 C2，实际是 C5**（C2 是「业务 API 路径形式」）；已改正 | 同一概念在多处表述不一致 —— Sprint 2 复盘的固定教训：设计摘要写完要 grep 核对同一概念的多处表述 | 是（已改正） | Planner 周检 |
+| D29 | 2026-11-18 | **「存在性不泄露」的对照对象定为「无权访问的资源」vs「不存在的资源」**，不是「有权 vs 无权」 | 初版 AC-S-045 把对照写成「用户有权访问 R2」，与预期「两次都是 404」自相矛盾。资源类越权用 404 的意义正是：**越权访问与不存在无法区分**。而动作类 403 是契约 C5 的规定行为，**不算**泄露 —— 两条语义不能混在一个 AC 里判 | 是（验收标准修订） | Planner 周检 |
+| D30 | 2026-11-18 | **主部门约束分「预防层 + 防御层」两层**：DB 部分唯一索引阻止第二个主部门；即便绕过约束造出歧义，判定层仍 fail closed 到 `SELF` | 只做 DB 约束不够 —— 历史数据 / 手工改库 / 迁移失误都可能造出歧义；只做判定层又挡不住数据脏。两层都要，验收也分两步测 | 是（验收标准修订） | Planner 周检 |
+| D31 | 2026-11-18 | **`platform-admin` 的权限集合 = 注册表当前全部权限点，动态得出**；**不用 `*` 通配** | 初版设计摘要 §3.3 写「权限 = `*`（全权限点）」，与 §3.1「`*:*` 不允许」**自相矛盾**（同一条需求内两处打架）。动态得出还带来额外好处：新增权限点时 `platform-admin` 自动拥有，不需要人工补授权行 | 是（设计修订） | Planner 周检 |
+| D32 | 2026-11-18 | **内置角色按租户物化**（租户初始化时在该租户下建 `platform-admin` / `platform-user`），不搞「平台级模板 + 租户级引用」 | 角色、授权、绑定全部是租户数据，规则统一成一套比两套引用少一半心智负担；`builtin` 标记天然在租户行上 | 是（设计修订） | Planner 周检 |
+| D33 | 2026-11-18 | **`require_permission` 鉴权入口放 `platform-core`**（不是 `platform-rbac`），实现通过**请求扩展**注入的 `Arc<dyn PermissionChecker>` 取用 | 业务模块的运行期依赖只有 `platform-core` + `platform-db`（AGENTS.md 硬规则 2）。入口若住 `platform-rbac`，业务模块就得依赖平台内部模块 → 违规。`platform-core` 本就依赖 axum，放得下；`PermissionChecker` 方法全同步 → dyn 兼容 | 是（设计修订） | Planner 周检 |
+| D34 | 2026-11-18 | **REQ-009 的夹具落在 `modules/sandbox`**：新增 `sandbox_scope_item` 表（含 `org_node_id` / `created_by`）+ sandbox 的 HTTP 层接上 `require_permission` | ① 现有 `sandbox_tenant_item` 只有 `title` / `revision`，**表达不了数据范围**；② **不新建业务模块**（`modules/demo` / `modules/order` 是凭空发明的），sandbox 本就是官方的参考模块；③ sandbox 现有权限点只定义常量、**从不鉴权**，C-5 落地后它必须接上 —— 一举两得 | 是（设计修订） | Planner 周检 |
+| D35 | 2026-11-18 | **权限点级 scope 存 `platform_role_permission.data_scope`（可空）；`CUSTOM` 表达式存 `platform_role.custom_filter`；兼岗并集开关 `platform_role.use_all_memberships`** | 初版设计只说了「权限点可覆盖角色的 scope」，**没说存在哪** —— Dev 会自己猜，猜错就得返工。存储位置属于 BA 该拍板的细节 | 是（设计修订） | Planner 周检 |
+| D36 | 2026-11-18 | **改 `platform-core` / `platform-contracts` 时必须同步改 `AGENTS.md`**（硬规则 1 的例外说明 + 新 crate + C-5） | AGENTS.md 硬规则 1 写「不得修改 platform-core / platform-contracts」，其**意图**是「业务方 / AI 不许就地扩平台」，不是「平台自己不许演进」——REQ-009 是已评审的平台演进。但不改 AGENTS.md，引导文件就与实际脱节（父 AC-035 违规），AI 会以为 C-1~C-4 就是全部检查 | 是（引导文件修订） | Planner 周检 |
 
 ## 升级给用户的事项
 

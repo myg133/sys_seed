@@ -25,7 +25,7 @@ REQ-009 交付：角色与权限点模型、数据范围求值、鉴权中间件
 - 鉴权中间件要挂在 `platform-server` 上 → 平台 crate 才能被 server 依赖（`check-deps` 禁止 server 依赖业务模块）
 - 业务模块**通过扩展点**用权限能力，不直接依赖 `platform-rbac` 的内部
 
-业务模块侧只需要一个能力接口。**它放在 `platform-core`，但不放在 `platform-core::extension` 下**：
+业务模块侧只需要一个能力接口。它放在 **`crates/platform-core/src/extension/permission.rs`**：
 
 ```rust
 pub trait PermissionChecker: Send + Sync + 'static {
@@ -36,12 +36,22 @@ pub trait PermissionChecker: Send + Sync + 'static {
 }
 ```
 
-**为什么不是第 6 个扩展点**：扩展点的方向是「**业务模块实现、平台调用**」
-（`PlatformModule` / `Repository` / `Auditable` / `NotificationSender` / `WorkflowHandler` 全是这个方向）。
-`PermissionChecker` 的方向正好相反 —— **平台实现、业务模块调用**。
-它属于「平台能力 API」而不是「业务 ↔ 平台的接缝」，
-放进 `platform-core::extension` 会改变已冻结的扩展点集合的形状，逼所有消费方改契约。
-**`extension-points v2` 因此不动那 5 个 trait**。
+**它不是「第 6 个扩展点」，但与扩展点同目录**：
+
+| | 扩展点（5 个） | `PermissionChecker` |
+|---|---|---|
+| 谁实现 | **业务模块** | **平台**（`platform-rbac`） |
+| 谁调用 | **平台** | **业务模块** |
+| 分类 | `kind: "extension-point"` | `kind: "platform-capability"` |
+
+- **同目录有先例**：`crates/platform-core/src/extension/transaction.rs` 的 `TransactionalWrite`
+  已经是「平台能力声明面」而不是扩展点（它不在 `EXTENSION_POINT_TRAITS` 清单里）。
+- **能力索引会收录它**：`cargo xtask capabilities` 扫 `platform-core/src/extension/` 下的 trait，
+  按 `EXTENSION_POINT_TRAITS` 分类 —— `PermissionChecker` 进 `capabilities/extension-points.json`
+  且 `kind = "platform-capability"`，`extension_point_count` **仍是 5**。
+  这对 AI 引导很重要（D8：AI 不知道底座已有什么就会重写轮子）——
+  权限能力**必须出现在能力索引里**，否则 AI 会自己写一套 RBAC。
+- **5 个扩展点一个不动**，`extension-points v2` 不需要为它升版本。
 
 **依赖方向**：`platform-core`（定义 trait）← `platform-rbac`（实现）← `platform-server`（装配）。
 业务模块 ← `platform-core`（只用 trait）。
@@ -85,12 +95,16 @@ Sprint 2 复盘 34 个 QA 问题里 9 个属于「静默放行」类 —— 这�
 
 ## 3. 角色模型
 
-| 概念 | 表 | 说明 |
+| 概念 | 表 | 关键列 |
 |---|---|---|
-| 角色 | `platform_role` | `tenant_id` / `id` / `code` / `name` / `data_scope` / `builtin` |
-| 角色-权限 | `platform_role_permission` | `tenant_id` / `role_id` / `permission_code` |
+| 权限点注册 | `platform_permission` | `code` / `name` / `condition`（**平台级，无 `tenant_id`**） |
+| 角色 | `platform_role` | `tenant_id` / `id` / `code` / `name` / `data_scope` / `custom_filter` / `use_all_memberships` / `builtin` |
+| 角色-权限 | `platform_role_permission` | `tenant_id` / `role_id` / `permission_code` / `data_scope`（**可空 = 不覆盖角色级**） |
 | 角色继承 | `platform_role_inherit` | `tenant_id` / `role_id` / `parent_role_id`（自引用） |
 | 用户-角色 | `platform_user_role` | `tenant_id` / `user_id` / `role_id` |
+
+> `platform_permission` **不带 `tenant_id`** —— 权限点来自代码（manifest），全平台一致，
+> 同 `platform_meta` 的处理。其余四张表都是**租户数据**，带 `tenant_id` + RLS policy。
 
 ### 3.1 权限点通配
 
@@ -106,10 +120,19 @@ Sprint 2 复盘 34 个 QA 问题里 9 个属于「静默放行」类 —— 这�
 
 | code | 权限 | data_scope |
 |---|---|---|
-| `platform-admin` | 全部权限点（通配 `*`） | `ALL` |
+| `platform-admin` | **注册表的全部权限点**（动态得出，见下） | `ALL` |
 | `platform-user` | 无特殊权限 | `SELF` |
 
-`platform-admin` **不能被删除或降权**（`builtin = true`）。
+**`platform-admin` 的权限集合是「注册表全集」，不是通配 `*`。**
+
+初版这里写的是「权限 = `*`（全权限点）」，**与 §3.1「`*:*` 不允许」自相矛盾** —— 已改正。
+正确语义：查询 `platform-admin` 的权限集合时，**动态取注册表当前的全部权限点**。
+好处：新增一个权限点，`platform-admin` **自动**拥有它，不需要人工补授权行。
+
+**内置角色按租户物化**：租户初始化时在**该租户**下创建这两条角色行（`builtin = true`）。
+不搞「平台级模板 + 租户级引用」两套 —— 角色体系统一是租户数据，规则只有一套。
+
+`builtin = true` 的角色**不能被删除，也不能降权**（改 `data_scope` / 改权限点都被拒）。
 
 ---
 
@@ -161,10 +184,13 @@ CREATE UNIQUE INDEX user_org_one_primary_idx
 
 ### 4.3 数据范围挂在哪
 
-- **角色级**：角色的默认 `data_scope`
+- **角色级**：角色的默认 `data_scope`（`platform_role.data_scope`），
+  `CUSTOM` 的表达式存 `platform_role.custom_filter`
 - **权限点级**：某个权限点可覆盖角色的 scope（如「查看本部门」的角色里，`export` 权限点单独收紧为 `SELF`）
+  → `platform_role_permission.data_scope`（**可空 = 不覆盖**）
 - **优先级**：权限点级 > 角色级 > 用户默认（`SELF`）
 - 多个角色的 scope **取最宽松的**（并集语义）—— 与权限点「任一满足即通过」一致
+- **兼岗取并集的开关是角色级的**：`platform_role.use_all_memberships`（默认 `false`）
 
 ### 4.4 「最宽松」的序：需要**全序**，不能靠感觉
 
@@ -241,6 +267,18 @@ router.route("/api/order/invoice/approve", post(approve))
     .route_layer(require_permission("order:invoice:approve"));
 ```
 
+**`require_permission` 放在 `platform-core`**（`src/extension/permission.rs`），
+**不放在 `platform-rbac`**。
+
+理由：**业务模块的运行期依赖只有 `platform-core` + `platform-db`**（AGENTS.md 硬规则 2）。
+鉴权入口如果住在 `platform-rbac`，业务模块就得依赖平台内部模块 → 违反规则 2。
+`platform-core` **本来就依赖 axum**（`Cargo.toml` 里已有），所以入口放得下。
+
+入口怎么拿到判定实现：**不靠泛型状态，靠请求扩展**。
+`platform-server` 的中间件把 `Arc<dyn PermissionChecker>` 放进请求扩展，
+`require_permission` 返回的 layer 从扩展里取出来用。
+`PermissionChecker` 的方法都是同步的（无 RPITIT）→ **dyn 兼容**，可以 `Arc<dyn ...>`。
+
 ### 6.2 鉴权中间件
 
 统一中间件，行为：
@@ -255,15 +293,29 @@ router.route("/api/order/invoice/approve", post(approve))
 **资源类 404、动作类 403** 是契约 **C5** 已定的口径（不是 C2 —— C2 是「业务 API 路径形式」，
 初版设计摘要写错了，这里纠正）。
 
+**403 与 404 的分工（这是最容易写错的地方）**：
+
+| 情形 | 谁判 | 结果 |
+|---|---|---|
+| 用户**根本没有**这个权限点 | `require_permission` 层 | **403** |
+| 用户**有**权限点，但目标记录**不在其数据范围内** | 数据层的范围过滤（查不到 → 当不存在） | **404** |
+
+所以「无权访问的资源」与「不存在的资源」都表现为 **404**（用户有权限点的前提下），
+**存在性不泄露**；而「缺操作权限」是 **403**（契约 C5 明确的动作类语义，不是泄露）。
+
 **错误码取值对齐契约 C6 的示例**：`INSUFFICIENT_PERMISSION`（C6 示例里给的就是这个码，
 不是 `PERMISSION_DENIED`）。401 / 404 沿用 `platform-iam` 已有码（`platform-iam/src/error.rs`
 的 `code::UNAUTHENTICATED` / `code::NOT_FOUND`），不另造。
+`INSUFFICIENT_PERMISSION` 是**新增**码，**放在 `platform-rbac` 的错误类型里**，
+不塞进 `platform-iam`（那是账号体系的错误集，与权限判定不是一回事）。
 
 **响应体约束**（契约 C6 + 本仓 `docs/contracts/README.md` 的落地口径）：
 - 结构 = RFC 9457（`type` / `title` / `status` / `detail` / `instance` / `code` / `trace_id`）
 - `detail` **必须是英文 ASCII**（后端不拼中文句子；面向用户的中文由前端 i18n 渲染）
 - `title` 可为中文短句（与 `platform-iam` 现有实现一致）
 - `trace_id` 必带
+- `detail` **可以**含被拒的**权限点编码**（开发者信息），
+  但**不得**含被拒**资源**的业务细节（标题 / 金额 / 归属人 / `org_node_id`）
 
 ### 6.3 ★ 补 C-5 扩展检查（extension-points v1 留下的账）
 
@@ -353,18 +405,45 @@ CREATE TABLE platform_permission_epoch (
 - 字段级权限的可视化配置界面
 - 跨租户授权（平台管理员代客操作）→ 后续需求
 
-### 8.1 需要动到的既有平台件（Dev 注意，别以为只是加个 crate）
+### 8.1 需要动到的既有件（Dev 注意，别以为只是加个 crate）
+
+**平台件**
 
 | 位置 | 改什么 | 为什么 |
 |---|---|---|
 | `crates/platform-db/src/query.rs` | `BindValue` **没有数组变体** | `OWN_ORG_AND_BELOW` 的子树 id 集合要 `= ANY($n)`，需要 `TextArray(Vec<String>)` |
 | `crates/platform-db/src/query.rs` | `TenantQuery` 加 `with_scope()` | 数据范围条件必须与 `{tenant}` 一起渲染，且**参数化** |
+| `crates/platform-core/src/extension/permission.rs`（**新建**） | `PermissionChecker` trait + `DataScope` + `ScopeFilter` + `require_permission(...)` **唯一入口** | 业务模块只能依赖 `platform-core` + `platform-db`；入口不能住在 `platform-rbac`（§6.1） |
 | `crates/platform-core/src/extension/manifest.rs` | `PermissionSpec` 加可选 `condition` | ABAC 属性级校验（§5.3） |
 | `crates/platform-core/src/extension/manifest_schema.rs` + `capabilities/schema/manifest.schema.json` | schema 与实现**必须完全一致** | v1 契约 §5 明写「schema 与平台校验器必须完全一致」 |
-| `crates/xtask/src/capabilities.rs` | `permissions.json` 带出 `condition` | 注册表是单一来源 |
-| `crates/platform-contracts/src/checks.rs` + `crates/platform-contracts-macros` | 新增 C-5 检查与对应测试 | §6.3 |
-| `crates/platform-server/src/main.rs` | 挂载 `/api/rbac` + 鉴权中间件 | C1 前缀约定 |
-| `modules/sandbox` | 补 `require_permission(...)` 调用点 | sandbox 现有权限点只定义常量、从不鉴权；C-5 落地后它必须接上，否则契约测试失败 |
+| `crates/xtask/src/capabilities.rs` | `permissions.json` 带出 `condition`；`extension-points.json` 的 `contract` 字段改 `v2` | 注册表是单一来源；契约版本不能与正本脱节 |
+| `crates/platform-contracts/src/checks.rs` + `crates/platform-contracts-macros` | 新增 C-5 检查与对应测试（宏现在生成 4 个测试，要变 5 个） | §6.3 |
+| `crates/platform-server/src/main.rs` | 挂载 `/api/rbac` + 注入 checker 的中间件 | C1 前缀约定 |
+| `crates/platform-rbac/`（**新建**） | 平台 crate 本体 | — |
+| `crates/platform-rbac/migrations/`（**新建**） | `platform_permission` / `platform_role` / `platform_role_permission` / `platform_role_inherit` / `platform_user_role` / `platform_permission_epoch` | §3 |
+
+**`modules/sandbox`（唯一的业务模块，本期要改成「参考实现」）**
+
+| 位置 | 改什么 | 为什么 |
+|---|---|---|
+| `modules/sandbox/backend/src/http.rs`（**新建**） | 加一个最小路由 + `require_permission("...")` 调用点 | C-5 要求「已登记权限点必须有鉴权调用点」；sandbox 现有权限点只定义常量、**从不鉴权** |
+| `modules/sandbox/migrations/`（**新建**） | `sandbox_scope_item`（**带 `org_node_id` 与 `created_by` 两列**） | 数据范围用例需要一张能被范围过滤的表；现有 `sandbox_tenant_item` 只有 `title` / `revision`，**没法表达范围** |
+| `modules/sandbox/manifest.json` | `tenantScoped.tables` 加 `sandbox_scope_item`；`permissions` 加对应的读写权限点 | RLS policy 由平台按 manifest 生成（§AGENTS 硬规则 4） |
+| `modules/sandbox/Cargo.toml` | 若用了 axum，加 `axum` 依赖 | 业务模块可以依赖 axum（不是平台内部模块） |
+
+> ⚠️ **业务模块的路由不由 `platform-server` 挂载** ——
+> `check-deps` 禁止平台 crate 依赖业务模块（REQ-008 已踩过这个坑，见 `REQ-008/status.md`）。
+> sandbox 的路由**在自己的测试里用 `ServiceExt::oneshot` 驱动**，
+> 既是 C-5 的调用点来源，也是「参考实现」的示范。模块挂载机制等 REQ-020。
+
+**仓库基建**
+
+| 位置 | 改什么 | 为什么 |
+|---|---|---|
+| `feature-meta/manifest.json` | 加 `"contracts": { "api-conventions": "v1", "extension-points": "v2" }` | **现在缺这个 pin，`scripts/sync-contracts.sh` 直接 exit 2 —— 契约门禁在 CI 上是常红的** |
+| `docs/contracts/extension-points/v2.md` | 用 `scripts/sync-contracts.sh --sync` 生成快照 | 快照必须与 BA 正本一致 |
+| `AGENTS.md` | 补 `platform-rbac` 目录、C-5、硬规则 1 的例外说明 | **AI 引导文件必须与实际一致**（父 AC-035）；否则 AI 会以为 platform-core 永远不能改、或以为 C-1~C-4 就是全部检查 |
+| `crates/xtask/src/scaffold.rs` | 生成的模块骨架带上 `require_permission` 用法 + `condition` 字段示例 | 脚手架是二次开发的第一入口（父 AC-037） |
 
 ---
 
@@ -394,3 +473,7 @@ CREATE TABLE platform_permission_epoch (
 | R7 | 平台 crate 引入后 `check-deps` 门禁被绕过 | 靠「`crates/` 工作区成员」兜底规则覆盖；有**破坏性测试**证明新 crate 被纳入 |
 | R8 | **C-5 让既有模块（sandbox）契约测试失败** | 这是**预期效果**（sandbox 确实从不鉴权）；本需求内把 sandbox 接上真实鉴权调用 |
 | R9 | 「最宽松 scope」没有全序 → 多角色组合语义含糊 | §4.4 明确规则：`CUSTOM` 不参与比较、多 `CUSTOM` 取交集；API 响应标明用了自定义范围 |
+| R10 | **`require_permission` 入口放在 `platform-rbac` 会让业务模块违规依赖平台内部模块** | 入口放 `platform-core`（已有 axum 依赖）；靠请求扩展注入 `Arc<dyn PermissionChecker>`，不靠泛型状态 |
+| R11 | **AGENTS.md 硬规则 1 说「不得修改 platform-core / platform-contracts」**，而本需求必须改这两个 crate | 规则的意图是「业务方 / AI 不许就地扩平台」，不是「平台自己不许演进」；本需求是**已评审**的平台演进。**必须同步改 AGENTS.md**，否则引导文件与实际脱节（父 AC-035 违规） |
+| R12 | 数据范围用例缺夹具表（现有 `sandbox_tenant_item` 没有 `org_node_id` / `created_by`） | 本需求内给 sandbox 加 `sandbox_scope_item`（§8.1） |
+| R13 | 契约门禁在 CI 上**常红**（`feature-meta/manifest.json` 缺 `contracts` pin） | 本需求内补 pin + 同步 v2 快照（§8.1「仓库基建」） |
