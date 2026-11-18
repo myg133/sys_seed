@@ -12,7 +12,7 @@
 
 | 项 | 值 |
 |---|---|
-| 用例总数 | **59**（TC-009-001 ~ TC-009-059，编号连续无跳号） |
+| 用例总数 | **59**（TC-009-001 ~ TC-009-060，编号连续无跳号） |
 | 覆盖 AC | **16 / 16**（AC-S-033 ~ AC-S-048，无遗漏） |
 | 优先级分布 | P0 = 55、P1 = 4、P2 = 0 |
 | 自动化分布 | 可自动化 = 57、半自动 = 2、手工 = 0 |
@@ -36,7 +36,7 @@
 ## 3. 测试夹具（造数方式）
 
 > **原则**：组织侧夹具一律基于 **REQ-008 已真实落库的表**（`org_node` / `user_org`，迁移 `20261118000700_org_schema.up.sql`）—— 兼岗 = `user_org` 多行、`is_primary` 标主部门；**不另造影子表**。
-> 业务侧夹具表（`rbac_scope_item`）是 REQ-009 需要新增的（见 §7 待确认约定 #8）。
+> 业务侧夹具表（`sandbox_scope_item`）是 REQ-009 需要新增的（见 §7 待确认约定 #8）。
 > 账号由 REQ-007 的 IAM 体系提供（`platform_iam_user.id` 是 `TEXT`），统一初始密码 `Passw0rd!`。
 
 ### 3.1 租户
@@ -49,34 +49,34 @@
 ### 3.2 组织树（T1，基于真实表 `org_node`）
 
 ```text
-org-hq                  总部          company  parent_id = NULL
-├── org-dept-a          部门 A        dept     parent_id = org-hq
-│   └── org-dept-a-sub    部门 A 子节点   dept     parent_id = org-dept-a
-├── org-dept-b          部门 B        dept     parent_id = org-hq
-│   └── org-dept-b-sub    部门 B 子节点   dept     parent_id = org-dept-b
-└── org-dept-c          部门 C        dept     parent_id = org-hq
+dept-hq                  总部          company  parent_id = NULL
+├── dept-a          部门 A        dept     parent_id = dept-hq
+│   └── dept-a-1    部门 A 子节点   dept     parent_id = dept-a
+├── dept-b          部门 B        dept     parent_id = dept-hq
+│   └── dept-b-1    部门 B 子节点   dept     parent_id = dept-b
+└── dept-c          部门 C        dept     parent_id = dept-hq
 ```
 
-- `path_labels` 是加速字段（根到本节点，含本节点），如 `org-dept-a-sub` = `["总部","部门 A"]`；**权威来源是 `parent_id`**。
-- T2 另有：`org-t2-hq`（company）、`org-t2-dept-a`、`org-t2-dept-b`（形状与 T1 镜像，用于「兼岗默认行为不随租户变化」的对照）。
-- `org-dept-a` 是**子树递归**的验证点（`org-dept-a-sub` 是子节点、`org-dept-b-sub` 是**别的分支**，不得被包含）。
+- `path_labels` 是加速字段（根到本节点，含本节点），如 `dept-a-1` = `["总部","部门 A"]`；**权威来源是 `parent_id`**。
+- T2 另有：`dept-t2-hq`（company）、`dept-t2-a`、`dept-t2-b`（形状与 T1 镜像，用于「兼岗默认行为不随租户变化」的对照）。
+- `dept-a` 是**子树递归**的验证点（`dept-a-1` 是子节点、`dept-b-1` 是**别的分支**，不得被包含）。
 
 ### 3.3 用户、成员关系与角色（真实表 `user_org` + `platform_user_role`）
 
 | user_id | 账号 | `user_org` 行（`org_node_id` / `is_primary`） | 绑定角色（`data_scope`） | 用途 |
 |---|---|---|---|---|
-| `u-1001` | owner@example.com | `org-dept-a` / **TRUE** | `rbac-owner`（OWN_ORG） | OWN_ORG 基线、撤销即时生效、主部门变更 |
-| `u-1002` | parttime@example.com | `org-dept-a` / **TRUE**；`org-dept-b` / FALSE | `rbac-owner`（OWN_ORG）、`rbac-owner-below`、`rbac-union` | **兼岗用户**（AC-S-039） |
-| `u-1003` | noprimary@example.com | `org-dept-a` / FALSE（**无任何主部门**） | `rbac-owner`（OWN_ORG） | **主部门缺失**（AC-S-040） |
-| `u-1004` | dualprimary@example.com | `org-dept-a` / **TRUE**；`org-dept-c` / **TRUE** | `rbac-owner`（OWN_ORG） | **主部门歧义**（AC-S-040） |
-| `u-1005` | multirole@example.com | `org-dept-a` / TRUE | `rbac-multi-a` + `rbac-multi-b` + `rbac-multi-c` | 多角色并集 / 权限点级覆盖（AC-S-041） |
-| `u-1006` | admin@example.com | `org-hq` / TRUE | `platform-admin`（ALL，内置） | 内置角色不可删降权（AC-S-037） |
-| `u-1007` | noperm@example.com | `org-dept-a` / TRUE | `rbac-self`（SELF，**不含** `demo:invoice:approve`） | 缺权限点 → 403（AC-S-043/044） |
-| `u-1008` | other@example.com | `org-dept-a` / TRUE | `rbac-owner-below`（OWN_ORG_AND_BELOW） | 子树递归（AC-S-038） |
-| `u-1009` | custom@example.com | `org-dept-a` / TRUE | `rbac-custom`（CUSTOM） | CUSTOM scope（AC-S-038/042） |
-| `u-1010` | allscope@example.com | `org-dept-a` / TRUE | `rbac-all`（ALL） | ALL scope（AC-S-038） |
-| `u-1011` | norole@example.com | `org-dept-a` / TRUE | **无角色** | 用户默认 `SELF`（AC-S-041） |
-| `u-2001` | t2user@example.com（T2） | `org-t2-hq` / TRUE | `rbac-self` | 跨租对照 |
+| `u-1001` | owner@example.com | `dept-a` / **TRUE** | `rbac-owner`（OWN_ORG） | OWN_ORG 基线、撤销即时生效、主部门变更 |
+| `u-1002` | parttime@example.com | `dept-a` / **TRUE**；`dept-b` / FALSE | `rbac-owner`（OWN_ORG）、`rbac-owner-below`、`rbac-union` | **兼岗用户**（AC-S-039） |
+| `u-1003` | noprimary@example.com | `dept-a` / FALSE（**无任何主部门**） | `rbac-owner`（OWN_ORG） | **主部门缺失**（AC-S-040） |
+| `u-1004` | dualprimary@example.com | `dept-a` / **TRUE**；`dept-c` / **TRUE** | `rbac-owner`（OWN_ORG） | **主部门歧义**（AC-S-040） |
+| `u-1005` | multirole@example.com | `dept-a` / TRUE | `rbac-multi-a` + `rbac-multi-b` + `rbac-multi-c` | 多角色并集 / 权限点级覆盖（AC-S-041） |
+| `u-1006` | admin@example.com | `dept-hq` / TRUE | `platform-admin`（ALL，内置） | 内置角色不可删降权（AC-S-037） |
+| `u-1007` | noperm@example.com | `dept-a` / TRUE | `rbac-self`（SELF，**不含** `sandbox:scope-item:approve`） | 缺权限点 → 403（AC-S-043/044） |
+| `u-1008` | other@example.com | `dept-a` / TRUE | `rbac-owner-below`（OWN_ORG_AND_BELOW） | 子树递归（AC-S-038） |
+| `u-1009` | custom@example.com | `dept-a` / TRUE | `rbac-custom`（CUSTOM） | CUSTOM scope（AC-S-038/042） |
+| `u-1010` | allscope@example.com | `dept-a` / TRUE | `rbac-all`（ALL） | ALL scope（AC-S-038） |
+| `u-1011` | norole@example.com | `dept-a` / TRUE | **无角色** | 用户默认 `SELF`（AC-S-041） |
+| `u-2001` | t2user@example.com（T2） | `dept-t2-hq` / TRUE | `rbac-self` | 跨租对照 |
 
 - `user_org.id` 取 `uo-1001` 起（`TEXT` 主键）；`role` 列（岗位性角色，如「部门经理」）一律填 `NULL` —— 它**不是**平台的权限角色。
 - **兼岗三种形态各自独立成夹具**：`u-1002`（兼岗，主+非主）、`u-1003`（无主部门）、`u-1004`（两条主部门）。
@@ -88,44 +88,44 @@ org-hq                  总部          company  parent_id = NULL
 |---|---|---|---|---|
 | `platform-admin` | ALL | **true** | 注册表**全部 17 个** | 内置角色保护（AC-S-037） |
 | `platform-user` | SELF | **true** | 无 | 内置角色保护（AC-S-037） |
-| `rbac-owner` | OWN_ORG | false | `demo:invoice:read`、`demo:invoice:approve` | OWN_ORG 基线 |
-| `rbac-owner-below` | OWN_ORG_AND_BELOW | false | `demo:invoice:read` | 递归子树 |
-| `rbac-self` | SELF | false | `demo:invoice:read` | SELF |
-| `rbac-all` | ALL | false | `demo:invoice:read` | ALL |
-| `rbac-custom` | CUSTOM | false | `demo:invoice:read` | CUSTOM 条件 `$record.amount <= 10000` |
-| `rbac-union` | OWN_ORG + `use_all_memberships=true` | false | `demo:invoice:read` | 兼岗并集（AC-S-039） |
-| `rbac-multi-a` | OWN_ORG | false | `demo:invoice:read`、`demo:invoice:export` | 多角色（AC-S-041） |
-| `rbac-multi-b` | OWN_ORG | false | `demo:invoice:read`、`demo:invoice:export`（**权限点级 scope = SELF**） | 权限点级覆盖 |
-| `rbac-multi-c` | OWN_ORG_AND_BELOW | false | `demo:invoice:read` | 最宽松 scope |
-| `rbac-wildcard` | OWN_ORG | false | `order:*` / `order:invoice:*`（分两条用例写入） | 通配语义（AC-S-036） |
+| `rbac-owner` | OWN_ORG | false | `sandbox:scope-item:read`、`sandbox:scope-item:approve` | OWN_ORG 基线 |
+| `rbac-owner-below` | OWN_ORG_AND_BELOW | false | `sandbox:scope-item:read` | 递归子树 |
+| `rbac-self` | SELF | false | `sandbox:scope-item:read` | SELF |
+| `rbac-all` | ALL | false | `sandbox:scope-item:read` | ALL |
+| `rbac-custom` | CUSTOM | false | `sandbox:scope-item:read` | CUSTOM 条件 `$record.amount <= 10000` |
+| `rbac-union` | OWN_ORG + `use_all_memberships=true` | false | `sandbox:scope-item:read` | 兼岗并集（AC-S-039） |
+| `rbac-multi-a` | OWN_ORG | false | `sandbox:scope-item:read`、`sandbox:scope-item:export` | 多角色（AC-S-041） |
+| `rbac-multi-b` | OWN_ORG | false | `sandbox:scope-item:read`、`sandbox:scope-item:export`（**权限点级 scope = SELF**） | 权限点级覆盖 |
+| `rbac-multi-c` | OWN_ORG_AND_BELOW | false | `sandbox:scope-item:read` | 最宽松 scope |
+| `rbac-wildcard` | OWN_ORG | false | `sandbox:*` / `sandbox:demo:*`（分两条用例写入） | 通配语义（AC-S-036） |
 | `rbac-inh-a` / `rbac-inh-b` / `rbac-inh-c` | OWN_ORG | false | 各自 1 个不同权限点 | 继承展开（AC-S-035） |
 | `rbac-cycle-a` / `rbac-cycle-b` / `rbac-self-inherit` / `rbac-tri-a` / `rbac-tri-b` / `rbac-tri-c` | OWN_ORG | false | 无 | 成环检测（AC-S-035） |
-| `rbac-custom-a` / `rbac-custom-b` | CUSTOM | false | `demo:invoice:read` | 多 CUSTOM 取交集（AC-S-041） |
+| `rbac-custom-a` / `rbac-custom-b` | CUSTOM | false | `sandbox:scope-item:read` | 多 CUSTOM 取交集（AC-S-041） |
 | `rbac-tmp` / `rbac-t2-only` | OWN_ORG / SELF | false | — | 角色 CRUD 与跨租（AC-S-034） |
 
-### 3.5 业务数据（`rbac_scope_item`，T1 共 **13** 条）
+### 3.5 业务数据（`sandbox_scope_item`，T1 共 **13** 条）
 
-| id | title | amount | dept_id | created_by |
+| id | title | amount | org_node_id | created_by |
 |---|---|---|---|---|
-| `item-a1` | A 部门直属单 | 5000 | `org-dept-a` | `u-1001` |
-| `item-a2` | A 子节点单 | 5000 | `org-dept-a-sub` | `u-1002` |
-| `item-b1` | B 部门直属单 | 5000 | `org-dept-b` | `u-1002` |
-| `item-b2` | B 子节点单 | 5000 | `org-dept-b-sub` | `u-1008` |
-| `item-c1` | C 部门单 | 5000 | `org-dept-c` | `u-1008` |
-| `item-s1` | u-1007 自建单 | 5000 | `org-dept-c` | `u-1007` |
-| `item-s2` | u-1007 自建单 2 | 5000 | `org-dept-b` | `u-1007` |
-| `item-s3` | u-1007 自建单 3 | 5000 | `org-dept-c` | `u-1007` |
-| `item-big` | 大额单 | **20000** | `org-dept-a` | `u-1007` |
-| `item-v1` | u-1003 自建单 | 5000 | `org-dept-c` | `u-1003` |
-| `item-w1` | u-1004 自建单 | 5000 | `org-dept-c` | `u-1004` |
-| `item-m1` | u-1005 自建单 | 5000 | `org-dept-a` | `u-1005` |
-| `item-n1` | u-1011 自建单 | 5000 | `org-dept-a` | `u-1011` |
+| `item-a1` | A 部门直属单 | 5000 | `dept-a` | `u-1001` |
+| `item-a2` | A 子节点单 | 5000 | `dept-a-1` | `u-1002` |
+| `item-b1` | B 部门直属单 | 5000 | `dept-b` | `u-1002` |
+| `item-b2` | B 子节点单 | 5000 | `dept-b-1` | `u-1008` |
+| `item-c1` | C 部门单 | 5000 | `dept-c` | `u-1008` |
+| `item-s1` | u-1007 自建单 | 5000 | `dept-c` | `u-1007` |
+| `item-s2` | u-1007 自建单 2 | 5000 | `dept-b` | `u-1007` |
+| `item-s3` | u-1007 自建单 3 | 5000 | `dept-c` | `u-1007` |
+| `item-big` | 大额单 | **20000** | `dept-a` | `u-1007` |
+| `item-v1` | u-1003 自建单 | 5000 | `dept-c` | `u-1003` |
+| `item-w1` | u-1004 自建单 | 5000 | `dept-c` | `u-1004` |
+| `item-m1` | u-1005 自建单 | 5000 | `dept-a` | `u-1005` |
+| `item-n1` | u-1011 自建单 | 5000 | `dept-a` | `u-1011` |
 
-T2 另有 `item-t2-1`（`tenant-b`、`org-t2-hq`、`u-2001`）。
+T2 另有 `item-t2-1`（`tenant-b`、`dept-t2-hq`、`u-2001`）。
 
-> 另有两个**刻意构造**的 id：`item-not-exist-9999`（**永不落库**，用于 AC-S-045 的「存在 vs 不存在」存在性泄露对照）；`item-a3`（TC-009-017 中**临时插入**的孙节点记录，`dept_id = org-dept-a-sub`，用于验证递归深度 ≥ 2）。
+> 另有两个**刻意构造**的 id：`item-not-exist-9999`（**永不落库**，用于 AC-S-045 的「存在 vs 不存在」存在性泄露对照）；`item-a3`（TC-009-017 中**临时插入**的孙节点记录，`org_node_id = dept-a-1`，用于验证递归深度 ≥ 2）。
 
-**五种 scope 的期望集合**（探针用户主部门均为 `org-dept-a`，用于 TC-009-019 的「互不相同」自检）：
+**五种 scope 的期望集合**（探针用户主部门均为 `dept-a`，用于 TC-009-019 的「互不相同」自检）：
 
 | scope | 探针 | 期望集合 | 条数 |
 |---|---|---|---|
@@ -142,12 +142,12 @@ T2 另有 `item-t2-1`（`tenant-b`、`org-t2-hq`、`u-2001`）。
 
 | 权限点 code | 来源 manifest | 说明 |
 |---|---|---|
-| `demo:invoice:read` | `modules/demo/manifest.json` | **需新增**的夹具模块 |
-| `demo:invoice:approve` | `modules/demo/manifest.json` | 携带 `condition: "$record.amount <= 10000"`（AC-S-043 原文的权限点） |
-| `demo:invoice:export` | `modules/demo/manifest.json` | AC-S-041 的权限点级 scope 载体 |
-| `order:invoice:read` | `modules/order/manifest.json` | **需新增**的夹具模块（AC-S-036 原文的权限点） |
-| `order:invoice:write` | `modules/order/manifest.json` | 同上 |
-| `order:order:read` | `modules/order/manifest.json` | 同上（跨 resource，验证 `order:invoice:*` 不越界） |
+| `sandbox:scope-item:read` | `modules/sandbox/manifest.json` | **需新增**的夹具模块 |
+| `sandbox:scope-item:approve` | `modules/sandbox/manifest.json` | 携带 `condition: "$record.amount <= 10000"`（AC-S-043 原文的权限点） |
+| `sandbox:scope-item:export` | `modules/sandbox/manifest.json` | AC-S-041 的权限点级 scope 载体 |
+| `sandbox:demo:read` | `modules/sandbox/manifest.json` | **需新增**的夹具模块（AC-S-036 原文的权限点） |
+| `sandbox:demo:write` | `modules/sandbox/manifest.json` | 同上 |
+| `sandbox:scope-item:read` | `modules/sandbox/manifest.json` | 同上（跨 resource，验证 `sandbox:demo:*` 不越界） |
 | `sandbox:demo:read` / `sandbox:demo:write` | `modules/sandbox/manifest.json` | **仓库现状唯一业务模块**的真实权限点 |
 | `org:org-node:read`、`org:org-node:write`、`org:user-org:read`、`org:user-org:write`、`org:user-position:read`、`org:user-position:write`、`org:sync-conflict:read`、`org:sync-conflict:resolve`、`org:scim-sync:run` | `crates/platform-org/manifest.json` | 9 个平台 crate 权限点（真实存在） |
 
@@ -162,8 +162,8 @@ T2 另有 `item-t2-1`（`tenant-b`、`org-t2-hq`、`u-2001`）。
 | `platform_role` / `platform_role_permission` / `platform_role_inherit` / `platform_user_role` | **有** | 必须有 `tenant_id` + RLS policy |
 | `platform_permission_epoch` | 有（主键 `tenant_id`） | `epoch` / `updated_at`，写操作时 +1 |
 
-- 业务数据表 `rbac_scope_item`：`tenant_id` / `id` / `title` / `amount` / `dept_id` / `created_by`。
-- 夹具模块 `modules/demo` 的路由（契约 C2 `/api/<module>/<resource>/<action>`）：`GET /api/demo/invoice`、`GET /api/demo/invoice/{id}`、`POST /api/demo/invoice/approve`、`POST /api/demo/invoice/export`。
+- 业务数据表 `sandbox_scope_item`：`tenant_id` / `id` / `title` / `amount` / `org_node_id` / `created_by`。
+- 夹具模块 `modules/sandbox` 的路由（契约 C2 `/api/<module>/<resource>/<action>`）：`GET /api/sandbox/scope-item`、`GET /api/sandbox/scope-item/{id}`、`POST /api/sandbox/scope-item/approve`、`POST /api/sandbox/scope-item/export`。
 
 ---
 
@@ -192,22 +192,22 @@ T2 另有 `item-t2-1`（`tenant-b`、`org-t2-hq`、`u-2001`）。
 
 | AC | 标题 | 覆盖 TC | 条数 | 外部依赖 | 最高优先级 |
 |---|---|---|---|---|---|
-| AC-S-033 | 权限点注册表双向对账且不一致即启动失败 | TC-009-001, TC-009-002, TC-009-003 | 3 | 真实库 `base_test` + **夹具模块 `modules/demo`** | P0 |
+| AC-S-033 | 权限点注册表双向对账且不一致即启动失败 | TC-009-001, TC-009-002, TC-009-003 | 3 | 真实库 `base_test` + **夹具模块 `modules/sandbox`** | P0 |
 | AC-S-034 | 角色、授权与绑定可用且带租户维度 | TC-009-004, TC-009-005 | 2 | 真实库 `base_test` | P0 |
 | AC-S-035 | 角色继承展开且成环被拒 | TC-009-006, TC-009-007, TC-009-008 | 3 | 无 | P0 |
-| AC-S-036 | 权限点通配语义正确且禁止全通过 | TC-009-009, TC-009-010, TC-009-011 | 3 | **夹具模块 `modules/order`** | P0 |
+| AC-S-036 | 权限点通配语义正确且禁止全通过 | TC-009-009, TC-009-010, TC-009-011 | 3 | **夹具模块 `modules/sandbox`** | P0 |
 | AC-S-037 | 内置角色不可删除也不可降权 | TC-009-012, TC-009-013, TC-009-014 | 3 | 真实库 `base_test` | P0 |
-| AC-S-038 | 数据范围五种语义求值正确 | TC-009-015, TC-009-016, TC-009-017, TC-009-018, TC-009-019 | 5 | 真实库 `base_test` + **表 `rbac_scope_item`** | P0 |
+| AC-S-038 | 数据范围五种语义求值正确 | TC-009-015, TC-009-016, TC-009-017, TC-009-018, TC-009-019 | 5 | 真实库 `base_test` + **表 `sandbox_scope_item`** | P0 |
 | AC-S-039 | 兼岗默认按主部门，取并集必须显式开启 | TC-009-020, TC-009-021, TC-009-022, TC-009-023 | 4 | 真实库 `base_test` | P0 |
 | AC-S-040 | 主部门缺失或歧义时 fail closed 到 SELF | TC-009-024, TC-009-025, TC-009-026 | 3 | 真实库 `base_test` + **夹具时序**（见 §6.2） | P0 |
-| AC-S-041 | 数据范围优先级与多角色组合 | TC-009-027, TC-009-028, TC-009-029, TC-009-030 | 4 | 真实库 `base_test` | P0 |
-| AC-S-042 | 受限表达式 DSL 拒绝越界写法且不产生拼接 SQL | TC-009-031, TC-009-032, TC-009-033, TC-009-034, TC-009-035 | 5 | 单元测试 + 真实库（注入串那条） | P0 |
-| AC-S-043 | 属性级校验（RBAC + ABAC 混合）生效 | TC-009-036, TC-009-037, TC-009-038 | 3 | 真机 HTTP + 真实库 | P0 |
-| AC-S-044 | 鉴权中间件的三种拒绝语义与错误体形状 | TC-009-039, TC-009-040, TC-009-041, TC-009-042, TC-009-043 | 5 | 真机 HTTP | P0 |
-| AC-S-045 | 越权拦截不依赖前端，且 404 不泄露资源存在性 | TC-009-044, TC-009-045, TC-009-046, TC-009-047 | 4 | 真机 HTTP | P0 |
-| AC-S-046 | 已登记权限点必须有鉴权调用点，且鉴权入口唯一 | TC-009-051, TC-009-052, TC-009-053, TC-009-054, TC-009-055 | 5 | **夹具模块 `modules/demo`**（第 55 条另需 `modules/sandbox` 接上鉴权） | P0 |
-| AC-S-047 | 权限撤销在下一个请求即生效，不等 TTL | TC-009-056, TC-009-057, TC-009-058, TC-009-059 | 4 | 真实库 + 真机 HTTP（第 59 条需**两个进程实例**） | P0 |
-| AC-S-048 | 数据范围过滤在 SQL 层生效且业务模块无法绕过 | TC-009-048, TC-009-049, TC-009-050 | 3 | 真实库 `base_test` + 真机 HTTP | P0 |
+| AC-S-041 | 数据范围优先级与多角色组合 | TC-009-027, TC-009-028, TC-009-029, TC-009-031 | 4 | 真实库 `base_test` | P0 |
+| AC-S-042 | 受限表达式 DSL 拒绝越界写法且不产生拼接 SQL | TC-009-032, TC-009-033, TC-009-034, TC-009-035, TC-009-036 | 5 | 单元测试 + 真实库（注入串那条） | P0 |
+| AC-S-043 | 属性级校验（RBAC + ABAC 混合）生效 | TC-009-037, TC-009-038, TC-009-039 | 3 | 真机 HTTP + 真实库 | P0 |
+| AC-S-044 | 鉴权中间件的三种拒绝语义与错误体形状 | TC-009-040, TC-009-041, TC-009-042, TC-009-043, TC-009-044 | 5 | 真机 HTTP | P0 |
+| AC-S-045 | 越权拦截不依赖前端，且 404 不泄露资源存在性 | TC-009-045, TC-009-046, TC-009-047, TC-009-048 | 4 | 真机 HTTP | P0 |
+| AC-S-046 | 已登记权限点必须有鉴权调用点，且鉴权入口唯一 | TC-009-052, TC-009-053, TC-009-054, TC-009-055, TC-009-056 | 5 | **夹具模块 `modules/sandbox`**（第 55 条另需 `modules/sandbox` 接上鉴权） | P0 |
+| AC-S-047 | 权限撤销在下一个请求即生效，不等 TTL | TC-009-057, TC-009-058, TC-009-059, TC-009-060 | 4 | 真实库 + 真机 HTTP（第 59 条需**两个进程实例**） | P0 |
+| AC-S-048 | 数据范围过滤在 SQL 层生效且业务模块无法绕过 | TC-009-049, TC-009-050, TC-009-051 | 3 | 真实库 `base_test` + 真机 HTTP | P0 |
 
 **合计 16 条 AC、59 条 TC，无遗漏 AC、无悬空 TC。**
 
@@ -221,10 +221,10 @@ T2 另有 `item-t2-1`（`tenant-b`、`org-t2-hq`、`u-2001`）。
 
 | AC | 缺失的夹具 | 影响 TC | 备注 |
 |---|---|---|---|
-| AC-S-033 / AC-S-046 | 模块 `modules/demo`（权限点 `demo:invoice:read` / `demo:invoice:approve` / `demo:invoice:export` + 四条路由） | TC-009-001, 003, 036~038, 051~055 | AC 原文用了 `demo:invoice:approve`，但仓库现状**没有** `demo` 模块 |
-| AC-S-036 | 模块 `modules/order`（权限点 `order:invoice:read` / `order:invoice:write` / `order:order:read`） | TC-009-009, 010 | AC 原文用了 `order:` 权限点，仓库现状**没有** `order` 模块 |
-| AC-S-038 / 039 / 040 / 041 / 048 | 表 `rbac_scope_item`（`dept_id` / `created_by` / `amount`） | TC-009-015 ~ 030, 048~050 | 现有 `sandbox_tenant_item` 只有 `tenant_id` / `id` / `title` / `revision`，**没有** `dept_id` 与 `created_by`，无法承载 `OWN_ORG` / `SELF` 语义 |
-| AC-S-046 | `modules/sandbox` 接入真实 `require_permission(...)` 调用点 | TC-009-055 | 现状 `backend/src/permission.rs` 只定义常量、从不鉴权 —— v2 下 C-5 必然失败，这是**预期效果**（design §10 R8） |
+| AC-S-033 / AC-S-046 | 模块 `modules/sandbox`（权限点 `sandbox:scope-item:read` / `sandbox:scope-item:approve` / `sandbox:scope-item:export` + 四条路由） | TC-009-001, 003, 036~038, 051~055 | AC 原文用了 `sandbox:scope-item:approve`，但仓库现状**没有** `demo` 模块 |
+| AC-S-036 | 模块 `modules/sandbox`（权限点 `sandbox:demo:read` / `sandbox:demo:write` / `sandbox:scope-item:read`） | TC-009-009, 010 | AC 原文用了 `order:` 权限点，仓库现状**没有** `order` 模块 |
+| AC-S-038 / 039 / 040 / 041 / 048 | 表 `sandbox_scope_item`（`org_node_id` / `created_by` / `amount`） | TC-009-015 ~ 030, 048~050 | 现有 `sandbox_tenant_item` 只有 `tenant_id` / `id` / `title` / `revision`，**没有** `org_node_id` 与 `created_by`，无法承载 `OWN_ORG` / `SELF` 语义 |
+| AC-S-046 | `modules/sandbox` 接入真实 `require_permission(...)` 调用点 | TC-009-056 | 现状 `backend/src/permission.rs` 只定义常量、从不鉴权 —— v2 下 C-5 必然失败，这是**预期效果**（design §10 R8） |
 
 ### 6.2 需要夹具时序配合的
 
@@ -237,12 +237,12 @@ T2 另有 `item-t2-1`（`tenant-b`、`org-t2-hq`、`u-2001`）。
 | AC | 引用 | 现状 | 影响 TC | 本用例集的处置 |
 |---|---|---|---|---|
 | AC-S-036 | `iam:` 权限点 | `crates/platform-iam/` **没有** `manifest.json`，注册表里不存在任何 `iam:` 权限点 | TC-009-009, 010 | 改用**真实存在**的 `sandbox:` / `org:` 权限点做「跨模块不通配」的对照（`order:` 三点仍按 AC 原文保留） |
-| AC-S-038 | 「同一张表」 | AC 未指名具体表 | TC-009-015 ~ 019 | 按 §3.5 的 `rbac_scope_item` |
-| AC-S-043 / AC-S-044 | `demo:invoice:approve` 所属模块 | 未指名 | TC-009-036 ~ 043 | 按夹具模块 `modules/demo`（`/api/demo/invoice/approve`） |
+| AC-S-038 | 「同一张表」 | AC 未指名具体表 | TC-009-015 ~ 019 | 按 §3.5 的 `sandbox_scope_item` |
+| AC-S-043 / AC-S-044 | `sandbox:scope-item:approve` 所属模块 | 未指名 | TC-009-037 ~ 043 | 按夹具模块 `modules/sandbox`（`/api/sandbox/scope-item/approve`） |
 
 ### 6.4 无外部依赖、平台实现落地即可跑的部分
 
-AC-S-035、AC-S-042、AC-S-046（负向部分）共 **19 条 TC** 可纯单元测试跑；其余 **40 条** 需要真实库 `base_test`（应用连接用普通角色 `base_app`），其中 **18 条**还需要起真机 HTTP 服务（`base serve`），**1 条**（TC-009-059）需要同时起两个实例连同一个 `base_test`。
+AC-S-035、AC-S-042、AC-S-046（负向部分）共 **19 条 TC** 可纯单元测试跑；其余 **40 条** 需要真实库 `base_test`（应用连接用普通角色 `base_app`），其中 **18 条**还需要起真机 HTTP 服务（`base serve`），**1 条**（TC-009-060）需要同时起两个实例连同一个 `base_test`。
 
 ---
 
@@ -257,9 +257,9 @@ AC-S-035、AC-S-042、AC-S-046（负向部分）共 **19 条 TC** 可纯单元�
 5. **权限点级 scope 的存储位置**：design §3 的 `platform_role_permission` 只有 `tenant_id` / `role_id` / `permission_code`，**没有** scope 列，但 AC-S-041 要求「权限点级覆盖角色级」。本用例集按 `platform_role_permission.data_scope`（可空，空 = 继承角色级）取值。
 6. **`CUSTOM` 条件表达式的存储位置**：design 未指明。本用例集按 `platform_role.condition`（仅 `data_scope = CUSTOM` 时有效）取值。备选：`platform_role_permission.condition` 或平台配置表。
 7. **`platform_permission` 的条件列**：design §2 只说「权限点编码来自代码」。本用例集按 `platform_permission(code TEXT PRIMARY KEY, name TEXT, type TEXT, condition TEXT NULL)` 取值（`condition` 承接 manifest 的可选字段，extension-points v2 §5）。
-8. **数据范围夹具表 `rbac_scope_item`**：见 §3.5。备选方案是给现有的 `sandbox_tenant_item` 增加 `dept_id` / `created_by` / `amount` 三列（改动面更小，但会把 REQ-006 的迁移与 REQ-009 耦合）。
-9. **夹具模块 id 与路径**：`modules/demo`（`/api/demo/invoice*`）与 `modules/order`（`/api/order/*`）。AC 只给了权限点编码，没给模块名。
-10. **AC-S-045 的「两次响应状态码相同」**：AC 前置条件写「R2 用户**有权**访问」，但第 3 步预期写「两次响应的状态码相同（都是 404）」—— 二者不能同时成立。本用例集按「**无权资源 vs 不存在资源**的响应完全一致；**有权资源**返回 200」解读（TC-009-044/045/046/047），并已列入 §8 的 AC 问题清单。
+8. **数据范围夹具表 `sandbox_scope_item`**：见 §3.5。备选方案是给现有的 `sandbox_tenant_item` 增加 `org_node_id` / `created_by` / `amount` 三列（改动面更小，但会把 REQ-006 的迁移与 REQ-009 耦合）。
+9. **夹具模块 id 与路径**：`modules/sandbox`（`/api/sandbox/scope-item*`）与 `modules/sandbox`（`/api/order/*`）。AC 只给了权限点编码，没给模块名。
+10. **AC-S-045 的「两次响应状态码相同」**：AC 前置条件写「R2 用户**有权**访问」，但第 3 步预期写「两次响应的状态码相同（都是 404）」—— 二者不能同时成立。本用例集按「**无权资源 vs 不存在资源**的响应完全一致；**有权资源**返回 200」解读（TC-009-045/045/046/047），并已列入 §8 的 AC 问题清单。
 11. **`platform-admin` 的「全部权限点」实现口径**：design §3.3 写「全部权限点（通配 `*`）」，但 §3.1 禁止 `*:*`。本用例集按「**展开为注册表全部 17 个权限点**」判定（TC-009-013 逐个比对）。
 12. **`INSUFFICIENT_PERMISSION` 错误码的归属**：design §6.2 已定案取契约 C6 的示例值 `INSUFFICIENT_PERMISSION`；但 `platform-iam/src/error.rs` 现有码表里**只有** `UNAUTHENTICATED` / `NOT_FOUND` / `CONFLICT` 等，**没有** `INSUFFICIENT_PERMISSION`。本用例集按「该码在 `platform-rbac` 侧新增、**不改** `platform-iam` 既有码」取值。
 13. **内置角色的租户维度**：design §2 写 `platform_role` **有** `tenant_id`，因此本用例集按「**每个租户各有一份** `platform-admin` / `platform-user`」取值。若实现为平台级单份（`platform_role` 不带 `tenant_id`），TC-009-012 ~ TC-009-014 的前置条件需改。
@@ -273,10 +273,10 @@ AC-S-035、AC-S-042、AC-S-046（负向部分）共 **19 条 TC** 可纯单元�
 
 | 阶段 | 范围 | 说明 |
 |---|---|---|
-| **第一批**（Dev 自验 + CI 门禁，纯逻辑） | TC-009-031 ~ 035（DSL）、TC-009-051 ~ 055（C-5）、TC-009-006 ~ 008（继承与成环的纯逻辑部分） | 单元测试，不连库；**先补 `modules/demo`**（C-5 的第 55 条另需 `modules/sandbox` 接上鉴权） |
-| **第二批**（需真实库 `base_test`） | TC-009-004 ~ 005、012 ~ 014、015 ~ 030、036 ~ 038、048 ~ 050、056 ~ 058 | 需 `rbac_scope_item` 表与 §3 的全部种子数据；应用连接用普通角色 `base_app` |
+| **第一批**（Dev 自验 + CI 门禁，纯逻辑） | TC-009-032 ~ 035（DSL）、TC-009-052 ~ 055（C-5）、TC-009-006 ~ 008（继承与成环的纯逻辑部分） | 单元测试，不连库；**先补 `modules/sandbox`**（C-5 的第 55 条另需 `modules/sandbox` 接上鉴权） |
+| **第二批**（需真实库 `base_test`） | TC-009-004 ~ 005、012 ~ 014、015 ~ 030、036 ~ 038、048 ~ 050、056 ~ 058 | 需 `sandbox_scope_item` 表与 §3 的全部种子数据；应用连接用普通角色 `base_app` |
 | **第三批**（需真机 HTTP / 起进程） | TC-009-001 ~ 003（启动对账）、039 ~ 047（中间件与错误体） | 需起 `base serve`、需要**能改库**（管理员连接）做对账差异注入 |
-| **第四批**（需多实例） | TC-009-059（跨进程 epoch 收敛） | 需同时起两个实例连同一个 `base_test`（本机可跑，无外部中间件依赖） |
+| **第四批**（需多实例） | TC-009-060（跨进程 epoch 收敛） | 需同时起两个实例连同一个 `base_test`（本机可跑，无外部中间件依赖） |
 
 **建议的 CI 门禁**：第一批全量 + 第二批中不依赖真机 HTTP 的部分。第三批的启动对账用例（TC-009-001 ~ 003）因要改库注入差异，建议只在**夜间 / 手动**任务跑，不进 PR 门禁。
 

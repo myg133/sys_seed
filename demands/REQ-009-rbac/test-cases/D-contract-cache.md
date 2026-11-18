@@ -2,7 +2,7 @@
 
 - **需求**: REQ-009「RBAC 权限与数据范围」
 - **来源**: [acceptance.md](../acceptance.md) §AC-S-046 / AC-S-047、[design-summary.md](../design-summary.md) §6.3 / §7、[extension-points v2 §4](../../../contracts/extension-points/v2.md)
-- **用例数**: 9（TC-009-051 ~ TC-009-059）
+- **用例数**: 9（TC-009-052 ~ TC-009-060）
 - **公共夹具**: 见 [index.md](index.md) §3 测试夹具
 
 ## D.0 本域约定
@@ -25,7 +25,7 @@
 
 ---
 
-### TC-009-051: manifest 登记了代码里不存在的权限点 → C-5 失败并点名
+### TC-009-052: manifest 登记了代码里不存在的权限点 → C-5 失败并点名
 - **关联 AC**: AC-S-046
 - **前置条件**:
   - **执行位置**: 单元测试（`crates/platform-contracts`）。
@@ -44,7 +44,7 @@
 - **自动化**: 可自动化
 - **设计方法**: 负向用例（假权限）+ 精确违例断言（点名 + 不误报）
 
-### TC-009-052: 模块自写鉴权函数绕过平台入口 → C-5 失败
+### TC-009-053: 模块自写鉴权函数绕过平台入口 → C-5 失败
 - **关联 AC**: AC-S-046
 - **前置条件**:
   - **执行位置**: 单元测试（`crates/platform-contracts`）。
@@ -62,7 +62,7 @@
 - **自动化**: 可自动化
 - **设计方法**: 攻击面枚举（自建入口绕过扫描）+ 负向用例
 
-### TC-009-053: 非字面量参数调用鉴权入口 → C-5 失败（fail closed）
+### TC-009-054: 非字面量参数调用鉴权入口 → C-5 失败（fail closed）
 - **关联 AC**: AC-S-046
 - **前置条件**:
   - **执行位置**: 单元测试（`crates/platform-contracts`）。
@@ -80,7 +80,7 @@
 - **自动化**: 可自动化
 - **设计方法**: 边界值（静态不可确认）+ fail closed 断言（不得跳过）
 
-### TC-009-054: 出现第二个鉴权入口 → C-5 失败
+### TC-009-055: 出现第二个鉴权入口 → C-5 失败
 - **关联 AC**: AC-S-046
 - **前置条件**:
   - **执行位置**: 单元测试（`crates/platform-contracts`）。
@@ -98,7 +98,7 @@
 - **自动化**: 可自动化
 - **设计方法**: 攻击面枚举（入口唯一性是扫描可信的前提）+ 负向用例
 
-### TC-009-055: 正常模块（既登记又有调用点）→ 通过；`sandbox` 接上真实鉴权后 C-5 通过
+### TC-009-056: 正常模块（既登记又有调用点）→ 通过；`sandbox` 接上真实鉴权后 C-5 通过
 - **关联 AC**: AC-S-046
 - **前置条件**:
   - **执行位置**: 单元测试（`crates/platform-contracts`）+ 模块契约测试（`cargo test -p sandbox -- --test-threads=2`）。
@@ -107,26 +107,26 @@
 - **测试步骤**:
   1. 跑 `cargo test -p sandbox -- --test-threads=2`，记录契约套件的 C-5 结果。
   2. 核对 `sandbox:demo:read` / `sandbox:demo:write` 在代码中各有**字面量**调用点。
-  3. 跑 `cargo test -p demo -- --test-threads=2`（夹具模块 `modules/demo`），记录 C-5 结果。
+  3. 跑 `cargo test -p sandbox -- --test-threads=2`（夹具模块 `modules/sandbox`），记录 C-5 结果。
 - **预期结果**:
   1. `sandbox` 的契约套件**通过**（C-5 失败数 = 0）；C-1 ~ C-4 的判定口径**不变**（C-2 仍对「manifest 声明了代码没用到的权限点」给 warning）。
   2. 两个权限点各有一个**字面量**调用点；扫描结果与 manifest 声明**逐条相等**。
-  3. `modules/demo` 的 C-5 **通过**（`demo:invoice:read` / `demo:invoice:approve` / `demo:invoice:export` 都有字面量调用点）。
+  3. `modules/sandbox` 的 C-5 **通过**（`sandbox:scope-item:read` / `sandbox:scope-item:approve` / `sandbox:scope-item:export` 都有字面量调用点）。
 - **类型**: 功能 / 可维护性
 - **优先级**: P0
 - **自动化**: 可自动化
 - **设计方法**: 正常路径（负向夹具的镜像）+ 回归断言（C-1~C-4 口径不变）
 
-### TC-009-056: 撤销角色授权后，下一个请求立即被拒（不等 60s TTL）
+### TC-009-057: 撤销角色授权后，下一个请求立即被拒（不等 60s TTL）
 - **关联 AC**: AC-S-047
 - **前置条件**:
   - **执行位置**: 真实库（`base_test`）+ 真机 HTTP。
-  - 账号 `u-1001`（`owner@example.com`）绑定角色 `rbac-owner`，该角色含 `demo:invoice:approve`。
-  - `item-a1`（`amount = 5000`、`dept_id = org-dept-a`）在 `u-1001` 的 `OWN_ORG` 范围内。
+  - 账号 `u-1001`（`owner@example.com`）绑定角色 `rbac-owner`，该角色含 `sandbox:scope-item:approve`。
+  - `item-a1`（`amount = 5000`、`org_node_id = dept-a`）在 `u-1001` 的 `OWN_ORG` 范围内。
   - 平台进程内缓存已存在 `u-1001` 的权限集合（先调一次即可生成）。
 - **测试步骤**:
-  1. 调 `POST /api/demo/invoice/approve`（body `{"id":"item-a1"}`），记录状态码与**时刻 T1**。
-  2. 调 `DELETE /api/rbac/roles/{rbac-owner id}/permissions/demo:invoice:approve` 撤销授权。
+  1. 调 `POST /api/sandbox/scope-item/approve`（body `{"id":"item-a1"}`），记录状态码与**时刻 T1**。
+  2. 调 `DELETE /api/rbac/roles/{rbac-owner id}/permissions/sandbox:scope-item:approve` 撤销授权。
   3. **立刻**（不等待、不重启、不清缓存）再调同一接口，记录状态码与**时刻 T2**。
   4. 用管理员连接查 `platform_permission_epoch` 中 `tenant-a` 的 `epoch`，与步骤 2 之前的值比较。
 - **预期结果**:
@@ -139,16 +139,16 @@
 - **自动化**: 可自动化
 - **设计方法**: 攻击面枚举（撤销后残留可用）+ 时序断言（不是等 TTL）+ epoch 旁证
 
-### TC-009-057: 收紧角色的数据范围后立即生效
+### TC-009-058: 收紧角色的数据范围后立即生效
 - **关联 AC**: AC-S-047
 - **前置条件**:
   - **执行位置**: 真实库（`base_test`）+ 真机 HTTP。
-  - 账号 `u-1001` 绑定角色 `rbac-owner`（`data_scope = OWN_ORG`）；`item-a1`（`dept_id = org-dept-a`）与 `item-big`（`dept_id = org-dept-a`、`amount = 20000`）都在其范围内。
+  - 账号 `u-1001` 绑定角色 `rbac-owner`（`data_scope = OWN_ORG`）；`item-a1`（`org_node_id = dept-a`）与 `item-big`（`org_node_id = dept-a`、`amount = 20000`）都在其范围内。
 - **测试步骤**:
-  1. 调 `GET /api/demo/invoice`（`limit=200`），记录条数与集合 S0（应为 2 条：`item-a1`、`item-big`）。
+  1. 调 `GET /api/sandbox/scope-item`（`limit=200`），记录条数与集合 S0（应为 2 条：`item-a1`、`item-big`）。
   2. 把角色 `rbac-owner` 的 `dataScope` 改为 `SELF`（`POST /api/rbac/roles/{id}`，body `{"dataScope":"SELF"}`）。
   3. **立刻**再调同一接口，记录条数与集合 S1。
-  4. 调 `GET /api/demo/invoice/item-big` 记录状态码。
+  4. 调 `GET /api/sandbox/scope-item/item-big` 记录状态码。
 - **预期结果**:
   1. 第 1 步返回 HTTP 200，S0 = {`item-a1`, `item-big`}（条数 2）。
   2. 第 2 步返回 HTTP 204/200；`platform_permission_epoch` 中 `tenant-a` 的 `epoch` +1。
@@ -159,36 +159,36 @@
 - **自动化**: 可自动化
 - **设计方法**: 状态迁移（范围变更 → 可见集变化）+ 集合精确断言
 
-### TC-009-058: 改组织成员关系（主部门变更）后立即生效
+### TC-009-059: 改组织成员关系（主部门变更）后立即生效
 - **关联 AC**: AC-S-047
 - **前置条件**:
   - **执行位置**: 真实库（`base_test`）+ 真机 HTTP。
-  - `user_org` 中 `u-1001` 当前主部门为 `org-dept-a`（`is_primary = TRUE`）；角色 `rbac-owner` 的 `data_scope = OWN_ORG`。
-  - `item-a1`（`dept_id = org-dept-a`）、`item-c1`（`dept_id = org-dept-c`）。
+  - `user_org` 中 `u-1001` 当前主部门为 `dept-a`（`is_primary = TRUE`）；角色 `rbac-owner` 的 `data_scope = OWN_ORG`。
+  - `item-a1`（`org_node_id = dept-a`）、`item-c1`（`org_node_id = dept-c`）。
 - **测试步骤**:
-  1. 调 `GET /api/demo/invoice`（`limit=200`），记录集合 S0（应为 {`item-a1`, `item-big`}）。
-  2. 调 `POST /api/org/user-org`，body `{"userId":"u-1001","orgNodeId":"org-dept-c","isPrimary":true}`（REQ-008 的加成员逻辑会清掉旧主部门）。
-  3. **立刻**再调 `GET /api/demo/invoice`，记录集合 S1。
+  1. 调 `GET /api/sandbox/scope-item`（`limit=200`），记录集合 S0（应为 {`item-a1`, `item-big`}）。
+  2. 调 `POST /api/org/user-org`，body `{"userId":"u-1001","orgNodeId":"dept-c","isPrimary":true}`（REQ-008 的加成员逻辑会清掉旧主部门）。
+  3. **立刻**再调 `GET /api/sandbox/scope-item`，记录集合 S1。
   4. 用管理员连接查 `user_org` 中 `u-1001` 的 `is_primary = TRUE` 行数与 `org_node_id`。
 - **预期结果**:
   1. 第 1 步返回 HTTP 200，S0 = {`item-a1`, `item-big`}（条数 2）。
   2. 第 2 步返回 HTTP 201；`platform_permission_epoch` 中 `tenant-a` 的 `epoch` +1（组织变更也触发范围缓存失效）。
-  3. 第 3 步返回 HTTP 200，S1 = {`item-c1`}（条数 **1**）—— 主部门已切到 `org-dept-c`，`item-a1`/`item-big` **立即不可见**。
-  4. `user_org` 中 `u-1001` 的 `is_primary = TRUE` 行**恰好 1 条**且 `org_node_id = org-dept-c`。
+  3. 第 3 步返回 HTTP 200，S1 = {`item-c1`}（条数 **1**）—— 主部门已切到 `dept-c`，`item-a1`/`item-big` **立即不可见**。
+  4. `user_org` 中 `u-1001` 的 `is_primary = TRUE` 行**恰好 1 条**且 `org_node_id = dept-c`。
 - **类型**: 安全
 - **优先级**: P0
 - **自动化**: 可自动化
 - **设计方法**: 状态迁移（主部门变更 → 范围变更）+ 集合精确断言
 
-### TC-009-059: 撤销结论跨进程成立（第二个实例立即看到失效）
+### TC-009-060: 撤销结论跨进程成立（第二个实例立即看到失效）
 - **关联 AC**: AC-S-047
 - **前置条件**:
   - **执行位置**: 真实库（`base_test`）+ 两个真机 HTTP 实例。
   - 实例 **P1** 与实例 **P2** 连的是**同一个** `base_test` 库（不同端口），二者都已为 `u-1001` 生成过权限缓存（先各调一次 approve 接口）。
-  - 账号 `u-1001` 绑定角色 `rbac-owner`（含 `demo:invoice:approve`）。
+  - 账号 `u-1001` 绑定角色 `rbac-owner`（含 `sandbox:scope-item:approve`）。
 - **测试步骤**:
-  1. 在 P1 上调 `POST /api/demo/invoice/approve`（body `{"id":"item-a1"}`）→ 期望 200；在 P2 上调同一接口 → 期望 200。
-  2. **只在 P1 上**调 `DELETE /api/rbac/roles/{rbac-owner id}/permissions/demo:invoice:approve`。
+  1. 在 P1 上调 `POST /api/sandbox/scope-item/approve`（body `{"id":"item-a1"}`）→ 期望 200；在 P2 上调同一接口 → 期望 200。
+  2. **只在 P1 上**调 `DELETE /api/rbac/roles/{rbac-owner id}/permissions/sandbox:scope-item:approve`。
   3. **不重启 P2**，立刻在 P2 上调同一接口，记录状态码与时刻。
   4. 用管理员连接查 `platform_permission_epoch` 中 `tenant-a` 的 `epoch`。
 - **预期结果**:
