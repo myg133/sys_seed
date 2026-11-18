@@ -1,9 +1,9 @@
 # 状态：REQ-009 RBAC 权限与数据范围
 
-- **状态**: 待验证
+- **状态**: 已完成
 - **更新者**: myg133-ba-1 (mcp:proc-83964)
-- **更新时间**: 2026-11-18 20:20
-- **分支**: `feature/REQ-009` @ `05bc6bd`（Dev 交回）
+- **更新时间**: 2026-11-18 21:20
+- **分支**: `develop` @ `12366e9`（已合并）
 
 ## 状态历史
 
@@ -17,42 +17,30 @@
 | 2026-11-18 20:05 | 进行中 | 待验证 | ba | BA 裁定 Dev 上报的规格问题（D37 真并集 / D38 trait 扩展），派定点修复 |
 | 2026-11-18 20:16 | 待验证 | 进行中 | dev | 修复轮：`05bc6bd` 修正 CUSTOM 多角色合并语义为真并集，452 passed |
 | 2026-11-18 20:20 | 进行中 | 待验证 | ba | 派 QA Pre-merge（按 [qa-brief-REQ-009.md](../../sprint/qa-brief-REQ-009.md)） |
+| 2026-11-18 20:40 | 待验证 | 已退回 | ba | QA 结论 **PASS-WITH-RISK**：HIGH 0 / MEDIUM 2 / LOW 2 / INFO 3 |
+| 2026-11-18 20:43 | 已退回 | 进行中 | dev | 修复轮：4 项全修（trait 文档 / 夹具污染 / C-5 位置 / grant 优先级 D43） |
+| 2026-11-18 21:12 | 进行中 | 待验证 | ba | QA 修复复核 **PASS**：4 项真修好、无回归、461/461 连跑 3 轮全绿 |
+| 2026-11-18 21:16 | 待验证 | 已验证 | ba | QA 报告归档（首轮 + 复核），`demand` 分支 |
+| 2026-11-18 21:18 | 已验证 | 已完成 | ba | 合并到 develop @ `12366e9`，post-merge 回归 461/461；worktree 与分支已回收 |
 
-## 规格要点（Dev 必读）
+## 完成记录
 
-| 项 | 口径 |
+| 项 | 结果 |
 |---|---|
-| 父 AC | AC-001（权限点注册表驱动前后端判定）、AC-002（数据范围隔离生效） |
-| 本需求 AC | **AC-S-033 ~ AC-S-048**（共 16 条，全局唯一编号段） |
-| 契约 | `api-conventions v1` C4 / C5 / C6 / C7；`extension-points v2`（**C-5 是新增的失败级检查**） |
-| 错误码 | 401 `UNAUTHENTICATED` / 403 `INSUFFICIENT_PERMISSION` / 404 `NOT_FOUND`（对齐契约 C6 示例，**不用** `PERMISSION_DENIED`） |
-| 数据范围 | `ALL` / `OWN_ORG` / `OWN_ORG_AND_BELOW` / `SELF` / `CUSTOM` |
-| 兼岗 | **默认主部门**（`user_org.is_primary`）；取并集必须显式开启（角色级 `use_all_memberships`） |
-| 主部门缺失 / 歧义 | **fail closed 到 `SELF`**（不是 `ALL`）；DB 加部分唯一索引兜底 |
-| **多角色合并** | **过滤条件的并集**（D37）：`CUSTOM` 之间 OR，`CUSTOM` 与包含型 scope 也 OR，含 `ALL` 直接 `ALL` |
-| 属性条件非法 | 返回**永不匹配的条件**（不是 `None`）→ fail closed（D40） |
-| 缓存 | 进程内 + **DB epoch 主动失效**；**不引 Redis 客户端** |
-| 对账 | manifest ↔ 库不一致 → **启动失败**（不是告警） |
+| 合并 | `develop` @ `12366e9`，`--no-ff` |
+| 规模 | 61 文件 / +11692 −752 行；新建 `crates/platform-rbac`（平台 crate，9 个源文件） |
+| 回归 | Rust **461/461**（23 个二进制，**连跑 3 轮全绿**；post-merge 复跑 **461/461**） |
+| 依赖 | `Cargo.lock` **293 → 294**（+1 是**本地工作区成员** `platform-rbac`）；**第三方 registry 284 → 284 不变**（未引策略引擎 / Redis 客户端 / nom·pest） |
+| 契约 | `extension-points` **v1 → v2**（新增 **C-5**：已登记权限点必须有鉴权调用点，且入口唯一） |
+| 规格 | 16 条 AC（**AC-S-033~048**，全局唯一编号段）+ 61 条用例（TC-009-001~061）+ **D23~D44** 共 22 条新决策 |
+| 修复轮 | 3 轮（并集语义 / QA 的 2 中 + 2 低），每轮都做了**破坏性验证 + 变异验证**并逐字节还原 |
+| 回收 | worktree 与分支已删除；QA 两份报告已按需求归档到 `BA/demands/REQ-009-rbac/` |
+| 遗留 | 8 项（见 [sprint-03-retro.md](../../sprint/sprint-03-retro.md) §5），**CI 真跑 / 分支保护需用户侧配置** |
 
-## 开工前必须先修的既有缺陷（**Dev 已修**）
+## 复盘
 
-`scripts/sync-contracts.sh` 在 `develop` 上**恒定失败**（exit 2）：
-
-```
-✗ feature-meta/manifest.json 缺少非空的 contracts pin。
-```
-
-**修法**：`feature-meta/manifest.json` 加
-
-```json
-"contracts": { "api-conventions": "v1", "extension-points": "v2" }
-```
-
-并把 `docs/contracts/extension-points/v2.md` 快照同步进来（`scripts/sync-contracts.sh --sync`）。
-脚手架模板（`crates/xtask/src/scaffold.rs`）也应带上这个 pin，否则下一个需求还会踩。
-
-> ✅ Dev 已在 `05bc6bd` 中修掉：`sync-contracts.sh` 现 exit 0。
+[sprint-03-retro.md](../../sprint/sprint-03-retro.md)
 
 ## 阻塞项
 
-无。REQ-006 / REQ-007 / REQ-008 均已完成并合并 `develop` @ `400cefa`。
+无。
