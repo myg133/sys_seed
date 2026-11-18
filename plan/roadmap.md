@@ -143,6 +143,8 @@ REQ-002 → REQ-005 (并行)                                          ↓
 | R9 | `migrations/` 只用 README 占位就能通过「非空」校验，照抄范例的新模块会得到一个「有目录但无迁移」的壳 | 低 | REQ-006/007 落地 DB 层时，把规则升级为「至少一个 `*.sql` 迁移文件」（记于 REQ-003 QA 提示 #8） |
 | R10 | `claim` 工具重建 `feature-meta/manifest.json` 时会冲掉上一个需求的 `contracts` 契约 pin | 中 | 每次认领后**手工核对并补回** `contracts` / `adrs` 键；合并前用 `aw.py contract check` 兜底（记于 REQ-003 QA 提示 #7） |
 | R11 | 扩展点 trait 为 RPITIT 形态，**不可用于 trait object**（`Box<dyn Trait>` → E0038）。异构汇聚（多通道通知、多流程处理器）会撞墙 | 中 | 已记入 REQ-003 design-summary §2 的扩展点版本注记 + api-conventions；**REQ-015 / REQ-017 必须先决策**：加对象安全包装，还是引入 `async-trait` |
+| **R12** | **⚠️ 超级用户绕过 RLS —— 租户隔离 fail open**。开发库的 `base` 是超级用户，超级用户**绕过 RLS**，所以当前环境里 RLS **实际不生效**，只有应用层的租户过滤在挡 | **高** | REQ-006 已加 `deploy/seed/02-app-role.sql`（组角色 + 登录角色）、`require_isolation` 的 `RLS_BYPASSED_BY_ROLE` 拒绝、`tenant-policies --check` 告警。**但部署侧（compose / Helm 的 `DATABASE_URL`）必须切到普通角色** —— 否则 RLS 只是摆设。**下一步必须做** |
+| **R13** | 策略重应用曾有「全部拒绝」窗口（`DROP POLICY` + `CREATE POLICY` 分两条语句 → 中间表上没有 policy → 并发读表现为「表是空的」假象，10 次并发跑 3 次偶发失败） | 中 | REQ-006 已改为**在一个事务里应用**，复测 10/10 全绿。但**生产重新应用策略时仍有短暂抖动** → 要么写进 RUNBOOK，要么换更安全的替换方式（先建后删 / `ALTER POLICY`） |
 
 ## 状态流转约定
 
