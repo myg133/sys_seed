@@ -20,7 +20,7 @@
 | 新增第三方依赖 | **无**（`sqlx` 沿用 REQ-005 引入的 0.8，**不开 `macros` feature**；`cargo tree` 实测 `sqlx-macros` 不参与编译） |
 | 依赖树 | **175 → 179 个 crate**（工作区成员 6 → 7；**第三方 crate 172 个，+0**） |
 | 冷编译实测 | **63.7s / 66.0s**（两次）· 峰值内存 **925 MB / 940 MB** → **峰值 < 1.5G，`.cargo/config.toml` 的 `jobs` 保持 3** |
-| Rust 测试 | **172/172 通过**（REQ-005 基线 142 个全绿，**+30 只增不减**）；另有 **3 个真实库用例**默认 `#[ignore]`（由集成脚本 `--include-ignored` 跑到，实测 3/3 通过） |
+| Rust 测试 | **172/172 通过**（REQ-005 基线 142 个全绿，**+30 只增不减**）；**8 个 ignored**：3 个是真实库用例（默认 `#[ignore]`，由集成脚本 `--include-ignored` 跑到，实测 3/3 通过）、5 个是文档里的 `ignore` 代码块（其中 2 个是本期新增） |
 | 前端测试 | **23/23**（`pnpm -r test`） |
 | E2E | **1/1**（`bun run test:e2e`，chromium） |
 | lint | `cargo fmt --all --check` ✅ / `cargo clippy --workspace --all-targets -- -D warnings` ✅ **0 告警** |
@@ -163,7 +163,7 @@ cargo clean && cargo check --workspace --all-targets
 | 项 | 结果 |
 |----|------|
 | `cargo check --workspace --all-targets` | ✅ |
-| `cargo test --workspace -- --test-threads=2` | ✅ **172/172**（+30） |
+| `cargo test --workspace -- --test-threads=2` | ✅ **172 passed / 0 failed / 8 ignored**（+30；ignored 的构成见 §0） |
 | `cargo test -p sandbox --test c3_real_db -- --include-ignored` | ✅ **3/3** |
 | `bash scripts/test-integration.sh`（重置 `base_test` 后全量） | ✅ **exit 0**，容器数量比对 2 → 2 ✅（**连跑 2 次全绿**） |
 | `cargo clippy --workspace --all-targets -- -D warnings` | ✅ **0 告警** |
