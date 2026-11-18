@@ -365,7 +365,29 @@ sqlx::migrate!("../../migrations").run(&pool).await?;   // 跑迁移
   （与 `test-cases/` 中已写定的夹具一致，见 QA 生成的用例集）
 - 每个测试自带清理逻辑，或统一用独立库重置
 
-### 5.3 E2E 的跑法
+### 5.3 ⚠️ cargo test 的双 `--` 会假绿（2026-11-18 由 REQ-008 的 Dev 抓出）
+
+libtest 只认**一个** `--`（分隔 cargo 参数与测试二进制参数）。写成两个：
+
+```bash
+# ❌ 错：双 `--` → libtest 把后面的 flag 当「测试名过滤串」→ 0 个用例被执行
+cargo test --workspace -- --include-ignored -- --test-threads=2
+# → test result: ok. 0 passed; 0 failed    ← exit 0，假绿！
+
+# ✅ 对：只有一个 `--`
+cargo test --workspace -- --include-ignored --test-threads=2
+# → 真实跑出全部用例（含 ignored 的真实库用例）
+```
+
+**为什么危险**：退出码是 0、输出是 "ok"，看起来完全正常 —— 但**一个用例都没跑**。
+如果你拿它当验收门禁，就会把「没跑」当成「通过」。
+
+**自查**：任何 `cargo test` 输出的用例数若为 **0**，先怀疑双 `--`，别当成「全部通过」。
+
+> 同一个坑还有另一个形态：`cargo test -- --nocapture` 是**对的**（只有一个 `--`），
+> 但 `cargo test --workspace -- --test-threads=2 -- --nocapture` 就错了。
+
+### 5.4 E2E 的跑法
 
 ```bash
 # 只跑关键主链路，不开全量
