@@ -7,7 +7,11 @@
 
 ## 1. 当前状态一句话
 
-**Sprint 2（身份）已完成并合并；Sprint 3（权限与界面）已开工，REQ-009（RBAC）正在 Dev 实现中。**
+**Sprint 2（身份）已完成并合并；Sprint 3（权限与界面）第一棒 REQ-009（RBAC）已完成并合并**
+（`develop` @ `12366e9`）。**下一棒是 REQ-010（配置品牌）—— 规格仍是草稿，需要先写实。**
+
+> 本文件写于 REQ-009 实现过程中，其中的「进行中」状态已被下面的「已完成」覆盖；
+> 以 [sprint-current.md](sprint-current.md) 与 [sprint-03-retro.md](sprint-03-retro.md) 为准。
 
 ---
 
@@ -61,12 +65,12 @@ python $AW doctor        # 一页巡检：workspace / 拓扑 / 认领 / 队列 /
 
 ---
 
-## 4. 进行中：REQ-009 RBAC 权限与数据范围
+## 4. 已完成：REQ-009 RBAC 权限与数据范围（`develop` @ `12366e9`）
 
 | 项 | 值 |
 |---|---|
-| 认领 | `myg133-ba-1`（BA 兼 Dev），worktree `feature-REQ-009` |
-| 分支 | `feature/REQ-009`，基线 `develop` @ `400cefa` |
+| 认领 | `myg133-ba-1`（BA 兼 Dev），worktree `feature-REQ-009`（**已回收**） |
+| 分支 | `feature/REQ-009`（**已回收**），基线 `develop` @ `400cefa` |
 | 规格 | `BA/demands/REQ-009-rbac/` —— `acceptance.md`（**16 条 AC：AC-S-033~048**）、`design-summary.md`、`status.md` |
 | 用例 | `BA/demands/REQ-009-rbac/test-cases/` —— **61 条**（TC-009-001~061） |
 | QA 任务书 | `BA/sprint/qa-brief-REQ-009.md` |
@@ -100,14 +104,13 @@ modules/sandbox/migrations/20261118000900_sandbox_scope_item.*.sql   范围用�
 
 ## 5. 下一步（按序）
 
-1. **Dev 交回** → BA 改 `status.md`：进行中 → 待验证
-2. **QA Pre-merge**（按 `BA/sprint/qa-brief-REQ-009.md` 逐项自己复现，**不采信 Dev 的数字**）
-   → 报告落 `feature-meta/qa-report.md`（**QA 不 commit**，BA 代落 `demand` 分支）
-3. 若 QA 判 `已退回` → 修复轮 → QA 复核
-4. **合并**：`--no-ff` 合到 `develop`，commit `[Merge] REQ-009 ... (关联: REQ-009)`
-5. **回收** worktree 与分支；BA 改 `status.md` → 已完成
-6. **Sprint 3 复盘** → `BA/sprint/sprint-03-retro.md`
-7. 下一个需求：**REQ-010**（配置、品牌与 Feature Flag，**仍是草稿，规格需先写实**）
+1. **REQ-010（配置、品牌与 Feature Flag）** —— ⚠️ **规格仍是草稿**，必须先写实：
+   - BA 写验收标准（**编号用全局唯一段**，REQ-010 既有 `AC-S-015`）
+   - **QA 写用例 + 明确要求它挑验收标准的毛病** ← REQ-009 的最大经验（挑出 22 条，5 条硬伤）
+   - BA 裁定 → Dev 实现 → QA 验证 → 合并 → 复盘
+2. 之后 REQ-011（前端 SDK）→ REQ-012（元数据驱动渲染）
+
+**流程模板**见 [sprint-03-retro.md](sprint-03-retro.md) §7。
 
 ---
 
