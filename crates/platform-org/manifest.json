@@ -1,0 +1,52 @@
+{
+  "id": "org",
+  "name": "用户与组织架构",
+  "version": "0.1.0",
+  "enabled": true,
+  "permissions": [
+    { "code": "org:org-node:read", "name": "查看组织架构", "type": "menu" },
+    { "code": "org:org-node:write", "name": "编辑组织架构", "type": "button" },
+    { "code": "org:user-org:read", "name": "查看组织成员关系", "type": "button" },
+    { "code": "org:user-org:write", "name": "编辑组织成员关系", "type": "button" },
+    { "code": "org:user-position:read", "name": "查看岗位", "type": "button" },
+    { "code": "org:user-position:write", "name": "编辑岗位", "type": "button" },
+    { "code": "org:sync-conflict:read", "name": "查看同步冲突", "type": "menu" },
+    { "code": "org:sync-conflict:resolve", "name": "裁决同步冲突", "type": "button" },
+    { "code": "org:scim-sync:run", "name": "触发 SCIM 全量同步", "type": "button" }
+  ],
+  "menus": [
+    { "label": "组织架构", "icon": "sitemap", "route": "/org", "perm": "org:org-node:read" }
+  ],
+  "dependencies": [],
+  "tenantScoped": {
+    "tables": [
+      "org_node",
+      "user_org",
+      "user_position",
+      "external_identity",
+      "sync_conflict",
+      "sync_source_state"
+    ],
+    "column": "tenant_id"
+  },
+  "config": {
+    "scimBaseUrl": {
+      "type": "string",
+      "default": "",
+      "scope": "platform",
+      "label": "SCIM 出站目标地址（本期只支持 http://）"
+    },
+    "ldapBaseDn": {
+      "type": "string",
+      "default": "",
+      "scope": "platform",
+      "label": "LDAP 入站检索根（Base DN）"
+    },
+    "conflictStrategy": {
+      "type": "string",
+      "default": "manual",
+      "scope": "platform",
+      "label": "同步冲突策略：manual / local_wins / remote_wins"
+    }
+  }
+}

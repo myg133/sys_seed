@@ -1,10 +1,10 @@
 {
-  "req": "REQ-007",
-  "branch": "feature/REQ-007",
+  "req": "REQ-008",
+  "branch": "feature/REQ-008",
   "agent_id": "myg133-ba-1",
   "session_id": "proc-83964",
   "owner": "myg133-ba-1",
   "base_branch": "develop",
-  "created_at": "2026-11-18T13:11:55+08:00",
-  "demand_dir": "BA/demands/REQ-007-auth-account"
+  "created_at": "2026-11-18T16:37:05+08:00",
+  "demand_dir": "BA/demands/REQ-008-user-org"
 }

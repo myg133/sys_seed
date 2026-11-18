@@ -4,6 +4,54 @@
 
 ## Unreleased
 
+### REQ-008 用户与组织架构
+
+- **新建 `crates/platform-org`**（平台 crate；依赖方向
+  `platform-core ← platform-db ← platform-iam ← platform-org ← platform-server`）：
+  - **组织树 = 邻接表**（`org_node.parent_id`），查子树用 **PostgreSQL 递归 CTE**
+    —— **不用 ltree**（私有化部署常无扩展权限，design-summary D1）
+  - **节点类型只有 `company` / `dept` / `team`**；**岗位不是节点**，是挂在部门上的
+    属性（`user_position`，D2）
+  - **汇报关系是人的属性**（`platform_iam_user.manager_id`，D3）——
+    「部门经理」与「我的上级」不混为一谈
+  - **用户 ↔ 节点多对多**（`user_org`，含 `is_primary` 标主部门）
+  - **`path_labels` 是加速字段**（祖先链），**权威是 `parent_id`**；
+    不一致时以 `parent_id` 为准，`rebuild_path_labels` 可重建（D5）
+  - 跨表引用都带 `tenant_id`（外键 `(tenant_id, parent_id)`）→
+    **结构上**杜绝跨租户挂父节点与悬空成员关系
+- **SCIM 2.0 出站**：**自己实现，不引 SCIM 库**（D6）
+  - 复用树里已有的 `hyper` / `hyper-util` / `http`（**不引 reqwest**，依赖增量 0）
+  - **PUT 幂等**（幂等键 `(provider, external_id)`）；连续两次全量同步**不产生重复条目**
+  - **推送必须异步**：本地操作只**入队**就返回，后台 worker 再推（第三方慢不拖垮本地）
+  - 失败**指数退避重试**（最多 3 次），超出进同步状态（错误计数）
+  - **字段映射外置为配置**（不同 IdP 的用户名 / 邮箱 / 显示名字段名可不同）
+- **LDAP / AD 入站**：用 `ldap3`（**`default-features = false`** —— 默认特性会拉
+  `native-tls` → OpenSSL 开发包，且 TLS 后端带 `ring` / `aws-lc-rs`）
+  - **属性映射外置为 JSON 配置**（D7）
+  - **离职检测用位运算表达式**（AD 的 `userAccountControl`）：`bit_and` / `bit_not`，
+    不是布尔比较 —— `514` / `546` / `4098` 判为离职，`512` / `660` / `402653184` 判为在职
+  - 增量（按 `modifyTimestamp`）+ 全量对账
+- **同步冲突队列**（`sync_conflict`，**字段级**）：默认策略 **`manual`** —— 冲突记录到
+  `field` / `local_value` / `remote_value`，**绝不静默覆盖**；
+  人工裁决（`keep_local` / `take_remote` / `manual`）后按裁决生效
+- **离职自动禁用**：禁用账号 + **撤销全部会话与 refresh family**（REQ-007 的 family 作废）
+  + 解绑成员关系与岗位 + 审计事件 + 通知 + 出站 `active: false`
+- **组织变更事件** → REQ-003 的 `NotificationSender` 扩展点
+  （平台 trait 不可 dyn 兼容，故有一层**只转发**的可对象化适配器）
+- **新增 `/api/org/*` 路由**（17 个）：组织树 CRUD / 移动 / 子树、成员关系、岗位、
+  汇报关系、冲突列表与裁决、SCIM 全量同步、同步状态
+  —— **每个接口都验令牌**（组织数据是租户数据），租户只认令牌里的租户
+- **平台迁移新增 6 张组织表**（`org_node` / `user_org` / `user_position` /
+  `external_identity` / `sync_conflict` / `sync_source_state`）+
+  账号表加 3 列（`display_name` / `manager_id` / `departed_at`）
+- **RLS 策略由平台统一生成**：`crates/platform-org/manifest.json` 的 `tenantScoped`
+  段声明 6 张表 → `cargo xtask tenant-policies` 生成（模块**不手写** policy）；
+  平台 crate 的 manifest 现在也参与收集（`platform-db::collect_scopes` 扫 `crates/`）
+- **本期只支持明文**：SCIM 只支持 `http://`，LDAP 只支持 `ldap://` ——
+  树里**没有任何 TLS 栈**（无 `rustls` / `native-tls`），引入会带 30~50 个 crate
+  且拉进 `ring` / `aws-lc-rs`；HTTPS / LDAPS 留后续需求（配置项已留口）
+- **依赖**：新增 `ldap3`（`default-features = false`）；SCIM 出站**不新增任何 crate**
+
 ### REQ-007 认证与账号体系
 
 - **新建 `crates/platform-iam`**（平台 crate；依赖方向仍是

@@ -62,8 +62,8 @@ const IDEMPOTENCY_MAX_BODY_BYTES: usize = 256 * 1024;
 /// HTTP 层共享的状态。
 #[derive(Debug, Clone)]
 pub struct IamState {
-    /// 业务服务。
-    pub service: IamService,
+    /// 业务服务（`Arc` —— 组织架构（REQ-008）的接口要复用它的验签能力）。
+    pub service: Arc<IamService>,
 }
 
 /// 统一错误响应体（RFC 9457，契约 C6）。

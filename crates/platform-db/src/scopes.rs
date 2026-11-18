@@ -41,11 +41,28 @@ pub struct TenantScope {
 
 /// 收集全部模块声明的租户作用域表。
 ///
+/// 扫两处：
+///
+/// | 目录 | 谁 |
+/// |------|-----|
+/// | `modules/<模块>/manifest.json` | 业务模块（如 `sandbox`） |
+/// | `crates/<crate>/manifest.json` | 平台 crate（如 `platform-org`） |
+///
+/// 平台 crate 也要能声明租户作用域表 —— 组织架构（REQ-008）就是这样的平台能力：
+/// 表由平台迁移建好，policy 仍由**平台统一生成**（模块不手写）。
+///
 /// 没有业务模块、或模块都没声明 `tenantScoped` 时返回**空列表**（不是错误）——
 /// 「没有要隔离的表」是合法状态。
 pub fn collect_scopes(root: &Path) -> Result<Vec<TenantScope>> {
-    let modules_dir = root.join("modules");
-    let Ok(entries) = std::fs::read_dir(&modules_dir) else {
+    let mut scopes = Vec::new();
+    scopes.extend(collect_from_dir(&root.join("modules"))?);
+    scopes.extend(collect_from_dir(&root.join("crates"))?);
+    Ok(scopes)
+}
+
+/// 扫一个目录下的全部 manifest（`crates/` 或 `modules/`）。
+fn collect_from_dir(dir: &Path) -> Result<Vec<TenantScope>> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
         return Ok(Vec::new());
     };
     let mut scopes = Vec::new();
