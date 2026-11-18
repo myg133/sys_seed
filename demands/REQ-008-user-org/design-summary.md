@@ -61,11 +61,22 @@ position 岗位（挂在部门下，不算组织层级，但参与数据范围�
 
 | 表 | 关键列 | 说明 |
 |---|---|---|
-| `org_node` | `id` / `tenant_id` / `parent_id` / `type` / `code` / `name` / `manager_id` / `path_labels` | 组织节点 |
+| `org_node` | `id` / `tenant_id` / `parent_id` / `type` / `code` / `name` / `path_labels` | 组织节点。**无 `manager_id`** —— 见下方修正 |
 | `user_org` | `user_id` / `org_node_id` / `role` / `is_primary` | **用户 ↔ 节点**多对多 |
 | `user_position` | `user_id` / `position_code` / `org_node_id` | 岗位 |
 | `external_identity` | `provider` / `external_id` / `user_id` / `last_synced_at` | SSO 身份映射（REQ-007 建，这里扩展） |
 | `sync_conflict` | `source` / `external_id` / `field` / `local_value` / `remote_value` / `status` | 同步冲突待处理队列 |
+| `sync_source_state` | `source` / `last_synced_at` / `last_success_at` / `error_count` / `last_error` | **同步源状态可见性**（§9 要求，原 5 张表没有承载位置 → 2026-11-18 补） |
+
+> **修正（2026-11-18，Dev 实施时发现设计摘要自相矛盾）**
+>
+> 原 §1.2 的表里写了 `org_node.manager_id`，而 D3 又写「**汇报关系是人的属性**
+> （`user.manager_id`），不是节点的属性」。两者冲突。
+>
+> **按 D3 为准**（理由：部门经理 ≠ 我的上级，前者是组织属性、后者是人的属性；
+> 混在一起会让「我的下属」判定在兼岗场景下出错）。
+> → `org_node` **无 `manager_id`**；汇报关系挂在 **`user.manager_id`**。
+> 设计摘要 §1.2 的表已同步改正。
 
 `path_labels` 存一份物化的「祖先 id 列表」（如 `[root, dept-a, team-b]`），
 **作为查询加速字段**，不作为权威来源（权威是 `parent_id`）。
@@ -218,15 +229,22 @@ AD 与 OpenLDAP 的属性差异很大 → **映射配置外置**（每个源一�
 
 **做**
 
-- [ ] `org_node` / `user_org` / `user_position` 表 + 租户 RLS policy
+- [ ] `org_node` / `user_org` / `user_position` / `external_identity` / `sync_conflict` / `sync_source_state` 表 + 租户 RLS policy
 - [ ] 组织树 CRUD + 递归 CTE 查子树 + `path_labels` 加速字段
-- [ ] 用户 ↔ 节点多对多成员关系、岗位、汇报关系
+- [ ] 用户 ↔ 节点多对多成员关系、岗位、汇报关系（`user.manager_id`）
 - [ ] **SCIM 2.0 出站**：User / Group 的查询、创建、更新、PATCH；幂等 PUT；异步推送 + 重试
 - [ ] **LDAP / AD 入站**：`ldap3` 拉取、增量 + 全量对账、**字段级**映射配置
 - [ ] 冲突队列 `sync_conflict` + 人工裁决入口（数据层 + API，界面放后续）
 - [ ] 离职自动禁用（含**撤销全部 session**）
 - [ ] 组织变更事件 → `NotificationSender`
-- [ ] 同步状态的可见性（上次同步时间、同步错误计数）
+- [ ] 同步状态的可见性（上次同步时间、同步错误计数）→ `sync_source_state`
+
+> **交付形态说明（2026-11-18 Dev 实施后确认）**
+> 实现放在 **`crates/platform-org`（平台 crate）**，而非 `modules/org`（业务模块）。两个理由：
+> ① 离职禁用必须撤销 IAM 会话 → 业务模块会依赖平台内部模块，
+> 违反 extension-points v1 §1 D7「业务模块只依赖扩展点 trait，不依赖平台内部模块」；
+> ② `check-deps` 禁止 `platform-server` 依赖业务模块 → 业务模块形态下 `/api/org/*` 挂不上。
+> 租户隔离**不降级**：manifest 的 `tenantScoped` 声明这 6 张表 → 平台统一生成 policy。
 
 **不做**
 
