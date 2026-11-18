@@ -23,11 +23,11 @@
 | REQ-003 | 扩展点框架与契约测试 | P0 | 1 | REQ-002 | AC-031~034 | AC-S-003 | **已完成**（Sprint 1） |
 | REQ-004 | AI 引导体系与能力索引 | P0 | 1 | REQ-002, REQ-003 | AC-035~038 | AC-S-004 | **已完成**（Sprint 1） |
 | REQ-005 | 交付基线与发布 | P1 | 1 | REQ-002 | — | AC-S-005/006 | **已完成**（Sprint 1） |
-| REQ-006 | 多租户与隔离 | P0 | 2 | REQ-002 | AC-009/010 | AC-S-007/008 | 草稿 |
+| REQ-006 | 多租户与隔离 | P0 | 2 | REQ-002 | AC-009/010 | AC-S-007/008 | **已完成**（Sprint 2） |
 | REQ-007 | 认证与账号体系 | P0 | 2 | REQ-002, REQ-006 | AC-003/004/007/008 | AC-S-009/010 | 草稿 |
 | REQ-008 | 用户与组织架构 | P0 | 2 | REQ-002, REQ-007 | AC-011/012 | AC-S-011/012 | 草稿 |
 | REQ-009 | RBAC 权限与数据范围 | P0 | 3 | REQ-006, REQ-008 | AC-001/002 | AC-S-013/014 | 草稿 |
-| REQ-010 | 配置、品牌与 Feature Flag | P1 | 3 | REQ-006 | AC-013/014/015 | AC-S-015 | 草稿 |
+| REQ-010 | 配置、品牌与 Feature Flag | P1 | 3 | REQ-006 | AC-013/014/015 | AC-S-015 | **已完成**（Sprint 2） |
 | REQ-011 | 前端 SDK 骨架 | P0 | 3 | REQ-002, REQ-009 | AC-016/017/019 | AC-S-016/017 | 草稿 |
 | REQ-012 | 元数据驱动渲染 | P0 | 4 | REQ-009, REQ-011 | AC-018 | AC-S-018/019 | 草稿 |
 | REQ-013 | SSO 多协议与出站 IdP | P1 | 4 | REQ-007, REQ-009 | AC-005/006 | AC-S-020/021 | 草稿 |
@@ -143,7 +143,7 @@ REQ-002 → REQ-005 (并行)                                          ↓
 | R9 | `migrations/` 只用 README 占位就能通过「非空」校验，照抄范例的新模块会得到一个「有目录但无迁移」的壳 | 低 | REQ-006/007 落地 DB 层时，把规则升级为「至少一个 `*.sql` 迁移文件」（记于 REQ-003 QA 提示 #8） |
 | R10 | `claim` 工具重建 `feature-meta/manifest.json` 时会冲掉上一个需求的 `contracts` 契约 pin | 中 | 每次认领后**手工核对并补回** `contracts` / `adrs` 键；合并前用 `aw.py contract check` 兜底（记于 REQ-003 QA 提示 #7） |
 | R11 | 扩展点 trait 为 RPITIT 形态，**不可用于 trait object**（`Box<dyn Trait>` → E0038）。异构汇聚（多通道通知、多流程处理器）会撞墙 | 中 | 已记入 REQ-003 design-summary §2 的扩展点版本注记 + api-conventions；**REQ-015 / REQ-017 必须先决策**：加对象安全包装，还是引入 `async-trait` |
-| **R12** | **⚠️ 超级用户绕过 RLS —— 租户隔离 fail open**。开发库的 `base` 是超级用户，超级用户**绕过 RLS**，所以当前环境里 RLS **实际不生效**，只有应用层的租户过滤在挡 | **高** | REQ-006 已加 `deploy/seed/02-app-role.sql`（组角色 + 登录角色）、`require_isolation` 的 `RLS_BYPASSED_BY_ROLE` 拒绝、`tenant-policies --check` 告警。**但部署侧（compose / Helm 的 `DATABASE_URL`）必须切到普通角色** —— 否则 RLS 只是摆设。**下一步必须做** |
+| ~~R12~~ | ~~超级用户绕过 RLS —— 租户隔离 fail open~~。开发库的 `base` 是超级用户，超级用户**绕过 RLS**，所以当前环境里 RLS **实际不生效**，只有应用层的租户过滤在挡 | **高** | REQ-006 已加 `deploy/seed/02-app-role.sql`、`require_isolation` 拒绝、`tenant-policies` 接入 compose+Helm。**另发现**：app 容器拿到整包 `.env`/Secret 仍能读到超管串 → 已改为逐个列变量。**✅ REQ-006 已解决**：部署侧 7 处全部切到普通角色；超管启动 → 退出码 3 拒绝；prod 绕过开关 → 退出码 2 |
 | **R13** | 策略重应用曾有「全部拒绝」窗口（`DROP POLICY` + `CREATE POLICY` 分两条语句 → 中间表上没有 policy → 并发读表现为「表是空的」假象，10 次并发跑 3 次偶发失败） | 中 | REQ-006 已改为**在一个事务里应用**，复测 10/10 全绿。但**生产重新应用策略时仍有短暂抖动** → 要么写进 RUNBOOK，要么换更安全的替换方式（先建后删 / `ALTER POLICY`） |
 
 ## 状态流转约定
