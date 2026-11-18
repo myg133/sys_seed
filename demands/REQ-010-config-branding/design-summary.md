@@ -79,6 +79,34 @@ CREATE POLICY cfg ON platform_config
 收益：类型由数据库保证、可以直接按键查询/索引、不用 double-encode。
 代价：一次列类型迁移（表当前无生产数据，`USING value::jsonb` 即可，**但要写 down 脚本**）。
 
+### 2.3 平台级表的访问路径：沿用 REQ-009 的「伪租户」模式
+
+`platform-db` **只暴露租户作用域的入口**（`TenantDb` 的每个方法都要 `ctx`，
+且 `TenantQuery` 强制语句里出现且只出现一次 `{tenant}`）。**没有「平台级访问」入口。**
+
+REQ-009 读平台级表 `platform_permission` 的既有做法（`crates/platform-rbac/src/store.rs`）：
+
+```rust
+pub const PLATFORM_SCOPE_TENANT: &str = "platform";
+
+let ctx = RequestContext::new().with_tenant(PLATFORM_SCOPE_TENANT);
+let query = TenantQuery::new(format!(
+    "SELECT ... FROM {} WHERE {{tenant}} IS NOT NULL ORDER BY ...", self.db.table(TABLE)
+));
+```
+
+即：用 `"platform"` 这个**伪租户**满足 `TenantQuery` 的硬约束，
+SQL 条件写成 `{tenant} IS NOT NULL`（恒真）。对**没有 RLS、没有租户列**的表是安全的 ——
+`SET LOCAL app.tenant_id = 'platform'` 对它们不起作用。
+
+**REQ-010 必须沿用这个模式，不得绕过 `platform-db` 直连连接池**（AGENTS.md 硬规则 4）。
+两条注意事项：
+
+| 注意 | 说明 |
+|---|---|
+| **写入不能只靠 `{tenant} IS NOT NULL`** | 对 INSERT 而言这个条件毫无约束力。平台级配置的**写入控制必须来自表级权限**（只授予平台管理角色）+ **权限点**（`config:platform:write`），**不是**靠 SQL 条件 |
+| 伪租户值 `"platform"` **不能与真实租户 id 撞车** | 租户 id 是 UUID 形态；`"platform"` 不是合法 UUID，不会冲突。**要有一条测试守住**（若哪天允许自选租户 id，这条就得改） |
+
 ---
 
 ## 3. 配置键的注册表：来自 manifest（复用既有机制，不另建）
