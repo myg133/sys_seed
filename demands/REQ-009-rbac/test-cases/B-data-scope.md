@@ -27,6 +27,7 @@
 - **主部门判定**：来自 `user_org.is_primary = TRUE`（REQ-008 真实表）。
 - **DSL 白名单**：`$record.amount` / `$record.org_node_id` / `$record.name` / `$user.id` / `$ctx.tenant_id`。
 - **错误码**：`NOT_FOUND`(404，资源类越权) / `INSUFFICIENT_PERMISSION`(403，动作类越权)。
+- **管理权限点**：凡调 `/api/rbac/*` 改绑 / 改角色的账号（本域为 `u-1002` / `u-1005`）**已额外绑定角色 `rbac-manager`**（含 `rbac:role:read` / `rbac:role:write`）—— 否则按 AC-S-034 ★ 的自举防护会先被 403 拦下，测不到本域要测的范围语义。
 - **跑法**：真实库用例用 `base_test`（应用连接用普通角色 `base_app`）；DSL 解析用例为**单元测试**（`crates/platform-rbac` 内）。
 
 ---

@@ -24,6 +24,7 @@
 - **缓存与 epoch**（design §7 / §7.1）：平台级表 `platform_permission_epoch(tenant_id TEXT PRIMARY KEY, epoch BIGINT NOT NULL, updated_at TIMESTAMPTZ)`；任何角色 / 权限绑定 / 角色继承 / 数据范围的写操作在同一事务里 `epoch = epoch + 1`；缓存 TTL 60s，但**写操作必须主动失效**。
 - **跨实例口径**（AC-S-047）：用**两个独立的 checker 实例**（各自持自己的进程内缓存、共享同一个 `base_test` 库）模拟两个进程 —— 不必真起两个服务进程。
 - **权限点选取**：「撤销授权」类用例用 `sandbox:demo:read`（AC-S-047 原文所写）+ 路由 `GET /api/sandbox/demo`（`sandbox_tenant_item` 夹具里有 3 条记录）；「数据范围 / 组织成员」类用例用 `sandbox:scope-item:read` + 路由 `GET /api/sandbox/scope-item`（同一套机制、不同权限点）。
+- **管理权限点**：凡调 `/api/rbac/*` 的账号（本域为 `u-1001`）**已额外绑定角色 `rbac-manager`**（含 `rbac:role:read` / `rbac:role:write`）—— 否则按 AC-S-034 ★ 的自举防护会先被 403 拦下，测不到本域要测的「撤销即时生效」。
 - **跑法**：C-5 用例为**单元测试**（`crates/platform-contracts`）；缓存用例为**真实库（`base_test`）+ 模块内进程内 HTTP**（`ServiceExt::oneshot`）。
 
 ---
