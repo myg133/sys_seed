@@ -1,24 +1,27 @@
 # 验证报告 —— 修复复核（Recheck）
 
-- 需求: REQ-005 交付基线与发布
-- 分支: feature/REQ-005 @ `f8b574cc8b2e9443decccc8c29afae0b317c0b3e`
-- 首轮报告: feature-meta/qa-report.md（结论 PASS-WITH-RISK，基线 `266dfa9`）
-- 复核范围: 5 个改动点 + 恢复 Dev 自述的 3 个漏 + 一次回归（不重做全量验证）
-- 验证者: QA Agent（独立复现；自起后端、自停 PG、自计时，未采信 Dev 报告中的任何数字）
-- 工具链: rustc/cargo 1.98.1 / podman 6.2.0 + podman-compose 1.6.0 / helm v3.16.3（临时下载到 /tmp 校验，已删）/ pnpm 12.19.0 / bun 1.4.4 / python3 3.14
-- 日期: 2026-11-18
-- 结论: **PASS-WITH-RISK**
+- **需求**: REQ-006 多租户与隔离
+- **分支**: `feature/REQ-006` @ `c3277f827a4d983cc2ef9d00b3573c1a1b07ad48`
+- **首轮报告**: `feature-meta/qa-report.md`（@ `668d357`，结论 PASS-WITH-RISK；1 高 + 2 中）
+- **本轮改动**: 4 提交（`1aeec63` → `75355f3` → `90d9195` → `c3277f8`），35 文件 / +1548 -158
+- **复核范围**: 首轮 3 个问题（高 1 / 中 1 / 中 2）逐点独立复现 + 一次全量回归 + `base_dev` 缺权限项的严重度判定
+- **验证者**: QA Agent（独立复现；未采信 Dev 自验报告里的任何数字与结论，全部自己重跑）
+- **环境**: rustc/cargo 1.98.1 · podman 6.2.0 + postgres 17-alpine · podman-compose 1.6.0 · helm v3.16.3（临时下载到 `/tmp` 校验，未装进系统）· pnpm · bun 1.4.4
+- **日期**: 2026-11-18
+- **结论**: **PASS-WITH-RISK**
 
-> 核心结论：首轮登记的 **1 中 + 4 低，本轮全部复现为已修复**，5 项逐条自测通过。
-> 四条 `detail` 路径我**自起后端实测**，全部为纯 ASCII 英文（`title` 保留中文短句符合契约 C6）；
-> PG 停库后 ready 返回 503 的**实测耗时 2.002s**（首轮为 5.003s），显著小于 5s 探针超时；
-> prod compose 缺口令/空口令**均非 0 退出**，给有效口令后渲染出的是 `docker.io/library/...` 官方地址。
+> 首轮 3 个问题**全部复验为真（已修复）**：部署侧 7 处逐处独立核对通过，5 项角色/RLS 实测全过，
+> C-3 假绿已修且护栏**经变异验证是承重的**，策略已接进 compose 与 Helm。
 >
-> 但**新发现 2 个低 severity 问题**（均不违反 AC，但都与「首轮修复的正确性」直接相关）：
-> ① `BASE_LOG_LEVEL` **完全无效** —— 默认配置下后端**一行日志都不输出**，RUNBOOK §5.1
-> 「中文运维说明在日志里」这句**不成立**（即中 1 修复所依赖的兜底通道是死的）；
-> ② RUNBOOK §3.1 关于 `podman-compose` 解析 `env_file` 基准的说明**说反了**，且它给出的
-> 备选写法 `ENV_FILE=deploy/.env` **实测直接报错**。
+> 但本轮**新发现 2 个中危**，都出在「角色拆分」这条主线上：
+> **① 应用容器/Pod 仍然拿到了数据库超管连接串**（角色拆分只做了连接串层面，没做凭据层面）；
+> **② RUNBOOK §3.4.3 给出的补建命令救不了「已存在表」的权限缺失**（`ALTER DEFAULT PRIVILEGES` 只管未来对象）。
+>
+> 另需更正 Dev 自陈的一处**事实误判**：`base_dev` 当前**不缺表权限**（实测 `base_app` 对
+> `_sqlx_migrations` / `platform_meta` 均有 SELECT，`pg_default_acl` 里默认权限已落地）；
+> Dev 描述的 `permission denied for _sqlx_migrations` **在本机复现不出来**。
+> `base_dev` 的 `/health/ready` 503 的**真实原因是迁移未应用**（`pending migrations: [20261118000200]`），
+> 属于「跑一次 migrate up」的常规开发态，不是权限问题。
 
 ---
 
@@ -26,61 +29,64 @@
 
 | # | 问题 | Dev 声称 | 复核结果 | 证据 |
 |---|------|---------|---------|------|
-| **中 1** | 健康检查 4 条路径的 `detail` 全英文、无中文字符（违反契约 C6） | 三个错误路径 `detail` 全部为英文，统一过 `dev_detail()`，5 条单测守着 | ✅ **复现为真（自起后端实测四条路径 + 1 个变体）** | 5 份真实响应体见下表；程序化断言「`detail` 无非 ASCII、无 CJK」→ **全部 detail 全 ASCII：True**。实现：`crates/platform-server/src/health.rs:113-149`（4 个 `detail_*` + `dev_detail()` 只保留可打印 ASCII）；单测 5 条（`health.rs:234-292`）。`title` 为「服务未就绪」（中文短句）—— 契约 C6 只约束 `detail`，**不判为缺陷** |
-| **低 2** | 探针超时与连接池超时撞车（均 5s），探针拿不到 503 | `acquire_timeout` 降到 **2s**，探针保持 5s，并加单测守住 | ✅ **复现为真** | `crates/platform-server/src/db.rs:27` → `pub const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(2)`；`db.rs:70-76` 单测 `acquire_timeout_is_shorter_than_the_probe_timeout`（**存在且通过**）；`deploy/helm/base-platform/templates/deployment.yaml:89` → `timeoutSeconds: 5`；`Dockerfile:94` → `HEALTHCHECK --timeout=5s`。**实测**：停 PG 后 ready → `HTTP=503 time=2.002212` / `2.002235` / `2.001611`（连测 3 次）→ **2.002s < 5s** ✓ |
-| **低 1** | RUNBOOK/报告称 Helm 默认渲染含 Ingress | RUNBOOK §4 改为「默认 5 类不含 Ingress」，并给 `--set ingress.enabled=true`；上一轮的「六类资源」表述一并更正 | ✅ **复现为真** | `helm template` 默认 → **5 类**（ServiceAccount/ConfigMap/Service/Deployment/Job，`count=5`，**无 Ingress**）；`--set ingress.enabled=true` → **6 类**（多 Ingress，`count=6`）；`helm lint` → `1 chart(s) linted, 0 chart(s) failed`。三处表述均已改正：`deploy/RUNBOOK.md:222-228`、`feature-meta/verification-report.md:27,229-241`、`feature-meta/traceability.md:29`。全仓残留「六类」仅出现在首轮报告与 Dev 报告里**明确指出旧说法不实**的段落 → 无残留错误表述 |
-| **低 3** | `core-change-detect.sh --self-test` 未覆盖「平台 crate 必须登记」 | self-test 已并入 `check_core_coverage`，同时覆盖「未登记必须检出」与「已登记必须放行」 | ✅ **复现为真（并做了变异测试证明不是假覆盖）** | `./scripts/core-change-detect.sh --self-test` → `✓ 自检通过：merge-base 口径不误算 base 侧改动，PR 侧核心改动能检出，未登记平台 crate 能检出`，**EXIT=0**。**变异测试（在 /tmp 副本上做，未改交付物）**：把 `check_core_coverage` 的 `return "$missing"` 改成 `return 0` → 自检 **失败**「未登记的平台 crate 没被检出」EXIT=1；改成 `return 1` → 自检 **失败**「已登记的 crate 被误报」EXIT=1 → **两个方向都被真正守住** |
-| **低 4** | prod compose 默认弱口令 `base` + 第三方镜像源 | 口令默认值改空（`${POSTGRES_PASSWORD:?…}`），镜像改官方地址 | ✅ **复现为真** | ① 不设口令 → `podman-compose -f deploy/compose.prod.yaml config` **EXIT=1**，报 `required variable POSTGRES_PASSWORD is missing a value: POSTGRES_PASSWORD is required - inject it via .env or a Docker secret`（**未静默用弱口令**）；② `.env` 里 `POSTGRES_PASSWORD=` 空值 → **EXIT=1**，同一报错；③ 有效口令 → **EXIT=0**，渲染出 `docker.io/library/postgres:17-alpine` / `docker.io/library/redis:7-alpine`，grep `daocloud\|docker.m.` → **无命中**（官方地址）；④ 开发用 `compose.yaml:6,49` **仍保留** `docker.m.daocloud.io/library/...` 加速前缀（属开发环境优化，符合预期） |
-| **额外 1** | 恢复 Dev：① `prod-preflight.sh` 路径不存在 | 脚本已落到 `scripts/prod-preflight.sh` | ✅ **复现为真** | `ls -la scripts/prod-preflight.sh` → `-rwxr-xr-x`（**存在且可执行**）；按 RUNBOOK §3.1 的 `cd deploy && ../scripts/prod-preflight.sh` **实跑** → `✓ 生产部署前置校验通过…`，EXIT=0。另做 6 组反向测试（缺口令 / 弱口令 `base` / 口令过短 / DATABASE_URL 内弱口令 / 库名 `base_dev`≠`base` / 全部合规）→ **前 5 组均 EXIT=1 并打印修复提示，第 6 组 EXIT=0** |
-| **额外 2** | 恢复 Dev：② CI 私有化 compose 校验 job 会挂（空口令） | CI step 级 `env` 注入非空占位口令 | ✅ **复现为真** | `.github/workflows/ci.yml:154-160`：`env: POSTGRES_PASSWORD: ci-validation-only-not-a-real-secret`（**非空**），紧跟在 `cp .env.example deploy/.env`（`:153`）之后。**本地等价复现**：`.env` 里空口令 + shell 里非空占位 → `podman-compose … config` **EXIT=0**，且渲染出 `POSTGRES_PASSWORD: ci-validation-only-not-a-real-secret`（**shell env 覆盖 .env 空值**）→ job 不会挂 |
-| **额外 3** | 恢复 Dev：③ compose 头部用法示例把 `.env` 放错目录 | 头部改为「在 deploy/ 目录里执行；.env 与本文件同目录」 | ⚠️ **示例已修对，但 RUNBOOK 的配套说明写反了（见问题 #2）** | 头部（`deploy/compose.prod.yaml:15-21`）现在写 `cp ../.env.example .env` → `.env` 与 compose 文件同目录 ✓。但 RUNBOOK §3.1（`deploy/RUNBOOK.md:115-118`）称「`podman-compose` 按**当前目录**解析服务级 `env_file`」—— **与本机 podman-compose 1.6.0 实测相反**（见问题 #2） |
+| **高 1** | 部署侧从未切到普通角色 | 逐处改了 7 个位置 | **PASS（7/7 处逐处核对通过）** | 见下方「部署侧逐处核对」表 |
+| **高 1-a** | `compose.yaml` app 服务用普通角色 | `postgres://base_app:base@postgres:5432/base_dev` | **复现为真** | `compose.yaml:131`；渲染实测：`podman-compose -f compose.yaml --profile app --profile migrate --profile policies config` → `app` → `postgres://base_app:base@postgres:5432/base_dev`；`migrate`/`policies` → `postgres://base:base@...`（超管，保留 DDL 权限）✓ |
+| **高 1-b** | `.env.example` 拆成两个连接串 + 角色分工注释 | 拆分清晰无混用 | **复现为真** | `.env.example:53-54`（`APP_DATABASE_URL` / `MIGRATION_DATABASE_URL`）；`:9-16` 角色分工注释块；`:36-49` 连接串说明。全文件 grep：**没有任何裸 `DATABASE_URL=` 赋值** |
+| **高 1-c** | `deploy/compose.prod.yaml` app → `${APP_DATABASE_URL:?}`；新增 `app-role` 服务 | 生产路径独立、幂等 | **复现为真** | `:172` `DATABASE_URL: ${APP_DATABASE_URL:?…}`；`:130-161` app-role 服务；**prod 的 postgres 服务无 seed 挂载**（渲染后 `volumes` 只有 `pgdata`；全文件 grep `deploy/seed` → **0 命中**）✓；**幂等实测**：把 app-role 的 SQL 原文抠出来连跑 3 次 → 每次 `EXIT=0`，角色不变（`base_app` 仍是 `rolsuper=f / rolbypassrls=f`）✓ |
+| **高 1-d** | Helm hook 顺序 app-role(-10) → migrate(-5) → policies(-4) | 先建角色、再建表、最后建 policy | **复现为真** | `helm template` 渲染实测（3.16.3）：`base-platform-app-role` weight=`-10` → `base-platform-migrate` weight=`-5` → `base-platform-policies` weight=`-4`，三者 hook 均为 `pre-upgrade,pre-install` ✓；默认渲染 7 类（`ConfigMap`/`Deployment`/`Job×3`/`Service`/`ServiceAccount`），`--set ingress.enabled=true` → 8 类 ✓（与 RUNBOOK §4 自检口径一致） |
+| **高 1-e** | `require_isolation` 有生产调用点 | 接在 `serve()` 启动路径 | **复现为真** | `crates/platform-server/src/main.rs:255-258`（`isolation::verify_startup_isolation(&config.database_url, config.allow_superuser)`）→ 失败映射 `Failure::Isolation` → `main.rs:136-140` **退出码 3**。这是 `serve()` 的必经路径，**不是测试专用** |
+| **高 1-f** | `BASE_ALLOW_SUPERUSER` 只本地放行；prod 配它退出码 2 | 两条路径都实测 | **复现为真** | 本地放行：`BASE_ALLOW_SUPERUSER=true` + dev + 超管 → 启动成功并打 WARN「放行了绕过 RLS 的连接角色」✓；**prod 不可绕过**：`BASE_ENV=prod` + `BASE_ALLOW_SUPERUSER=true` → `[CONFIG_FORBIDDEN_COMBINATION] BASE_ALLOW_SUPERUSER` **退出码 2** ✓（`config.rs:273-279`） |
+| **高 1-g** | RUNBOOK 新增 §0.1 四步、§3.4 | 内容与实际行为一致 | **复现为真** | `deploy/RUNBOOK.md:20-30`（四步表：应用角色 → 迁移 → 策略 → 应用，标注「用超级用户起 → 直接拒绝启动（退出码 3）」）、`:276-366`（§3.4.1–3.4.4）；`:398-408`（三个 hook Job 权重表）。**四步在一个全新库里逐条跑通**（见「角色与 RLS 实测」第 6 行）✓ |
+| **高 1-h** | 部署侧无超级用户残留 | — | **PASS（但见新问题 #1）** | 渲染后的 prod compose：`app` → `postgres://base_app:…`；`migrate`/`policies` → `postgres://base:…`（超管，**这是对的**，需要 DDL / 表属主）；`app-role` 走 `PG*` 而非 `DATABASE_URL`。Helm `deployment.yaml:61-65` 引用 Secret 的 `databaseUrlKey`，`values.yaml:76-78` 写明「DATABASE_URL 必须是普通角色」。**额外硬闸**：`scripts/prod-preflight.sh` 实测 —— `APP_DATABASE_URL` 用超管 → `✗ APP_DATABASE_URL 用的是超级用户（base）…` **exit 1**；用普通角色 → `✓ …应用连接用的是普通角色` **exit 0** ✓ |
+| **中 1** | C-3 缺 `DATABASE_URL_TEST` 不再假绿 | 非 0 退出 + 无 "3 passed" | **复现为真** | 不设环境变量跑 `cargo test -p sandbox --test c3_real_db -- --include-ignored` → **`test result: FAILED. 1 passed; 3 failed; 0 ignored; … finished in 0.01s`，`EXIT=101`**；输出中**没有** "3 passed"；panic 文案「缺少 DATABASE_URL_TEST：真实库用例必须真的连库跑，不能静默跳过。」✓（`c3_real_db.rs:66-90`） |
+| **中 1-b** | 护栏用例真在断言（变异验证） | 子进程断言非零退出 + 0 passed + 无 "3 passed" | **复现为真（护栏承重）** | 变异验证：临时在 3 条 C-3 用例开头插 `if std::env::var_os("DATABASE_URL_TEST").is_none() { return; }`（**精确复刻首轮的假绿实现**）→ 护栏立刻 **RED**：<br>`缺 DATABASE_URL_TEST 时子进程必须失败（它却成功退出了）：… test result: ok. 3 passed; 0 failed; … finished in 0.00s` —— **输出里是首轮那个一模一样的 "3 passed / 0.00s" 签名**。护栏抓住了它 → 证明不是空跑。已 `git checkout` 还原（`git diff` 为空） |
+| **中 1-c** | 设了 `DATABASE_URL_TEST` 三条断言真执行 | 真跑 | **复现为真** | `DATABASE_URL_TEST=…/base_test cargo test -p sandbox --test c3_real_db -- --include-ignored` → **4 passed**（3 条 C-3 + 1 条护栏），`finished in 0.79s`，`EXIT=0`；**变异验证**：临时 `ALTER ROLE base_app BYPASSRLS` → 3 条 C-3 **全部失败**（`RlsBypassed { role: "base_app" }`）→ 证明真的连库、真的断言 → 已 `ALTER ROLE base_app NOBYPASSRLS` 还原 |
+| **中 2** | policies 接进部署流程 | compose 两个文件 + Helm job | **复现为真** | `compose.yaml:107-117`（`policies` 服务，`profiles: ['policies']`，超管连接）；`deploy/compose.prod.yaml:108-121`（同名服务 + profile）；**Helm** `policies-job.yaml` weight `-4`（在 migrate `-5` 之后）✓；RUNBOOK §0.1 的顺序与实际服务顺序一致 ✓ |
+| **中 2-b** | `base tenant-policies` 与 `--check` 都能跑 | --check 报齐全 | **复现为真** | `base tenant-policies` → `已为 1 个模块生成 RLS 策略：✓ sandbox：sandbox_tenant_item`，exit 0；`base tenant-policies --check`（超管）→ 打印绕过 RLS 告警 + `租户隔离前提校验通过`，exit 0；`--check`（**应用角色** `base_app`）→ 无告警 + 通过，exit 0；`cargo xtask tenant-policies --check` → 通过，exit 0 ✓ |
+
+### 部署侧逐处核对（高 1，7/7）
+
+| 位置 | 声称 | 复核 |
+|---|---|---|
+| `compose.yaml` app | 普通角色；migrate/policies 仍超管 | ✅ 渲染实测确认 |
+| `.env.example` | 拆分 + 角色分工注释 | ✅ 无裸 `DATABASE_URL=`，注释块完整 |
+| `deploy/compose.prod.yaml` | app → `${APP_DATABASE_URL:?}`；app-role 服务；**不挂 seed**；幂等 | ✅ 四项全过（幂等 = 连跑 3 次 exit 0） |
+| Helm | app-role(-10) → migrate(-5) → policies(-4) | ✅ 渲染实测权重 |
+| `require_isolation` 调用点 | `isolation.rs` → `serve()` | ✅ `main.rs:255-258`，退出码 3 |
+| `BASE_ALLOW_SUPERUSER` | 本地放行 / prod 退出码 2 | ✅ 两条路径都实测 |
+| RUNBOOK | §0.1 四步 + §3.4 | ✅ 与实际行为一致，四步在全新库跑通 |
 
 ---
 
-## 四条 detail 路径实测
+## 角色与 RLS 实测
 
-自起后端：`./target/debug/base serve`（**重新编译过**，`target/debug/base` 原始产物 09:59，早于修复提交 10:13，为避免验到旧代码我先 `cargo build -p platform-server --bin base`）。
-真实响应体逐条摘录（`detail` 原样，未截断）：
+| # | 场景 | 预期 | 实测 | 结论 |
+|---|---|---|---|---|
+| 1 | 普通角色 `base_app` 不设 `app.tenant_id` | **0 行** | `select count(*) from sandbox_tenant_item` → **0** | ✅ |
+| 2 | 超级用户 `base` 对照组 | **4 行**（能看到行 = RLS 被绕过） | → **4** | ✅ |
+| 3 | `require_isolation` 对超级用户 | **拒绝启动，退出码 3**，信息清楚 | `✗ 租户隔离前提不成立，进程退出（fail-fast）：连接角色 \`base\` 绕过 RLS（超级用户或 BYPASSRLS）—— 租户隔离会 fail open…` **EXIT=3** | ✅ |
+| 4 | **普通角色起应用** | 启动自检通过、`/health/live` 200、`/health/ready` `{"status":"ready"}` | 自检日志「租户隔离前提自检通过：连接角色不绕过 RLS role=base_app」；live **HTTP 200**；ready **HTTP 200** `{"appliedMigrations":[20261118000100,20261118000200],"environment":"dev","status":"ready",…}` | ✅ |
+| 5 | `BASE_ALLOW_SUPERUSER=true` + `BASE_ENV=prod` | **必须仍拒绝，退出码 2** | `✗ 配置校验失败… - [CONFIG_FORBIDDEN_COMBINATION] BASE_ALLOW_SUPERUSER：生产环境禁止放行绕过 RLS 的角色` **EXIT=2** | ✅ |
+| 6 | **全新库跑完 RUNBOOK §0.1 四步**（自建临时库，非 `base_dev`） | 角色 → 表 → policy → 应用就绪，RLS 生效 | ① `02-app-role.sql` exit 0；② `base migrate up` → `已应用版本 [20261118000100, 20261118000200]`，`base_app` 对 5 张表全有 SELECT；③ `base tenant-policies` → `sandbox_tenant_item` `relrowsecurity=t` / `policies=1`；④ 应用 → live 200 / **ready 200 `{"status":"ready"}`**；⑤ RLS 行为：超管看到 2 行 / `base_app` 不设租户看到 **0 行** | ✅（临时库已删除） |
+| 7 | 应用角色的租户上下文（`base_test`） | 设 `tenant-a` / `tenant-b` 各 2 行、不串租户 | `tenant-a` → 2 行 / 1 个租户；`tenant-b` → 2 行 / 1 个租户 | ✅ |
 
-| 路径 | HTTP | 耗时 | `code` | `detail` 原文 | detail 是否全英文 |
-|------|------|------|--------|--------------|-----------------|
-| ① PG 正常 → `/health/ready` | **200** | 0.169140s | —（无错误体） | `{"appliedMigrations":[20261118000100],"environment":"dev","status":"ready","traceId":"dc23a784-…","version":"0.1.0"}` | n/a（成功体无 detail） |
-| ② **停掉 PG** → `/health/ready` | **503** | **2.002212s**（复测 2.002235 / 2.001611） | `DATABASE_UNAVAILABLE` | `database is unreachable: pool timed out while waiting for an open connection` | ✅ **全 ASCII** |
-| ②′ 停掉 PG → `/health/live` | **200** | 0.000686s | — | `{"status":"alive","traceId":"486f5126-…","version":"0.1.0"}` | n/a |
-| ③ `MIGRATIONS_PENDING`（临时库 up→down，账本清空） | **503** | 0.158066s | `MIGRATIONS_PENDING` | `pending migrations: [20261118000100]` | ✅ **全 ASCII** |
-| ④ `MIGRATION_DIRTY`（`_sqlx_migrations.success=false`） | **503** | 0.001999s | `MIGRATION_DIRTY` | `migration 20261118000100 is in a dirty state and needs manual recovery` | ✅ **全 ASCII** |
-| ⑤ 变体：迁移表读不出来（`DROP TABLE _sqlx_migrations`） | **503** | 0.002497s | `MIGRATIONS_PENDING` | `migration state is unreadable, migrations may not have run: error returned from database: relation "_sqlx_migrations" does not exist` | ✅ **全 ASCII** |
-
-- 原始响应（②）：`{"type":"https://errors.base.example/service-not-ready","title":"服务未就绪","status":503,"detail":"database is unreachable: pool timed out while waiting for an open connection","instance":"/health/ready","code":"DATABASE_UNAVAILABLE","trace_id":"f1850ebf-…"}`
-- 原始响应（③）：`{"type":"https://errors.base.example/service-not-ready","title":"服务未就绪","status":503,"detail":"pending migrations: [20261118000100]","instance":"/health/ready","code":"MIGRATIONS_PENDING","trace_id":"70cf1fbe-…"}`
-- 原始响应（④）：`{"type":"https://errors.base.example/service-not-ready","title":"服务未就绪","status":503,"detail":"migration 20261118000100 is in a dirty state and needs manual recovery","instance":"/health/ready","code":"MIGRATION_DIRTY","trace_id":"3a94c932-…"}`
-- 原始响应（⑤）：`{"type":"https://errors.base.example/service-not-ready","title":"服务未就绪","status":503,"detail":"migration state is unreadable, migrations may not have run: error returned from database: relation \"_sqlx_migrations\" does not exist","instance":"/health/ready","code":"MIGRATIONS_PENDING","trace_id":"1097d1a7-…"}`
-- **程序化复核**（python3 逐字符判定 `c.isascii()` 与 CJK 码位区间）→ 五条 `detail` **全部无非 ASCII、无 CJK**：「全部 detail 无中文字符： True」
-- `title` 恒为「服务未就绪」（中文短句）—— 契约 C6 只约束 `detail`，**符合契约，不判为缺陷**。
-- PG 恢复后 `/health/ready` → **HTTP 200** `{"appliedMigrations":[20261118000100],"environment":"dev","status":"ready",…}`（0.181925s）。
+> 场景 6 用的是我自建的临时库（`qa_fresh_tmp`），验证完已 `DROP DATABASE`；`base_dev` / `base_test` 均未写入业务数据。
 
 ---
 
 ## 回归
 
-- **Rust 138/138**（`cargo test --workspace -- --test-threads=2` → `passed=138 failed=0`；分布：platform-core 41 + platform-contracts 8 + platform-server(lib) 32 + base(bin) 5 + sandbox 2 + contracts 4 + xtask 46；3 个 doctest ignored）
-  - **首轮 132 个必须仍全绿 ✓**：132 → 138，增量 **+6 全部来自新增单测**（`health.rs` 3→8 条：`readiness_detail_is_english_on_every_error_path` / `dirty_migration_error_carries_english_detail` / `pending_migrations_error_carries_english_detail` / `healthy_database_has_no_error_and_no_detail` / `dev_detail_strips_non_ascii_from_database_errors`；`db.rs` 2→3 条：`acquire_timeout_is_shorter_than_the_probe_timeout`）；**逐个比对首轮 7 个测试函数名，无一被删除**
-- **前端 23/23**（`pnpm -r test`：i18n 3 + auth 3 + schema 3 + hooks 3 + sdk 2 + theme 2 + ui 3 + shell 4，8 个 workspace 包全绿）
-- **E2E 1/1**（`bun run test:e2e` → `✓ 1 [chromium] › e2e/shell.spec.ts:3:1 › 底座壳渲染并可过滤菜单 (268ms)`，`1 passed (4.9s)`）
-- **Lint / 格式**：`cargo clippy --workspace --all-targets -- -D warnings` → **0 告警**（exit 0）；`cargo fmt --all --check` → **通过**（exit 0）
-- **静态门禁**：`cargo xtask capabilities --check` → 「能力索引校验通过：13 个文件与源码一致」；`check-deps` → 「平台 crate 未反向依赖业务模块」；`check-modules` → 「模块目录校验通过：1 个模块 ✓ sandbox」—— 全 exit 0
-- **Helm**：`helm lint` → 0 failed；`helm template` 默认 5 类 / `--set ingress.enabled=true` 6 类
-
-### 通用清单
-
-| 项 | 结果 | 证据 |
-|----|------|------|
-| 无 TODO/FIXME/XXX/HACK | ✅ | 本轮改动文件（`.rs/.ts/.tsx/.sh/.yaml/.sql/.md`）grep → **0 处** |
-| 无调试输出 | ✅ | 无 `dbg!`；`eprintln!` 仅 3 处，均在 `main.rs:107-115` 的**配置 fail-fast 错误输出**路径（属功能，非调试） |
-| `.env` 未入库 | ✅ | `git ls-files | grep .env` → 只有 `.env.example`；`.gitignore:20-22` 排除 `.env` / `.env.*`（放行 `!.env.example`）；磁盘上 `.env` 与 `deploy/.env` **均不存在** |
-| `.env.example` 无弱口令默认值 | ✅ | `.env.example:14` → `POSTGRES_PASSWORD=`（**空值**） |
-| 无硬编码密钥 | ✅ | 全仓扫描（`password/secret/token/api_key`）→ 唯一命中是 `scripts/prod-preflight.sh:109` 的**变量引用** |
-| `git diff` 对 `crates/platform-core/`、`crates/platform-contracts/` 为空 | ✅ | `git diff develop..HEAD -- crates/platform-core crates/platform-contracts crates/platform-contracts-macros --stat` → **输出为空** |
+- **Rust**: `cargo test --workspace -- --test-threads=2` → **182 passed / 0 failed / 8 ignored**（8 = 3 条 C-3 `#[ignore]` + 5 条文档 `ignore` 块）—— 与预期的 182/182 一致；首轮的 172 条**全部仍绿**
+- **Rust（真实库）**: `cargo test -p sandbox --test c3_real_db -- --include-ignored`（`DATABASE_URL_TEST` 已设）→ **4 passed / 0.79s**
+- **集成脚本**: `bash scripts/test-integration.sh` → **exit 0**，容器数量 `2 → 2`（未新建容器），日志中 C-3 `4 passed … in 0.75s`，全脚本 **0 个 FAILED**
+- **前端**: `pnpm -r test` → **23/23**（i18n 3 + auth 3 + hooks 3 + schema 3 + theme 2 + sdk 2 + ui 3 + shell 4）
+- **E2E**: `bun run test:e2e` → **1/1**
+- **Lint/格式**: `cargo clippy --workspace --all-targets -- -D warnings` → **0 告警**；`cargo fmt --all --check` → **通过**
+- **门禁**: `cargo xtask capabilities --check` → `能力索引校验通过：13 个文件与源码一致`；`check-deps` → `依赖方向校验通过`；`check-modules` → `模块目录校验通过：1 个模块`；`tenant-policies --check` → `租户隔离前提校验通过`
+- **编排文件**: `podman-compose -f compose.yaml config` → **exit 0**；`podman-compose -f deploy/compose.prod.yaml config`（注入必需变量）→ **exit 0**；`helm template` → **exit 0**（7 类 / 加 ingress 8 类）
+- **依赖树**: `git diff develop..HEAD -- Cargo.lock` → **只新增 1 条 `name = "platform-db"`（工作区成员自己）** → **第三方 crate +0**；`cargo tree -i sqlx-macros` → `nothing to print`；`cargo tree | grep -c sqlx-macros` → **0**
+- **核心逻辑未被改动**: `git diff --numstat 668d357..c3277f8 -- crates/platform-core/ crates/platform-db/src/` → `platform-core/` **无任何条目（零改动）**；`platform-db/src` 只有 `lib.rs +2`（模块导出）、`rls.rs +10`（`IsolationReport::table_problems` 拆分）、`scopes.rs +172`（新增）。**`query.rs` / `tenant.rs` / `quota.rs` 一行未改** ✓
+- **脚本**: `prod-preflight.sh` 双路径实测（超管 → exit 1 / 普通角色 → exit 0）；`backup.sh` / `restore.sh` / `rollback.sh` / `backup-verify.sh` 改为 `DATABASE_URL` 缺失时回退 `MIGRATION_DATABASE_URL`（管理操作用超管，方向正确）
 
 ---
 
@@ -88,36 +94,53 @@
 
 | # | 级别 | 描述 | 证据 | 建议 |
 |---|------|------|------|------|
-| **1** | **低** | **`BASE_LOG_LEVEL` 完全无效，默认配置下后端一行日志都不输出。** `init_tracing` 的默认过滤器写死 `platform_server={level},tower_http=info`，但 `main.rs` 里的事件属于**二进制 target `base`**（不是 lib target `platform_server`）→ 过滤器一个都匹配不上。**后果**：① `.env.example:34` 承诺的 `BASE_LOG_LEVEL` 开关是摆设；② RUNBOOK §5.1 新写的「运维视角的中文说明在**日志**里（`tracing::warn!` 记 `code`+`detail`+`pending`+`dirty`）」**不成立** —— 中 1 修复把中文运维说明「移到日志」，而**这条兜底通道是死的**，中文运维说明实际**彻底丢失**（既不在响应体，也不在日志） | `crates/platform-server/src/main.rs:177-181`（`EnvFilter::new(format!("platform_server={level},tower_http=info"))`）+ `crates/platform-server/Cargo.toml`（`[lib] name="platform_server"` / `[[bin]] name="base"`，`main.rs` 属 bin → tracing target = `base`）。**实测**：`BASE_LOG_LEVEL=warn|info|debug` 三档 → 日志文件均 **0 字节**（连启动 INFO「底座服务已启动」都没有）；对照组 `RUST_LOG=warn` → **455 字节**，能看到 `WARN base: readiness 未通过… code="MIGRATIONS_PENDING" detail="migration state is unreadable…"` | ① 把过滤器改成同时覆盖 bin target：`EnvFilter::new(format!("base={level},platform_server={level},tower_http=info"))`（或直接用 `format!("warn,platform_server={level},base={level}")`）；② 加一条单测/冒烟断言「默认配置下 `tracing::warn!` 能被采集到」防回潮；③ 若不想现在改代码，**至少把 RUNBOOK §5.1 那句改成如实描述**（当前文档与实际不符，且它正是中 1 修复的正当性依据） |
-| **2** | **低** | **RUNBOOK §3.1 关于 `podman-compose` 解析服务级 `env_file` 基准的说明写反了，且它给出的备选写法实测直接报错。** RUNBOOK 称「`docker compose` 按 compose 文件所在目录解析，`podman-compose` 按**当前目录**解析 —— 用 `podman-compose` 时请在 `deploy/` 目录里执行，或显式指定 `ENV_FILE=deploy/.env`」。实测（podman-compose 1.6.0）：服务级 `env_file` **按 compose 文件所在目录**解析，与 `docker compose` **一致**；照 RUNBOOK 的备选写法从仓库根执行 `ENV_FILE=deploy/.env podman-compose -f deploy/compose.prod.yaml …` → **报错 `Env file at <repo>/deploy/deploy/.env does not exist`，exit 1** | `deploy/RUNBOOK.md:115-118`。**实测**（真实 `compose.prod.yaml` + 仓库式目录布局）：S1 从仓库根跑 `-f deploy/compose.prod.yaml`（`.env` 在 `deploy/`）→ **EXIT=0 解析成功**；S2 `ENV_FILE=deploy/.env` 从仓库根跑 → **EXIT=1**，`ValueError: Env file at /tmp/qa_real/deploy/deploy/.env does not exist`；S3 在 `deploy/` 里跑 → **EXIT=0**。旁证：podman-compose 源码 `podman_compose.py:1355` → `os.path.realpath(os.path.join(dirname, path))`，`dirname` = compose 文件目录 | ① 把 §3.1 那句改成「两种 compose 实现**都按 compose 文件所在目录**解析服务级 `env_file`」；② **删掉** `ENV_FILE=deploy/.env` 这个备选写法（它是坏的）；③ 保留「在 `deploy/` 目录里执行」作为推荐用法（**实测该用法可行**，属最稳妥建议）。注：compose 文件**头部**的说明（「compose 从 compose 文件所在目录读 .env」）本身是**对的**，无需改 |
-| **3** | **信息** | `podman-compose` 遇到必填变量缺失时抛的是 **Python 原始 traceback**（`ValueError: required variable POSTGRES_PASSWORD is missing a value: …`），不是人话错误提示。退出码与语义都正确（exit 1，不静默用弱口令），只是排障体验差 | `podman-compose -f deploy/compose.prod.yaml config`（不设口令）完整输出见上（10 行 traceback）。同类问题在 `docker compose` 下会是干净的一行 `error: …` | 客户侧以 `docker compose` 为主，影响有限；若客户用 `podman-compose`，可在 RUNBOOK §3.1 补一句「podman-compose 的报错是 Python traceback，看最后一行 `ValueError:` 即可」 |
-| **4** | **信息** | `.env.example:21` 的 `DATABASE_URL=postgres://base:base@postgres:5432/base_dev` 仍带 `base:base` 弱口令与 `base_dev` 库名（开发用值），与 prod compose 的 `POSTGRES_DB=base` 不一致 | `.env.example:16,21`。**但安全网在**：`prod-preflight.sh` 对「DATABASE_URL 内弱口令」与「库名不一致」**都实测报 EXIT=1**（见「额外 1」的 6 组反向测试） | 保持现状可接受（preflight 已兜住）；若要更干净，可把 `.env.example` 的 `DATABASE_URL` 留空并在注释里给 prod 模板 |
-| **5** | **信息** | **本轮指定的交付物路径 `feature-meta/qa-report-recheck.md` 在 git 里**已存在一份 REQ-004 的复核报告**（BA 归档于 `beee35f`），本轮按任务指定的唯一交付物路径写入 → 工作区里那份被**原地覆盖**。**REQ-004 的内容完整保存在 git 历史里，没有丢失**（`beee35f` / `b0a26c9` / `3ff22fb` 三次提交均可取回） | `git log --oneline -- feature-meta/qa-report-recheck.md` → `beee35f` / `b0a26c9` / `3ff22fb`；`git show HEAD:feature-meta/qa-report-recheck.md` 首行仍是「需求: REQ-004 AI 引导体系与能力索引 … 分支: feature/REQ-004 @ f45ef882…」（23593 字节），本文件为 REQ-005 版（21177 字节） | 与首轮报告**问题 #6** 同源：BA 归档时把上一轮文件**改名保留**（如 `qa-report-recheck-REQ-004.md`），避免历史报告在工作区被无声覆盖。**本 QA 不提交任何改动**，该决定权留给 BA |
+| **1** | **中** | **应用容器 / Pod 仍然拿到了数据库超管连接串** —— 角色拆分只做到了「连接串层面」，没做到「凭据层面」。<br>① `deploy/compose.prod.yaml:167-168`：`app` 服务挂 `env_file: ${ENV_FILE:-.env}`，而 `.env` 里含 `MIGRATION_DATABASE_URL=postgres://base:<超管口令>@…` 与 `APP_ROLE_PASSWORD` → **这些都进了 app 容器的环境变量**（`environment:` 只覆盖了 `DATABASE_URL` 一项）。<br>② `deploy/helm/base-platform/templates/deployment.yaml:53-54`：`envFrom: secretRef: base-platform-secret` → **整个 Secret 被注入 app Pod**，而该 Secret 按 RUNBOOK §1.3 含 `MIGRATION_DATABASE_URL`（超管）+ `APP_ROLE_PASSWORD`。<br>**影响**：应用连接本身已是普通角色、RLS 真的开着（这点已复验为真），但应用进程环境里躺着超管口令 —— 应用一旦被拿下（任意 RCE / 环境变量泄露 / 崩溃转储），拿到的是**超级用户** → RLS 直接被绕过 → 跨租户全量可读。**这把本轮刚建立的角色边界从容器外又漏回容器内**。 | 渲染实测（prod compose `app` 服务块）：`env_file: [ .env ]` + `environment: { DATABASE_URL: postgres://base_app:… }`；`.env.example:54` `MIGRATION_DATABASE_URL=postgres://base:…`；`deployment.yaml:53-54` `envFrom: secretRef: base-platform-secret`；`RUNBOOK.md:76-81` Secret 建法含 `MIGRATION_DATABASE_URL` 与 `APP_ROLE_PASSWORD` | **本轮建议补**：① compose：给 `app` 单独一个 `app.env`（只含 `APP_DATABASE_URL` 与非敏感项），别复用管理侧 `.env`；② Helm：把 Secret 拆成 `base-platform-app`（只有 `DATABASE_URL`）与 `base-platform-admin`（迁移用），`deployment.yaml` 只 `envFrom` 前者；③ 迁移 / 策略 Job 改 `env` 显式点名，不要整包 `envFrom`。<br>（不阻塞合并：应用**用的**连接是普通角色，RLS 已真实生效；这是纵深防御问题） |
+| **2** | **中** | **RUNBOOK §3.4.3 给出的补建命令救不了「已存在表」的权限缺失**（`ALTER DEFAULT PRIVILEGES` 只对**之后**新建的对象生效，对**已存在**的表无效）。<br>**实测（临时库）**：建表 → 跑 app-role 的 SQL → `has_table_privilege('base_app','old_table','SELECT')` = **f**；再建一张新表 → **t**。<br>**影响**：RUNBOOK §3.4.3 的症状对照表写着「应用连得上，但 `permission denied for table <表>` → 同上：重跑角色脚本 / app-role 步骤」—— **这条处置对已存在的表无效**。存量环境（表由更早的迁移建好）跑完这条命令后**仍然 503**，运维会被这条 RUNBOOK 误导（重跑一遍没用 → 以为是别的问题）。 | 临时库 `qa_recheck_tmp` 实测：`CREATE TABLE old_tenant_item` → 跑 `deploy/seed/02-app-role.sql` → `old_table_select = f`；`CREATE TABLE new_tenant_item` → `new_table_select = t`（临时库已删）。`deploy/seed/02-app-role.sql:38-39` 与 `deploy/compose.prod.yaml:155-156`、`deploy/helm/base-platform/templates/app-role-job.yaml:78-79` 三处都**只有** `ALTER DEFAULT PRIVILEGES`，**没有** `GRANT … ON ALL TABLES IN SCHEMA public` | **本轮建议补（一行）**：在 `02-app-role.sql`、compose 的 `app-role` 服务、Helm 的 `app-role-job` 三处各加一句<br>`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO base_platform_app;`<br>（新建对象靠默认权限、存量对象靠这句，一起覆盖）；并把 RUNBOOK §3.4.3 的处置说明改成「默认权限只管新建表，存量表要用这句 GRANT」 |
+| **3** | **低** | **Dev 自陈的「`base_dev` 缺表权限」在本机复现不出来 —— 事实误判。** 实测 `base_dev`：`pg_default_acl` 里 `base` 的默认权限**已落地**（`base_platform_app=arwd/base`），`base_app` 对 `_sqlx_migrations` / `platform_meta` **均有 SELECT**。Dev 描述的 `permission denied for _sqlx_migrations` **没有出现**；`base_dev` 的 `/health/ready` 503 的**真实 detail 是 `pending migrations: [20261118000200]`** —— 即「迁移没跑」（迁移 `20261118000200` 早于本次改动就已存在，与本轮无关）。 | `podman exec base-postgres psql -U base -d base_dev -c "select … from pg_default_acl"` → `base\|public\|r\|{base_platform_app=arwd/base}`；`has_table_privilege('base_app','public._sqlx_migrations','SELECT')` = **t**；应用实测：`live HTTP 200`、`ready HTTP 503` 且 `detail="pending migrations: [20261118000200]"`；`base_dev` 的 `_sqlx_migrations` 只有 `20261118000100` | ① 更正 Dev 报告与 `feature-meta/traceability.md:86` 的表述（那里写的是「存量开发卷早于 `02-app-role.sql` 创建 → `base_app` 在 `base_dev` 上缺表权限」）—— 与实测不符；② `base_dev` 的 503 只需在开发机上跑一次 `cargo run -p platform-server --bin base -- migrate up`（超管连接）即可，属常规开发态，**不构成缺陷**；③ `base_dev` 是只读纪律，本轮**未对它做任何写操作**（只跑 SELECT 与只读的就绪探针） |
+| **4** | 低 | **首轮 #8 的弱口令仍在**：`deploy/seed/02-app-role.sql:29` 硬编码 `CREATE ROLE base_app LOGIN PASSWORD 'base'`。已**降级为开发专用**（生产由 `app-role` 步骤用 `APP_ROLE_PASSWORD` 建角色），但开发环境口令仍是弱口令，且 `.env.example:53` 的 `APP_DATABASE_URL=postgres://base_app:base@…` 同样把弱口令写死。 | `deploy/seed/02-app-role.sql:29`；`.env.example:53` | 生产路径已不受影响；开发环境保留弱口令是可接受的取舍，建议在 RUNBOOK §3.4.2 明确标注「仅开发库」。**不阻塞合并** |
+| **5** | 低 | **首轮 #6（配额无自动化用例）未处理**：`quota.rs` 仍只有纯结构体单测，「计数落 DB / 重启不丢 / 超限判定 / 跨租户写入被拒」无自动化用例。 | `git diff 668d357..c3277f8` 未触及 `crates/platform-db/src/quota.rs` | 记入 Sprint 2 收尾 |
+| **6** | 低 | **首轮 #5（契约口径张力）未处理，但已如实登记**：`api-conventions v1` C3/C7 写「业务模块不得手工加 `tenant_id` 过滤条件 / 平台自动叠加」，本期实现是「模块在自己写的 SQL 里写 `tenant_id = {tenant}`，平台强制占位符」。`feature-meta/traceability.md:91` 已登记为「需 BA 裁定」✓ | `modules/sandbox/backend/src/tenant_repository.rs` 全部显式带 `{tenant}`；`crates/platform-db/src/query.rs` 强制占位符；`traceability.md:91` | 需 BA 裁定（改契约 or 改实现）。**本轮 RLS 已真实生效，风险已从「会泄漏」降级为「文档口径不一致」** |
+| **7** | 低 | **首轮 #4（AC-S-012 未登记）已解决**：`traceability.md:90` 现已如实登记 AC-S-012 为「本期未实现」✓（AC-S-008 同样已登记）。**该 AC 本身仍未实现**（`X-Tenant-Id` 全仓仍零命中） | `grep -rn "X-Tenant-Id"` → 0 命中；`traceability.md:90` | 记入后续需求（REQ-019 API 治理）。**不阻塞本轮** |
+
+---
+
+## Dev 自陈未完成项的严重度判定（`base_dev` 缺权限）
+
+| 问 | 答 | 依据 |
+|---|---|---|
+| **1. 开发环境当前是坏的吗？** | **不是。** `base_dev` 权限完整（`base_app` 对 `_sqlx_migrations` / `platform_meta` 均有 SELECT，默认权限已落地）。应用能起、自检通过、`/health/live` **200**。`/health/ready` **503** 的真实 detail 是 `pending migrations: [20261118000200]` —— 是「迁移没跑」，不是权限问题。跑一次 `migrate up` 即恢复，**属常规开发态**。 | 实测输出见问题 #3 |
+| **2. 补建命令正确可用吗？** | **语法可用，但不足以解决它声称要解决的症状。** 命令本身能跑通（原文 SQL 连跑 3 次 exit 0，幂等 ✓）；但它**只设默认权限**，对**已存在**的表无效（实测 `old_table_select = f`）。RUNBOOK §3.4.3 症状表里「`permission denied for table <表>` → 重跑角色脚本 / app-role 步骤」这条**处置是错的**（重跑没用）。 | 临时库实测；`ALTER DEFAULT PRIVILEGES` 语义 |
+| **3. 新建卷无此问题吗？** | **是。** 全新路径已端到端跑通：app-role → migrate → policies → 应用，`base_app` 对所有表有权限、RLS 生效、ready 200、RLS fail-closed（超管 2 行 / 普通角色 0 行）。新建卷在 initdb 阶段就跑 `02-app-role.sql`（含 `ALTER DEFAULT PRIVILEGES`，`:38-39` ✓），之后的迁移建表自动继承。 | 临时库 `qa_fresh_tmp` 四步实测 |
+| **4. 严重度与建议** | **中 —— 本轮必须补，但补的不是「开发环境」，而是「补建手段本身」。**<br>① **必须补**：在 app-role 三处（`02-app-role.sql` / compose `app-role` 服务 / Helm `app-role-job`）补 `GRANT … ON ALL TABLES IN SCHEMA public TO base_platform_app`，让 RUNBOOK §3.4.3 的处置对存量表真正有效（问题 #2）。<br>② **不必补**：`base_dev` 本身没坏，跑一次 `migrate up` 即可；**Dev 的诊断（缺表权限）与实测不符，应更正**（问题 #3）。<br>③ 若 BA 认为「存量私有化环境升级」不在本期范围，则可把问题 #2 **降级为 Sprint 2 收尾**，但 RUNBOOK 的处置文字必须同步改成「默认权限只管新建表」，否则会误导运维。 | 综合上述 |
 
 ---
 
 ## 未验证
 
-| 项 | 原因 | 影响 / 由谁补 |
-|----|------|--------------|
-| **CI 里 `docker compose -f deploy/compose.prod.yaml config --quiet` 这一条命令的实跑** | 本机 docker CLI 27.2.1 **没有 compose 插件**（`docker compose` → `not a docker command`；`/usr/libexec/docker/cli-plugins/` 等目录均无插件，也无独立 `docker-compose`），本轮**未执行该命令原样** | 已用**等价复现**覆盖其两个关键语义：① `${POSTGRES_PASSWORD:?…}` 在缺失/空值时 **exit 1**（podman-compose 实测，源码 `REQUIRED_NONEMPTY` 语义相同）；② **shell env 覆盖 `.env` 空值**（podman-compose 实测 exit 0 且渲染出占位口令）。CI 里注入的是**非空**占位口令（`ci.yml:159`）→ 该 job 判断为不会挂，但**未在真 Docker Compose 上跑过** |
-| **GitHub Actions 整体实跑** | 仓库 `git remote -v` 为空，无 remote，Actions 不可能触发 | CI 配置做了逐行静态核对（12 个 job、`pull_request_review` 触发器仍在、build-image 体积校验仍在），**未在真实 GitHub 上跑过** |
-| **镜像实构建**（体积 <100MB、容器内启动、容器内 `HEALTHCHECK --timeout=5s` 与 2s acquire_timeout 的关系、非 root） | 本机内存不足，按任务约束**不构建镜像** | `Dockerfile:94` 的 `--timeout=5s` 为静态核对（5s > 2s，关系成立）；容器内真实行为由 CI `build-image` job 兜住 |
-| **真实 K8s 集群的探针行为**（`timeoutSeconds: 5` vs 2.002s 实测值） | 本机无 K8s 集群 | 静态关系成立且已有单测守住（`acquire_timeout_is_shorter_than_the_probe_timeout`）；集群内真实行为未实跑 |
-| **Trivy 镜像漏洞扫描** | 需联网拉扫描器与漏洞库 | 由 CI `image-scan` job（CRITICAL/HIGH 阻断）验证 |
-| **`prod-preflight.sh` 的 `ENV_FILE` 分支（指定非默认 env 文件路径）** | 已确认脚本支持 `ENV_FILE=` 覆盖，但本轮未对**该分支**做独立断言 | 影响面小（默认分支 6 组场景已全测） |
+| 项 | 说明 |
+|---|---|
+| **真实 K8s 集群里的 Helm Job 执行** | 本机无集群，只做了 `helm template` **渲染**（权重、kind 数、Secret 引用均正确）。三个 hook Job 在真集群上的**实际执行顺序**、Secret 预置、`psql` 镜像拉取**未在真集群验证** |
+| **镜像实构建 + 容器里跑 compose 的 `app-role` / `policies` 服务** | 本机内存不足未构建镜像；`app-role` 的 SQL 我用**原文**在容器里连跑 3 次验证幂等，`policies` 用交付二进制验证；**但没有真的用 `podman-compose --profile app-role run --rm app-role` 起这个服务**（需要与 `base-postgres` 同网络且口令不同，会动到运行环境） |
+| **私有化生产库的真实部署闭环** | prod compose 只做了 `config` 渲染校验 + `prod-preflight.sh` 双路径实测；未真正 `up -d` 一套私有化环境 |
+| **`base_dev` 上的写操作** | 按纪律全程只读（仅 SELECT 与只读就绪探针）。`base_dev` 上「跑完 migrate up 后的策略与权限状态」未实测 |
+| **覆盖率数字** | 低配机无覆盖率工具链，未测 |
+| **真实负载性能** | 未压测（「每次访问多一次 `BEGIN`/`COMMIT`」的开销未量化） |
+| **AC-S-008 / AC-S-012** | 本期未实现（已如实登记），不计入通过 |
 
 ---
 
-## 清理确认
+## 本轮产生的临时物（均已清理）
 
-- 自建临时库 `base_qa_recheck`（MIGRATIONS_PENDING / MIGRATION_DIRTY / 迁移表读不出来 三种变体用）→ **已 DROP**；`pg_database` 回到 `postgres / base_dev / base_test`（与开工前一致）
-- `base_dev` 未被污染：表清单仍为 `_sqlx_migrations / platform_meta / platform_seed_log`，迁移账本 `20261118000100 | t` 完好
-- 我起的全部 `./target/debug/base serve` 进程 → **已 kill**（残留 2 个，已确认无残留）
-- `/tmp` 下我的临时物（helm 二进制与缓存、`/tmp/qa_*` 目录、`/tmp/pc_*`、`/tmp/r_*.json`、日志与断言脚本）→ **已全部删除**
-- 容器状态：`base-postgres` / `base-redis` 均 **healthy**
-- `git status --porcelain` → **仅 `M feature-meta/qa-report.md`**（**首轮报告**的未提交改动，mtime 09:52:32，**早于本轮开工 10:14，非本轮所改**；按要求**未覆盖、未改动**该文件）
-- 本轮唯一写入的文件：`feature-meta/qa-report-recheck.md`（本文件）。**注意**：该路径在 git 里原本已有 BA 归档的 **REQ-004 复核报告**（`beee35f`），本轮按任务指定路径写入 → 工作区那份被原地覆盖；**REQ-004 内容完整保存在 git 历史中，未丢失**（详见「仍存在的问题」#5）
-- **本 QA 未做任何 git 提交 / 推送**，工作区改动留给 BA 处理
+| 物 | 处置 |
+|---|---|
+| 临时库 `qa_recheck_tmp`（权限实验） | 已 `DROP DATABASE` ✓ |
+| 临时库 `qa_fresh_tmp`（四步全流程） | 已 `DROP DATABASE` ✓ |
+| `ALTER ROLE base_app BYPASSRLS`（变异验证） | 已 `ALTER ROLE base_app NOBYPASSRLS` 还原 → 实测 `base_app \| rolsuper=f \| rolbypassrls=f` ✓ |
+| `modules/sandbox/tests/c3_real_db.rs` 变异（3 行早退） | 已 `git checkout` 还原，`git diff` 为空 ✓ |
+| `/tmp` 下的日志、渲染结果、helm 二进制 | 已删除 ✓ |
+| 容器 | `base-postgres` / `base-redis` 仍为 2 个且 healthy（未新建） ✓ |
 
-**VERDICT: PASS-WITH-RISK**
+**结束状态**：`git status` 仅 `M feature-meta/qa-report.md`（首轮报告，本轮未改动）与 `M feature-meta/qa-report-recheck.md`（本报告）；其余干净。
+
+> 注：本文件在本次复核前存放的是 **REQ-005** 的复核报告（BA 已归档于 `a56869f`，内容在 git 历史里可查）。
+> 与首轮报告 `feature-meta/qa-report.md` 的处理方式一致（同一路径复用，内容按当前需求覆盖）。
