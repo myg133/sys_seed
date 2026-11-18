@@ -4,6 +4,49 @@
 
 ## Unreleased
 
+### REQ-010 配置、品牌与 Feature Flag
+
+- **新建 `crates/platform-config`**（平台 crate）与前端 shell 的品牌接入：
+  - **三层配置**（平台 → 租户 → 空间）与 `source` 四值
+    （`platform` / `tenant` / `space` / `default`）；`default` 是**独立枚举**
+    `ConfigSource`，`ConfigScope` 仍只三值（不新增可写层）
+  - **注册表来自 manifest 的 `config` 段**：未声明的键写入 **400**、读取 **404**；
+    值按登记的 JSON 类型校验（`"20"` ≠ `20`）
+  - **作用域 = 允许覆盖的最深层**：`platform` 只能平台写、`tenant` 不许空间写；
+    空间级写还必须在**品牌白名单**内（枚举 11 个键，不用 `theme.*` 通配）
+  - **`ConfigResolver` trait** 迁到 `platform-core/src/extension/config.rs`
+    （`kind = platform-capability`，**不是扩展点**；`extension_point_count` 仍是 5）；
+    骨架实现改名 `InMemoryConfigResolver`
+  - **`DbConfigResolver`**：缓存存 `(platform_epoch, tenant_epoch)` **成对比较**
+    （**不是 `max(epoch)`** —— 会被更高的租户 epoch 掩蔽）；
+    **下一个请求**生效，失效信号来自共享数据库
+  - **Feature Flag**：`flags.<F>.rolloutPercent` 派生键；
+    `sha256("<flag>:<user>") % 100` **确定性灰度**（禁 `RandomState`）、
+    单调性 / 边界 / 无身份 fail closed；未登记 flag **不 404**（200 + false + WARN）；
+    非法 flag 名 **400** 且不进日志
+- **迁移 `20261118001000_config_schema`**（含 down）：
+  - `platform_config`（无 `tenant_id`、无 RLS）/ `platform_space_config`（RLS）/
+    `platform_config_epoch`；`platform_tenant_config.value` 由 **TEXT → JSONB**
+  - 平台级表**显式 `REVOKE INSERT/UPDATE/DELETE`**（`ALTER DEFAULT PRIVILEGES` 会给新表自动授权）；
+    唯一写通道是 `SECURITY DEFINER` 的 `platform_config_upsert`，**同事务自增 `platform` epoch**
+  - **down 不删除 `platform_tenant_config`**（REQ-006 的历史表，只把列转回 TEXT）
+  - `deploy/seed/02-app-role.sql` 重跑时**再收一次**平台表的直接 DML 权限
+- **权限点**：`config:entry:write` / `config:flag:write` /
+  `config:platform:write` / `config:platform:read`（manifest + 种子迁移
+  `20261118000902` + 重生成 `capabilities/`）
+- **接口**：`GET/PUT /api/config/entries`、`GET/PUT /api/config/platform-entries`（**独立路由**）、
+  `GET /api/config/branding`（**公开**、白名单、扁平 map、忽略空间级）、
+  `GET /api/feature-flags`、`GET/PUT /api/feature-flags/{flag}`
+  - **flag 只能经 flag 接口改**：通用写路由收到 flag 名 / `flags.` 前缀 → 400
+    `CONFIG_FLAG_USE_FLAG_ENDPOINT`（否则 `config:flag:write` 被架空）
+  - 新增 7 个稳定 400 错误码（D62 + D70）；通用读路由收到平台级键 → **整请求 403**
+- **契约检查**：`platform-contracts` 新增**不依赖 `ContractFixture`** 的 C-5 入口
+  `check_c5_for(manifest, src)`（平台 crate 没有 `Repository` + `PlatformModule`）；
+  顺带修掉扫描器把**生命周期 `'a`** 当字符字面量、吞掉后续代码的缺陷
+- **前端**：`apps/shell` 的 `<title>` / `<h1>` / 主色**从 `/api/config/branding` 读取**
+  （同源、无 CORS）；`e2e/shell.spec.ts` 改为断言运行时标题；新增 `scripts/e2e-server.sh`
+  用 `platform-server` 静态目录做同源 E2E
+
 ### REQ-009 RBAC 权限与数据范围
 
 - **新建 `crates/platform-rbac`**（平台 crate；依赖方向

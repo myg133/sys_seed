@@ -2,7 +2,7 @@
   "already_provided": {
     "audit_declaration": "Auditable + AuditEventSpec 提供审计事件声明面，平台据此自动埋点，勿自建审计表",
     "auth_state": "@base/auth 的 isAuthenticated()/tenantId() 提供登录态形状，勿另造登录态模型",
-    "config": "ConfigScope/ConfigResolver/AppConfig + manifest 的 config 段提供配置分层（platform/tenant/space），勿自建配置读取",
+    "config": "ConfigScope/ConfigResolver（platform-capability，不是扩展点）/AppConfig + manifest 的 config 段提供三层配置与 Feature Flag（4 个权限点 config:entry:write / config:flag:write / config:platform:write / config:platform:read），勿自建配置读取",
     "contract_suite": "#[platform_module_contract] 自动生成 C-1~C-5 五项契约测试（C-5：已登记权限点必须有鉴权调用点、鉴权入口全仓库唯一），勿自写重复的契约检查",
     "error_code_i18n": "@base/i18n 的 translate()/hasMessage() 提供错误码到文案映射，勿在后端拼中文句子",
     "hooks_toggle": "@base/hooks 的 createToggle() 提供通用布尔开关状态容器，勿另造状态容器",
@@ -31,7 +31,7 @@
       "traits": 5
     },
     "permissions.json": {
-      "total": 18
+      "total": 22
     },
     "schema/manifest.schema.json": {},
     "schema/metadata.schema.json": {},
@@ -81,5 +81,5 @@
     ],
     "version": "0.1.0"
   },
-  "source_fingerprint": "fnv1a64:f3ef0d24261a9c90"
+  "source_fingerprint": "fnv1a64:59a20fe818fac5f5"
 }

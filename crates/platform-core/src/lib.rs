@@ -9,12 +9,13 @@ pub mod error;
 pub mod extension;
 pub mod problem;
 
-pub use config::{AppConfig, ConfigEntry, ConfigKey, ConfigResolver, ConfigScope};
+pub use config::{AppConfig, ConfigEntry, ConfigKey, ConfigScope, InMemoryConfigResolver};
 pub use context::RequestContext;
 pub use error::{CoreError, CoreResult};
 pub use extension::{
-    Auditable, DataScope, Manifest, ModuleContext, NotificationSender, PermissionChecker,
-    PlatformModule, Repository, ScopeFilter, WorkflowHandler,
+    Auditable, ConfigResolver, ConfigSource, DataScope, FlagDecision, Manifest, ModuleContext,
+    NotificationSender, PermissionChecker, PermissionRefresher, PlatformModule, Repository,
+    ResolvedConfig, ScopeFilter, WorkflowHandler,
 };
 pub use problem::ProblemDetails;
 

@@ -1525,6 +1525,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
+name = "platform-config"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "http-body-util",
+ "platform-contracts",
+ "platform-core",
+ "platform-db",
+ "platform-rbac",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "thiserror 2.0.21",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "platform-contracts"
 version = "0.1.0"
 dependencies = [
@@ -1651,6 +1673,7 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
+ "platform-config",
  "platform-core",
  "platform-db",
  "platform-iam",

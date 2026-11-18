@@ -193,6 +193,30 @@ pub trait PermissionChecker: Send + Sync + 'static {
     fn condition(&self, ctx: &RequestContext, permission: &str) -> Option<CompiledCondition>;
 }
 
+/// 权限判定的**异步刷新**接缝（平台能力，不是扩展点）。
+///
+/// [`PermissionChecker`] 的方法必须同步（dyn 兼容），所以读库发生在**方法之外**：
+/// 认证中间件在请求进入时调用一次 [`Self::ensure_fresh`]，同步方法只读已填好的缓存。
+///
+/// # 为什么放在 `platform-core`
+///
+/// 任何**自带认证中间件**的平台模块（REQ-010 的 `platform-config` 就是第一个）
+/// 都要在 `require_permission` 之前刷新判定缓存；没有这个接缝，它只能去依赖
+/// `platform-rbac` 的具体实现（平台模块之间不该这样耦合）。
+///
+/// 返回 `Pin<Box<dyn Future>>` 而不是 RPITIT —— 这样它可以
+/// `Arc<dyn PermissionRefresher>`（trait object），与 [`PermissionChecker`] 保持同样的
+/// 装配方式。
+pub trait PermissionRefresher: Send + Sync + 'static {
+    /// 用共享数据库的 epoch 判断缓存是否新鲜；不一致则重算。
+    ///
+    /// 失败时返回**英文**原因（由调用方转成 `INTERNAL_ERROR`；**不得放行**）。
+    fn ensure_fresh<'a>(
+        &'a self,
+        ctx: &'a RequestContext,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
+}
+
 /// 鉴权入口：**平台唯一的权限判定入口**。
 ///
 /// ```ignore

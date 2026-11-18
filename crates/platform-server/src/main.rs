@@ -11,7 +11,9 @@
 //! 配置校验失败时**立即退出**（退出码 2），不进入监听状态。
 //! 租户隔离前提不成立时（连接角色绕过 RLS）同样**立即退出**（退出码 3）。
 
-use std::path::PathBuf;
+use std::future::Future;
+use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::ExitCode;
 use std::sync::Arc;
 
@@ -22,6 +24,10 @@ use axum::routing::get;
 use axum::{Json, Router};
 use clap::{Parser, Subcommand};
 use platform_core::RequestContext;
+use platform_core::extension::expr::CompiledCondition;
+use platform_core::extension::permission::{
+    DataScope, PermissionChecker, PermissionRefresher, ScopeFilter,
+};
 use platform_iam::config::IamConfig;
 use platform_iam::http::IamState;
 use platform_iam::service::IamService;
@@ -280,6 +286,14 @@ async fn serve() -> Result<(), Failure> {
         .route("/health/live", get(live))
         .route("/health/ready", get(ready));
 
+    // 配置与开关（REQ-010）的认证 / 鉴权部件。默认 **fail closed**：
+    // 没配 IAM 时没有可铸造的令牌、权限判定一律拒绝 —— 但 `/api/config/branding`
+    // 是公开接口，仍要能渲染登录页（它不经过认证中间件）。
+    let mut config_tokens: Arc<dyn platform_config::http::TokenVerifier> =
+        Arc::new(RejectAllTokens);
+    let mut config_checker: Arc<dyn PermissionChecker> = Arc::new(DenyAllPermissions);
+    let mut config_permissions: Arc<dyn PermissionRefresher> = Arc::new(DenyAllPermissions);
+
     // 认证与账号体系（REQ-007）：`/api/iam/*` + JWKS。
     //
     // **配了就必须配对**：环境变量里只要出现过一个 IAM 相关变量，就要求整套配置
@@ -305,8 +319,15 @@ async fn serve() -> Result<(), Failure> {
         // （退出码非 0，逐条列出差异）。不一致不是告警 —— 告警就是静默放行的一种。
         let rbac_state = build_rbac_state(&config, iam_state.service.clone()).await?;
         reconcile_permissions(&config, &rbac_state).await?;
-        app = app.nest("/api/rbac", platform_rbac::http::router(rbac_state));
+        app = app.nest("/api/rbac", platform_rbac::http::router(rbac_state.clone()));
         tracing::info!("角色与权限已启用：/api/rbac/*");
+
+        // 配置接口的令牌校验与权限判定复用同一套 IAM / RBAC 实现：
+        // 令牌主体来自 IAM，权限点判定与缓存刷新来自 `RbacChecker`
+        // （同一个 `Arc` 同时实现 `PermissionChecker` 与 `PermissionRefresher`）。
+        config_tokens = Arc::new(ConfigIamTokenVerifier::new(iam_state.service.clone()));
+        config_checker = rbac_state.checker.clone();
+        config_permissions = rbac_state.checker.clone();
     } else {
         tracing::warn!(
             "未检测到 IAM 环境变量（BASE_JWT_* / BASE_IAM_*）：平台不提供 /api/iam/* 与 /api/org/* 接口"
@@ -314,6 +335,18 @@ async fn serve() -> Result<(), Failure> {
     }
 
     let app = app.fallback(static_fallback).with_state(state);
+
+    // 配置、品牌与 Feature Flag（REQ-010）：`/api/config/*` + `/api/feature-flags/*`。
+    //
+    // 品牌接口公开（登录页在认证前就要显示 logo）；其余接口需要令牌 + 权限点。
+    let config_state = Arc::new(platform_config::http::ConfigState {
+        service: build_config_service(&config).await?,
+        tokens: config_tokens,
+        checker: config_checker,
+        permissions: config_permissions,
+    });
+    let app = app.merge(platform_config::http::router(config_state));
+    tracing::info!("配置与品牌已启用：/api/config/*、/api/feature-flags/*");
 
     let addr = config.socket_addr();
     let listener = tokio::net::TcpListener::bind(addr)
@@ -413,6 +446,101 @@ async fn build_rbac_state(
         checker,
         tokens: Arc::new(platform_rbac::http::IamTokenVerifier::new(iam)),
     }))
+}
+
+/// 构造配置服务（注册表来自 manifest 根目录，数据访问只走 `platform-db`）。
+async fn build_config_service(
+    config: &DeployConfig,
+) -> Result<Arc<platform_config::ConfigService>, Failure> {
+    // 数据访问走 `platform-db` 的租户作用域入口（**不得**直连池）。
+    let tenant_db =
+        platform_db::TenantDb::connect(&config.database_url, platform_db::DbOptions::default())
+            .await
+            .map_err(|err| Failure::Runtime(format!("数据库连接串非法：{err}")))?;
+
+    let registry =
+        platform_config::ConfigRegistry::from_manifest_root(Path::new(&config.manifest_root))
+            .map_err(|err| Failure::Runtime(format!("配置键注册表加载失败：{err}")))?;
+    if registry.is_empty() {
+        return Err(Failure::Runtime(
+            "配置键注册表为空：manifest 根目录下没有找到任何 config 段（检查 BASE_MANIFEST_ROOT）"
+                .to_string(),
+        ));
+    }
+
+    Ok(Arc::new(platform_config::ConfigService::new(
+        tenant_db,
+        Arc::new(registry),
+    )))
+}
+
+/// 没配 IAM 时的令牌校验：**一律拒绝**（fail closed）。
+struct RejectAllTokens;
+
+impl platform_config::http::TokenVerifier for RejectAllTokens {
+    fn verify(
+        &self,
+        _token: &str,
+    ) -> Result<platform_config::http::VerifiedToken, platform_config::ConfigError> {
+        Err(platform_config::ConfigError::Unauthenticated)
+    }
+}
+
+/// 没配 IAM 时的权限判定：**一律拒绝**（fail closed）。
+struct DenyAllPermissions;
+
+impl PermissionChecker for DenyAllPermissions {
+    fn has(&self, _ctx: &RequestContext, _permission: &str) -> bool {
+        false
+    }
+
+    fn scope(&self, _ctx: &RequestContext, _scope: DataScope) -> ScopeFilter {
+        ScopeFilter::All
+    }
+
+    fn effective_scope(&self, _ctx: &RequestContext, _permission: &str) -> ScopeFilter {
+        ScopeFilter::All
+    }
+
+    fn condition(&self, _ctx: &RequestContext, _permission: &str) -> Option<CompiledCondition> {
+        None
+    }
+}
+
+impl PermissionRefresher for DenyAllPermissions {
+    fn ensure_fresh<'a>(
+        &'a self,
+        _ctx: &'a RequestContext,
+    ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+/// IAM 的令牌校验适配器（只转发验签，不重写语义）。
+struct ConfigIamTokenVerifier {
+    inner: Arc<platform_iam::service::IamService>,
+}
+
+impl ConfigIamTokenVerifier {
+    fn new(inner: Arc<platform_iam::service::IamService>) -> Self {
+        Self { inner }
+    }
+}
+
+impl platform_config::http::TokenVerifier for ConfigIamTokenVerifier {
+    fn verify(
+        &self,
+        token: &str,
+    ) -> Result<platform_config::http::VerifiedToken, platform_config::ConfigError> {
+        let claims = self
+            .inner
+            .verify_access_token(token)
+            .map_err(|_| platform_config::ConfigError::Unauthenticated)?;
+        Ok(platform_config::http::VerifiedToken {
+            user_id: claims.subject,
+            tenant_id: claims.tenant_id,
+        })
+    }
 }
 
 /// **权限点注册表的双向对账**：manifest ↔ 库。

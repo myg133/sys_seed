@@ -3,14 +3,30 @@
 //! 两组类型：
 //!
 //! - `AppConfig`：进程级配置（地址、数据库、缓存连接串），只做类型与默认值骨架。
-//! - `ConfigScope` / `ConfigKey` / `ConfigEntry` / `ConfigResolver`：
-//!   平台配置项模型，遵循 `api-conventions v1` C9 —— 键名 camelCase、层级 `.` 分隔、
+//! - `ConfigScope` / `ConfigKey` / `ConfigEntry` / `InMemoryConfigResolver`：
+//!   平台配置项模型，遵循 `api-conventions v2` C9 —— 键名 camelCase、层级 `.` 分隔、
 //!   作用域优先级 空间 > 租户 > 平台。
+//!
+//! # REQ-010 的迁移（design-summary §1 / D63）
+//!
+//! | 内容 | 位置 |
+//! |------|------|
+//! | `ConfigResolver` **trait** / `ConfigSource` / `ResolvedConfig` / `FlagDecision` | `crate::extension::config`（能力索引只扫 `extension/`） |
+//! | `AppConfig`（进程级配置） | 本文件 |
+//! | `InMemoryConfigResolver`（REQ-002 的骨架实现） | 本文件 |
+//!
+//! 骨架原来叫 `ConfigResolver`（结构体）；REQ-010 把它改成 trait 并把这个
+//! 纯内存实现改名为 `InMemoryConfigResolver` —— **不是**新增同名类型，
+//! 所有引用点都跟着改（`lib.rs` / 能力目录 / 测试）。
+//!
+//! `source` 用的是四值的 [`ConfigSource`]，`ConfigScope` 保持三值（D60）。
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::context::RequestContext;
 use crate::error::{CoreError, CoreResult};
+use crate::extension::config::{ConfigResolver, ConfigSource, FlagDecision, ResolvedConfig};
 
 /// 进程级配置骨架。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +87,18 @@ pub enum ConfigScope {
 }
 
 impl ConfigScope {
+    /// 落库 / API 用的名字（`platform` / `tenant` / `space`）。
+    ///
+    /// ⚠️ **没有 `default`** —— `source` 的四值见
+    /// [`crate::extension::config::ConfigSource`]（D60）。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Platform => "platform",
+            Self::Tenant => "tenant",
+            Self::Space => "space",
+        }
+    }
+
     /// 优先级权重，数值越大越优先。
     pub fn rank(self) -> u8 {
         match self {
@@ -119,16 +147,19 @@ impl TryFrom<&str> for ConfigKey {
 pub struct ConfigEntry {
     pub key: String,
     pub value: Value,
-    pub source: ConfigScope,
+    pub source: ConfigSource,
 }
 
-/// 配置解析器骨架：按作用域优先级命中一条配置。
+/// 纯内存的配置解析器（REQ-002 的骨架实现）。
+///
+/// 不连库、不缓存失效 —— 真实实现是 `platform-config` 的 `DbConfigResolver`；
+/// 这个实现留在平台核心里供业务模块的单元测试与最小示例使用。
 #[derive(Debug, Clone, Default)]
-pub struct ConfigResolver {
+pub struct InMemoryConfigResolver {
     entries: Vec<ConfigEntry>,
 }
 
-impl ConfigResolver {
+impl InMemoryConfigResolver {
     /// 空解析器。
     pub fn new() -> Self {
         Self::default()
@@ -155,6 +186,26 @@ impl ConfigResolver {
     /// 是否为空。
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+}
+
+impl ConfigResolver for InMemoryConfigResolver {
+    fn resolve(&self, _ctx: &RequestContext, key: &ConfigKey) -> Option<ResolvedConfig> {
+        let entry = self
+            .entries
+            .iter()
+            .filter(|entry| entry.key == key.as_str())
+            .max_by_key(|entry| entry.source.rank())?;
+        Some(ResolvedConfig {
+            key: entry.key.clone(),
+            value: entry.value.clone(),
+            source: entry.source,
+        })
+    }
+
+    fn flag(&self, _ctx: &RequestContext, flag: &str) -> FlagDecision {
+        // 内存实现没有 flag 配置：一律「未配置 → 关闭 + default」（fail closed）。
+        FlagDecision::disabled(flag)
     }
 }
 
@@ -198,32 +249,32 @@ mod tests {
 
     #[test]
     fn resolver_prefers_space_over_tenant_over_platform() {
-        let mut resolver = ConfigResolver::new();
+        let mut resolver = InMemoryConfigResolver::new();
         resolver.insert(ConfigEntry {
             key: "logo".to_string(),
             value: json!("/platform.svg"),
-            source: ConfigScope::Platform,
+            source: ConfigSource::Platform,
         });
         resolver.insert(ConfigEntry {
             key: "logo".to_string(),
             value: json!("/tenant.svg"),
-            source: ConfigScope::Tenant,
+            source: ConfigSource::Tenant,
         });
         resolver.insert(ConfigEntry {
             key: "logo".to_string(),
             value: json!("/space.svg"),
-            source: ConfigScope::Space,
+            source: ConfigSource::Space,
         });
 
         let hit = resolver.resolve("logo").expect("应命中配置");
         assert_eq!(hit.value, json!("/space.svg"));
-        assert_eq!(hit.source, ConfigScope::Space);
+        assert_eq!(hit.source, ConfigSource::Space);
         assert_eq!(resolver.len(), 3);
     }
 
     #[test]
     fn resolver_returns_none_for_unknown_key() {
-        let resolver = ConfigResolver::new();
+        let resolver = InMemoryConfigResolver::new();
         assert!(resolver.is_empty());
         assert!(resolver.resolve("missing").is_none());
     }

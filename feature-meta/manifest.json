@@ -6,5 +6,9 @@
   "owner": "myg133-ba-1",
   "base_branch": "develop",
   "created_at": "2026-11-18T23:21:20+08:00",
-  "demand_dir": "BA/demands/REQ-010-config-branding"
+  "demand_dir": "BA/demands/REQ-010-config-branding",
+  "contracts": {
+    "api-conventions": "v2",
+    "extension-points": "v2"
+  }
 }

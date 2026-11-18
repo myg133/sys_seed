@@ -50,6 +50,21 @@ GRANT USAGE ON SCHEMA public TO base_platform_app;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO base_platform_app;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO base_platform_app;
 
+-- ⚠️ **例外：平台级配置表（REQ-010 D56）**。
+--
+-- `platform_config` 是**跨租户影响**的表：直接 DML 必须被收回，写入只走
+-- `platform_config_upsert`（SECURITY DEFINER）。上面那句 `GRANT ... ON ALL TABLES`
+-- 是补建场景的兜底，它会在**本脚本重跑时**把迁移里的 REVOKE 又盖回去 ——
+-- 所以这里必须再收一次（表还不存在时跳过：首次建库先跑本脚本、后跑迁移）。
+DO $$
+BEGIN
+    IF to_regclass('public.platform_config') IS NOT NULL THEN
+        EXECUTE 'GRANT SELECT ON platform_config TO base_platform_app';
+        EXECUTE 'REVOKE INSERT, UPDATE, DELETE ON platform_config FROM base_platform_app';
+    END IF;
+END
+$$;
+
 -- **增量**：之后由本角色（base）创建的表自动授权给应用角色组（省掉逐表 GRANT）
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO base_platform_app;

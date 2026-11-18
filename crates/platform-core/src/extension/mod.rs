@@ -36,6 +36,7 @@
 //! （可安全交给 tokio 任务）。
 
 pub mod auditable;
+pub mod config;
 pub mod expr;
 pub mod manifest;
 pub mod manifest_schema;
@@ -48,6 +49,7 @@ pub mod transaction;
 pub mod workflow;
 
 pub use auditable::{AuditEventSpec, Auditable};
+pub use config::{ConfigResolver, ConfigSource, FlagDecision, ResolvedConfig};
 pub use expr::{
     CompiledCondition, ConditionValue, EvalContext, Expr, ExprError, FieldBinding, FieldWhitelist,
     Op, Operand, ValueKind,
@@ -58,8 +60,8 @@ pub use manifest::{
 };
 pub use notification::{DeliveryResult, NotificationMessage, NotificationSender};
 pub use permission::{
-    DataScope, PermissionChecker, PermissionLayer, PermissionService, ScopeFilter,
-    require_permission,
+    DataScope, PermissionChecker, PermissionLayer, PermissionRefresher, PermissionService,
+    ScopeFilter, require_permission,
 };
 pub use platform_module::{ModuleContext, PlatformModule};
 pub use registry::{ModuleRegistration, discover, discover_enabled};

@@ -8,7 +8,7 @@ export interface NavItem {
   readonly path: string;
 }
 
-/** 底座壳默认菜单（本期为占位数据，后续由应用注册表下发）。 */
+/** 默认菜单（本期为占位数据，后续由应用注册表下发）。 */
 export const NAV_ITEMS: readonly NavItem[] = [
   { key: 'workbench', label: '工作台', path: '/workbench' },
   { key: 'iam', label: '账号与认证', path: '/api/iam' },

@@ -45,7 +45,7 @@ pub mod runtime;
 pub mod suite;
 
 pub use checks::{
-    CheckOutcome, assert_compliant, check_c1, check_c2, check_c3, check_c4, check_c5,
+    CheckOutcome, assert_compliant, check_c1, check_c2, check_c3, check_c4, check_c5, check_c5_for,
 };
 pub use fixture::{ContractFixture, ContractSubject, Seeded};
 pub use runtime::block_on;
@@ -57,6 +57,7 @@ pub use platform_contracts_macros::platform_module_contract;
 pub mod prelude {
     pub use crate::checks::{
         CheckOutcome, assert_compliant, check_c1, check_c2, check_c3, check_c4, check_c5,
+        check_c5_for,
     };
     pub use crate::fixture::{ContractFixture, ContractSubject, Seeded};
     pub use crate::runtime::block_on;

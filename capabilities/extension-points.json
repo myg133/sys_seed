@@ -21,6 +21,26 @@
     },
     {
       "associated_types": [],
+      "description": "配置解析能力（**平台实现，业务模块调用**）。",
+      "generics": "",
+      "kind": "platform-capability",
+      "methods": [
+        {
+          "declaration": "fn resolve(&self, ctx: &RequestContext, key: &ConfigKey) -> Option<ResolvedConfig>",
+          "has_default": false,
+          "name": "resolve"
+        },
+        {
+          "declaration": "fn flag(&self, ctx: &RequestContext, flag: &str) -> FlagDecision",
+          "has_default": false,
+          "name": "flag"
+        }
+      ],
+      "name": "ConfigResolver",
+      "supertraits": "Send + Sync + 'static"
+    },
+    {
+      "associated_types": [],
       "description": "通知投递扩展点。",
       "generics": "",
       "kind": "extension-point",
@@ -67,6 +87,21 @@
         }
       ],
       "name": "PermissionChecker",
+      "supertraits": "Send + Sync + 'static"
+    },
+    {
+      "associated_types": [],
+      "description": "权限判定的**异步刷新**接缝（平台能力，不是扩展点）。",
+      "generics": "",
+      "kind": "platform-capability",
+      "methods": [
+        {
+          "declaration": "fn ensure_fresh<'a>(&'a self, ctx: &'a RequestContext) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>",
+          "has_default": false,
+          "name": "ensure_fresh"
+        }
+      ],
+      "name": "PermissionRefresher",
       "supertraits": "Send + Sync + 'static"
     },
     {

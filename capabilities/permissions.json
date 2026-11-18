@@ -34,6 +34,32 @@
       ]
     },
     {
+      "manifest": "crates/platform-config/manifest.json",
+      "module": "config",
+      "permissions": [
+        {
+          "code": "config:entry:write",
+          "name": "写租户级/空间级配置",
+          "type": "button"
+        },
+        {
+          "code": "config:flag:write",
+          "name": "改功能开关",
+          "type": "button"
+        },
+        {
+          "code": "config:platform:write",
+          "name": "写平台级配置",
+          "type": "button"
+        },
+        {
+          "code": "config:platform:read",
+          "name": "读平台级配置",
+          "type": "button"
+        }
+      ]
+    },
+    {
       "manifest": "crates/platform-org/manifest.json",
       "module": "org",
       "permissions": [
@@ -111,5 +137,5 @@
       ]
     }
   ],
-  "total": 18
+  "total": 22
 }
