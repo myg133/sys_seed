@@ -75,6 +75,9 @@ pub struct TenantPoliciesArgs {
     #[arg(long)]
     pub check: bool,
     /// 数据库连接串；默认取环境变量 `DATABASE_URL`。
+    ///
+    /// 生成策略需要**表的属主权限** → 用管理员角色；
+    /// 校验隔离前提可用应用角色（超级用户会给出「绕过 RLS」告警）。
     #[arg(long)]
     pub database_url: Option<String>,
 }

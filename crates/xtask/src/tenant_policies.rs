@@ -67,6 +67,9 @@ pub fn collect_scopes(root: &Path) -> Result<Vec<ModuleScope>> {
 }
 
 /// 应用策略（幂等）：按 manifest 的声明生成 / 补齐 RLS 策略。
+///
+/// ⚠️ **需要表的属主权限**（`ALTER TABLE` / `CREATE POLICY`）——
+/// 用管理员角色执行；用应用角色跑会报「must be owner of table」。
 pub async fn apply(scopes: &[ModuleScope], database_url: &str) -> Result<()> {
     let db = TenantDb::connect(database_url, DbOptions::default())
         .await
@@ -80,6 +83,10 @@ pub async fn apply(scopes: &[ModuleScope], database_url: &str) -> Result<()> {
 }
 
 /// 校验：每张 `tenantScoped` 声明的表都必须**真的有** policy（漏建 = 完全无隔离）。
+///
+/// 连接角色绕过 RLS（超级用户 / `BYPASSRLS`）时**只警告不失败**：
+/// 运维通常用管理员角色跑这条检查，而「应用连接用的是什么角色」是另一件事
+/// （用应用角色跑一次 `require_isolation` 才是它的判据，见 `platform-db`）。
 pub async fn check(scopes: &[ModuleScope], database_url: &str) -> Result<()> {
     let db = TenantDb::connect(database_url, DbOptions::default())
         .await
@@ -89,13 +96,17 @@ pub async fn check(scopes: &[ModuleScope], database_url: &str) -> Result<()> {
         .await
         .context("cannot verify the tenant isolation policies")?;
 
-    let mut problems = report.problems();
-    if report.role_bypasses_rls {
-        problems.push(format!(
-            "the connected role `{}` bypasses RLS: the application must connect with a \
-             non-superuser role (see deploy/seed/02-app-role.sql)",
-            report.role
-        ));
+    let mut problems = Vec::new();
+    for table in &report.tables {
+        if !table.rls_enabled {
+            problems.push(format!(
+                "table `{}` does not have ROW LEVEL SECURITY enabled",
+                table.table
+            ));
+        }
+        if table.policy_count == 0 {
+            problems.push(format!("table `{}` has no isolation policy", table.table));
+        }
     }
     if !problems.is_empty() {
         bail!(
@@ -105,6 +116,15 @@ pub async fn check(scopes: &[ModuleScope], database_url: &str) -> Result<()> {
                 .map(|problem| format!("  - {problem}"))
                 .collect::<Vec<_>>()
                 .join("\n")
+        );
+    }
+
+    if report.role_bypasses_rls {
+        println!(
+            "警告：当前连接角色 `{}` 绕过 RLS（超级用户或 BYPASSRLS）。\
+             如果**应用**也用这个角色连接，租户隔离会 fail open —— \
+             请用应用角色（组 base_platform_app 的成员）再自检一次。",
+            report.role
         );
     }
     Ok(())

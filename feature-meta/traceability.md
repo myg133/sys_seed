@@ -1,13 +1,13 @@
-# REQ-005 追溯性矩阵
+# REQ-006 追溯性矩阵
 
-- **需求**: REQ-005 交付基线与发布
-- **分支**: `feature/REQ-005`
-- **基线**: `develop` @ `37a93c5`（REQ-002 工程基线 + REQ-003 扩展点框架 + REQ-004 AI 引导体系已合并）
-- **契约**: api-conventions v1、extension-points v1（已 ratified，已在 `feature-meta/manifest.json` pin）
-- **设计依据**: `BA/demands/REQ-005-delivery/design-summary.md`
+- **需求**: REQ-006 多租户与隔离
+- **分支**: `feature/REQ-006`
+- **基线**: `develop` @ `806bb66`（REQ-002 工程基线 + REQ-003 扩展点框架 + REQ-004 AI 引导体系 + REQ-005 交付基线已合并）
+- **设计依据**: `BA/demands/REQ-006-tenant/design-summary.md`（架构决策 D1–D8 已定死，本轮照它做）
+- **契约**: api-conventions v1、extension-points v1（已 ratified）
 - **开发者**: myg133-dev-1
-- **更新时间**: 2026-11-18（**微修轮**：QA 复核 PASS-WITH-RISK 后，只修复核新发现的 2 个低问题 —— 日志过滤器与 RUNBOOK `env_file` 口径）
-- **本轮复核依据**: `feature-meta/qa-report-recheck.md`（QA 复核：首轮 1 中 + 4 低全部复现为已修复，新发现 **2 个低**；结论与证据见验证报告 §4.2）
+- **更新时间**: 2026-11-18
+- **本轮改动**: 37 文件 / +2860 -20 行（vs BA 分配提交 `31c692b`）
 
 图例：**PASS** = 已实现且有自动化或可复现的验证证据；**未验证** = 没有证据，如实标注。
 
@@ -17,48 +17,59 @@
 
 | AC | 内容 | 实现位置 | 验证方式与证据 | 结论 |
 |----|------|----------|----------------|------|
-| AC-S-005 | 配置与代码分离：同一镜像可通过环境变量切分 dev/staging/prod，无需重新构建；失败路径有明确错误码 | `crates/platform-server/src/config.rs`（`DeployConfig::from_env` / `from_lookup`）、`crates/platform-server/src/main.rs`（启动前校验 + 退出码）、`.env.example`、`deploy/compose.prod.yaml`、`deploy/helm/base-platform/templates/configmap.yaml` + `deployment.yaml` | ① **同一二进制**在 `BASE_ENV=dev` / `staging` / `prod` 三种取值下行为不同（`config::tests::same_image_switches_environment_by_env_var`）；② **fail-fast 实测**：去掉 `DATABASE_URL` 启动 → 打印 `[CONFIG_MISSING_REQUIRED] DATABASE_URL：…` 并以**退出码 2** 退出（不监听端口）；③ 非法取值（`BASE_ENV=pro` / `SERVER_PORT=not-a-port`）→ `CONFIG_INVALID_VALUE`，多个问题**一次报全**（`config::tests::all_problems_are_reported_at_once`）；④ `BASE_ENV=prod` + `BASE_SEED_ON_START=true` → `CONFIG_FORBIDDEN_COMBINATION`；⑤ 镜像里**不含任何环境相关配置**，dev/staging/prod 靠同一镜像 + 环境变量切换（compose 用 `.env`，K8s 用 ConfigMap/Secret）；⑥ 错误码稳定：`CONFIG_MISSING_REQUIRED` / `CONFIG_INVALID_VALUE` / `CONFIG_FORBIDDEN_COMBINATION` | **PASS** |
-| AC-S-006 | 迁移可回滚：迁移失败时能恢复到迁移前状态，且恢复过程有演练记录 | `crates/platform-server/src/migrate.rs`、`migrations/20261118000100_platform_meta.{up,down}.sql`、`scripts/rollback.sh`、`deploy/RUNBOOK.md` §6.2 | ① **可逆迁移实测**：干净库上 `migrate up` → 建出 `platform_meta`；`migrate down --target 0` → 该表消失（只剩 sqlx 自身的 `_sqlx_migrations` 记账表）；再 `up` 可重复执行；② **不可逆保护**：`migrate down` 遇到没有 `down.sql` 的版本会返回 `MigrationError::Irreversible` 并拒绝回滚（`migrate::tests::irreversible_error_names_the_blocking_versions`）；③ `scripts/rollback.sh <版本>` 实跑：先自动备份 → 再执行 down → 打印被撤销的版本（实测 `base_migrate_drill` 上回滚到 0 成功）；④ **演练记录真实**：`deploy/RUNBOOK.md` §6.2 记录了 2026-11-18 的实际执行（备份 307ms / 恢复 704ms / 校验演练 1509ms，均为本机实测值），临时库与测试表已清理 | **PASS** |
+| AC-S-007 | RLS 兜底生效：故意在应用层漏写 `tenant_id` 过滤，数据库仍不返回他租数据 | `crates/platform-db/src/rls.rs`（policy 生成）、`migrations/20261118000200_tenant_isolation.up.sql`（平台表 policy）、`modules/sandbox/tests/c3_real_db.rs`（真实库层）、`crates/platform-db/src/tenant.rs`（租户入口） | ① **真实库实测**（`base_test`）：策略 `USING (tenant_id = current_setting('app.tenant_id', true))` + `WITH CHECK` 同式；② **管理员连接（超级用户，绕过 RLS）看到 4 行**，**应用角色不设 `app.tenant_id` 看到 0 行** —— 对照组证明「0 行」不是因为表里没数据，而是 RLS 挡住；③ 应用角色设了 `app.tenant_id='tenant-a'` 只看到 tenant-a 的 2 行；④ 漏写租户条件的写入被 `WITH CHECK` 拒绝（`new row violates row-level security policy`）；⑤ `require_isolation` 自检：角色不绕过 RLS + 每张声明的表都开了 RLS 且有 policy，否则 `DbError::RlsBypassed` / `DbError::MissingPolicy`；⑥ **失败路径有明确错误码**：`RLS_BYPASSED_BY_ROLE` / `RLS_POLICY_MISSING` / `TENANT_CONTEXT_MISSING` / `INVALID_QUERY` / `DATABASE_ERROR` | **PASS** |
+| AC-S-008 | 上下文跨消息边界：异步消息与缓存 key 均带租户维度 | —— | **本期未实现**：设计摘要 §8「本期交付边界」**不含**缓存/消息链路（那是租户上下文中间件，属 REQ-019 API 治理）。本轮交付的是**数据库层**的租户上下文贯穿（`RequestContext` → `SET LOCAL app.tenant_id` → RLS），缓存 key / 消息体的租户维度**未做** | **未实现（如实登记，见 §5）** |
 
-## 2. 设计摘要 §7 交付清单
+## 2. 交付清单（A–F）
 
 | 交付项 | 实现位置 | 验证方式与证据 | 结论 |
 |--------|----------|----------------|------|
-| 多阶段 Dockerfile（builder / frontend / runtime），目标镜像 < 100MB | `Dockerfile`（3 个 stage + `cargo-chef` 依赖层缓存）、`.dockerignore` | ① builder 用 `rust:lld`（**不是**官方 `rust` 镜像）、runtime 用 `debian:12-slim`、非 root（uid 10001）；② **本机未构建镜像**（低配机内存不够，见验证报告 §6）—— Dockerfile 只做**语法与阶段逻辑核对**，体积目标由 CI `build-image` job 的 `docker image inspect` 硬校验（>100MB 直接失败）；③ 前端产物路径已核对：`pnpm -r build` 实跑产出 `apps/shell/dist`（56K），与 Dockerfile 的 `COPY --from=frontend` 路径一致 | **PASS（配置层）/ 未验证（镜像实构建）** |
-| `compose.yaml`（开发）+ `deploy/compose.prod.yaml`（私有化） | `compose.yaml`（新增 `migrate` 服务，带 `profiles`）、`deploy/compose.prod.yaml`、`scripts/prod-preflight.sh`、`.env.example` | ① 两个文件 `podman-compose config` 均**退出码 0**；② `podman-compose -f deploy/compose.prod.yaml config --services` → `postgres / redis / app`（**无 migrate**）；`--profile migrate` → 多出 `migrate` ⇒ **`up -d` 不会自动跑迁移**；③ 开发 compose 同样验证（默认 `postgres / redis`）；④ **私有化口令无默认值**：`POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?…}` —— 不设 / 设为空时 compose **解析阶段报错并退出码 1**（本轮实测 `ValueError: required variable POSTGRES_PASSWORD is missing a value: …`），不会静默用弱口令建库；弱口令与库名不一致另由 `scripts/prod-preflight.sh` 拒绝（实测退出码 1）；⑤ 基础镜像默认**官方地址**（`docker.io/library/postgres:17-alpine` / `docker.io/library/redis:7-alpine`），不再是第三方镜像源；⑥ **本轮新增**：服务级 `env_file` 的相对路径按 **compose 文件所在目录**解析（`podman-compose` 1.6.0 **实测** 5 个场景 + 源码佐证；`docker compose` v2 官方文档口径一致）—— RUNBOOK §3.1 此前把 `podman-compose` 的基准**说反了**，本轮已按实测改正并删掉报错的 `ENV_FILE=deploy/.env` 备选写法（验证报告 §3.8） | **PASS** |
-| `deploy/helm/base-platform/`：Chart + values.yaml | `deploy/helm/base-platform/`（Chart.yaml / values.yaml / .helmignore / templates × 8） | ① `helm lint` 通过（`1 chart(s) linted, 0 chart(s) failed`）；② `helm template` 默认实渲染出 **ServiceAccount / ConfigMap / Service / Deployment / Job 五类资源**（**不含 Ingress** —— `values.yaml` 里 `ingress.enabled` 默认 `false`；加 `--set ingress.enabled=true` 后才是六类，本轮实测）；③ 迁移 Job 带 `helm.sh/hook: pre-upgrade,pre-install` + `hook-weight: -5` + `hook-delete-policy: before-hook-creation`；④ Deployment 的 liveness→`/health/live`、readiness→`/health/ready`（`timeoutSeconds: 5` > 连接池 `acquire_timeout` 2s）；⑤ Secret **只引用不生成**（`secret.existingSecret`） | **PASS** |
-| 配置外置：环境变量清单 + 启动时校验 + `.env.example` | `crates/platform-server/src/config.rs`、`crates/platform-server/src/main.rs`（`log_filter`）、`.env.example`、`deploy/RUNBOOK.md` §1 / §5.3 | 见 §1 的 AC-S-005 行；**本轮新增**：`BASE_LOG_LEVEL` **真的生效** —— 日志过滤器覆盖 **bin target `base`** 与 **lib target `platform_server`**（此前只写 `platform_server=…`，与事件实际所在的 bin target 不匹配 → **默认一行日志都不输出**）；实测 `info` / `warn` / `error` 三档符合预期（验证报告 §3.7），**+4 条单测**守着 | **PASS** |
-| 迁移作为独立步骤（compose profile + Helm hook） | `crates/platform-server/src/main.rs`（`migrate` 子命令）、`compose.yaml` 与 `deploy/compose.prod.yaml` 的 `migrate` 服务、Helm 的 `migrate-job.yaml` | ① `base serve` **不跑迁移**（迁移只在 `base migrate up` 时执行）；② compose 侧 `profiles: ["migrate"]` 手动触发；③ K8s 侧 Helm hook Job 自动触发；④ CI 的 `migration-test` job 固化了 up→down→up 流程 | **PASS** |
-| `scripts/backup.sh` / `restore.sh` / `rollback.sh` | `scripts/backup.sh`、`scripts/restore.sh`、`scripts/backup-verify.sh`、`scripts/rollback.sh`、`scripts/lib/pg.sh` | ① 备份实测 307ms，产物 `backup/base-<时间戳>.sql.gz`，自动轮转只留 5 份；② 恢复实测 704ms，测试表与数据都在；③ `rollback.sh` 实跑成功（先备份再回滚）；④ 本机无 psql 客户端 → 脚本自动走容器内执行，**口令不落命令行/进程列表** | **PASS** |
-| `deploy/RUNBOOK.md` + **恢复演练记录** | `deploy/RUNBOOK.md`（§1 配置 / §2 镜像 / §3 私有化 / §4 K8s / §5 健康检查 + **§5.1 语言边界** + **§5.3 日志级别** / §6 备份恢复 + 演练记录 / §7 故障排查四类） | 演练记录是**真实执行结果**（日期 2026-11-18、执行人 myg133-dev-1、耗时 307/704/1509ms、发现并修掉的 3 个问题），不是模板占位；**本轮新增**：§3.1 的 `env_file` 口径按实测改正、§5.1 补「`detail` 英文 / 日志中文」的语言边界表、§5.3 补 `BASE_LOG_LEVEL` 与 target 匹配规则（验证报告 §3.7 / §3.8） | **PASS** |
-| 健康检查端点（liveness / readiness） | `crates/platform-server/src/health.rs`、`crates/platform-server/src/main.rs` | ① 正常路径实测：PG 正常 → `/health/live` **200**、`/health/ready` **200**（响应含 `appliedMigrations`）；② 异常路径**本轮实测**：**停掉 PG 容器** → `/health/ready` **503** + `code=DATABASE_UNAVAILABLE`，`detail` = `database is unreachable: pool timed out while waiting for an open connection`，**耗时 2.002s**（修复前 5.003s；探针超时 5s，有 3s 余量），而 `/health/live` **仍 200**；③ 迁移未应用 → `MIGRATIONS_PENDING`，`detail` = `pending migrations: [20261118000100]`；④ 迁移 dirty → `MIGRATION_DIRTY`，`detail` = `migration 20261118000100 is in a dirty state and needs manual recovery`；⑤ 迁移表读不出来 → `MIGRATIONS_PENDING`，`detail` = `migration state is unreadable, migrations may not have run: …`；⑥ 错误体按 RFC 9457（契约 C6：`type` / `title` / `status` / `detail` / `instance` / `code` / `trace_id`） | **PASS** |
-| CI 增加构建镜像与扫描 job | `.github/workflows/ci.yml`（新增 `build-image` / `image-scan` / `migration-test`） | ① 基础镜像一律**官方地址**（`rust:lld` / `node:22-bookworm-slim` / `debian:12-slim` / `postgres:17-alpine`），未加国内镜像前缀；② `build-image` 含体积校验（>100MB 失败）+ 容器内迁移 + 健康检查冒烟；③ `image-scan` 用 Trivy（CRITICAL/HIGH 阻断）；④ `migration-test` 固化迁移可回滚；⑤ **GitHub Actions 本体未实跑**（本仓库无 remote） | **PASS（配置层）/ 未验证（Actions 实跑）** |
+| **A** `crates/platform-db`：租户感知的数据访问 | `crates/platform-db/src/{lib,tenant,query,error,quota,rls}.rs` | ① 每次访问在**显式事务**内设租户：`TenantDb::begin` → `set_config('app.tenant_id', $1, true)`（= `SET LOCAL` 语义）；② 单次操作（`fetch_all`/`fetch_optional`/`fetch_one`/`execute`）与多操作（`begin` → `TenantTx` → `commit`/`rollback`）两种形态；③ 公开 API **拿不到裸连接**：`no_public_api_returns_a_raw_connection` 源码扫描测试（本 crate 全部 `.rs` 的公开签名与公开字段里不出现 `PgPool`/`PgConnection`/`Transaction<`/`&mut PgConnection`），另有 `no_public_api_is_named_after_a_raw_connection`；④ 错误类型沿用 `CoreError` 风格：`DbError` + `code()` 稳定错误码；⑤ crate 级文档写清「为什么是 `SET LOCAL` 而不是 `SET`」（连接池串租户风险 + `SET` 不接受绑定参数）；⑥ 配额：`add_quota_usage`（计数**写 DB**，`INSERT … ON CONFLICT DO UPDATE`）/ `quota_usage`（用量 + 限额）/ `set_quota_limit` | **PASS** |
+| **B** 迁移与 RLS | `migrations/20261118000200_tenant_isolation.{up,down}.sql`、`crates/platform-db/src/rls.rs`、`crates/xtask/src/tenant_policies.rs`、`modules/sandbox/migrations/20261118000300_sandbox_tenant_item.{up,down}.sql` | ① 平台表建 `ENABLE ROW LEVEL SECURITY` + policy（实测 `relrowsecurity = t`、policy 数 = 1）；② 业务表的 policy **由 manifest 的 `tenantScoped` 统一生成**（模块的迁移文件里**只有建表**，没有 policy）；③ **漏建 = 完全无隔离的检查**：`cargo xtask tenant-policies --check` → 逐表核对 `relrowsecurity` 与 policy 数，缺一即失败；④ schema 同步：`manifest_schema.rs` 的内置常量与 `capabilities/schema/manifest.schema.json` 逐字节一致（平台核心测试守着） | **PASS** |
+| **C** C-3 契约检查叠加真实库层 | `modules/sandbox/tests/c3_real_db.rs`（真实库层）、`modules/sandbox/tests/contracts.rs`（内存层，**保留未改**） | 真实库层三条断言全通过：① tenant_a 的 `list()` 只返 tenant_a 的行；② tenant_a 的 `find(tenant_b 的 id)` 返回 `None`；③ **绕过应用层**（平台内部连接、不设 `app.tenant_id`）→ **0 行**（对照：管理员连接 4 行）；另有 **串租户用例**（tenant_a 查完立刻用**同一个连接池**查 tenant_b，连接池只开 1 条连接 → 必然复用同一条物理连接） | **PASS** |
+| **D** 示例模块 | `modules/sandbox/backend/src/tenant_repository.rs`、`modules/sandbox/manifest.json`、`modules/sandbox/migrations/*`、`modules/sandbox/Cargo.toml` | ① 沙箱新增 `sandbox_tenant_item` 表（`tenant_id` 作用域，`tenantScoped` 声明）；② 仓储实现走 `platform-db` 的 `TenantDb` 租户入口（语句里带 `{tenant}`）；③ 沙箱是「业务方照着抄」的标准范例：注释写明三条规矩（租户只从 `ctx` 取 / 每条语句带 `{tenant}` / 拿不到裸连接） | **PASS** |
+| **E** 能力索引与文档 | `crates/xtask/src/catalog.rs`、`AGENTS.md`、`capabilities/index.json`、`docs/dev-environment.md`、`CHANGELOG.md` | ① 能力目录新增 `tenant_scoped_db`（`already_provided`），`db_access_layer` 从 `not_yet_provided` 换成 `crud_scaffolding`（口径如实）；② `cargo xtask capabilities --check` → **13 个文件与源码一致**；③ `AGENTS.md` 的「已有能力 / 尚未提供」两段与能力目录**逐行一致**（`agents_doc_matches_catalog` 测试守着）；④ **硬规则新增第 4 条**：数据访问必须走 `platform-db` 的租户作用域入口，不得直连池；⑤ `docs/dev-environment.md` 补依赖树变化（91 → 175 → 179，第三方 **172 不变**）与冷编译实测 | **PASS** |
+| **F** 依赖方向门禁 | `crates/xtask/src/deps.rs`（`PLATFORM_CRATES` + 自动纳管测试）、`.github/CODEOWNERS`、`scripts/core-change-detect.sh` | ① `platform_db_is_covered_by_the_platform_crate_rules` 断言 `platform-db` 在平台 crate 集合里（自动纳管生效）；② **实测造违规**：临时给 `platform-db` 加一条指向 `modules/sandbox` 的依赖 → `cargo xtask check-deps` **退出码 1** 并点名「平台 crate `platform-db` 反向依赖了业务模块 `sandbox`（依赖链：platform-db → sandbox）」→ 验证后**已还原**（还原后 `check-deps` 退出码 0）；③ `CODEOWNERS` 与核心路径清单收录 `platform-db`（业务模块的数据访问都走它 → 改动影响所有业务模块 → 属核心） | **PASS** |
 
-## 3. 顺带修的 4 项遗留技术债（QA 前几轮登记，归属本需求）
+## 3. 设计决策 D1–D8 的符合性
 
-| # | 债务 | 处置 | 验证方式与证据 | 结论 |
-|---|------|------|----------------|------|
-| 1 | `scripts/sync-contracts.sh` 拿不到 `demand` 分支时**静默跳过 exit 0**，CI 门禁可能空转 | 改为**明确失败**：找不到正本分支 → 打印原因与修复命令 → **退出码 2**；另加 `--fetch` 参数（显式拉取后再校验）与「`manifest.json` 缺 `contracts` pin」的明确失败；CI 的 `guardrails` job 增加 `git fetch --no-tags origin demand` | ① **失败路径实测**：在无 `demand` 分支的临时仓库里跑 → 打印「✗ 找不到 BA 正本分支…本脚本不会静默跳过」并 **exit 2**；② **正常路径实测**：本仓库跑 → 两份快照一致、**exit 0**；③ CI 侧显式 fetch 后再校验 | **PASS** |
-| 2 | `core-change-review` 用 `pull_request.base.sha` 做 diff，该 SHA 不随 base 前进 → 偏严 | **已修正**：改用 **merge-base(base 分支最新提交, PR head)** 作为 diff 起点，判定逻辑抽到共享脚本 `scripts/core-change-detect.sh`，两个 job（打标 / 强制评审）同源 | `scripts/core-change-detect.sh --self-test` 实跑通过：① base 侧合入核心改动、PR 只改非核心路径 → **不误报**（修复前会误报）；② PR 侧改核心路径 → **能检出**。CI 侧 `BASE_REF=origin/${{ github.base_ref }}` + `HEAD_SHA` | **PASS（已修正）** |
-| 3 | `core-change-review` 的 diff 判定只看文件路径 | **确认覆盖**：`crates/platform-core` / `crates/platform-contracts` / `crates/platform-contracts-macros`（REQ-003 新增的 macros 已算核心）三条都在清单里；脚本会比对 `crates/` 下每个平台 crate 是否都在清单里，新增平台 crate 忘了登记会**直接失败**（`crates/platform-server` 与 `crates/xtask` 显式豁免并写明理由）。**本轮把该检查并进 `--self-test` 入口**（上一轮只在主流程校验，自检入口覆盖不到） | ① `scripts/core-change-detect.sh` 的 `check_core_coverage` 实跑通过（exit 0）；② `scripts/core-change-detect.sh --self-test` → `✓ 自检通过：merge-base 口径不误算 base 侧改动，PR 侧核心改动能检出，未登记平台 crate 能检出`（**exit 0**）—— 自检里额外构造「临时仓库建未登记的 `crates/other` → 必须检出」与「全部 crate 已登记 → 必须放行」两个场景；③ 豁免名单带理由注释 | **PASS** |
-| 4 | `migrations/` 只有 README 占位就能过 `check-modules` 的「非空」校验 | **规则暂不改**（本期无业务 DB 层），但**提示写进两处**：`modules/sandbox/migrations/README.md` 新增「规则何时升级」段；`crates/xtask/src/modules.rs` 的空目录提示单列一条，明确「DB 层落地后规则将升级为至少一个 `*.sql`」 | ① `cargo xtask check-modules` 仍通过（规则未改）；② `xtask::tests::empty_migrations_dir_explains_the_future_rule` 断言提示语含 `*.sql` 与「DB 层落地后」；③ README 与提示语口径一致 | **PASS** |
+| 决策 | 要求 | 实现与证据 | 结论 |
+|------|------|------------|------|
+| D1 | 新建 `crates/platform-db`，**不改 `platform-core`**；依赖方向 `platform-core ← platform-db ← 业务模块` | `platform-db` 依赖 `platform-core` ✓；`sandbox` 依赖 `platform-core` + `platform-db` ✓；`check-deps` 实测无反向依赖 ✓。**唯一例外**：`platform-core` 的 **manifest schema 扩展**（G1 的必要条件，见 §4） | **PASS（含 1 处必要例外，已说明）** |
+| D2 | sqlx 的 `macros` feature 关闭，用 `query_as` + `FromRow`（运行时检查）；不引入 `syn`/`quote`/`proc-macro2` | `cargo tree` 实测 **`sqlx-macros` 不参与编译** ✓；`FromRow` 用 `platform_db::tenant_row!` 声明宏手写实现（无 proc-macro）✓；`syn`/`quote`/`proc-macro2` 是 REQ-002 起就有的（serde_derive / thiserror-impl / clap_derive），**不是本期引入** ✓ | **PASS** |
+| D3 | 必须用 `SET LOCAL app.tenant_id`（事务局部），绝不用普通 `SET` | 实现用 `set_config('app.tenant_id', $1, true)`（`is_local = true` **等价于 `SET LOCAL`**，且能走绑定参数 —— `SET` 命令不接受 `$1`）✓；crate 文档与 `AGENTS.md` 写明原因 ✓；**串租户用例**实测：连接池只开 1 条连接 → tenant_a 查完立刻查 tenant_b，**不返回 tenant_a 的数据** ✓ | **PASS** |
+| D4 | 不向业务模块暴露「未加租户条件的连接」 | 公开 API 全部带 `&RequestContext` ✓；裸连接类型不出现在任何公开签名/字段（源码扫描测试）✓；`TenantDb` 的 `pool` 字段是 `pub(crate)` ✓ | **PASS** |
+| D5 | RLS policy 用 `current_setting('app.tenant_id', true)`（fail closed） | 平台表与业务表的 policy 实测：`USING ((tenant_id = current_setting('app.tenant_id'::text, true)))` ✓；漏设时**查不到任何行**（0 行，不是报错）✓ | **PASS** |
+| D6 | 业务模块的表通过 manifest 的 `tenantScoped` 段声明，平台统一生成 policy | `manifest.json` 新增 `tenantScoped` ✓；模块迁移文件里**没有** policy ✓；`cargo xtask tenant-policies` 统一生成 ✓ | **PASS** |
+| D7 | L2/L3 只留接口不实现；**不把 L1 的假设写死**（schema 名从配置来） | `DbOptions.schema`（默认 `public`，可配）✓；`policy_statements(spec, schema)` 的 schema 是**参数** ✓；`TenantDb::table()` 按配置的 schema 拼表名 ✓。**L2/L3 本期不实现**（设计如此） | **PASS** |
+| D8 | C-3 契约检查**叠加**真实库层，内存层保留 | 内存层（`#[platform_module_contract]`）**未改动** ✓；新增真实库层（`c3_real_db.rs`）三条断言 ✓ | **PASS** |
 
-## 4. 契约与既有规则的符合性
+## 4. 对 `platform-core` 的改动（CODEOWNERS 门禁范围）
 
-| 约定 | 实现位置 | 验证方式与证据 | 结论 |
-|------|----------|----------------|------|
-| C6 统一错误响应体（RFC 9457 + 稳定 `code` + `trace_id`） | `crates/platform-server/src/main.rs`（`ProblemDetails`）、`crates/platform-server/src/health.rs`（`dev_detail` / `detail_*`） | 未就绪响应实测含 `type` / `title` / `status` / `detail` / `instance` / `code` / `trace_id`；**`detail` 在三个 readiness 错误路径上全部为英文**（`database is unreachable: …` / `pending migrations: […]` / `migration {version} is in a dirty state and needs manual recovery` / `migration state is unreadable, …`），**不含任何中文字符** —— 符合 C6「后端不得在 `detail` 里拼中文句子」；运维视角的中文说明只进日志（`tracing::warn!` 记 `code` + `detail` + `pending` + `dirty`）。5 条单测守着（`health::tests::readiness_detail_is_english_on_every_error_path` 等）。**上一轮此处写的「`detail`（英文），符合 C6」是不实结论**（当时只验了「数据库不可达」那一条路径），本轮已按三条路径的实测响应体更正；**本轮（微修轮）复核**：C6 未动、`detail` 仍为纯 ASCII 英文，运维中文说明只在日志里（实测 `WARN base: readiness 未通过：…`，验证报告 §3.7），两条通道的边界已写进 RUNBOOK §5.1 的语言边界表 | **PASS** |
-| C13 命名与编码（JSON camelCase、DB snake_case、UTC） | 健康检查成功响应、迁移表列名 | 成功响应为 `appliedMigrations` / `traceId`（camelCase）；迁移表列名 `version` / `success` / `checksum`（snake_case）；容器时区固定 UTC | **PASS** |
-| 硬规则 1：不得修改 `crates/platform-core/` 与 `crates/platform-contracts/` | `git diff 31ca87a..HEAD -- crates/platform-core crates/platform-contracts crates/platform-contracts-macros` | **输出为空** —— 本需求一行未改这两个 crate（部署侧能力放在新 crate `crates/platform-server`） | **PASS** |
-| 硬规则 2：业务模块只依赖扩展点 trait | `cargo xtask check-deps` | 实跑通过：平台 crate 未反向依赖业务模块 | **PASS** |
-| AGENTS.md「尚未提供」段不被夸大 | `AGENTS.md` / `crates/xtask/src/catalog.rs` / `capabilities/index.json` | **未改动** `AGENTS.md` 与能力目录 ⇒ `db_access_layer` 仍如实标为「尚未提供」（业务数据访问层仍待 REQ-006/007）；`cargo xtask capabilities --check` 通过（13 个文件与源码一致） | **PASS** |
-| 目录规范（`cargo xtask check-modules`） | `modules/sandbox/` | 实跑通过 | **PASS** |
+| 文件 | 改动 | 为什么必须改 |
+|------|------|--------------|
+| `crates/platform-core/src/extension/manifest.rs` | +138 行（**纯新增**）：新增 `TenantScopedSpec` 结构、`Manifest.tenant_scoped` 字段、字段校验（表名/列名必须匹配 `^[a-z][a-z0-9_]*$`）、6 条新单测 | 需求 G1「业务模块的表通过 manifest 的 `tenantScoped` 段声明，平台统一生成 policy」——**声明段必须是 manifest 的一部分**，否则平台无处可读模块的租户作用域声明 |
+| `crates/platform-core/src/extension/manifest_schema.rs` | +76 行（**纯新增**）：schema 增加 `tenantScoped` 段 + 2 条新单测 | manifest 的 schema 是**对外发布**的（第三方拿它做校验）—— schema 与平台实现必须完全一致，否则第三方按 schema 校验的结果与平台判定不同（`extension-points v1` §5 的硬要求） |
+| `crates/platform-core/src/extension/mod.rs` | +1 行：导出 `TenantScopedSpec` | 供 `platform-db` / `xtask` 复用同一套类型 |
+
+**影响说明**：改动是**纯增量**的 —— 既有字段、既有校验、既有 schema 约束**一行未删**；
+`deny_unknown_fields` 仍生效（新字段是已知的）；既有 manifest 全部照常解析。
+破坏性变更清单（`extension-points v1` §6）里**没有**这一项
+（5 个 trait 的签名、`discover()` 签名、manifest 的**必填字段**都没动 ——
+`tenantScoped` 是**可选**字段）。
+
+## 4.1 顺带落地：REQ-005 遗留技术债 #4（scope 之外的一小步）
+
+`crates/xtask/src/modules.rs`：`migrations/` 下没有 `*.sql` → `check-modules` 判失败
+（REQ-005 登记的债务写明「DB 层落地后升级」→ 本轮兑现）。
+**不在任务交付清单 A–F 内** —— 属主动扩大的一小步 scope，已在验证报告 §5.1 / 风险 R7 登记。
 
 ## 5. 未验证 / 不成立的部分（如实登记）
 
 | 项 | 原因 | 影响 |
 |----|------|------|
-| **镜像实构建**（`docker build`） | 本机 4.2G 可用内存，`cargo build --release` + LTO 的链接峰值远超余量（设计摘要 §8 与任务约束明确要求本机不构建） | Dockerfile 只做了阶段/路径核对；体积、启动、探针在容器里的真实行为由 CI `build-image` job 验证（**Actions 未实跑**，本仓库无 remote） |
-| **GitHub Actions 实跑** | 本仓库没有 remote（`git remote -v` 为空），云端 CI 跑不起来 | CI 配置只做了 YAML 解析校验（`yaml.safe_load` 通过，12 个 job）+ 命令与仓库现状逐条核对 |
-| **Helm 在真实集群部署** | 本机无 K8s 集群 | Chart 经 `helm lint` + `helm template` 渲染校验（helm 二进制临时下载到 `/tmp` 校验，未安装到系统） |
-| **数据库 TLS** | `sqlx` 未开 TLS 特性（`tls-none`） | `DATABASE_URL` 带 `sslmode=require` 会连接失败；私有化部署的库走内网/本地 socket，TLS 需求随 REQ-006/007 的 DB 层一并处理 |
+| **AC-S-008（上下文跨消息边界）** | 本期设计边界不含缓存/消息链路（`design-summary` §8）；本轮只做了**数据库层**的租户上下文贯穿 | 该 AC **未实现**，需要后续需求（租户上下文中间件 / REQ-019）补齐 |
+| **`base_dev`（开发库）上的真实验证** | 本轮的数据库验证全部跑在 `base_test`（`scripts/test-integration.sh` 的白名单闸门只允许重置 `base_test`）；**开发库未被触碰** | 开发库上还没有应用角色的策略（需手工跑一次 `cargo xtask tenant-policies`） |
+| **K8s / 私有化部署里的策略生成** | `tenant-policies` 子命令已就绪，但**部署流程（Helm / compose）还没有调用它** —— 部署时必须先跑一次，否则业务表的 policy 不存在 | 部署链路的一处**待接线**（见验证报告 §5 风险 R2） |
+| **覆盖率数字** | 本轮未跑覆盖率工具（低配机 + 无覆盖率工具链） | 角色规范里的「覆盖率 ≥ 80%」这条**未验证**（新增代码的每个分支都有对应用例，但无工具数字） |
+| **真实负载下的性能** | 未做压测；每次访问多一次 `BEGIN`/`COMMIT` 往返 | 性能影响未量化（设计上的刻意取舍，见 `platform-db` 的 crate 文档） |

@@ -4,6 +4,43 @@
 
 ## Unreleased
 
+### REQ-006 多租户与隔离
+
+- **租户隔离双保险**：应用层每次查询都带租户条件，数据库层用 PostgreSQL RLS 再兜一遍
+  —— 任一层失效都不至于跨租户泄漏
+- **新建 `crates/platform-db`**（不改 `platform-core` 的既有语义）：
+  - 租户作用域入口：每次访问在**显式事务**内 `SET LOCAL app.tenant_id`（等价写法
+    `set_config('app.tenant_id', $1, true)` —— `SET` 命令不接受绑定参数）
+  - **公开 API 表面拿不到裸连接**：只有带 `&RequestContext` 的入口能被业务模块用
+    （源码扫描测试守着公开签名里不出现 `PgPool` / `PgConnection` / `Transaction`）
+  - 事务封装：单次操作（`fetch_all` / `fetch_optional` / `fetch_one` / `execute`）
+    与多操作（`begin` → `TenantTx` → `commit` / `rollback`）两种形态
+  - 配额用量计数**写 DB**（`platform_tenant_quota`）+ 限额查询（重启不丢）
+  - crate 级文档写清「为什么是 `SET LOCAL` 而不是 `SET`」（连接池串租户风险）
+- **RLS 策略由平台统一生成**：模块在 manifest 的 `tenantScoped` 段声明表，
+  平台按声明生成 `ENABLE ROW LEVEL SECURITY` + policy
+  （`current_setting('app.tenant_id', true)` = **fail closed**），
+  **模块不手写 policy**（漏建一张表 = 该表完全无隔离）
+  - `cargo xtask tenant-policies`（生成 / `--check` 校验）
+  - 策略应用**在一个事务里**完成：`DROP` + `CREATE` 分两条语句会有一个
+    「表上没有 policy」的窗口（那一瞬间 RLS 变成全部拒绝）
+- **manifest 新增 `tenantScoped` 段**（`crates/platform-core`，CODEOWNERS 保护目录）：
+  字段与 JSON Schema 同步，平台校验器与 schema 口径一致
+- **C-3 契约检查叠加真实库层**（`base_test` 库）：内存层保留，新增三条断言 ——
+  ① tenant_a 的 `list()` 只返本租户行；② tenant_a 的 `find(tenant_b 的 id)` 返回 `None`；
+  ③ **绕过应用层**（不设 `app.tenant_id`）**查不到任何行**（RLS fail closed）
+- **串租户用例**：tenant_a 查完立刻用**同一个连接池**查 tenant_b（连接池只开一条连接，
+  保证复用同一条物理连接）—— 专门验「用的是 `SET LOCAL` 而不是 `SET`」
+- **应用角色是 RLS 的前提**：超级用户与 `BYPASSRLS` 角色会**绕过 RLS**
+  （租户隔离 fail open）—— 新增 `deploy/seed/02-app-role.sql`，
+  应用连接必须用普通角色（组 `base_platform_app` 的成员）
+- **沙箱模块升级为标准范例**：新增 `tenant_id` 作用域表（`tenantScoped` 声明）
+  与走 `platform-db` 租户入口的仓储实现
+- **能力索引与门禁**：能力目录新增 `tenant_scoped_db`；
+  `check-deps` 的平台 crate 集合收录 `platform-db`（自动纳管生效，有测试守着）
+- **新增第三方依赖：无**（`sqlx` 沿用 REQ-005 引入的版本，**不开 `macros` feature**；
+  `sqlx-macros` 不参与编译）
+
 ### REQ-005 交付基线与发布
 
 - **交付形态**：同一套镜像 + 同一套配置，三处复用 —— 开发（本机 compose）/
