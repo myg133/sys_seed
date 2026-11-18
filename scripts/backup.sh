@@ -23,7 +23,7 @@ case "$BACKUP_KEEP" in
   '' | *[!0-9]*) echo "✗ BACKUP_KEEP 必须是正整数：$BACKUP_KEEP" >&2; exit 1 ;;
 esac
 
-pg_parse_url "${DATABASE_URL:-}"
+pg_parse_url "${DATABASE_URL:-${MIGRATION_DATABASE_URL:-}}"
 pg_detect_mode pg_dump
 
 mkdir -p "$BACKUP_DIR"

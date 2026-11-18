@@ -4,21 +4,30 @@
 #   - 用发布镜像（base-platform:${TAG}），不本地构建
 #   - 配置从 .env 注入（.env 不入库）
 #   - **迁移是独立服务**：走 profile，手动触发，`up -d` 不会自动跑迁移
+#   - **策略是独立服务**：走 profile，必须在迁移**之后**跑
 #   - **口令没有默认值**：POSTGRES_PASSWORD 必须由 .env / Secret 显式注入，
 #     缺失时 compose 直接报错退出（不会静默用弱口令建库）
 #   - **基础镜像走官方地址**：生产交付物默认从 docker.io 拉，
 #     客户可把 POSTGRES_IMAGE / REDIS_IMAGE 指向自己的镜像仓库
+#
+# ---- 角色分工（租户隔离的前提）----
+#   POSTGRES_USER（超级用户）  → 建库、迁移（DDL）、建 RLS 策略
+#   APP_ROLE_NAME（普通角色）  → **应用连接**（超级用户会绕过 RLS，隔离会 fail open）
+# 详见 deploy/RUNBOOK.md「应用角色与 RLS」。
 #
 # 交付物：把本文件、.env 与 scripts/prod-preflight.sh 放在同一套目录里
 #         （脚本放同级 scripts/ 子目录），整体拷给客户即可。
 #
 # 用法（在 deploy/ 目录里执行；.env 与本文件同目录 —— compose 从
 #       **compose 文件所在目录**读 .env）：
-#   cp ../.env.example .env && 编辑 .env（**必须**设置 POSTGRES_PASSWORD）
+#   cp ../.env.example .env && 编辑 .env（**必须**设置 POSTGRES_PASSWORD /
+#   APP_ROLE_PASSWORD，并让 APP_DATABASE_URL 用**普通角色**）
 #   ../scripts/prod-preflight.sh                      # 口令/库名校验，缺失直接退出
-#   docker compose -f compose.prod.yaml up -d
-#   docker compose -f compose.prod.yaml --profile migrate run --rm migrate
-#   docker compose -f compose.prod.yaml up -d --no-deps app   # 迁移成功后滚 app
+#   docker compose -f compose.prod.yaml up -d postgres redis
+#   docker compose -f compose.prod.yaml --profile app-role run --rm app-role  # 建应用角色
+#   docker compose -f compose.prod.yaml --profile migrate run --rm migrate    # 迁移（建表）
+#   docker compose -f compose.prod.yaml --profile policies run --rm policies  # 策略（建 policy）
+#   docker compose -f compose.prod.yaml up -d --no-deps app                    # 滚应用
 #
 # ⚠️ 服务级 env_file 的**相对路径按本文件所在目录**解析（docker compose v2 与
 #    podman-compose 1.6.0 一致）。要换 env 文件：ENV_FILE=./别的.env（相对本目录）
@@ -73,6 +82,8 @@ services:
   # 迁移：独立步骤，手动触发。
   # `up -d` 不会启动它（profile 未激活）；发布时显式跑：
   #   docker compose -f deploy/compose.prod.yaml --profile migrate run --rm migrate
+  #
+  # **迁移用超级用户**（MIGRATION_DATABASE_URL）：建表 / 建策略需要 DDL 权限。
   migrate:
     image: base-platform:${TAG:-latest}
     container_name: base-migrate
@@ -81,7 +92,69 @@ services:
     env_file:
       - ${ENV_FILE:-.env}
     environment:
+      DATABASE_URL: ${MIGRATION_DATABASE_URL:?MIGRATION_DATABASE_URL is required - the migration connection needs the superuser (DDL); see deploy/RUNBOOK.md 3.1}
       BASE_MIGRATIONS_DIR: /app/migrations
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: 'no'
+
+  # 租户作用域策略：独立步骤，**必须在迁移之后**（策略是对已建好的表做的）。
+  #
+  # 漏跑这一步 = 租户作用域表**完全没有隔离**（RLS 没开、policy 不存在）。
+  #   docker compose -f deploy/compose.prod.yaml --profile policies run --rm policies
+  #
+  # 同样用超级用户连接（建策略需要表的属主权限）。
+  policies:
+    image: base-platform:${TAG:-latest}
+    container_name: base-policies
+    profiles: ['policies']
+    command: ['tenant-policies']
+    env_file:
+      - ${ENV_FILE:-.env}
+    environment:
+      DATABASE_URL: ${MIGRATION_DATABASE_URL:?MIGRATION_DATABASE_URL is required - the policy step needs the superuser (table owner)}
+      BASE_MANIFEST_ROOT: /app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: 'no'
+
+  # 应用角色：独立步骤，手动触发（**幂等**，可重复跑）。
+  #
+  # 应用连接必须用**普通角色** —— 超级用户会绕过 RLS，租户隔离会 fail open。
+  # 生产库不挂 `deploy/seed`（那里面是开发用的建库脚本 + 弱口令），
+  # 所以生产角色由这一步建：组角色 base_platform_app（NOLOGIN，持有表权限）
+  # + 登录角色 APP_ROLE_NAME（组角色的成员）。
+  #   docker compose -f deploy/compose.prod.yaml --profile app-role run --rm app-role
+  app-role:
+    image: ${POSTGRES_IMAGE:-docker.io/library/postgres:17-alpine}
+    container_name: base-app-role
+    profiles: ['app-role']
+    environment:
+      PGHOST: postgres
+      PGPORT: '5432'
+      PGUSER: ${POSTGRES_USER:-base}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required - inject it via .env or a Docker secret (see .env.example / deploy/RUNBOOK.md 3.1)}
+      PGDATABASE: ${POSTGRES_DB:-base}
+      APP_ROLE_NAME: ${APP_ROLE_NAME:-base_app}
+      APP_ROLE_PASSWORD: ${APP_ROLE_PASSWORD:?APP_ROLE_PASSWORD is required - the application role password; it must match the one in APP_DATABASE_URL}
+    entrypoint: ['sh', '-c']
+    # ⚠️ `$$` 是 compose 的转义写法：渲染成字面量 `$`，由容器里的 shell 展开。
+    #    （直接写 `$APP_ROLE_NAME` 会被 compose 在解析期当变量插值掉。）
+    command:
+      - |
+        psql -v ON_ERROR_STOP=1 -v role_name="$$APP_ROLE_NAME" -v role_password="$$APP_ROLE_PASSWORD" <<'SQL'
+        SELECT 'CREATE ROLE base_platform_app NOLOGIN'
+         WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'base_platform_app')
+        \gexec
+        SELECT format('CREATE ROLE %I LOGIN PASSWORD %L', :'role_name', :'role_password')
+         WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = :'role_name')
+        \gexec
+        GRANT base_platform_app TO :"role_name";
+        ALTER DEFAULT PRIVILEGES IN SCHEMA public
+          GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO base_platform_app;
+        SQL
     depends_on:
       postgres:
         condition: service_healthy
@@ -94,6 +167,9 @@ services:
     env_file:
       - ${ENV_FILE:-.env}
     environment:
+      # **普通角色**连接：超级用户会绕过 RLS，租户隔离会 fail open。
+      # 应用启动时自检连接角色：绕过 RLS 就**拒绝启动**（退出码 3）。
+      DATABASE_URL: ${APP_DATABASE_URL:?APP_DATABASE_URL is required - the application connection must use a NORMAL role (not the superuser); see deploy/RUNBOOK.md 3.1}
       BASE_MIGRATIONS_DIR: /app/migrations
       BASE_STATIC_DIR: /app/static
       HOST: 0.0.0.0

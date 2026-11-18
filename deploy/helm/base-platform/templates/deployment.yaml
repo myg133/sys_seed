@@ -54,7 +54,10 @@ spec:
                 name: {{ .Values.secret.existingSecret }}
           env:
             # 必填项单独点名：Secret 里缺 DATABASE_URL 时容器 fail-fast，
-            # 这里显式声明让「谁提供」一目了然
+            # 这里显式声明让「谁提供」一目了然。
+            #
+            # ⚠️ 这里必须是**普通角色**的连接串：超级用户会绕过 PostgreSQL 的 RLS，
+            #    租户隔离会 fail open。应用启动时会自检连接角色，绕过 RLS 就拒绝启动。
             - name: {{ .Values.secret.databaseUrlKey }}
               valueFrom:
                 secretKeyRef:

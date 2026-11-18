@@ -13,7 +13,8 @@
 # 不可逆迁移（没有配套 down）会被拒绝回滚 —— 脚本会明确报错，不会做半截破坏。
 #
 # 环境变量：
-#   DATABASE_URL  数据库连接串（必填）
+#   DATABASE_URL  数据库连接串（必填；缺省时用 MIGRATION_DATABASE_URL）
+#                 回滚迁移是**管理操作**，要用超级用户连接
 #   MIGRATE_CMD   执行迁移的命令前缀，默认 `cargo run -p platform-server --bin base --`
 #                 私有化部署示例：
 #                 MIGRATE_CMD="docker compose -f deploy/compose.prod.yaml --profile migrate run --rm migrate" \
@@ -44,7 +45,7 @@ case "$target_version" in
   '' | *[!0-9]*) echo "✗ 版本号必须是非负整数：$target_version" >&2; exit 1 ;;
 esac
 
-pg_parse_url "${DATABASE_URL:-}"
+pg_parse_url "${DATABASE_URL:-${MIGRATION_DATABASE_URL:-}}"
 pg_detect_mode psql
 
 # 迁移命令前缀

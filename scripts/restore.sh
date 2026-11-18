@@ -9,7 +9,8 @@
 #     必须显式加 --yes 确认（防止误操作把生产库清空）。
 #
 # 环境变量：
-#   DATABASE_URL  数据库连接串（必填）
+#   DATABASE_URL  数据库连接串（必填；缺省时用 MIGRATION_DATABASE_URL）
+#                 备份 / 恢复是**管理操作**，要用超级用户连接（普通角色没有 DDL 权限）
 #   PG_CONTAINER  数据库容器名（默认 base-postgres）
 set -euo pipefail
 
@@ -44,7 +45,7 @@ if ! gzip -t "$backup_file"; then
   exit 1
 fi
 
-pg_parse_url "${DATABASE_URL:-}"
+pg_parse_url "${DATABASE_URL:-${MIGRATION_DATABASE_URL:-}}"
 pg_detect_mode psql
 
 if [ -n "$target_db" ]; then

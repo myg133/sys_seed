@@ -45,11 +45,13 @@ spec:
             - secretRef:
                 name: {{ .Values.secret.existingSecret }}
           env:
-            - name: {{ .Values.secret.databaseUrlKey }}
+            # 迁移用**超级用户**连接：建表 / 建 policy 需要 DDL 权限。
+            # （应用连接用的是普通角色，见 deployment.yaml）
+            - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.secret.existingSecret }}
-                  key: {{ .Values.secret.databaseUrlKey }}
+                  key: {{ .Values.secret.migrationDatabaseUrlKey }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
 {{- end }}

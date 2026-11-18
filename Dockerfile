@@ -32,6 +32,20 @@ RUN cargo install cargo-chef --version "${CARGO_CHEF_VERSION}" --locked
 
 COPY . .
 
+# 只保留业务模块的 manifest.json —— 租户作用域声明的**唯一来源**。
+#
+# 交付环境没有 cargo，但「租户作用域表必须有 RLS policy」必须在部署期能落地
+# （`base tenant-policies`）。所以镜像里要带上声明本身；
+# 模块源码不进镜像（COPY 的是 manifest.json，不是整个 modules/）。
+RUN mkdir -p /app/manifests \
+    && cd /app/modules \
+    && for dir in */; do \
+         if [ -f "${dir}manifest.json" ]; then \
+           mkdir -p "/app/manifests/${dir}"; \
+           cp "${dir}manifest.json" "/app/manifests/${dir}manifest.json"; \
+         fi; \
+       done
+
 # recipe 只描述依赖图；cook 先把依赖编进缓存层
 RUN cargo chef prepare --recipe-path recipe.json
 RUN cargo chef cook --release --locked --jobs "${CARGO_BUILD_JOBS}" --recipe-path recipe.json
@@ -74,10 +88,12 @@ WORKDIR /app
 
 COPY --from=builder /app/target/release/base /usr/local/bin/base
 COPY --from=builder /app/migrations/ /app/migrations/
+COPY --from=builder /app/manifests/ /app/modules/
 COPY --from=frontend /app/apps/shell/dist/ /app/static/
 
 ENV BASE_MIGRATIONS_DIR=/app/migrations \
     BASE_STATIC_DIR=/app/static \
+    BASE_MANIFEST_ROOT=/app \
     HOST=0.0.0.0 \
     SERVER_PORT=8080 \
     RUST_LOG=info

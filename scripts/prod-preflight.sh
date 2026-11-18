@@ -14,10 +14,12 @@
 #   ENV_FILE=/etc/base/prod.env ./scripts/prod-preflight.sh
 #
 # 环境变量：
-#   ENV_FILE         要校验的 env 文件（默认 .env；不存在则只看当前环境变量）
-#   POSTGRES_PASSWORD 生产库口令（必须显式注入，无默认值）
-#   POSTGRES_DB      生产库名（默认 base）
-#   DATABASE_URL     应用连接串（必须显式注入）
+#   ENV_FILE                要校验的 env 文件（默认 .env；不存在则只看当前环境变量）
+#   POSTGRES_PASSWORD       生产库口令（必须显式注入，无默认值）
+#   POSTGRES_DB             生产库名（默认 base）
+#   POSTGRES_USER           生产库超级用户（默认 base）
+#   APP_DATABASE_URL        应用连接串（必须显式注入；**普通角色**）
+#   MIGRATION_DATABASE_URL  迁移 / 建策略连接串（超级用户；必须显式注入）
 #
 # 退出码：0 = 通过；1 = 校验不通过（逐条打印原因）。
 set -euo pipefail
@@ -90,6 +92,18 @@ url_password() {
   esac
 }
 
+# 从连接串里取用户名（没有 user:pass@ 形式则返回空）
+url_user() {
+  local url="$1" creds
+  case "$url" in
+    *@*) ;;
+    *) printf ''; return 0 ;;
+  esac
+  creds="${url#*://}"
+  creds="${creds%%@*}"
+  printf '%s' "${creds%%:*}"
+}
+
 is_weak_password() {
   local candidate="$1" weak
   candidate="$(printf '%s' "$candidate" | tr '[:upper:]' '[:lower:]')"
@@ -122,31 +136,52 @@ elif [ "${#password}" -lt 12 ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 2. 应用连接串：必须显式注入
+# 2. 应用连接串：必须显式注入，且**必须用普通角色**
 # ---------------------------------------------------------------------------
-database_url="${DATABASE_URL:-}"
-if [ -z "$database_url" ]; then
-  fail "缺少 DATABASE_URL：应用连接串必须显式注入（compose 的 app 服务靠它连库）。"
-  fail "  修复：在 .env 里设置 DATABASE_URL=postgres://base:<口令>@postgres:5432/<库名>"
+app_database_url="${APP_DATABASE_URL:-}"
+if [ -z "$app_database_url" ]; then
+  fail "缺少 APP_DATABASE_URL：应用连接串必须显式注入（compose 的 app 服务靠它连库）。"
+  fail "  修复：在 .env 里设置 APP_DATABASE_URL=postgres://<普通角色>:<口令>@postgres:5432/<库名>"
   problems=$((problems + 1))
 else
-  url_pass="$(url_password "$database_url")"
+  url_pass="$(url_password "$app_database_url")"
   if [ -n "$url_pass" ] && is_weak_password "$url_pass"; then
-    fail "DATABASE_URL 里的口令是弱口令（生产库不接受默认/示例口令）。"
-    fail "  修复：口令改成随机值，并与 POSTGRES_PASSWORD 保持一致"
+    fail "APP_DATABASE_URL 里的口令是弱口令（生产库不接受默认/示例口令）。"
+    fail "  修复：口令改成随机值（openssl rand -base64 24）"
+    problems=$((problems + 1))
+  fi
+
+  # ⚠️ 最要紧的一条：应用**不能**用超级用户连接。
+  # PostgreSQL 的 RLS 对超级用户与 BYPASSRLS 角色不生效 →
+  # 租户隔离会 fail open（数据库层兜底完全失效）。
+  app_user="$(url_user "$app_database_url")"
+  superuser="${POSTGRES_USER:-base}"
+  if [ -n "$app_user" ] && [ "$app_user" = "$superuser" ]; then
+    fail "APP_DATABASE_URL 用的是超级用户（${app_user}）—— RLS 对超级用户不生效，租户隔离会 fail open。"
+    fail "  修复：跑 app-role 步骤建普通角色，并把 APP_DATABASE_URL 指向它"
     problems=$((problems + 1))
   fi
 fi
 
 # ---------------------------------------------------------------------------
-# 3. 库名一致：compose 建库用的 POSTGRES_DB 必须等于连接串里的库名
+# 3. 迁移连接串：必须显式注入（迁移 / 建策略需要 DDL 权限）
+# ---------------------------------------------------------------------------
+migration_database_url="${MIGRATION_DATABASE_URL:-}"
+if [ -z "$migration_database_url" ]; then
+  fail "缺少 MIGRATION_DATABASE_URL：迁移 / 建 RLS 策略需要超级用户连接串（compose 的 migrate / policies 服务靠它）。"
+  fail "  修复：在 .env 里设置 MIGRATION_DATABASE_URL=postgres://<超级用户>:<口令>@postgres:5432/<库名>"
+  problems=$((problems + 1))
+fi
+
+# ---------------------------------------------------------------------------
+# 4. 库名一致：compose 建库用的 POSTGRES_DB 必须等于连接串里的库名
 # ---------------------------------------------------------------------------
 postgres_db="${POSTGRES_DB:-base}"
-if [ -n "$database_url" ]; then
-  url_db="$(url_db_name "$database_url")"
+if [ -n "$app_database_url" ]; then
+  url_db="$(url_db_name "$app_database_url")"
   if [ -n "$url_db" ] && [ "$url_db" != "$postgres_db" ]; then
-    fail "库名不一致：DATABASE_URL 指向 '${url_db}'，但 POSTGRES_DB 是 '${postgres_db}' —— 应用会连到不存在的库。"
-    fail "  修复：把 .env 里的 DATABASE_URL 库名改成 '${postgres_db}'，或显式设置 POSTGRES_DB"
+    fail "库名不一致：APP_DATABASE_URL 指向 '${url_db}'，但 POSTGRES_DB 是 '${postgres_db}' —— 应用会连到不存在的库。"
+    fail "  修复：把 .env 里的 APP_DATABASE_URL 库名改成 '${postgres_db}'，或显式设置 POSTGRES_DB"
     problems=$((problems + 1))
   fi
 fi
@@ -156,4 +191,4 @@ if [ "$problems" -ne 0 ]; then
   exit 1
 fi
 
-echo "✓ 生产部署前置校验通过：口令已显式注入且非弱口令，库名 '${postgres_db}' 与 DATABASE_URL 一致"
+echo "✓ 生产部署前置校验通过：口令已显式注入且非弱口令，库名 '${postgres_db}' 与 APP_DATABASE_URL 一致，应用连接用的是普通角色"

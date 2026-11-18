@@ -70,12 +70,44 @@ config:
 # 创建方式见 deploy/RUNBOOK.md：
 #   kubectl create secret generic base-platform-secret \
 #     --from-literal=DATABASE_URL='postgres://...' \
+#     --from-literal=MIGRATION_DATABASE_URL='postgres://...' \
 #     --from-literal=REDIS_URL='redis://...'
+#
+# ⚠️ DATABASE_URL 必须是**普通角色**的连接串（超级用户会绕过 RLS，
+#    租户隔离会 fail open）；MIGRATION_DATABASE_URL 是**超级用户**的连接串
+#    （迁移 / 建 RLS 策略需要 DDL 权限），只有迁移与策略 Job 用它。
 secret:
   existingSecret: base-platform-secret
   # Secret 内必须存在的键名
   databaseUrlKey: DATABASE_URL
+  # 迁移 / 策略用的超级用户连接串（Secret 内的键名）
+  migrationDatabaseUrlKey: MIGRATION_DATABASE_URL
   redisUrlKey: REDIS_URL
+
+# 应用角色（RLS 生效的前提）。
+#
+# 应用连接**必须**用普通角色：超级用户与 BYPASSRLS 角色会绕过 PostgreSQL 的 RLS，
+# 租户隔离会 fail open。Chart 用一个 pre-install / pre-upgrade hook Job 建这个角色
+# （组角色 base_platform_app + 登录角色），幂等。
+appRole:
+  enabled: true
+  # 登录角色名（组角色 base_platform_app 的成员）
+  name: base_app
+  # 口令所在的 Secret（Chart **不生成** Secret）
+  passwordSecret: base-platform-secret
+  # 口令在 Secret 里的键名
+  passwordKey: APP_ROLE_PASSWORD
+  # 建角色用的 psql 镜像（含 psql 客户端）
+  psqlImage: postgres:17-alpine
+  backoffLimit: 3
+  hookDeletePolicy: before-hook-creation
+
+# 租户作用域策略（RLS policy）：pre-install / pre-upgrade hook Job，
+# **在迁移 Job 之后**跑（策略是对已建好的表做的）。
+tenantPolicies:
+  enabled: true
+  backoffLimit: 3
+  hookDeletePolicy: before-hook-creation
 
 # 额外环境变量（覆盖 ConfigMap 里的同名项）
 extraEnv: []

@@ -39,6 +39,9 @@ services:
       - '127.0.0.1:5432:5432'
     volumes:
       - pgdata:/var/lib/postgresql/data
+      # 角色 / 种子初始化：**只在数据卷首次创建时执行**（`docker-entrypoint-initdb.d` 的约定）。
+      # 已有卷不会重跑 → `base_app` 角色可能缺失，补建命令见
+      # deploy/RUNBOOK.md「应用角色与 RLS」。
       - ./deploy/seed:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U base -d base_dev']
@@ -72,6 +75,9 @@ services:
 
   # 迁移：独立步骤，手动触发（profile 未激活时 `up -d` 不会跑它）。
   #
+  # **迁移用超级用户**（`base`）：建表 / 建策略需要 DDL 权限。
+  # 应用**不用**这个角色（见下面的 `app` 服务）。
+  #
   # 本机不构建镜像（内存不够），所以开发环境直接用本地二进制跑迁移：
   #   DATABASE_URL=postgres://base:base@localhost:5432/base_dev \
   #     cargo run -p platform-server --bin base -- migrate up
@@ -87,6 +93,49 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    restart: 'no'
+
+  # 租户作用域策略：独立步骤，**必须在迁移之后**（策略是对已建好的表做的）。
+  #
+  # 漏跑这一步 = 租户作用域表**完全没有隔离**（RLS 没开、policy 不存在）。
+  # 用超级用户连接（建策略需要表的属主权限）。
+  #
+  #   podman-compose -f compose.yaml --profile policies run --rm policies
+  # 本机没镜像时等价写法：
+  #   DATABASE_URL=postgres://base:base@localhost:5432/base_dev \
+  #     cargo run -p platform-server --bin base -- tenant-policies
+  policies:
+    image: base-platform:dev
+    profiles: ['policies']
+    command: ['tenant-policies']
+    environment:
+      DATABASE_URL: postgres://base:base@postgres:5432/base_dev
+      BASE_MANIFEST_ROOT: /app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: 'no'
+
+  # 应用：**普通角色**（`base_app`）连接 —— 超级用户会绕过 RLS，
+  # 租户隔离会 fail open（数据库层兜底完全失效）。
+  #
+  # 角色由 `deploy/seed/02-app-role.sql` 在**数据卷首次创建**时建好；
+  # 已有卷的环境角色可能缺失，补建命令见 deploy/RUNBOOK.md「应用角色与 RLS」。
+  #
+  # 应用启动时会自检连接角色：绕过 RLS 就**拒绝启动**（退出码 3）。
+  app:
+    image: base-platform:dev
+    profiles: ['app']
+    command: ['serve']
+    environment:
+      DATABASE_URL: postgres://base_app:base@postgres:5432/base_dev
+      BASE_MIGRATIONS_DIR: /app/migrations
+      BASE_MANIFEST_ROOT: /app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - '127.0.0.1:8080:8080'
     restart: 'no'
 
 volumes:
