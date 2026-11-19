@@ -18,11 +18,13 @@
 > （`91d8e09` → `a0a8d7a` → `400cefa`），Rust 303/303（连跑 8 轮全绿）、前端 23/23、E2E 1/1。
 > 复盘见 [sprint-02-retro.md](../sprint/sprint-02-retro.md)（34 个 QA 问题的归因）。
 >
-> **当前迭代：Sprint 3（权限与界面）** —— REQ-009（RBAC）**已完成**
-> （`develop` @ `12366e9`，Rust **461/461** 连跑 3 轮全绿，`extension-points` 升 v2 新增 C-5），
-> 下一棒 REQ-010（配置品牌）**规格已写实**（14 条 AC / AC-S-049~062）→ REQ-011（前端 SDK）。
-> 复盘见 [sprint-03-retro.md](../sprint/sprint-03-retro.md)。
-> ⚠️ **REQ-010 仍是草稿**（本表此前误标为「已完成 Sprint 2」，2026-11-18 修正）。
+> **当前迭代：Sprint 4（SDK 与二次开发面）** —— REQ-011（前端 SDK）**开发中**
+> （QA 挑刺 **40 条**全部接受 → 验收标准 **rev 2** + 新增决策 **D92~D97**；
+> Dev 已提交后端 `4dda8e8`（550 passed）+ 前端 `752791e`（123 passed，6 处变异全被抓住），
+> QA Pre-merge 验证中）。
+> Sprint 3 复盘见 [sprint-03-retro.md](../sprint/sprint-03-retro.md)；
+> Sprint 4 计划见 [sprint-current.md](../sprint/sprint-current.md)。
+> 已知技术债见 [tech-debt.md](tech-debt.md)（8 条，含「CI 从未真跑」）。
 
 ## 拆分总览
 
@@ -37,7 +39,7 @@
 | REQ-008 | 用户与组织架构 | P0 | 2 | REQ-002, REQ-007 | AC-011/012 | AC-S-011/012 | **已完成**（Sprint 2） |
 | REQ-009 | RBAC 权限与数据范围 | P0 | 3 | REQ-006, REQ-008 | AC-001/002 | AC-S-033~048（16 条） | **已完成**（Sprint 3，`develop` @ `12366e9`） |
 | REQ-010 | 配置、品牌与 Feature Flag | P1 | 3 | REQ-006, REQ-009 | AC-013/014/015 | AC-S-049~063（**15 条**） | **已完成**（Sprint 3，`develop` @ `a3fae66`） |
-| REQ-011 | 前端 SDK 骨架 | P0 | 4 | REQ-002, REQ-009, REQ-010 | AC-016/017/019 | AC-S-064~075（**12 条**） | **已就绪**（Sprint 4，规格写实） |
+| REQ-011 | 前端 SDK 骨架 | P0 | 4 | REQ-002, REQ-009, REQ-010 | AC-016/017/019 | AC-S-064~075（**12 条**） | **开发中**（Sprint 4：QA 挑刺 40 条全部接受 → rev 2；Dev 已提交后端 + 前端；QA Pre-merge 验证中） |
 | REQ-012 | 元数据驱动渲染 | P0 | 4 | REQ-009, REQ-011 | AC-018 | AC-S-018/019 | 草稿 |
 | REQ-013 | SSO 多协议与出站 IdP | P1 | 4 | REQ-007, REQ-009 | AC-005/006 | AC-S-020/021 | 草稿 |
 | REQ-014 | **审计日志** | P1 | 4 | REQ-002, REQ-006 | AC-022 | AC-S-022 | 草稿 |
