@@ -16,24 +16,32 @@
     ],
     "expected": [
       "HTTP 200",
-      "Object.keys(body).sort() == [\"entity\",\"fields\",\"label\",\"module\"]",
+      "Object.keys(body).sort() == [\"api\",\"entity\",\"fields\",\"label\",\"module\"]（**含 api**，D102）",
       "body.module == \"sandbox\"",
       "body.entity == \"demoItem\"",
       "body.label == \"示例条目\"",
-      "Array.isArray(body.fields) == true"
+      "Array.isArray(body.fields) == true",
+      "Object.keys(body.api).sort() == [\"create\",\"delete\",\"list\",\"update\"]",
+      "body.api.list == \"/api/sandbox/demo-items\""
     ],
     "type": "功能",
     "layer": "rust-integration",
     "automatable": true,
     "priority": "P0",
-    "notes": "响应体含 module（design §3.2）但 AC-S-078 步骤 2 只列了 entity/label/fields —— 两处形状不一致（挑刺 #40），本用例按 design 写，需 BA 同步。"
+    "notes": "**已按 D102 修订**：原预期 4 键（entity/fields/label/module）过时 —— 元数据接口必须返回 `api` 子段，否则前端拿到元数据也不知道去哪取数据（这正是 QA #5 挑的洞）。前端 `EntityMeta.api` 是**必填**。"
   },
   {
     "id": "TC-012-015",
     "ac": "AC-S-078",
     "title": "字段的集合与顺序精确等于 manifest 声明顺序",
-    "preconditions": ["同 TC-012-014（U2 全字段可见）"],
-    "steps": ["GET /api/schema/sandbox/demoItem", "取出 body.fields.map(f => f.key)", "与声明顺序逐项比对"],
+    "preconditions": [
+      "同 TC-012-014（U2 全字段可见）"
+    ],
+    "steps": [
+      "GET /api/schema/sandbox/demoItem",
+      "取出 body.fields.map(f => f.key)",
+      "与声明顺序逐项比对"
+    ],
     "expected": [
       "keys 数组**深度等于** [\"id\",\"title\",\"amount\",\"paid\",\"dueAt\",\"ownerId\",\"secret\"]",
       "keys.length == 7（不是 8、不是 6）",
@@ -49,7 +57,9 @@
     "id": "TC-012-016",
     "ac": "AC-S-078",
     "title": "required / permission 如实出现；未声明的可选属性**省略该键**（不是 null）",
-    "preconditions": ["同 TC-012-014（U2 全字段可见）"],
+    "preconditions": [
+      "同 TC-012-014（U2 全字段可见）"
+    ],
     "steps": [
       "GET /api/schema/sandbox/demoItem",
       "取 fields 中 key==\"title\" 的元素",
@@ -75,8 +85,13 @@
     "id": "TC-012-017",
     "ac": "AC-S-078",
     "title": "实体不存在 → 404 SCHEMA_ENTITY_NOT_FOUND",
-    "preconditions": ["模块 sandbox 存在且声明了 demoItem"],
-    "steps": ["GET /api/schema/sandbox/notARealEntity（带 U2 令牌）", "断言状态码与 code"],
+    "preconditions": [
+      "模块 sandbox 存在且声明了 demoItem"
+    ],
+    "steps": [
+      "GET /api/schema/sandbox/notARealEntity（带 U2 令牌）",
+      "断言状态码与 code"
+    ],
     "expected": [
       "HTTP 404",
       "body.code == \"SCHEMA_ENTITY_NOT_FOUND\"",
@@ -93,7 +108,9 @@
     "id": "TC-012-018",
     "ac": "AC-S-078",
     "title": "模块不存在 → 404 SCHEMA_MODULE_NOT_FOUND（与实体不存在可区分）",
-    "preconditions": ["已知存在的模块 id 集合 = {\"sandbox\"}"],
+    "preconditions": [
+      "已知存在的模块 id 集合 = {\"sandbox\"}"
+    ],
     "steps": [
       "GET /api/schema/notAModule/demoItem（带 U2 令牌）",
       "GET /api/schema/sandbox/demoItem（对照组）",
@@ -114,7 +131,9 @@
     "id": "TC-012-019",
     "ac": "AC-S-078",
     "title": "不带令牌 → 401 UNAUTHENTICATED（且在读取任何元数据之前）",
-    "preconditions": ["服务可达"],
+    "preconditions": [
+      "服务可达"
+    ],
     "steps": [
       "GET /api/schema/sandbox/demoItem（不带 Authorization）",
       "断言状态码与 code",
@@ -123,16 +142,15 @@
     "expected": [
       "HTTP 401",
       "body.code == \"UNAUTHENTICATED\"",
-      "Object.keys(body).sort() 深度等于 [\"code\",\"detail\",\"instance\",\"status\",\"title\",\"traceId\",\"type\"]（错误体形状与既有 401 一致，没有多带业务键）",
+      "Object.keys(body).sort() 深度等于 [\"code\",\"detail\",\"instance\",\"status\",\"title\",\"trace_id\",\"type\"]（错误体形状与既有 401 一致，没有多带业务键）",
       "body.status == 401",
-      "JSON.stringify(body) 中 token \"\\\"demoItem\\\"\" 的出现次数 == 0",
-      "JSON.stringify(body) 中 token \"\\\"title\\\"\" 的出现次数 == 0"
+      "JSON.stringify(body) 中 token \"\\\"demoItem\\\"\" 的出现次数 == 0"
     ],
     "type": "安全",
     "layer": "rust-integration",
     "automatable": true,
     "priority": "P0",
-    "notes": "现有 401 语义与码均有先例（platform-core/src/problem.rs:33,115-120；platform-rbac/src/http.rs:174-179）。"
+    "notes": "**已按裁定修订**：① 键是 `trace_id` **不是** `traceId`（契约 C6 优先于用例）；② **删掉**「`\"title\"` 出现次数 == 0」—— RFC 9457 错误体**自带** `title`，该断言**必然失败**。这与 QA 自己挑出的 #4（「全文不出现字段名」必然误报）**是同一类错**。"
   },
   {
     "id": "TC-012-020",
@@ -142,7 +160,10 @@
       "构造一个仅有 permissions/menus 的模块（无 schema 段），例如把 sandbox 的 schema 段删掉后放进临时 manifest 根",
       "服务以该临时根启动（BASE_MANIFEST_ROOT）"
     ],
-    "steps": ["GET /api/schema/sandbox/demoItem", "断言状态码与 body"],
+    "steps": [
+      "GET /api/schema/sandbox/demoItem",
+      "断言状态码与 body"
+    ],
     "expected": [
       "HTTP 404",
       "body.code == \"SCHEMA_ENTITY_NOT_FOUND\"",
@@ -162,7 +183,10 @@
       "用户 U0 在 tenant-a 下无任何 sandbox:* 权限点（无角色的账号）",
       "U0 令牌有效"
     ],
-    "steps": ["以 U0 请求 GET /api/schema/sandbox/demoItem", "断言状态码与可见字段"],
+    "steps": [
+      "以 U0 请求 GET /api/schema/sandbox/demoItem",
+      "断言状态码与可见字段"
+    ],
     "expected": [
       "HTTP 200",
       "body.fields.map(f => f.key) 深度等于 [\"id\",\"title\",\"amount\",\"paid\",\"dueAt\",\"ownerId\"]（6 个，secret 被剔除）",
@@ -204,17 +228,19 @@
     "id": "TC-012-023",
     "ac": "AC-S-079",
     "title": "响应全文不出现被剔除字段的**标识 token**，也不出现被剔除清单",
-    "preconditions": ["同 TC-012-022"],
+    "preconditions": [
+      "同 TC-012-022"
+    ],
     "steps": [
       "以 U1 请求元数据，取响应体原文 raw（字符串，不重新序列化）",
       "对 raw 做精确 token 匹配：\"secret\"（带 JSON 引号边界的键名/字符串值）",
       "检查是否出现计数或清单键"
     ],
     "expected": [
-      "raw 不包含 token \"\\\"secret\\\"\"（即 JSON 里不存在键名或字符串值 secret）",
+      "raw 不包含 token \"\\\"secret\\\"\"（即 JSON 里不存在**键名** secret）—— 注意是「作为键」，不是「作为子串」",
       "raw 不包含 \"内部备注\"（被剔除字段的 label 原文）",
       "raw 不包含 \"hiddenFields\"、\"deniedFields\"、\"omitted\"、\"total\"、\"filteredCount\" 任一 token",
-      "Object.keys(body).sort() == [\"entity\",\"fields\",\"label\",\"module\"]（顶层没有多余键）"
+      "Object.keys(body).sort() == [\"api\",\"entity\",\"fields\",\"label\",\"module\"]（**含 api**，D102；顶层没有多余键）"
     ],
     "type": "安全",
     "layer": "rust-integration",
