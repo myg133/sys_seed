@@ -3,18 +3,17 @@
  *
  * # 为什么带参数的处理函数放在 `.ts` 里
  *
- * `apps/shell` 的 `.svelte` 脚本块只能写 **JS 语法**：仓库根的 eslint 配置
- * （`eslint.config.js`）没有给 `.svelte` 配 TypeScript 解析器
- * （缺 `languageOptions.parserOptions.parser`），写 TS 注解会让
- * `eslint .` 直接报**解析错误**。
- *
- * 而 `.svelte` 在 TS 模式下又**不能**声明带类型的参数 ——
+ * `.svelte` 在 TS 模式下**不能**声明带类型的参数 ——
  * `strict`（含 `noImplicitAny`）会把没注解的参数判成错误：
  * 模板里的行内箭头函数没有上下文类型 → 报「implicitly has an 'any' type」。
  *
  * 所以：**带参数的处理函数一律在 `.ts` 模块里造**（那里是全量类型检查的），
  * `.svelte` 只负责把工厂的产物接到模板上 ——
  * 组件里出现的箭头函数要么**没有参数**，要么参数由这里的工厂提供上下文类型。
+ *
+ * （注：根 `eslint.config.js` 现已给 `.svelte` 文件配了 TypeScript 解析器，
+ * 所以 `.svelte` 的脚本块**可以**写 TS 类型标注了 —— 但上面那条
+ * 「模板内联箭头函数没有上下文类型」的限制**依然成立**，本工厂仍然必要。）
  */
 
 /** 输入值回调（输入框）。 */

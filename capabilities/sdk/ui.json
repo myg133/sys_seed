@@ -2,8 +2,32 @@
   "entry": "./dist/index.js",
   "exports": [
     {
+      "declaration": "export type Slot = Snippet",
+      "description": "内容插槽（视图层）。",
+      "kind": "type",
+      "name": "Slot"
+    },
+    {
+      "declaration": "export type ClickHandler = (event: MouseEvent) => void",
+      "description": "点击回调（按钮、遮罩）。",
+      "kind": "type",
+      "name": "ClickHandler"
+    },
+    {
+      "declaration": "export type CloseHandler = () => void",
+      "description": "关闭回调（对话框）。",
+      "kind": "type",
+      "name": "CloseHandler"
+    },
+    {
+      "declaration": "export type ValueHandler = (value: string) => void",
+      "description": "输入值回调（输入框）—— 拿的是**字符串**值，不是原生事件。",
+      "kind": "type",
+      "name": "ValueHandler"
+    },
+    {
       "declaration": "export type Tone = 'default' | 'primary' | 'danger'",
-      "description": "@base/ui —— 基础组件的**逻辑与样式契约**（REQ-011 / AC-S-075）。",
+      "description": "基础色调。",
       "kind": "type",
       "name": "Tone"
     },
@@ -62,6 +86,12 @@
       "name": "buttonClass"
     },
     {
+      "declaration": "export interface ButtonComponentProps extends ButtonProps {",
+      "description": "按钮组件的属性契约（视图层）。",
+      "kind": "interface",
+      "name": "ButtonComponentProps"
+    },
+    {
       "declaration": "export type InputType = 'text' | 'password' | 'email' | 'number' | 'search'",
       "description": "输入框类型。",
       "kind": "type",
@@ -80,6 +110,12 @@
       "name": "inputClass"
     },
     {
+      "declaration": "export interface InputComponentProps extends InputProps {",
+      "description": "输入框组件的属性契约（视图层）。",
+      "kind": "interface",
+      "name": "InputComponentProps"
+    },
+    {
       "declaration": "export interface CardProps {",
       "description": "卡片属性契约。",
       "kind": "interface",
@@ -90,6 +126,12 @@
       "description": "卡片类名（样式契约）。",
       "kind": "function",
       "name": "cardClass"
+    },
+    {
+      "declaration": "export interface CardComponentProps extends Omit<CardProps, 'footer'> {",
+      "description": "卡片组件的属性契约（视图层）。",
+      "kind": "interface",
+      "name": "CardComponentProps"
     },
     {
       "declaration": "export interface TableColumn<Row = unknown> {",
@@ -132,6 +174,12 @@
       "description": "对话框类名（样式契约）。",
       "kind": "function",
       "name": "dialogClass"
+    },
+    {
+      "declaration": "export interface DialogComponentProps extends DialogProps {",
+      "description": "对话框组件的属性契约（视图层）。",
+      "kind": "interface",
+      "name": "DialogComponentProps"
     },
     {
       "declaration": "export function rowKeyOf<Row>(",

@@ -38,7 +38,7 @@
     "schema/manifest.schema.json": {},
     "schema/metadata.schema.json": {},
     "sdk/auth.json": {
-      "exports": 16
+      "exports": 17
     },
     "sdk/hooks.json": {
       "exports": 18
@@ -56,7 +56,7 @@
       "exports": 14
     },
     "sdk/ui.json": {
-      "exports": 24
+      "exports": 32
     }
   },
   "entry_points": {
@@ -81,5 +81,5 @@
     ],
     "version": "0.1.0"
   },
-  "source_fingerprint": "fnv1a64:f501cc43afe55303"
+  "source_fingerprint": "fnv1a64:9e918a8349203979"
 }

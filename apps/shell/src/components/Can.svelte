@@ -14,24 +14,23 @@
   落点：无权限且给了 `fallback` → 渲染 `fallback`（纯 `<span>`）；
   无权限且没给 `fallback` → **什么都不渲染**。
 
-  ⚠️ 脚本块写成 **JS 语法**：本仓的 eslint 配置没有给 `.svelte` 文件配
-  TypeScript 解析器，写 TS 会让 `eslint .` 直接报解析错误。
-  类型契约在 `@base/auth` / `@base/ui` 里（那里是全量类型检查的）。
+  ⚠️ 类型契约住在 `@base/auth`（`CanComponentProps`）——
+  包不能产出 `.svelte` 组件（构建是 `tsc`），但**类型**可以、也应该由包提供，
+  否则每个宿主应用都要各写一份 props 接口。
 -->
 <script lang="ts">
   import { can } from '@base/auth';
+  import type { CanComponentProps } from '@base/auth';
+  import type { Snippet } from 'svelte';
 
   import { useAuthContext } from '../lib/auth-context';
 
   // props 整体取值：svelte-check 会把「解构出来的可选 props」当成必填，
   // 消费方就得把每个可选值都传一遍 —— 契约反而没法用。
-  interface CanProps {
-    permission: string;
-    state?: import('@base/auth').AuthState;
-    children?: import('svelte').Snippet;
-    fallback?: string;
-  }
-  const props: CanProps = $props();
+  //
+  // `Snippet` 作为泛型实参：包的契约保持框架无关，
+  // 具体内容类型由**宿主框架**给出（这里是 Svelte）。
+  const props: CanComponentProps<Snippet> = $props();
 
   const context = useAuthContext();
   const current = $derived(props.state ?? context?.state);

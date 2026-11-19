@@ -153,6 +153,37 @@ export function conditionalRender(
   return { renderChildren: allowed, fallback: allowed ? undefined : fallback };
 }
 
+/**
+ * `<Can>` 视图层的 props 契约（**类型-only**）。
+ *
+ * # 为什么类型住在包里、组件住在应用里
+ *
+ * 包的构建是 `tsc`（`.svelte` 文件进不了产物），所以 `@base/auth` **不能**产出
+ * Svelte 组件；但**类型契约**可以、也应该由包提供 ——
+ * 否则每个宿主应用都要各写一份 props 接口，**类型安全就散掉了**。
+ *
+ * # 为什么 `children` 是泛型
+ *
+ * `children` 的类型由**宿主框架**决定（Svelte 的 `Snippet`、React 的 `ReactNode` …），
+ * 而 `@base/auth` 必须**保持框架无关**（它只做判定）。
+ * 所以这里用**泛型参数** `Children`：
+ * 宿主应用写 `CanComponentProps<Snippet>` 时，
+ * `children` 就是 `Snippet` → `{@render props.children?.()}` 可被类型检查。
+ *
+ * 默认 `unknown` 时 `children` **不可调用** —— 这正是我们想要的：
+ * 宿主**必须**显式给出子内容的类型，否则 `@render` 无法通过类型检查。
+ */
+export interface CanComponentProps<Children = unknown> {
+  /** 要求的权限点编码。 */
+  readonly permission: string;
+  /** 当前登录态；不传时从宿主的上下文取。 */
+  readonly state?: AuthState;
+  /** 有权限时渲染的内容（类型由宿主框架给出）。 */
+  readonly children?: Children;
+  /** 无权限时的兜底文案；不传则**什么都不渲染**。 */
+  readonly fallback?: string;
+}
+
 /** 登录会话（令牌由宿主保管）。 */
 export interface AuthSession {
   /** access token。 */

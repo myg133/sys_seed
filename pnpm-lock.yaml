@@ -266,6 +266,10 @@ importers:
       '@base/theme':
         specifier: workspace:*
         version: link:../theme
+    devDependencies:
+      svelte:
+        specifier: ^5.0.0
+        version: 5.57.3(@typescript-eslint/types@8.72.2)
 
 packages:
 
