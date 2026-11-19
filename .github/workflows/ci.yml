@@ -46,9 +46,36 @@ jobs:
       - run: pnpm exec prettier --check .
 
   # 2. 单元测试 + 契约测试 + 前端单测
+  #
+  # ⚠️ 这里必须有 postgres service：
+  #   `platform-config` / `platform-org` 等套件里有需要真实数据库的用例，
+  #   缺 `DATABASE_URL_TEST` 时它们会 **panic**（不是 skip）→ 本 job 必红。
+  #   本地无库时用 `./scripts/test-integration.sh`（它自己处理这个降级）。
+  #
+  # ⚠️ 前端必须先 `pnpm -r build` 再 `pnpm -r test`：
+  #   `packages/sdk/test/packaging.test.ts` 用 `describe.skipIf(!built)` 守着
+  #   AC-S-075 的**产物边界**（dist 内容）。`dist` 被 gitignore，不先 build 就
+  #   全部 skip —— 那 2 条**看起来在、实际不跑**（假绿）。
   test:
     name: test
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: base
+          POSTGRES_PASSWORD: base
+          POSTGRES_DB: base_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U base -d base_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    env:
+      DATABASE_URL: postgres://base:base@127.0.0.1:5432/base_test
+      DATABASE_URL_TEST: postgres://base:base@127.0.0.1:5432/base_test
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -56,6 +83,9 @@ jobs:
           toolchain: 1.98.1
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      # 需要真实库的套件要求平台表已建好
+      - name: 迁移 up（测试库）
+        run: cargo run --locked -p platform-server --bin base -- migrate up
       - run: cargo test --workspace -- --test-threads=2
 
       - uses: pnpm/action-setup@v4
@@ -66,7 +96,55 @@ jobs:
           node-version-file: '.node-version'
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      - run: pnpm -r build
       - run: pnpm -r test
+
+  # 2b. 集成测试：把上面 test job **跑不到**的 `#[ignore]` 用例跑起来
+  #
+  # 为什么必须有这个 job：
+  #   `cargo test --workspace` **不会跑 `#[ignore]` 的用例**，而需要真实库的套件
+  #   全部标了 `#[ignore]` —— 共 **80 条**，包括：
+  #     platform-rbac/tests/rbac_real_db.rs      22 条（RBAC 判定核心）
+  #     platform-iam/tests/iam_real_db.rs        15 条（认证核心）
+  #     platform-org/tests/org_real_db.rs        14 条（组织核心）
+  #     platform-rbac/tests/me_permissions.rs    10 条（REQ-011 的 AC-S-064/065 验收）
+  #   **没有这个 job，上面这些在 CI 上等于不存在。**
+  #
+  # 用仓库的 canonical 脚本（它会重置库、建应用角色、再用 `--include-ignored` 跑），
+  # 与本地开发者跑的是**同一条路径**（D85：测试与生产/本地必须走同一个入口）。
+  #
+  # ⚠️ 已知：本 job 的「主机直连 psql」分支在开发机（无 psql）上**未实测**，
+  #    本地走的是 podman 分支。首次真跑时若此处失败，优先看这一处。
+  integration:
+    name: integration
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: base
+          POSTGRES_PASSWORD: base
+          POSTGRES_DB: base_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U base -d base_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 12
+    env:
+      DATABASE_URL_TEST: postgres://base:base@127.0.0.1:5432/base_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.1
+      - uses: Swatinem/rust-cache@v2
+      # psql 是硬依赖：脚本在 CI 环境**拒绝**静默跳过库重置（见 scripts/test-integration.sh
+      # 的 cannot_reset），没有 psql 会直接失败。显式装，不赌 runner 镜像预装了什么。
+      - name: 安装 psql 客户端
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
+      - run: ./scripts/test-integration.sh
 
   # 3. 构建
   build:
@@ -218,6 +296,9 @@ jobs:
         with:
           toolchain: 1.98.1
       - uses: Swatinem/rust-cache@v2
+      # 下面几步都要用 psql 直接查库；显式装，不赌 runner 镜像预装了什么。
+      - name: 安装 psql 客户端
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client
       - name: 迁移 up
         run: cargo run --locked -p platform-server --bin base -- migrate up
       - name: 校验平台表已建立

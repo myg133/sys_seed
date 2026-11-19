@@ -51,6 +51,25 @@ run_test_db_sql() {
   fi
 }
 
+# --- 「数据层不可用」的统一出口 ------------------------------------------------
+# 本地：**跳过**（开发机常不开库，不能强制）。
+# CI：**必须失败** —— CI 上静默跳过会让集成用例跑在**没重置的库**上，
+#     结果不可信，而脚本仍 exit 0 → 假绿。
+#     本仓已经吃过「看起来在、实际不跑」的亏（`#[ignore]` / `skipIf` / 双 `--`），
+#     这里不留同一个洞。
+cannot_reset() {
+  local reason="$1"
+  if [ -n "${CI:-}" ]; then
+    echo "错误：无法重置测试库（$reason），但当前处于 CI 环境 —— 拒绝静默跳过。" >&2
+    echo "  CI 上跳过重置 = 集成用例跑在未清理的库上 = 结果不可信。" >&2
+    echo "  检查 CI 是否装了 psql 客户端、postgres service 是否就绪。" >&2
+    return 1
+  fi
+  echo "跳过测试库重置：$reason" >&2
+  echo "  本地开发不常开数据库；需要集成测试时先执行 'bun run db:up'" >&2
+  return 0
+}
+
 # --- 重置测试库 ---------------------------------------------------------------
 # 用途：每轮集成测试从干净 schema 开始，避免用例之间互相污染。
 # 边界：**白名单** —— 只有库名恰好是 base_test 才允许重置；其它任何库名一律拒绝并非 0 退出。
@@ -84,9 +103,8 @@ reset_test_db() {
   # 路径 1：主机装了 psql —— 直连，最通用
   if [ "$HOST_HAS_PSQL" -eq 1 ]; then
     if ! psql "$DATABASE_URL_TEST" -v ON_ERROR_STOP=1 -c 'select 1' >/dev/null 2>&1; then
-      echo "跳过测试库重置：测试库不可达（$DATABASE_URL_TEST）" >&2
-      echo "  本地开发不常开数据库；需要集成测试时先执行 'bun run db:up'" >&2
-      return 0
+      cannot_reset "测试库不可达（$DATABASE_URL_TEST）"
+      return $?
     fi
   else
     # 路径 2：主机没装 psql —— 走 podman exec。
@@ -94,20 +112,17 @@ reset_test_db() {
     case "$host_port" in
       127.0.0.1:5432 | localhost:5432) ;;
       *)
-        echo "跳过测试库重置：主机未安装 psql，且 DATABASE_URL_TEST 不指向本机 127.0.0.1:5432" >&2
-        echo "  需要集成测试时先执行 'bun run db:up'，或安装 psql 客户端" >&2
-        return 0
+        cannot_reset "主机未安装 psql，且 DATABASE_URL_TEST 不指向本机 127.0.0.1:5432"
+        return $?
         ;;
     esac
     if ! podman ps --format '{{.Names}}' 2>/dev/null | grep -qx 'base-postgres'; then
-      echo "跳过测试库重置：主机未安装 psql，且数据库容器未运行" >&2
-      echo "  本地开发不常开数据库；需要集成测试时先执行 'bun run db:up'" >&2
-      return 0
+      cannot_reset "主机未安装 psql，且数据库容器未运行"
+      return $?
     fi
     if ! podman exec base-postgres pg_isready -U base -d "$db" >/dev/null 2>&1; then
-      echo "跳过测试库重置：数据库容器未就绪（$db）" >&2
-      echo "  需要集成测试时先执行 'bun run db:up'" >&2
-      return 0
+      cannot_reset "数据库容器未就绪（$db）"
+      return $?
     fi
   fi
 
