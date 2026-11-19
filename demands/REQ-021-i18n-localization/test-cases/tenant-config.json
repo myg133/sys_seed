@@ -1,0 +1,227 @@
+[
+  {
+    "id": "TC-021-040",
+    "ac": "AC-S-093",
+    "title": "platform-config 的 manifest 声明 locale / timezone / currency 三个键，类型均为 string",
+    "preconditions": [
+      "crates/platform-config/manifest.json 当前**没有**这三个键（实测 config 段只有 logo/favicon/title/loginBackground/footer/copyright/primaryColor/theme.*/loginBanner/newInvoice/beta）",
+      "manifest 的 config 段 schema 只允许 type ∈ {string,number,boolean,array,object}、default、scope、label 四个属性（crates/platform-core/src/extension/manifest_schema.rs:63-75）"
+    ],
+    "steps": [
+      "读 crates/platform-config/manifest.json",
+      "断言 config 段包含三个键",
+      "断言每个键的 type 与 default"
+    ],
+    "expected": [
+      "config.locale 存在，type == \"string\"，default == \"zh-CN\"",
+      "config.timezone 存在，type == \"string\"，default == \"Asia/Shanghai\"",
+      "config.currency 存在，type == \"string\"，default == \"CNY\"",
+      "三者的 default 值都出现在 manifest 原文里（不是代码兜底）",
+      "Manifest::parse_checked(raw) 返回 Ok（新增键不破坏 manifest 校验）"
+    ],
+    "type": "功能",
+    "layer": "rust-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "默认值（zh-CN / Asia/Shanghai / CNY）AC 没写，由本用例提出。依据：平台默认 zh-CN 见 AC-S-090 前置；Asia/Shanghai 见 AC-S-095 前置。BA 需在 acceptance.md 钉死，否则 TC-021-046 无依据。"
+  },
+  {
+    "id": "TC-021-041",
+    "ac": "AC-S-093",
+    "title": "三键的 scope 都是 tenant",
+    "preconditions": [
+      "TC-021-040 已通过"
+    ],
+    "steps": [
+      "读 manifest 里三键的 scope 字段",
+      "与固定值比较"
+    ],
+    "expected": [
+      "config.locale.scope == \"tenant\"",
+      "config.timezone.scope == \"tenant\"",
+      "config.currency.scope == \"tenant\"",
+      "三者的 scope 都不是 \"platform\"，也都不是 \"space\""
+    ],
+    "type": "功能",
+    "layer": "rust-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "D53 把 scope 解释为「允许覆盖到的最深层」→ scope=tenant 意味着 platform 层仍可写、space 层不可写。这正是 TC-021-048 的判据。若 BA 想让多空间租户分空间设语言，得改 scope=space 并同步改 AC。"
+  },
+  {
+    "id": "TC-021-042",
+    "ac": "AC-S-093",
+    "title": "租户 A 写 locale=en-US 后读回 en-US 且 source=tenant",
+    "preconditions": [
+      "已登录且有 config:entry:write 权限的用户，租户 A",
+      "locale 已在 manifest 声明（TC-021-040）"
+    ],
+    "steps": [
+      "PUT /api/config/entries，body = {\"scope\":\"tenant\",\"entries\":[{\"key\":\"locale\",\"value\":\"en-US\"}]}",
+      "GET /api/config/entries?keys=locale"
+    ],
+    "expected": [
+      "PUT 返回 200",
+      "GET 返回 200 且 body.entries 长度 == 1",
+      "body.entries[0].key == \"locale\"",
+      "body.entries[0].value == \"en-US\"（精确字符串）",
+      "body.entries[0].source == \"tenant\"（精确；来自 ConfigSource 的四值枚举）"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "响应形状取自 ResolvedConfig 的 serde（platform-core/src/extension/config.rs:100-112，camelCase）：{key, value, source}。读接口是 GET /api/config/entries?keys=...（platform-config/src/http.rs:51,261-278）。"
+  },
+  {
+    "id": "TC-021-043",
+    "ac": "AC-S-093",
+    "title": "租户 B 未配置 → 读到平台默认值且 source=default",
+    "preconditions": [
+      "租户 A 已配 locale=en-US（TC-021-042）",
+      "租户 B 从未写过 locale",
+      "平台层也未写过 locale"
+    ],
+    "steps": [
+      "以租户 B 的身份 GET /api/config/entries?keys=locale",
+      "对比租户 A 的读结果"
+    ],
+    "expected": [
+      "租户 B 的 body.entries[0].value == \"zh-CN\"（manifest 的 default）",
+      "租户 B 的 body.entries[0].source == \"default\"（不是 \"tenant\"，不是 \"platform\"）",
+      "租户 A 的结果仍为 \"en-US\" / \"tenant\"（租户隔离，互不影响）",
+      "两个响应的 value 不相等"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "source 的四值（platform/tenant/space/default）见 platform-core/src/extension/config.rs:47-56。断言 source 是这条用例的核心 —— 只断言 value 无法区分「平台写了 zh-CN」与「谁都没写」。"
+  },
+  {
+    "id": "TC-021-044",
+    "ac": "AC-S-093",
+    "title": "写入非法 timezone（Not/AZone）→ 400，错误码明确指出值非法（守卫：当前必红）",
+    "preconditions": [
+      "当前 config 的写入校验只做 JSON 类型匹配：platform-config/src/service.rs:464-471 的 value_matches(value, spec.kind)；spec 只有 type/default/scope/label",
+      "manifest schema 的 config 段没有 enum / pattern 校验器（manifest_schema.rs:63-75）",
+      "因此今天写 \"Not/AZone\" 会 200 成功落库"
+    ],
+    "steps": [
+      "PUT /api/config/entries，entries = [{key:\"timezone\", value:\"Not/AZone\"}]",
+      "解析响应体",
+      "再 GET 一次确认没有落库"
+    ],
+    "expected": [
+      "PUT 返回 400",
+      "body.code ∈ {\"CONFIG_INVALID_VALUE\", \"CONFIG_VALUE_OUT_OF_RANGE\"}（BA 必须二选一钉死）",
+      "body.params.key == \"timezone\"",
+      "body.params.value == \"Not/AZone\" 或 body.detail 含 \"Not/AZone\"",
+      "随后的 GET 里 timezone 仍为上一次的合法值（未落库）",
+      "响应体不含中文（与 AC-S-088 一致）"
+    ],
+    "type": "安全",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "★ AC-S-093 步骤 4 要求「400，不是存进去后渲染才炸」，但**平台没有任何值语义校验机制**：config 只校验 JSON 类型（string 类型接受任意字符串）。要满足这条 AC，必须新增一种「值校验器」声明（enum / pattern / 自定义），design 一个字没写。这是本需求第三个硬伤。见挑刺 #8。"
+  },
+  {
+    "id": "TC-021-045",
+    "ac": "AC-S-093",
+    "title": "写入非法 currency（XXXX）与非法 locale（xx-YY）→ 400（守卫：当前必红）",
+    "preconditions": [
+      "同 TC-021-044 的校验缺口"
+    ],
+    "steps": [
+      "PUT currency = \"XXXX\"",
+      "PUT locale = \"xx-YY\"",
+      "PUT currency = \"cny\"（小写）",
+      "分别解析响应"
+    ],
+    "expected": [
+      "currency=\"XXXX\" → 400，params.key == \"currency\"",
+      "locale=\"xx-YY\" → 400，params.key == \"locale\"",
+      "currency=\"cny\" → 行为必须钉死（归一化接受 / 400 拒绝二选一），不得静默存成小写",
+      "三次请求后 GET 三个键，值都未变"
+    ],
+    "type": "安全",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "三类值的三套校验规则（ISO 4217 / BCP 47 / IANA tz）AC 只举例，没写依据（是白名单还是语法检查？）。若用语法检查，\"xx-YY\" 语法合法 → 会被接受。必须钉死为「白名单校验」才可判定。"
+  },
+  {
+    "id": "TC-021-046",
+    "ac": "AC-S-093",
+    "title": "默认值来自 manifest 的 default（改 manifest 就能改默认，不需要改代码）",
+    "preconditions": [
+      "用一个临时 manifest 副本，把 locale.default 改成 \"en-US\"",
+      "BASE_MANIFEST_ROOT 指向该副本"
+    ],
+    "steps": [
+      "启动服务（或调用 ConfigRegistry::from_manifest_root）",
+      "对未配置任何 locale 的租户读 locale"
+    ],
+    "expected": [
+      "读到的 value == \"en-US\"（跟随 manifest，不是代码常量）",
+      "source == \"default\"",
+      "把 manifest 的 default 改回 \"zh-CN\" 后，同样读法得 \"zh-CN\"",
+      "两次读之间没有重启之外的操作"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "「默认值来自 manifest」的判据必须是「改 manifest 就变」，否则无法区分「manifest default」与「代码里写死 zh-CN」。"
+  },
+  {
+    "id": "TC-021-047",
+    "ac": "AC-S-093",
+    "title": "平台级写入 locale 后，未配置的租户读到 platform 层",
+    "preconditions": [
+      "操作者有 config:platform:write",
+      "租户 C 未配置 locale"
+    ],
+    "steps": [
+      "PUT /api/config/platform-entries，entries = [{key:\"locale\", value:\"en-US\"}]",
+      "以租户 C 身份 GET /api/config/entries?keys=locale",
+      "再以租户 A（已配 en-US→ 改成 ja-JP）身份读"
+    ],
+    "expected": [
+      "平台写返回 200",
+      "租户 C 读到 \"en-US\" 且 source == \"platform\"",
+      "租户 A 读到自己配的值且 source == \"tenant\"（租户覆盖平台）",
+      "两层都写时 tenant 优先，与 ConfigSource::rank（tenant=2 > platform=1）一致"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P2",
+    "notes": "AC-S-093 只写 scope 必须是 tenant，没说平台层能不能写。scope=tenant 在 D53 的语义下允许平台写 —— 这条把该语义显式化。"
+  },
+  {
+    "id": "TC-021-048",
+    "ac": "AC-S-093",
+    "title": "空间级写 locale → 400 CONFIG_SCOPE_NOT_ALLOWED（scope=tenant 是「可覆盖到的最深层」）",
+    "preconditions": [
+      "操作者有 config:entry:write",
+      "locale.scope == \"tenant\""
+    ],
+    "steps": [
+      "PUT /api/config/entries，body = {\"scope\":\"space\",\"entries\":[{\"key\":\"locale\",\"value\":\"en-US\"}]}",
+      "解析响应"
+    ],
+    "expected": [
+      "HTTP status == 400",
+      "body.code == \"CONFIG_SCOPE_NOT_ALLOWED\"",
+      "body.params.key == \"locale\"（或 detail 含 \"locale\"）",
+      "空间级 locale 没有被写入（后续读仍是 tenant/default 值）"
+    ],
+    "type": "安全",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "现有 config 的 scope 校验在 platform-config/src/service.rs:503-513（parse_scope）与 registry 的 scope 判定；config 错误码 CONFIG_SCOPE_NOT_ALLOWED 已存在（platform-config/src/error.rs:137）。这条是可实现的，与 TC-021-044 的「值校验缺口」不同。"
+  }
+]

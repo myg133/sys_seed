@@ -1,0 +1,547 @@
+[
+  {
+    "id": "TC-021-017",
+    "ac": "AC-S-090",
+    "title": "无用户偏好、无租户配置：只用 Accept-Language 得到 zh-CN",
+    "preconditions": [
+      "平台默认 locale = zh-CN（来源待钉死，见 TC-021-024 与挑刺 #35）",
+      "已注册语言集合 = {zh-CN, en-US}",
+      "u0 没有任何 locale 偏好记录",
+      "租户 T0 未配置 locale"
+    ],
+    "steps": [
+      "以 u0 的身份请求一个会回显协商结果的路由（通道见 TC-021-025）",
+      "请求头只带 Accept-Language: zh-CN"
+    ],
+    "expected": [
+      "协商结果 == \"zh-CN\"（精确字符串）",
+      "协商结果是已注册语言集合的成员",
+      "结果与「不带任何 Accept-Language」时的结果相同"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "「以什么形式观测协商结果」AC 完全没写 —— 全仓 0 处 locale（grep crates/ modules/ 无命中），没有响应头也没有字段。见 TC-021-025 与挑刺 #5。"
+  },
+  {
+    "id": "TC-021-018",
+    "ac": "AC-S-090",
+    "title": "租户配 en-US 但请求头带 zh-CN → zh-CN（请求头高于租户）",
+    "preconditions": [
+      "租户 T1 的 locale 配置为 en-US（通过 PUT /api/config/entries，scope=tenant）",
+      "u1 在 T1 下没有任何 locale 偏好"
+    ],
+    "steps": [
+      "以 u1 的身份请求回显路由",
+      "请求头带 Accept-Language: zh-CN"
+    ],
+    "expected": [
+      "协商结果 == \"zh-CN\"（精确）",
+      "协商结果 != \"en-US\"（证明请求头确实压过租户配置）",
+      "同一个 u1 去掉 Accept-Language 重放 → 结果 == \"en-US\"（证明租户配置本身生效）"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "两步合一是刻意的：只有「带头发 zh-CN」与「不带头得 en-US」同时成立，才能证明优先级方向，单看第一步无法区分「请求头优先」和「租户配置没读到」。"
+  },
+  {
+    "id": "TC-021-019",
+    "ac": "AC-S-090",
+    "title": "用户偏好 ja-JP（未注册）→ 视为没设，回退到请求头 zh-CN，不是 ja-JP 也不是租户的 en-US",
+    "preconditions": [
+      "u2 的 locale 偏好 = ja-JP",
+      "ja-JP 不在已注册集合 {zh-CN, en-US} 中",
+      "租户 T1 的 locale = en-US"
+    ],
+    "steps": [
+      "以 u2 的身份请求回显路由",
+      "请求头带 Accept-Language: zh-CN"
+    ],
+    "expected": [
+      "协商结果 == \"zh-CN\"（精确）",
+      "协商结果 != \"ja-JP\"",
+      "协商结果 != \"en-US\"",
+      "协商结果是已注册语言集合的成员"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "「三不」是关键：只断言 == zh-CN 会掩盖「直接返回未注册 locale + 恰好前端回退到 zh-CN」的实现。"
+  },
+  {
+    "id": "TC-021-020",
+    "ac": "AC-S-090",
+    "title": "用户偏好 en-US 且请求不带 Accept-Language → en-US",
+    "preconditions": [
+      "u4 的 locale 偏好 = en-US（已注册）",
+      "租户 T1 的 locale = zh-CN（与用户偏好相反，用于证明来源是用户）"
+    ],
+    "steps": [
+      "以 u4 的身份请求回显路由",
+      "请求**不带** Accept-Language 头"
+    ],
+    "expected": [
+      "协商结果 == \"en-US\"（精确）",
+      "协商结果 != \"zh-CN\"（证明不是租户配置）",
+      "同一请求带上 Accept-Language: zh-CN → 结果仍 == \"en-US\"（用户偏好压过请求头，这是 AC 步骤 2 未覆盖的方向）"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "★ AC-S-090 的 7 个步骤里，**没有一步**覆盖「用户偏好已注册且与请求头相反」—— 也就无法区分「用户偏好优先」与「请求头优先」两种实现。步骤 2 只验到「请求头 > 租户」。本用例补上是硬需求，否则 AC 的核心裁定（用户 > 请求头）不被任何用例守住。"
+  },
+  {
+    "id": "TC-021-021",
+    "ac": "AC-S-090",
+    "title": "请求头 fr-FR（未注册）+ 租户 en-US → en-US",
+    "preconditions": [
+      "租户 T1 的 locale = en-US",
+      "fr-FR 不在已注册集合中",
+      "u1 无 locale 偏好"
+    ],
+    "steps": [
+      "以 u1 的身份请求回显路由",
+      "请求头带 Accept-Language: fr-FR"
+    ],
+    "expected": [
+      "协商结果 == \"en-US\"（精确）",
+      "协商结果 != \"fr-FR\"",
+      "协商结果是已注册语言集合的成员"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "AC 原文写「回退到 en-US（租户）或 zh-CN（平台默认）」—— 这里的「或」不可判定（挑刺 #20）。本用例钉死为 en-US，依据 design §3.2「未注册即视为没设，落到下一级」。"
+  },
+  {
+    "id": "TC-021-022",
+    "ac": "AC-S-090",
+    "title": "Accept-Language 带 q 值 → 取 q 最高且已注册的语言",
+    "preconditions": [
+      "已注册集合 {zh-CN, en-US}",
+      "u1 无 locale 偏好，租户 T1 的 locale = en-US"
+    ],
+    "steps": [
+      "请求头带 Accept-Language: zh-CN;q=0.9, en-US;q=0.8",
+      "再发一次 Accept-Language: zh-CN;q=0.3, en-US;q=0.9",
+      "再发一次 Accept-Language: fr-FR;q=1.0, en-US;q=0.8"
+    ],
+    "expected": [
+      "第 1 次结果 == \"zh-CN\"（q=0.9 高于 q=0.8）",
+      "第 2 次结果 == \"en-US\"（q=0.9 高于 q=0.3）",
+      "第 3 次结果 == \"en-US\"（fr-FR 未注册被跳过，而不是整体放弃）",
+      "三次结果都满足「是已注册语言」"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "★ 第 3 次是 AC 没写的关键组合：「未注册语言排在 q 最高位」时，是跳过它取下一个，还是整体回退到租户？design 只说「未注册视为没设」，两种解释都符合字面。必须由 BA 钉死 —— 本用例按「跳过它、取下一个已注册」写（与 design §3.2 一致），见挑刺 #6。"
+  },
+  {
+    "id": "TC-021-023",
+    "ac": "AC-S-090",
+    "title": "Accept-Language: * → 平台默认 zh-CN",
+    "preconditions": [
+      "平台默认 locale = zh-CN",
+      "租户 T1 的 locale = en-US（刻意与平台默认不同）"
+    ],
+    "steps": [
+      "以 u1 身份请求，Accept-Language: *",
+      "对比不带 Accept-Language 的请求"
+    ],
+    "expected": [
+      "带 * 的结果 == \"zh-CN\"（平台默认，不是租户的 en-US）",
+      "带 * 的结果 == 不带 Accept-Language 的结果",
+      "协商结果是已注册语言集合的成员"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "AC 说「`*` → 用平台默认」。本用例用「租户配了不同值」来区分「平台默认」与「租户值」—— 否则两者相同，断言无区分力。"
+  },
+  {
+    "id": "TC-021-024",
+    "ac": "AC-S-090",
+    "title": "任何输入组合都不得返回未注册 locale（8 组组合的集合断言）",
+    "preconditions": [
+      "已注册集合 = {zh-CN, en-US}（由 BA 钉死的注册来源，例如 manifest 或常量表）"
+    ],
+    "steps": [
+      "枚举 8 组输入：无头/zh-CN/fr-FR/ja-JP/*/q 串/大小写变体 en-us/空白头",
+      "每组 × {无用户偏好, 用户偏好 ja-JP, 用户偏好 en-US} 共 24 个请求",
+      "收集全部结果"
+    ],
+    "expected": [
+      "24 个结果全部 ∈ {\"zh-CN\", \"en-US\"}",
+      "结果集合的势 <= 2",
+      "没有任何一个结果是空串、null 或 `*`",
+      "Accept-Language: en-us（小写）的结果 == \"en-US\"（BCP 47 大小写归一化）"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "「已注册语言」的来源 AC/design 都没写（是 manifest 的 config 键？是语言包文件？是常量？）。注册集合未定义时这条无法实现 —— 见挑刺 #35。大小写归一化 AC 也没写。"
+  },
+  {
+    "id": "TC-021-025",
+    "ac": "AC-S-090",
+    "title": "协商结果的观测通道存在且稳定（守卫：当前必红）",
+    "preconditions": [
+      "当前代码：RequestContext 只有 tenant_id / space_id / user_id / trace_id / entered_at（platform-core/src/context.rs:20-92），无 locale 字段",
+      "全仓 grep `locale` 在 crates/ modules/ 的 .rs 中 0 命中；grep `Content-Language` 全仓 0 命中"
+    ],
+    "steps": [
+      "请求任一受保护接口，检查响应头是否带 Content-Language",
+      "请求 /api/iam/me（或等价的当前用户接口），检查响应体是否有 locale 字段",
+      "检查 RequestContext 是否有 locale() 访问器"
+    ],
+    "expected": [
+      "存在**恰好一个**可机械读取的通道，且 BA 在 acceptance.md 里写死是哪个（推荐：响应头 Content-Language: <协商结果>）",
+      "该通道在 401/403 响应上也存在（错误响应同样带 locale，否则前端无法本地化错误页）",
+      "通道值与 TC-021-017~024 的结果一致",
+      "RequestContext 暴露 locale() 且值等于响应头"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "★ AC-S-090 的 7 个步骤全部写「断言协商结果」，但没有任何一句说结果出现在哪里。没有观测通道，AC-S-090 整条不可判定。这是本轮第二严重的硬伤（挑刺 #5）。"
+  },
+  {
+    "id": "TC-021-026",
+    "ac": "AC-S-091",
+    "title": "全部翻译键符合 <domain>.<KEY> 且 domain 在固定枚举内",
+    "preconditions": [
+      "TC-021-011 已通过（资源文件存在）",
+      "固定 domain 枚举 = {error, common, schema, nav}（design §6.1），BA 需确认是否还有更多"
+    ],
+    "steps": [
+      "遍历 zh-CN 资源的全部键",
+      "对每个键做正则匹配与 domain 提取"
+    ],
+    "expected": [
+      "每个键匹配正则 ^(error|common|schema|nav)\\.[A-Za-z][A-Za-z0-9]*$",
+      "不匹配的键数 == 0",
+      "error 域的键名部分全部满足 ^[A-Z][A-Z0-9_]*$（与后端 code 同形）",
+      "common/schema/nav 域的键名部分全部是 camelCase（^[a-z][A-Za-z0-9]*$）"
+    ],
+    "type": "可维护性",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "★ AC-S-091 步骤 2 的 domain 枚举写了「…」省略号（acceptance.md:115），不是可判定集合。design §6.1 给了 4 个，但用了「等」。必须钉死，否则 regex 无法写。见挑刺 #36。"
+  },
+  {
+    "id": "TC-021-027",
+    "ac": "AC-S-091",
+    "title": "同一语义只有一个键（禁止 common.save 与 common.btnSave 并存）",
+    "preconditions": [
+      "资源文件存在",
+      "同义键黑名单：[(common.save, common.btnSave), (common.cancel, common.btnCancel), (common.confirm, common.ok), (error.UNAUTHENTICATED, error.unauthorized)]"
+    ],
+    "steps": [
+      "对黑名单中的每一对，断言至多一个存在",
+      "再按「值相同」做一次全表扫描：找出值文本完全相同的不同键"
+    ],
+    "expected": [
+      "黑名单中每一对恰好有一个键存在（exists(a) xor exists(b) == true）",
+      "「值相同但键不同」的组数 == 0",
+      "允许的例外必须显式登记在一个 allowlist 里，且 allowlist 长度 <= 2（如不同上下文下同文案的按钮）"
+    ],
+    "type": "可维护性",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P2",
+    "notes": "「值相同即重复」的扫描在中文表里可能误报（「保存」既可以是按钮也可以是菜单项）。所以给了 allowlist 通道 —— 但不许无限制扩。"
+  },
+  {
+    "id": "TC-021-028",
+    "ac": "AC-S-091",
+    "title": "错误键名与后端 code 逐字一致（机械可推导，不做任何转换）",
+    "preconditions": [
+      "后端 code 全集见 TC-021-015 的抽取结果",
+      "资源文件存在"
+    ],
+    "steps": [
+      "从后端源码抽取 code 值集合 C",
+      "从资源里取以 error. 开头的键，去掉前缀得到集合 K",
+      "求 C 与 K 的对称差"
+    ],
+    "expected": [
+      "对每个 c ∈ C，键 \"error.\" + c 存在于资源中（不允许驼峰化、不允许小写化、不允许 kebab-case）",
+      "对称差为空（既无缺失也无多余）",
+      "反例必须失败：故意把 error.UNAUTHENTICATED 改成 error.Unauthenticated 后，本条断言变红"
+    ],
+    "type": "可维护性",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "★ AC-S-091 步骤 4 写「等于后端 **problem.rs** 里的 CODE_* 常量值」—— 但 iam/rbac/org 的码根本不在 problem.rs，而在各自的 `error.rs` 的 `pub mod code`（iam:30-47、rbac:24-33、org:21-35）；problem.rs 只有 6 个。按 AC 字面只对 6 个码成立。见挑刺 #21。"
+  },
+  {
+    "id": "TC-021-029",
+    "ac": "AC-S-091",
+    "title": "键无空白、无大小写漂移、无重复键（JSON 解析层面）",
+    "preconditions": [
+      "资源文件存在"
+    ],
+    "steps": [
+      "按 JSON 解析（不是按行 grep）",
+      "检查键与值"
+    ],
+    "expected": [
+      "每个键不含前导/尾随空格，不含 \" \"",
+      "JSON 解析后键数量 == 原文里 \"key\" 出现的次数（JSON.parse 会静默去重，故需原文正则计数对比）",
+      "每个值非空字符串",
+      "每个值不含未转义的换行"
+    ],
+    "type": "可维护性",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P2",
+    "notes": "JSON 重复键会被静默覆盖 —— 这是「看起来有 100 个键实际只有 98 个」的经典坑。"
+  },
+  {
+    "id": "TC-021-030",
+    "ac": "AC-S-091",
+    "title": "文案单一来源：渲染器/组件不硬编码面向用户的文案",
+    "preconditions": [
+      "现有反例：apps/shell/src/pages/Login.svelte:61-82 按 code 硬编码中文；Home.svelte:13 用组件内联字典；Table.svelte:46,59,67 硬编码「暂无数据/上一页/下一页」"
+    ],
+    "steps": [
+      "扫描 apps/shell/src 与 packages/*/src 的 .svelte/.ts",
+      "提取所有中文的**字符串字面量**（排除注释与 HTML 注释）",
+      "逐个判断是否应改走 t()"
+    ],
+    "expected": [
+      "面向用户的文案字面量数量 == 0",
+      "允许保留的只有：注释、tracing/console 的运维说明、测试文件",
+      "扫描器的阳性对照：在修复前运行，命中数 > 20 并记录（证明扫描有效）"
+    ],
+    "type": "可维护性",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P2",
+    "notes": "这条比 AC 的「单一来源」更狠，但 AC 字面只说「检查同一语义的键是否重复」，没要求「组件不得硬编码」。当前 apps/shell/src 里中文硬编码约 179 处（含注释），UI 文案至少 30 处。若 BA 不要求，英文界面会中英混杂 —— 这直接打脸 AC-S-099 的「切换后组件更新」。"
+  },
+  {
+    "id": "TC-021-031",
+    "ac": "AC-S-091",
+    "title": "两个语言资源的键集合完全一致（缺键只能是「翻译未完成」，不能是「键名写错」）",
+    "preconditions": [
+      "zh-CN.json 与 en-US.json 均存在"
+    ],
+    "steps": [
+      "解析两个文件",
+      "求键集合的对称差"
+    ],
+    "expected": [
+      "对称差为空 → 键集合完全相等",
+      "若对称差非空，必须登记在 missing-key-allowlist 里并在用例里逐条列出（allowlist 长度 <= 3）"
+    ],
+    "type": "可维护性",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P2",
+    "notes": "AC-S-092 的「缺失键回退」只有在「真的缺了」时才有意义。用 allowlist 把「故意缺」与「写错键名」区分开，否则回退机制会把拼写错误永久掩盖成回退文案。"
+  },
+  {
+    "id": "TC-021-032",
+    "ac": "AC-S-092",
+    "title": "en-US 缺 common.save → 回退到基准语言 zh-CN 的「保存」，不是空串、不是 key",
+    "preconditions": [
+      "zh-CN 有 key = \"保存\"",
+      "en-US **故意不含** common.save（或在 allowlist 里登记）",
+      "locale = en-US"
+    ],
+    "steps": [
+      "createI18n({ locale: 'en-US', messages: { 'zh-CN': zhCN, 'en-US': enUS } })",
+      "t('common.save')"
+    ],
+    "expected": [
+      "result == \"保存\"（精确，与 zh-CN 表里的值逐字相同）",
+      "result != \"\"",
+      "result != \"common.save\"",
+      "result != \"save\"（不是走最后一段回退）"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "★ 现有 translate() 的默认 fallback 是 key 本身（packages/i18n/src/index.ts:15-17 `dict[key] ?? fallback`，fallback 默认 = key）→ 断言「非空」会假绿。必须断「等于基准语言的值」。"
+  },
+  {
+    "id": "TC-021-033",
+    "ac": "AC-S-092",
+    "title": "缺失被记录：missingKeys() 返回该键",
+    "preconditions": [
+      "TC-021-032 的场景"
+    ],
+    "steps": [
+      "在渲染 t('common.save') 之后调用 missingKeys()",
+      "断言返回类型与内容"
+    ],
+    "expected": [
+      "missingKeys() 返回 Set（或 ReadonlySet）",
+      "missingKeys().has(\"common.save\") == true",
+      "missingKeys().size == 1（只缺这一个）",
+      "missingKeys() 里的元素是完整键路径（不是最后一段）"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "★ design §6.3 已钉死「`onMissingKey` 回调 + `missingKeys()` 导出」两条都做 —— 但 AC-S-092 步骤 3 仍写着「至少满足其一」的三选一（挑刺 #22）。本用例按 design 写死，BA 需把 AC 同步成 design。"
+  },
+  {
+    "id": "TC-021-034",
+    "ac": "AC-S-092",
+    "title": "缺失被记录：onMissingKey 被调用恰一次且参数为 (key, locale)",
+    "preconditions": [
+      "用 vi.fn() 注入 onMissingKey",
+      "locale = en-US"
+    ],
+    "steps": [
+      "t('common.save')",
+      "检查 mock"
+    ],
+    "expected": [
+      "mock 被调用恰好 1 次",
+      "第 1 个实参 == \"common.save\"",
+      "第 2 个实参 == \"en-US\"",
+      "再次 t('common.save') 后，调用次数 == 2（每次缺失都通知，不去重）"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "「回调每次都调」vs「只调一次」AC/design 都没定。本用例按「每次」写，因为回调常用于埋点计数；若 Dev 实现去重，必须改成「1 次」并在 design 写明 —— 这是必须钉死的细节，否则用例与实现各说各话。"
+  },
+  {
+    "id": "TC-021-035",
+    "ac": "AC-S-092",
+    "title": "两种语言都缺 → 回退到键的最后一段（common.save → \"save\"）",
+    "preconditions": [
+      "zh-CN 与 en-US 都没有 common.save",
+      "locale = en-US"
+    ],
+    "steps": [
+      "t('common.save')",
+      "再用一个无点号的键 t('nodot')"
+    ],
+    "expected": [
+      "t('common.save') == \"save\"（精确；最后一段）",
+      "t('nodot') == \"?\"（无点号时最后一段 == 完整键，故必须落到 \"?\"，不能返回 \"nodot\"）",
+      "两个结果都非空",
+      "两个结果都不含 \".\""
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "★ 「最后一段」是个有问题的设计（BA 自己也怀疑）：`error.INSUFFICIENT_PERMISSION` 的最后一段是 `INSUFFICIENT_PERMISSION` —— 等于把错误码甩给用户，比 `?` 更糟。design §6.4 的回退链是 4 级（目标 → 基准 → 最后一段 → \"?\"），AC 只测了两级。见挑刺 #7。"
+  },
+  {
+    "id": "TC-021-036",
+    "ac": "AC-S-092",
+    "title": "渲染结果不泄露完整 key 路径",
+    "preconditions": [
+      "TC-021-032 与 TC-021-035 的两个场景"
+    ],
+    "steps": [
+      "对「仅有基准语言」与「两语言都缺」两种结果做子串断言"
+    ],
+    "expected": [
+      "结果 1（\"保存\"）不含 \"common\"",
+      "结果 1 不含 \".\"",
+      "结果 2（\"save\"）不含 \"common.\"（带点号的完整路径前缀）",
+      "结果 2 不含 \"common.save\"",
+      "对 10 个随机 key 做同样断言：结果中完整 key 路径出现次数 == 0"
+    ],
+    "type": "安全",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "AC 步骤 5 的原文是「不含完整 key 路径（如 common.save）」—— 与步骤 4 的「最后一段 save」并存时，判据必须写成「不含带 domain 前缀的完整路径」，否则 save 与 common.save 都有 \"save\" 子串会打架。"
+  },
+  {
+    "id": "TC-021-037",
+    "ac": "AC-S-092",
+    "title": "missingKeys() 去重且跨多次渲染累计",
+    "preconditions": [
+      "zh-CN 与 en-US 都缺 common.save 与 common.cancel"
+    ],
+    "steps": [
+      "t('common.save') 两次",
+      "t('common.cancel') 一次",
+      "读 missingKeys()"
+    ],
+    "expected": [
+      "missingKeys().size == 2",
+      "missingKeys() 同时含 \"common.save\" 与 \"common.cancel\"",
+      "集合内元素无重复（Set 语义）",
+      "累计不因 setLocale 而清空（切到 zh-CN 再切回 en-US，size 仍为 2）"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P2",
+    "notes": "design §6.3 写「当前会话内累计的缺失键（去重）」——「会话内」是否包含 setLocale 之后，没写。本用例按「不因切换清空」写。"
+  },
+  {
+    "id": "TC-021-038",
+    "ac": "AC-S-092",
+    "title": "回退不污染基准语言：回退只影响渲染结果，不写入 zh-CN 字典",
+    "preconditions": [
+      "zh-CN 有 3 个键，en-US 只有 1 个"
+    ],
+    "steps": [
+      "在 en-US 下渲染缺失的 2 个键",
+      "切回 zh-CN，渲染同样的 2 个键",
+      "检查 zh-CN 字典对象"
+    ],
+    "expected": [
+      "切回后两个键的结果与「从未在 en-US 下渲染过」的实例完全一致",
+      "zh-CN 字典的键数量在渲染前后相等（3 == 3）",
+      "en-US 字典的键数量在渲染前后相等（1 == 1，回退不得写回）"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P2",
+    "notes": "「回退时顺手把基准语言的值复制进目标语言」是一种常见实现，会让后续「翻译完整性检查」永久通过 —— 假绿来源。"
+  },
+  {
+    "id": "TC-021-039",
+    "ac": "AC-S-092",
+    "title": "回退链的优先级顺序：目标语言 > 基准语言 > 最后一段 > \"?\"（4 级全验）",
+    "preconditions": [
+      "4 个键分别覆盖四种情形：k1（目标有）、k2（目标缺、基准有）、k3（两语言都缺、有 domain）、k4（两语言都缺、无点号）"
+    ],
+    "steps": [
+      "在 en-US 下依次渲染 k1~k4",
+      "记录四个结果"
+    ],
+    "expected": [
+      "k1 结果 == en-US 的值",
+      "k2 结果 == zh-CN 的值，且 != en-US（en-US 没有）",
+      "k3 结果 == 最后一段，且 != k3 的完整键",
+      "k4 结果 == \"?\"",
+      "四个结果两两不同（证明四级真的可区分）"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "AC-S-092 只写了 2 级（基准语言、最后一段），design §6.4 写 4 级。本用例按 design 写 —— BA 需确认 AC 是否补上第 4 级 \"?\"，否则「两语言都缺且键无点号」的行为无定义。"
+  }
+]

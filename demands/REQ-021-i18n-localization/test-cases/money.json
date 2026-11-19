@@ -1,0 +1,630 @@
+[
+  {
+    "id": "TC-021-061",
+    "ac": "AC-S-096",
+    "title": "Money 是 {minorUnits: i64, currency} —— 用 2^53+1 往返证明不是浮点",
+    "preconditions": [
+      "Money 类型在 platform-core（或新的 money 模块）可用",
+      "design §5.1 声明 struct Money { minor_units: i64, currency: CurrencyCode }"
+    ],
+    "steps": [
+      "let m = Money::from_minor(9_007_199_254_740_993)（2^53 + 1，f64 无法精确表示）",
+      "读回 m.minor_units()",
+      "对 i64::MIN 与 i64::MAX 各做一次同样的往返"
+    ],
+    "expected": [
+      "m.minor_units() == 9_007_199_254_740_993（精确相等）",
+      "Money::from_minor(i64::MAX).minor_units() == 9_223_372_036_854_775_807",
+      "Money::from_minor(i64::MIN).minor_units() == -9_223_372_036_854_775_808",
+      "Money 的 currency 字段类型是 CurrencyCode（不是 String，不是 f64）",
+      "编译期断言：Money 不实现 From<f64>，也不接受 f64 入参"
+    ],
+    "type": "安全",
+    "layer": "rust-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "★ 2^53+1 是「存储是不是浮点」的机械判据：任何 f64 实现在这一步就丢失精度。断言字段「是 i64」用 `size_of` 不可靠（CurrencyCode 的实现方式会影响布局），用值往返更硬。"
+  },
+  {
+    "id": "TC-021-062",
+    "ac": "AC-S-096",
+    "title": "10 + 20 == 30（最小单位整数加法精确）",
+    "preconditions": [
+      "Money::from_minor 与 Add 可用"
+    ],
+    "steps": [
+      "Money::from_minor(10) + Money::from_minor(20)",
+      "与 Money::from_minor(30) 比较"
+    ],
+    "expected": [
+      "sum == Money::from_minor(30)（PartialEq 精确相等）",
+      "sum.minor_units() == 30",
+      "sum.currency() 与操作数相同",
+      "比较用的是 ==，不是 (a-b).abs() < eps"
+    ],
+    "type": "功能",
+    "layer": "rust-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "AC 步骤 2 的前半段。"
+  },
+  {
+    "id": "TC-021-063",
+    "ac": "AC-S-096",
+    "title": "from_major(\"0.1\") + from_major(\"0.2\") == from_major(\"0.3\")（CNY 下）",
+    "preconditions": [
+      "Money::from_major(&str) 可用，currency 由参数或上下文给出（CNY，exponent=2）"
+    ],
+    "steps": [
+      "let a = Money::from_major(\"0.1\", CNY)",
+      "let b = Money::from_major(\"0.2\", CNY)",
+      "比较 a+b 与 Money::from_major(\"0.3\", CNY)"
+    ],
+    "expected": [
+      "a.minor_units() == 10",
+      "b.minor_units() == 20",
+      "Money::from_major(\"0.3\", CNY).minor_units() == 30",
+      "a + b == Money::from_major(\"0.3\", CNY)（== 精确相等）",
+      "a + b != Money::from_minor(31)"
+    ],
+    "type": "功能",
+    "layer": "rust-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "AC 步骤 2 的后半段。from_major 的签名在 design 里没给（只写「从 major 解析」），见挑刺 #27。"
+  },
+  {
+    "id": "TC-021-064",
+    "ac": "AC-S-096",
+    "title": "9,999,999.99 累加 1000 次 → 精确等于 999_999_999_000 minor，无累积误差",
+    "preconditions": [
+      "CNY（exponent=2）",
+      "初值 9_999_999.99 元 = 999_999_999 minor"
+    ],
+    "steps": [
+      "let acc = Money::from_minor(0)",
+      "循环 1000 次：acc = acc + Money::from_major(\"9999999.99\", CNY)",
+      "比较 acc 与期望值"
+    ],
+    "expected": [
+      "acc.minor_units() == 999_999_999_000（精确）",
+      "acc == Money::from_major(\"9999999990.00\", CNY)",
+      "acc != Money::from_minor(999_999_998_999) 且 != 999_999_999_001（相邻值都必须不等，证明不是「差一点」）",
+      "循环过程中不 panic、不饱和（saturating）"
+    ],
+    "type": "安全",
+    "layer": "rust-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "数值核对：999_999_999 × 1000 = 999_999_999_000 minor = 9_999_999_990.00 元，远小于 i64::MAX（9.2e18），不会溢出。AC 只写「1000 次」没给初值与期望值 —— 见挑刺 #38。"
+  },
+  {
+    "id": "TC-021-065",
+    "ac": "AC-S-096",
+    "title": "i64::MAX 附近加法返回错误，不静默回绕",
+    "preconditions": [
+      "Money::from_minor(i64::MAX) 可构造"
+    ],
+    "steps": [
+      "let m = Money::from_minor(i64::MAX)",
+      "调用 checked_add(m, Money::from_minor(1))",
+      "对 i64::MIN 做减法方向的同样测试"
+    ],
+    "expected": [
+      "checked_add 返回 Err(MoneyError::Overflow)（不是 Ok(回绕值)）",
+      "错误值不等于 Money::from_minor(i64::MIN)（证明没有回绕）",
+      "Money::from_minor(i64::MIN) - Money::from_minor(1) 同样返回 Err(Overflow)",
+      "Money::from_minor(i64::MAX) + Money::from_minor(0) 返回 Ok(i64::MAX)",
+      "若实现了 `+` 运算符，必须 panic 或编译期禁止；不得静默回绕（用 should_panic 断言）"
+    ],
+    "type": "安全",
+    "layer": "rust-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "★ AC 只说「返回错误」，没定错误的具体形状（是 `Result<Money, MoneyError>` 还是 panic？错误码叫什么？错误能否序列化成 ProblemDetails？）。见挑刺 #11。本用例按 `Result + MoneyError::Overflow` 写，BA 需钉死。"
+  },
+  {
+    "id": "TC-021-066",
+    "ac": "AC-S-096",
+    "title": "金额运算路径上没有 f32 / f64（限定在 money 模块内）",
+    "preconditions": [
+      "已知现状：platform-db/src/query.rs:56 的 BindValue::Float(f64) 与 platform-core/src/extension/expr.rs:54 的 Float(f64) 是**通用**类型，不属于金额路径",
+      "AC 步骤 4 的「源码里是否有浮点类型参与金额运算」若不限定范围会误报这两处"
+    ],
+    "steps": [
+      "定位 Money / 汇率换算 / 格式化的全部源文件",
+      "在这组文件内 grep `f32|f64|as f64|parse::<f64>|from_f64|to_f64`",
+      "同时 grep `rust_decimal|bigdecimal`"
+    ],
+    "expected": [
+      "money 模块内上述 pattern 命中数 == 0",
+      "Cargo.toml 的依赖列表里没有 rust_decimal / bigdecimal（零新依赖，design R6）",
+      "扫描范围显式写成文件白名单（不含 platform-db/query.rs 与 extension/expr.rs）",
+      "阳性对照：在扫描脚本里加一个含 f64 的假文件，必须命中（证明扫描有效）"
+    ],
+    "type": "安全",
+    "layer": "rust-unit",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "★ AC 的字面「源码里是否有浮点类型参与金额运算」是语义判断，不可机械执行；不限定文件范围会命中 query.rs 与 expr.rs 的通用 f64。见挑刺 #39。"
+  },
+  {
+    "id": "TC-021-067",
+    "ac": "AC-S-096",
+    "title": "from_major 走字符串解析（不走 parse::<f64>），非法与超精度输入被拒",
+    "preconditions": [
+      "CNY（exponent=2）"
+    ],
+    "steps": [
+      "对 6 个输入分别调用 from_major",
+      "记录 Ok/Err 与 minor 值"
+    ],
+    "expected": [
+      "from_major(\"0.1\") == Ok(Money::from_minor(10))",
+      "from_major(\"12.34\") == Ok(Money::from_minor(1234))",
+      "from_major(\"0.30000000000000004\") == Err(TooManyDecimals)（17 位小数，若用 f64 解析会「成功」并埋下误差）",
+      "from_major(\"1.234\") == Err(TooManyDecimals)（CNY 只有 2 位）",
+      "from_major(\"1\") == Ok(Money::from_minor(100))",
+      "from_major(\"abc\") == Err(InvalidFormat)",
+      "from_major(\"\") == Err(InvalidFormat)",
+      "from_major(\".5\") == Err(InvalidFormat)（前导点号不接受；行为必须钉死，不得依赖实现）"
+    ],
+    "type": "安全",
+    "layer": "rust-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "★ `\"0.30000000000000004\"` 是「是不是走了 f64」的判据：f64 解析会接受它。AC 只说「用字符串解析」，没说超精度怎么办（拒绝 / 截断 / 舍入）。见挑刺 #27。"
+  },
+  {
+    "id": "TC-021-068",
+    "ac": "AC-S-096",
+    "title": "不同币种相加返回明确错误，不静默把数字相加",
+    "preconditions": [
+      "Money::from_minor 支持指定币种"
+    ],
+    "steps": [
+      "Money::from_minor(100, CNY) + Money::from_minor(100, USD)",
+      "比较两个同币种的操作"
+    ],
+    "expected": [
+      "跨币种相加返回 Err(MoneyError::CurrencyMismatch { left: CNY, right: USD })",
+      "错误里能读出两个币种（不是含糊的 \"invalid\"）",
+      "同币种 100 + 100 == 200（证明错误只由币种不同引起）",
+      "不做隐式换算（不返回 200 或 100）"
+    ],
+    "type": "安全",
+    "layer": "rust-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "AC 完全没覆盖跨币种相加。这是「整数金额」最容易出的静默错误：两个 i64 相加编译器不会拦。"
+  },
+  {
+    "id": "TC-021-069",
+    "ac": "AC-S-096",
+    "title": "负金额与零的边界（退款场景）",
+    "preconditions": [
+      "Money 支持负数（退款/冲正需要）"
+    ],
+    "steps": [
+      "构造 from_minor(0)、from_minor(-1)、from_major(\"-12.34\")",
+      "做加法与取反"
+    ],
+    "expected": [
+      "Money::from_minor(0).minor_units() == 0",
+      "Money::from_major(\"-12.34\").minor_units() == -1234",
+      "Money::from_minor(-1).minor_units() == -1",
+      "from_minor(0) == from_minor(0)（零值可比较）",
+      "Money::from_minor(-5) + Money::from_minor(5) == Money::from_minor(0)",
+      "-Money::from_minor(i64::MAX) == Ok(Money::from_minor(-i64::MAX))",
+      "-Money::from_minor(i64::MIN) 返回 Err(Overflow)（i64::MIN 取负会溢出）"
+    ],
+    "type": "安全",
+    "layer": "rust-unit",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "负数是 i64 与「无符号最小单位」的分水岭 —— 若 Dev 选了 u64，退款就做不了。AC 没提，但这是类型选型必须回答的问题。"
+  },
+  {
+    "id": "TC-021-070",
+    "ac": "AC-S-097",
+    "title": "汇率快照表存在且可写入两条不同日期的 CNY→USD 快照",
+    "preconditions": [
+      "迁移已应用（新增 platform_fx_rate 表：id / from_currency / to_currency / rate_micros / as_of / source / created_at）",
+      "用管理员连接（base_test）播种，遵守 D101 幂等播种"
+    ],
+    "steps": [
+      "写入 (CNY,USD,rate_micros=140000,as_of=2026-01-01T00:00:00Z,source=manual)",
+      "写入 (CNY,USD,rate_micros=150000,as_of=2026-06-01T00:00:00Z,source=manual)",
+      "SELECT 验证落库"
+    ],
+    "expected": [
+      "两条记录都存在，id 不同",
+      "两次写入的 (from,to,as_of) 唯一约束成立（重复写入同 asOf 应报冲突或被幂等脚本跳过）",
+      "rate_micros 是 BIGINT（查询 information_schema 的 data_type == 'bigint'）",
+      "表里没有任何 NUMERIC/FLOAT/REAL 类型的金额或汇率列"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "rate 0.14 → rate_micros 140000（×10^6）。design §5.3 已给列定义，但没说唯一约束与索引，也没说 asOf 是「生效时刻」还是「快照日」—— 挑刺 #40 的边缘。"
+  },
+  {
+    "id": "TC-021-071",
+    "ac": "AC-S-097",
+    "title": "用 2026-01-01 的快照把 100 CNY 换成 USD",
+    "preconditions": [
+      "TC-021-070 的两条快照",
+      "100 CNY = 10000 minor"
+    ],
+    "steps": [
+      "convert(Money::from_minor(10000, CNY), USD, as_of=2026-01-01T00:00:00Z)",
+      "读结果的 minor_units 与 currency"
+    ],
+    "expected": [
+      "返回 Ok(result)",
+      "result.currency() == USD",
+      "result.minor_units() == 1400（14.00 USD；100 × 0.14 = 14.00，小数 2 位）",
+      "result != Money::from_minor(1500, USD)"
+    ],
+    "type": "功能",
+    "layer": "rust-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "换算公式必须写进 design 才能算这个数：result_minor = round_half_even(amount_minor × rate_micros × 10^to_exp / (10^from_exp × 10^6))。本用例的结果按此公式 = 10000×140000×100/(100×1e6) = 1400。"
+  },
+  {
+    "id": "TC-021-072",
+    "ac": "AC-S-097",
+    "title": "用 2026-06-01 的快照换算同样的 100 CNY，结果不同",
+    "preconditions": [
+      "同 TC-021-071，as_of 改成 2026-06-01T00:00:00Z（rate 0.15）"
+    ],
+    "steps": [
+      "convert(100 CNY, USD, as_of=2026-06-01T00:00:00Z)",
+      "与 TC-021-071 的结果比较"
+    ],
+    "expected": [
+      "result.minor_units() == 1500",
+      "result != TC-021-071 的结果（1500 != 1400）",
+      "两次调用的差异仅来自 as_of 参数（输入金额与币种对完全相同）"
+    ],
+    "type": "功能",
+    "layer": "rust-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "这两条合起来才证明「按 asOf 选快照」；只跑一条无法区分「取最新」与「按 asOf」。"
+  },
+  {
+    "id": "TC-021-073",
+    "ac": "AC-S-097",
+    "title": "换算结果带可追溯信息（rateId / asOf / source）且能反查回具体那条汇率",
+    "preconditions": [
+      "TC-021-071 的结果"
+    ],
+    "steps": [
+      "读结果的追溯字段",
+      "用该字段回查 platform_fx_rate"
+    ],
+    "expected": [
+      "结果对象可读出 as_of == 2026-01-01T00:00:00Z（与请求的 asOf 相同）",
+      "结果对象可读出 source == \"manual\"",
+      "结果对象可读出 rate_id（或能唯一定位一条汇率记录的等价标识）",
+      "用 rate_id 查表得到 rate_micros == 140000（反查成立）",
+      "三个字段都不是 Option::None"
+    ],
+    "type": "可维护性",
+    "layer": "rust-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "★ AC 写「带快照标识（`rateId` 或 `asOf` + `source`）」—— 「或」让断言失去形状。design §5.3 的列有 id/as_of/source，所以三者应全给。见挑刺 #28。"
+  },
+  {
+    "id": "TC-021-074",
+    "ac": "AC-S-097",
+    "title": "不存在的币种对 → FX_RATE_NOT_FOUND，不是 0 也不是原值",
+    "preconditions": [
+      "表里只有 CNY→USD",
+      "不存在 CNY→JPY 的任何快照"
+    ],
+    "steps": [
+      "convert(100 CNY, JPY, as_of=2026-01-01T00:00:00Z)"
+    ],
+    "expected": [
+      "返回 Err(MoneyError::FxRateNotFound { from: CNY, to: JPY, as_of })",
+      "错误码字符串 == \"FX_RATE_NOT_FOUND\"",
+      "不返回 Ok(0)（静默归零）",
+      "不返回 Ok(原金额，币种仍是 CNY)（静默透传）",
+      "错误可被序列化为 ProblemDetails，status == 404 或 422（BA 需钉死）"
+    ],
+    "type": "安全",
+    "layer": "rust-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "「静默返回原值」是换算最危险的失败模式 —— 报表上会显示「100 CNY = 100 JPY」。"
+  },
+  {
+    "id": "TC-021-075",
+    "ac": "AC-S-097",
+    "title": "同一 asOf 存在多条汇率时的裁决规则（守卫：未定义）",
+    "preconditions": [
+      "设计假设：as_of 有唯一约束 (from,to,as_of)",
+      "AC 与 design 都没规定 as_of 是否唯一"
+    ],
+    "steps": [
+      "尝试写入两条 (CNY,USD,as_of=2026-01-01,不同 rate)",
+      "若写入成功，则用该 asOf 换算并观察取哪条"
+    ],
+    "expected": [
+      "BA 明确二选一：① as_of 有唯一约束 → 第二条写入返回冲突（唯一索引名写进 design）；② 允许多条 → 明确「取 created_at 最新 / 取 rate_micros 最大 / 报错」中的一种",
+      "无论哪种，convert 的行为必须是确定的（同一 asOf 连调 10 次结果集合势 == 1）",
+      "不得依赖数据库的返回顺序（无 ORDER BY 的 SELECT 不确定）"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "★ design R4 提到「并发下可能不一致」，缓解措施是「显式传 asOf」—— 但显式传 asOf 并不能解决同一 asOf 有多条的情况。见挑刺 #40。"
+  },
+  {
+    "id": "TC-021-076",
+    "ac": "AC-S-097",
+    "title": "银行家舍入：4 个 .5 边界（1.5→2、4.5→4、7.5→8、10.5→10）",
+    "preconditions": [
+      "CNY→USD，from_exp=to_exp=2",
+      "rate_micros = 1_500_000（1.5）——这是合成汇率，只用于验舍入",
+      "金额依次为 1、3、5、7 minor"
+    ],
+    "steps": [
+      "convert(from_minor(1)) → 期望 1.5 → 2",
+      "convert(from_minor(3)) → 期望 4.5 → 4",
+      "convert(from_minor(5)) → 期望 7.5 → 8",
+      "convert(from_minor(7)) → 期望 10.5 → 10"
+    ],
+    "expected": [
+      "四个结果依次 == 2、4、8、10（精确 minor 值）",
+      "4.5 → 4 这一例是判别点：round-half-up 会给 5，必须为 4",
+      "10.5 → 10 这一例是判别点：round-half-up 会给 11，必须为 10",
+      "1.5 → 2 与 7.5 → 8 两例证明「取偶」不是「总是向下」"
+    ],
+    "type": "功能",
+    "layer": "rust-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "★ AC 说「舍入规则在 design 写死」，design §5.4 写了银行家舍入与 2.5/3.5/0.5/1.5 四个例子 —— 但**没写算法**：作用在哪个量上（商）、中间积用什么宽度（i64 会溢出：amount_minor × rate_micros × 10^exp 很容易超 9.2e18，必须用 i128）、余数比较怎么写。见挑刺 #12。本用例的数值按「result = half_even(a × rate_micros × 10^to_exp / (10^from_exp × 10^6))」算。"
+  },
+  {
+    "id": "TC-021-077",
+    "ac": "AC-S-097",
+    "title": "换算中间积溢出 → 明确错误，不回绕",
+    "preconditions": [
+      "from_minor(i64::MAX)，rate_micros = i64::MAX，from_exp=to_exp=2"
+    ],
+    "steps": [
+      "convert(Money::from_minor(i64::MAX, CNY), USD, rate=i64::MAX)",
+      "观察返回值"
+    ],
+    "expected": [
+      "返回 Err(MoneyError::Overflow)",
+      "不返回 Ok(任意值)",
+      "不 panic（除非 BA 明确选 panic 语义并写进 AC）",
+      "用 i128 做中间量时该场景能算出正确结果或明确 Err，但绝不能悄悄截断成 i64"
+    ],
+    "type": "安全",
+    "layer": "rust-unit",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "★ 这是 AC-S-097 完全没提、但必然发生的场景：`amount_minor × rate_micros` 两个 i64 相乘，只要金额 > 约 9.2e12 minor（≈ 920 亿元）就溢出。必须用 i128 中间量。"
+  },
+  {
+    "id": "TC-021-078",
+    "ac": "AC-S-097",
+    "title": "反向换算不与正向互为精确倒数（守卫：未定义）",
+    "preconditions": [
+      "CNY→USD rate=140000，USD→CNY rate=714286（≈1/0.14，仍非精确）"
+    ],
+    "steps": [
+      "convert(10000 CNY → USD) 得 x",
+      "convert(x USD → CNY) 得 y"
+    ],
+    "expected": [
+      "BA 明确是否要求 y == 10000（往返无损）",
+      "若不要求：断言 |y - 10000| <= 2 并在 design 写明「换算不可逆，报表不得用往返做校验」",
+      "不得在未声明的情况下断言 y == 10000（那会因舍入必然失败的假红）"
+    ],
+    "type": "功能",
+    "layer": "rust-unit",
+    "automatable": true,
+    "priority": "P2",
+    "notes": "金融系统的常见误解。AC 没提，但如果 Dev 或后续需求假设「换算可逆」，会出系统性对账偏差。"
+  },
+  {
+    "id": "TC-021-079",
+    "ac": "AC-S-098",
+    "title": "zh-CN 格式化 CNY 123456 → ¥1,234.56（精确字符串）",
+    "preconditions": [
+      "Money { minorUnits: 123456, currency: 'CNY' }（CNY exponent=2）",
+      "createI18n 的 locale = zh-CN"
+    ],
+    "steps": [
+      "t.formatMoney(123456, 'CNY')"
+    ],
+    "expected": [
+      "返回值 == \"¥1,234.56\"（精确，U+00A5 + 千分位 + 两位小数）",
+      "返回值匹配正则 ^¥\\d{1,3}(,\\d{3})*\\.\\d{2}$",
+      "返回值不含 \"CNY\" 字样",
+      "返回值的小数位恰好 2 位"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "实测（Node 26 / ICU）：`Intl.NumberFormat('zh-CN',{style:'currency',currency:'CNY'}).format(1234.56)` == \"¥1,234.56\"。AC 的「含 ¥ 与 1,234.56」是子串断言，比精确串弱；本用例收紧。注意 ICU 版本差异可能导致符号/空格变化 —— 见 TC-021-082。"
+  },
+  {
+    "id": "TC-021-080",
+    "ac": "AC-S-098",
+    "title": "en-US 格式化 CNY 123456 → CN¥1,234.56（精确字符串，不是 ¥）",
+    "preconditions": [
+      "同 TC-021-079，locale = en-US"
+    ],
+    "steps": [
+      "t.formatMoney(123456, 'CNY')"
+    ],
+    "expected": [
+      "返回值 == \"CN¥1,234.56\"（精确；en-US 下 CNY 的符号是 CN¥，不是 ¥）",
+      "返回值不含 \"¥\" 单独出现（必须以 \"CN¥\" 出现）",
+      "小数位恰好 2 位",
+      "结果与 TC-021-079 不相等"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "★ AC 写「含 ¥ 或 CN¥」—— 这个「或」让断言失去判别力（`¥` 是 `CN¥` 的子串，永远为真）。本用例钉死为 CN¥。见挑刺 #29。"
+  },
+  {
+    "id": "TC-021-081",
+    "ac": "AC-S-098",
+    "title": "ja-JP 格式化 JPY 123456 → ￥123,456（0 位小数）——注意这里币种必须换成 JPY",
+    "preconditions": [
+      "Money { minorUnits: 123456, currency: 'JPY' }（JPY exponent=0）",
+      "locale = ja-JP"
+    ],
+    "steps": [
+      "t.formatMoney(123456, 'JPY')"
+    ],
+    "expected": [
+      "返回值 == \"￥123,456\"（精确；U+FFE5 全角 yen sign）",
+      "返回值不含小数点（0 位小数）",
+      "返回值匹配正则 ^￥\\d{1,3}(,\\d{3})*$",
+      "若改成 1234.56 语义（minorUnits=123456 但币种是 CNY）则不适用本条"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "★ **AC 原文在这里是错的**：前置条件固定 `currency: 'CNY'`，步骤 3 却期望「含 ￥ 与 1,234」。实测 `Intl.NumberFormat('ja-JP',{currency:'CNY'}).format(1234.56)` == \"元\\u00A01,234.56\"（符号是「元」，小数仍是 2 位）。只有 currency='JPY' 才得 \"￥123,456\"。见挑刺 #13 —— 这是必须改 AC 的事实错误。"
+  },
+  {
+    "id": "TC-021-082",
+    "ac": "AC-S-098",
+    "title": "同一 CNY 金额在 ja-JP 下仍是 2 位小数（exponent 跟随币种，不跟随 locale）",
+    "preconditions": [
+      "Money { minorUnits: 123456, currency: 'CNY' }",
+      "locale = ja-JP"
+    ],
+    "steps": [
+      "t.formatMoney(123456, 'CNY')",
+      "对比 ja-JP / JPY 的结果"
+    ],
+    "expected": [
+      "结果为 \"元\\u00A01,234.56\"（或等价的 ja-JP 中文元符号，NBSP 分隔；实现需以 formatToParts 取符号与数值）",
+      "小数位 == 2（不是 0）",
+      "数值部分 == \"1,234.56\"（与 zh-CN 数值部分一致）",
+      "与 TC-021-081（JPY）的结果不同（证明 exponent 随币种变）"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "★ 精确串断言在这里有**跨环境风险**：ja-JP 的 CNY 符号与分隔符是 ICU 数据决定的（本机 Node 26 给 \"元\" + U+00A0 + \"1,234.56\"）。建议实现侧改用 formatToParts 断言部件，或把 NBSP 归一化。见挑刺 #29。"
+  },
+  {
+    "id": "TC-021-083",
+    "ac": "AC-S-098",
+    "title": "货币指数表：CNY/USD/EUR = 2，JPY/KRW = 0",
+    "preconditions": [
+      "exponent 表是平台常量（不是 Intl 推断）"
+    ],
+    "steps": [
+      "对 5 个币种构造 minorUnits=123456 的 Money",
+      "分别格式化（locale 固定 en-US）",
+      "读小数位"
+    ],
+    "expected": [
+      "CNY → \"CN¥1,234.56\"（2 位）",
+      "USD → \"$1,234.56\"（2 位）",
+      "EUR → \"€1,234.56\"（2 位）",
+      "JPY → \"¥123,456\"（0 位，注意 en-US 下 JPY 的符号是 ¥ U+00A5）",
+      "KRW → \"₩123,456\"（0 位）",
+      "五个结果的小数位数分别等于 2,2,2,0,0"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "design §5.2 只列了 CNY/USD/EUR/JPY/KRW，且说「必须按 exponent 转换」。用 Intl 的 `resolvedOptions().maximumFractionDigits` 也能拿到同样的值 —— 若实现这么做，等于把 exponent 表外包给 ICU，需要在 design 里明确这是允许的（影响一致性：ICU 升级会改变行为）。"
+  },
+  {
+    "id": "TC-021-084",
+    "ac": "AC-S-098",
+    "title": "源码使用 Intl.NumberFormat，未自造千分位逻辑",
+    "preconditions": [
+      "packages/i18n 的 formatMoney 实现"
+    ],
+    "steps": [
+      "在 formatMoney 的实现文件里 grep `Intl.NumberFormat`",
+      "grep 手写分组逻辑的痕迹：`toFixed|replace(/(\\\\d)(?=(\\\\d{3})+(?!\\\\d))/|/ 100|Math.round`",
+      "对 1234567890.12 做一次格式化，检查分组"
+    ],
+    "expected": [
+      "实现中出现 `new Intl.NumberFormat(` 至少 1 次",
+      "手写分组 pattern 命中数 == 0",
+      "formatMoney 内不出现 `/ 100`、`* 0.01`、`toFixed(` 这类浮点缩放的痕迹（缩放必须用整数：minorUnits 拆成整数部分与小数部分）",
+      "对 1234567890.12（minorUnits=123456789012）的输出匹配 ^[^\\d]*1,234,567,890\\.12"
+    ],
+    "type": "可维护性",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "★ design §7.1 写「formatMoney 必须按 exponent 缩放（minorUnits / 10^exponent 用整数处理）」——「用整数处理」在 JS 里做不到严格：`123456 / 100` 在 JS 里就是 float，只是 2 位小数下不出错。必须写成「把 minorUnits 拆成高位与低位，再拼字符串」，否则大额会丢精度。这是 design 的可实现性问题。"
+  },
+  {
+    "id": "TC-021-085",
+    "ac": "AC-S-098",
+    "title": "未知币种代码 → 明确错误（守卫：未定义）",
+    "preconditions": [
+      "currency = 'XXX'（ISO 4217 的「无货币」，或 'ZZZ' 非法码）"
+    ],
+    "steps": [
+      "t.formatMoney(123456, 'XXX')",
+      "t.formatMoney(123456, 'TOOLONG')"
+    ],
+    "expected": [
+      "BA 明确行为：抛错（推荐）还是回退到代码字面 + 数值",
+      "若抛错：错误信息含币种代码，且不静默用 locale 默认币种",
+      "若回退：输出含 \"XXX\" 字样而不是把它当 USD",
+      "绝不出现「未知币种被当成 CNY/USD 格式化」的结果"
+    ],
+    "type": "安全",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P2",
+    "notes": "Intl 对未知币种的处理是「原样显示代码」（`new Intl.NumberFormat('en-US',{style:'currency',currency:'XXX'}).format(1)` → \"XXX 1.00\"），不会抛错。这与「明确错误」不一致，必须在 design 里选一个。"
+  },
+  {
+    "id": "TC-021-086",
+    "ac": "AC-S-098",
+    "title": "零与负金额的格式化稳定",
+    "preconditions": [
+      "CNY，locale 分别为 zh-CN / en-US"
+    ],
+    "steps": [
+      "formatMoney(0, 'CNY')",
+      "formatMoney(-123456, 'CNY')",
+      "formatMoney(-1, 'CNY')"
+    ],
+    "expected": [
+      "formatMoney(0) 的数值部分 == \"0.00\"（不是 \"0\" 也不是 \"\"）",
+      "formatMoney(-123456) 的数值部分 == \"-1,234.56\"（负号位置由 locale 决定，zh-CN 与 en-US 都在数字前）",
+      "formatMoney(-1) 的数值部分 == \"-0.01\"",
+      "三次结果都不含 \"null\" / \"NaN\" / \"undefined\""
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P2",
+    "notes": "负数在 zh-CN 下可能被格式化为 \"-¥1,234.56\" 或 \"¥-1,234.56\"，取决于 ICU。断言「数值部分」而不是整串，避免被符号位置绑死。"
+  }
+]

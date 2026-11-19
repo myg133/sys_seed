@@ -1,0 +1,404 @@
+[
+  {
+    "id": "TC-021-001",
+    "ac": "AC-S-088",
+    "title": "全部 title 生产函数的返回值都是 ASCII（表驱动，覆盖 iam/rbac/org/config 四个 title_of/title）",
+    "preconditions": [
+      "代码基线 code/ @ 88b7ca3；本需求尚未实现",
+      "四个 title 生产者已定位：platform-iam/src/http.rs:134-153（17 个分支）、platform-rbac/src/http.rs:294-306（10）、platform-org/src/http.rs:263-280（15）、platform-config/src/error.rs:163-178（12）",
+      "platform-core/src/problem.rs:122-171 的三个构造函数（unauthenticated / insufficient_permission / not_found）也已定位"
+    ],
+    "steps": [
+      "为 iam / rbac / org / config 四个错误枚举各建一张「变体 → 构造函数」的表，逐变体构造错误值",
+      "对每个错误值调用 title_of(&err)（iam/rbac/org）或 err.title()（config）",
+      "对 core 的三个构造函数各调用一次并取 details.title",
+      "断言每个返回值的字符集"
+    ],
+    "expected": [
+      "断言样本数等于四个枚举的变体总数：iam = 17、rbac = 10、org = 15、config = 12（共 54；用 exhaustive match 编译期保证，不用手写列表）",
+      "每个 title 满足 title.is_ascii() == true",
+      "每个 title 满足 title.is_empty() == false",
+      "每个 title 对正则 /[\\u4e00-\\u9fff]/ 无匹配",
+      "core 三个构造函数的 title 依次等于 \"Unauthenticated\" / \"Insufficient Permission\" / \"Not Found\"（大小写敏感的精确字符串）"
+    ],
+    "type": "功能",
+    "layer": "rust-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "★ 这条是 AC-S-088 步骤 1 的**替代实现**。AC 原文要求「扫构造点的字符串字面量参数」——实测 title 全部经 title_of/title() 产出，构造点拿到的是函数调用而不是字面量（iam http.rs:97 `title: title_of(error)`、rbac :279、org :216、config http.rs:412），照 AC 字面扫会 0 命中而假绿。见挑刺 #1。"
+  },
+  {
+    "id": "TC-021-002",
+    "ac": "AC-S-088",
+    "title": "直接传中文 title 字面量的构造点全部清零（当前 13 处）",
+    "preconditions": [
+      "已确认 13 处直接字面量：modules/sandbox/backend/src/{http.rs:194,320,348,388,403,444; demo_item_http.rs:130,223; demo_note_http.rs:100,188}、crates/platform-core/src/extension/permission.rs:387、crates/platform-config/src/http.rs:210、crates/platform-server/src/main.rs:632",
+      "platform-core/src/problem.rs:125/146/167 的 3 处由 TC-021-001 覆盖"
+    ],
+    "steps": [
+      "用 ripgrep 在 crates/ 与 modules/ 的 *.rs 中定位 `ProblemDetails::from_context(` 与 `ProblemDetails::new(` 的调用",
+      "对每个调用点取第 2 个实参（title 位）的源码文本",
+      "断言该实参是 ASCII 字符串字面量或纯 ASCII 常量"
+    ],
+    "expected": [
+      "第 2 个实参位置匹配 CJK 正则的调用点数 == 0",
+      "同一扫描在修复前命中数 == 13（作为「扫描器真的能扫到东西」的阳性对照，必须先用修复前的快照跑一次并记录命中 13）",
+      "被扫描的文件集合包含 modules/sandbox/backend/src/ 与 crates/platform-server/src/（AC 原文只写 crates/ 与 modules/ 的 Rust 源码，需确认包含 server 层）"
+    ],
+    "type": "功能",
+    "layer": "rust-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "AC 原文的构造点清单只列了 new/from_context/unauthenticated/insufficient_permission —— 少了 not_found（problem.rs:167）与结构体直写字面量（platform-iam/src/http.rs:90-104 是 `ProblemDetails { .. }`），见挑刺 #33。"
+  },
+  {
+    "id": "TC-021-003",
+    "ac": "AC-S-088",
+    "title": "运行时 401：title 为英文且为 Unauthenticated，detail/type 全 ASCII",
+    "preconditions": [
+      "服务已启动，DATABASE_URL_TEST 指向 base_test",
+      "不携带 Authorization 请求头"
+    ],
+    "steps": [
+      "GET /api/rbac/roles（需鉴权的受保护路由）",
+      "解析响应体为 JSON",
+      "断言 title / detail / type 三个字段"
+    ],
+    "expected": [
+      "HTTP status == 401",
+      "body.code == \"UNAUTHENTICATED\"（精确）",
+      "body.title == \"Unauthenticated\"（精确，大小写敏感）",
+      "body.detail == \"authentication is required\"（精确）",
+      "body.type == \"https://errors.base.example/unauthenticated\"（精确）",
+      "对 body.title / body.detail / body.type 三个值分别断言 is_ascii() == true",
+      "对三个值分别断言正则 /[\\u4e00-\\u9fff]/ 无匹配"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "type 字段是 `https://errors.base.example/<kebab-case>`，天然 ASCII —— 断言它恒真，属于假绿成分（挑刺 #17）；保留它只是为了覆盖 AC 步骤 3 的「三个字段」字面要求，真正的判据在 title。"
+  },
+  {
+    "id": "TC-021-004",
+    "ac": "AC-S-088",
+    "title": "运行时 403：title 为英文，params.required 仍是权限点原文，detail 只含 ASCII",
+    "preconditions": [
+      "U1 已登录但无 rbac:role:write 权限",
+      "携带 U1 的有效访问令牌"
+    ],
+    "steps": [
+      "用 U1 的令牌 POST /api/rbac/roles（触发动作类越权）",
+      "解析响应体",
+      "逐个断言字段"
+    ],
+    "expected": [
+      "HTTP status == 403",
+      "body.code == \"INSUFFICIENT_PERMISSION\"",
+      "body.title == \"Insufficient Permission\"（精确）",
+      "body.params.required == \"rbac:role:write\"（精确；这是数据，允许非 ASCII 值，但本夹具的值本身是 ASCII）",
+      "body.detail 满足 is_ascii() == true，且 contains(\"rbac:role:write\") == true",
+      "body.title 对 CJK 正则无匹配",
+      "body.detail 不含 \"title\" / \"org_node_id\" / \"amount\" / \"created_by\" 任一子串（沿用 problem.rs:249 的既有护栏）"
+    ],
+    "type": "安全",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "params 里允许用户数据（AC 原文明确允许）。本用例同时验证「改 title 不能顺手把 params 里的权限点也改成中文」。"
+  },
+  {
+    "id": "TC-021-005",
+    "ac": "AC-S-088",
+    "title": "运行时 404：title 为英文 Not Found，且不泄露被访问资源名",
+    "preconditions": [
+      "T1 租户下的用户已登录",
+      "目标角色 ID 在 T1 下不存在"
+    ],
+    "steps": [
+      "GET /api/rbac/roles/{不存在的UUID}",
+      "解析响应体"
+    ],
+    "expected": [
+      "HTTP status == 404",
+      "body.code == \"NOT_FOUND\"",
+      "body.title == \"Not Found\"（精确）",
+      "body.detail == \"the role was not found\"（精确；resource 变量是 \"role\"）",
+      "body.title / body.detail 均 is_ascii() == true",
+      "body.title 对 CJK 正则无匹配"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "★ 当前 core 的 not_found 写的是「资源不存在」（problem.rs:167），而 acceptance.md 的缺口清单只点了 125/146/185 三行，把 185（tracing 日志，允许中文）当成了 title —— 真正的第三个中文 title 是 167。见挑刺 #3。"
+  },
+  {
+    "id": "TC-021-006",
+    "ac": "AC-S-088",
+    "title": "运行时 422：org 的 INVALID_ARGUMENT title 为英文",
+    "preconditions": [
+      "已登录且有 org 写权限的用户",
+      "请求体能构造出参数类错误（如 orgNodeType 非法）"
+    ],
+    "steps": [
+      "POST /api/org/nodes，body 里把 nodeType 设为 \"not_a_type\"",
+      "解析响应体"
+    ],
+    "expected": [
+      "HTTP status == 422",
+      "body.code == \"INVALID_ARGUMENT\"",
+      "body.title == \"Invalid Argument\"（精确）",
+      "body.title is_ascii() == true",
+      "body.title 对 CJK 正则无匹配"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "422 只有 org/rbac 会产生（platform-org/src/error.rs:162-163），core 没有 422。AC 步骤 2 只写「422 校验失败」没写端点，见挑刺 #16。"
+  },
+  {
+    "id": "TC-021-007",
+    "ac": "AC-S-088",
+    "title": "运行时 409：冲突类 title 为英文",
+    "preconditions": [
+      "T1 下已存在角色 code = \"dup-role\"",
+      "操作者具备 rbac:role:write"
+    ],
+    "steps": [
+      "再次 POST /api/rbac/roles，code 仍为 \"dup-role\"",
+      "解析响应体"
+    ],
+    "expected": [
+      "HTTP status == 409",
+      "body.code == \"CONFLICT\"",
+      "body.title == \"Conflict\"（精确）",
+      "body.title 对 CJK 正则无匹配"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "当前 rbac 的 title 是「状态冲突」（rbac http.rs:299），修后应为 \"Conflict\"。"
+  },
+  {
+    "id": "TC-021-008",
+    "ac": "AC-S-088",
+    "title": "运行时 500：INTERNAL_ERROR 的 title 为英文",
+    "preconditions": [
+      "服务已启动且已通过 /health/ready",
+      "制造 500 的手段：把数据库连接池指向一个已关闭的端口，或用故障注入使权限缓存刷新失败（platform-server/src/main.rs:631-640 的 CODE_INTERNAL_ERROR 分支）"
+    ],
+    "steps": [
+      "在故障注入状态下请求任一受保护接口",
+      "解析响应体（若 500 由静态资源层产生，见 TC-021-021）"
+    ],
+    "expected": [
+      "HTTP status == 500",
+      "body.code == \"INTERNAL_ERROR\"",
+      "body.title == \"Internal Server Error\"（精确）",
+      "body.title / body.detail 均 is_ascii() == true",
+      "响应体不是 HTML 错误页（Content-Type 以 application/problem+json 开头）"
+    ],
+    "type": "安全",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "500 的触发成本高。若 30 分钟内造不出来，改为「故障注入式单元测试」：直接断言 main.rs:632 与 sandbox 的 500 构造点 title 是英文（TC-021-002 已覆盖静态面），并在报告里注明运行时 500 未实跑 —— 不得静默跳过（D108 的精神）。"
+  },
+  {
+    "id": "TC-021-009",
+    "ac": "AC-S-088",
+    "title": "中文只允许出现在 tracing 日志：同一请求里日志有中文、响应体没有中文",
+    "preconditions": [
+      "服务以 RUST_LOG=warn 启动，日志可被采集（文件或 stderr 重定向）",
+      "不携带令牌"
+    ],
+    "steps": [
+      "发一个必然 401 的请求",
+      "从日志中取出该请求对应的 warn 行（按 trace_id 关联）",
+      "从响应体中取 title 与 detail"
+    ],
+    "expected": [
+      "日志行包含中文（例如 \"请求被拒绝\" 或 \"IAM 请求失败\"），证明「日志允许中文」这条规则真实生效",
+      "日志行的 trace_id 与响应体 body.trace_id 相等",
+      "响应体 body.title / body.detail 对 CJK 正则均无匹配",
+      "日志行中的 trace_id 不出现在 body.detail 里（detail 不得回灌日志内容）"
+    ],
+    "type": "可维护性",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P2",
+    "notes": "这条守的是 AC-S-088 的「⚠️ 允许日志有中文」豁免项。没有它，Dev 可能把日志也一起改成英文（过度整改），或反过来把中文从日志搬进 detail。"
+  },
+  {
+    "id": "TC-021-010",
+    "ac": "AC-S-089",
+    "title": "6 类错误的 code 都非空且符合大写+下划线格式",
+    "preconditions": [
+      "复用 TC-021-003 ~ TC-021-008 的 6 个响应体样本（401/403/404/422/409/500）"
+    ],
+    "steps": [
+      "取 6 个响应体的 body.code",
+      "对每个 code 做正则匹配"
+    ],
+    "expected": [
+      "6 个 code 均非空字符串",
+      "每个 code 匹配正则 ^[A-Z][A-Z0-9_]*$",
+      "6 个 code 两两不重复，集合等于 {\"UNAUTHENTICATED\",\"INSUFFICIENT_PERMISSION\",\"NOT_FOUND\",\"INVALID_ARGUMENT\",\"CONFLICT\",\"INTERNAL_ERROR\"}"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "这是 TC-021-012 的输入。"
+  },
+  {
+    "id": "TC-021-011",
+    "ac": "AC-S-089",
+    "title": "前端翻译资源文件存在且可被 @base/i18n 加载（守卫：当前必红）",
+    "preconditions": [
+      "本需求尚未实现；packages/i18n/src/index.ts 目前只有 translate/hasMessage 两个函数，且 translate 的字典由调用方传入（不是资源文件）",
+      "唯一调用点 apps/shell/src/pages/Home.svelte:13 用的是组件内联对象 { SHELL_READY: '已就绪', SHELL_HINT: '输入关键字过滤菜单' }"
+    ],
+    "steps": [
+      "断言仓库内存在语言资源文件（路径由 BA 钉死，建议 packages/i18n/src/locales/zh-CN.json 与 en-US.json）",
+      "用 createI18n 加载 zh-CN，断言 locale 字段",
+      "断言加载后的键数量 > 0"
+    ],
+    "expected": [
+      "packages/i18n/src/locales/zh-CN.json 与 en-US.json 均存在（existsSync == true）",
+      "两个文件的顶层键集合相同（缺键由 TC-021-032 覆盖回退，不作失败条件）",
+      "createI18n({ locale: 'zh-CN', ... }).locale == \"zh-CN\"",
+      "Object.keys(zhCN).length >= 6（至少覆盖 6 类错误）"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "★ 这是 AC-S-089 步骤 2 的**前置条件**，AC 里被写成「检查前端翻译资源里是否有该 code 的条目」，但资源文件今天不存在。本用例把前置显式化：它今天必红，是「开工前必须补的交付物」清单项。见挑刺 #4。"
+  },
+  {
+    "id": "TC-021-012",
+    "ac": "AC-S-089",
+    "title": "6 类错误的 code 在 zh-CN 与 en-US 两个资源里都有条目",
+    "preconditions": [
+      "TC-021-011 已通过",
+      "6 类 code 见 TC-021-010"
+    ],
+    "steps": [
+      "对 6 个 code 拼键 \"error.\" + code",
+      "用 hasMessage / 直接查字典断言存在性（两个语言分别查）"
+    ],
+    "expected": [
+      "对 6 个 code × 2 个语言 = 12 个键，全部 hasMessage(dict, key) == true",
+      "缺任意一条即失败，错误信息里列出缺失的 (locale, key) 对",
+      "en-US 的 6 条文案互不相同（防止整表复制成占位）",
+      "zh-CN 的 6 条文案互不相同"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "「en-US 的 6 条互不相同」这条是防「把中文表复制成英文表」的假绿 —— 否则英文界面会显示中文而所有断言仍然绿。"
+  },
+  {
+    "id": "TC-021-013",
+    "ac": "AC-S-089",
+    "title": "翻译条目的占位符集合与 params 键集合精确相等（6 类逐个）",
+    "preconditions": [
+      "TC-021-012 已通过",
+      "6 个响应体的 params（可能为缺省）"
+    ],
+    "steps": [
+      "对每条文案用正则 /\\{(\\w+)\\}/g 抽取占位符名，去重后排序",
+      "对每个响应体取 Object.keys(body.params ?? {})，排序",
+      "比较两个数组"
+    ],
+    "expected": [
+      "对 401：文案无占位符 且 body.params 为缺省（键集合为空）→ 两数组均 == []",
+      "对 403：文案占位符 == [\"required\"] 且 params 键 == [\"required\"]",
+      "对 404：文案占位符 == [\"resource\"] 且 params 键 == [\"resource\"]",
+      "对 422/409/500：两数组相等（具体键集合由实现钉死后写入本用例）",
+      "6 个样本逐一满足「占位符集合 == params 键集合」，任一不等即失败并打印两个集合"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "占位符语法在 AC 里只举了 {required} 一例，未钉死（挑刺 #34）。若改用 {{required}} 或 %s，正则要同步 —— 本用例假定单花括号。"
+  },
+  {
+    "id": "TC-021-014",
+    "ac": "AC-S-089",
+    "title": "渲染结果非空、不等于 key 本身、不含未替换占位符（防 fallback 假绿）",
+    "preconditions": [
+      "TC-021-013 已通过"
+    ],
+    "steps": [
+      "对 6 类错误调用 t(\"error.\" + code, body.params)",
+      "对结果做四项断言"
+    ],
+    "expected": [
+      "result.length > 0",
+      "result !== \"error.\" + code（不是回落到 key）",
+      "result 不含 \"{\" 且不含 \"}\"",
+      "result 对 CJK 正则的匹配结果：zh-CN 下有匹配、en-US 下无匹配（证明两个语言真的不同）",
+      "把 UNAUTHENTICATED 的 params 故意改成 {} 再渲染，若文案含占位符则结果含 \"{\" → 该负向样本必须失败（证明断言有牙齿）"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "最后一条是「断言的变异测试」：故意喂错参数，断言必须变红，否则说明断言恒真。"
+  },
+  {
+    "id": "TC-021-015",
+    "ac": "AC-S-089",
+    "title": "全部后端错误码都有翻译键（不是只有 6 类）（守卫：当前必红）",
+    "preconditions": [
+      "后端错误码全集 = platform-core/problem.rs 的 6 个 CODE_* + iam error.rs code 模块 17 个 + rbac 10 个 + org 15 个 + config 12 个 + 2 个 schema 码",
+      "实测全仓 `pub const <NAME>: &str = \"...\"` 形式的错误码共 50 个（error.rs 三处）+ core/config 若干"
+    ],
+    "steps": [
+      "用脚本从 Rust 源码抽取全部 code 常量值（crates/*/src/error.rs 的 code 模块 + problem.rs + platform-config/src/error.rs）",
+      "与 en-US 资源的 error.* 键集合求差集",
+      "断言差集为空"
+    ],
+    "expected": [
+      "抽取出的 code 总数 == 68（core 6 + iam 17 + rbac 10 + org 15 + config 12 + schema 2 + 6 个其它 —— 具体数字以实现时的抽取结果为准，但必须 >= 50）",
+      "差集（后端有 code 但前端无键）的长度 == 0",
+      "每个键名满足 \"error.\" + code 的逐字拼接（不做驼峰转换、不做小写化）"
+    ],
+    "type": "可维护性",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "AC-S-089 只要求「对 AC-S-088 步骤 2 的 6 类错误」有条目 → 覆盖率约 6/68 ≈ 9%。真实用户会遇到 INVALID_CREDENTIALS / ACCOUNT_LOCKED / TOKEN_EXPIRED 等，这些今天在前端是 Login.svelte 里硬编码的中文（apps/shell/src/pages/Login.svelte:61-82），不走 i18n。见挑刺 #19。"
+  },
+  {
+    "id": "TC-021-016",
+    "ac": "AC-S-089",
+    "title": "SDK 的 ApiError 必须透出 params（守卫：当前必红）",
+    "preconditions": [
+      "packages/sdk/src/index.ts:46-64 的 ApiError 只有 code / status / title / detail 四个字段，**没有 params**"
+    ],
+    "steps": [
+      "构造一个 403 的 Response（body 含 params.required）",
+      "用 @base/sdk 发请求并捕获 ApiError",
+      "读取 err.params"
+    ],
+    "expected": [
+      "instanceof ApiError == true",
+      "err.code == \"INSUFFICIENT_PERMISSION\"",
+      "err.params 是对象且 err.params.required == \"rbac:role:write\"",
+      "把 params 从响应体里去掉后，err.params 为 undefined 或 {}（不得抛错）"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "★ AC-S-089 步骤 3/4 要求前端拿 params 渲染，但 SDK 在解析阶段就把 params 丢了（ApiErrorParams 只接 code/status/title/detail）。不补 SDK，AC-S-089 步骤 3 无法实现。这是改 REQ-011 已合并包 —— 必须在 demand 的依赖里写明。见挑刺 #4。"
+  }
+]

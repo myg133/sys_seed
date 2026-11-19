@@ -1,0 +1,288 @@
+[
+  {
+    "id": "TC-021-049",
+    "ac": "AC-S-094",
+    "title": "Asia/Shanghai 下渲染 2026-01-15T00:00:00Z → 2026-01-15 08:00:00",
+    "preconditions": [
+      "createI18n 已构造，formatDate(iso, tz) 可用",
+      "固定输入 iso = \"2026-01-15T00:00:00Z\"",
+      "约定输出格式：yyyy-MM-dd HH:mm:ss（24 小时制，无时区后缀）—— AC 未写格式，需钉死"
+    ],
+    "steps": [
+      "t.formatDate('2026-01-15T00:00:00Z', 'Asia/Shanghai')"
+    ],
+    "expected": [
+      "返回值 == \"2026-01-15 08:00:00\"（精确，含 0 补位）",
+      "返回值匹配正则 ^\\d{4}-\\d{2}-\\d{2} \\d{2}:\\d{2}:\\d{2}$",
+      "返回值不以 Z 结尾、不含 \"UTC\""
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "★ 输出格式 AC 完全没写（「2026-01-15 08:00:00」只是一个举例）。格式不钉死则断言无法机械。本用例钉死为 `yyyy-MM-dd HH:mm:ss`。若实现改用 Intl 的默认 locale 输出（如 zh-CN 的 `2026/1/15 08:00:00`），本条必红。见挑刺 #25。"
+  },
+  {
+    "id": "TC-021-050",
+    "ac": "AC-S-094",
+    "title": "America/New_York 下渲染同一时刻 → 2026-01-14 19:00:00（跨日）",
+    "preconditions": [
+      "同 TC-021-049"
+    ],
+    "steps": [
+      "t.formatDate('2026-01-15T00:00:00Z', 'America/New_York')"
+    ],
+    "expected": [
+      "返回值 == \"2026-01-14 19:00:00\"（精确）",
+      "返回值的日期部分是 01-14，与输入日期的 01-15 不同（跨日证据）",
+      "返回值的小时部分是 19，不是 00"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "跨日是这条用例的立身之本 —— 若选一个日间时刻（如 12:00Z），时区错了日期也一样，断言无区分力。"
+  },
+  {
+    "id": "TC-021-051",
+    "ac": "AC-S-094",
+    "title": "两个时区的结果表示同一时刻（用 formatToParts 重建 epoch 后比较）",
+    "preconditions": [
+      "TC-021-049 与 TC-021-050 的结果"
+    ],
+    "steps": [
+      "对两个结果用 Intl.DateTimeFormat(...).formatToParts() 取得各部件（不是在字符串上加减小时）",
+      "按各时区把部件解释为本地时间，再用 Date.UTC 反推 epoch",
+      "比较两个 epoch 与原始 epoch"
+    ],
+    "expected": [
+      "epoch(Shanghai 结果) == 1768435200000（2026-01-15T00:00:00Z 的毫秒值）",
+      "epoch(NY 结果) == 1768435200000",
+      "两者相减 == 0",
+      "两者都等于 new Date('2026-01-15T00:00:00Z').getTime()"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "★ AC 步骤 3 写「转回 UTC 相等」，但步骤 1/2 期望的是**人类可读字符串**（无偏移信息）—— 字符串本身无法转回 UTC。必须写明「用 formatToParts 的部件 + 各自时区重建」，否则这条不可实现。见挑刺 #25。"
+  },
+  {
+    "id": "TC-021-052",
+    "ac": "AC-S-094",
+    "title": "两个租户的本地时间不相等（时区被忽略则失败）",
+    "preconditions": [
+      "TC-021-049 与 TC-021-050 的结果"
+    ],
+    "steps": [
+      "断言两个字符串不相等",
+      "再用一个空时区参数 / UTC 渲染做对照"
+    ],
+    "expected": [
+      "resultShanghai !== resultNewYork（字符串不等）",
+      "t.formatDate(iso, 'UTC') == \"2026-01-15 00:00:00\"",
+      "resultShanghai != resultUTC 且 resultNewYork != resultUTC（两个租户都不是「原样显示 UTC」）"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "AC 步骤 4 的原话是「若两个租户显示相同的本地时间，则时区被忽略了 → 失败」。本用例把它变成 `!==` 断言，并加了 UTC 对照 —— 只断两者不等无法发现「两者都显示 UTC」这种双错抵消。"
+  },
+  {
+    "id": "TC-021-053",
+    "ac": "AC-S-094",
+    "title": "后端返回的原始值仍是 2026-01-15T00:00:00Z（时区只影响展示）",
+    "preconditions": [
+      "某个接口返回带时间戳的记录（如 platform_iam_session.created_at 或 platform_org 的节点时间）",
+      "T1 时区 Asia/Shanghai、T2 时区 America/New_York"
+    ],
+    "steps": [
+      "以 T1 身份 GET 该记录，取时间字段原值",
+      "以 T2 身份 GET 同一记录，取同一字段",
+      "对比两个原始值"
+    ],
+    "expected": [
+      "T1 的字段值 == \"2026-01-15T00:00:00Z\"（RFC 3339，以 Z 结尾）",
+      "T2 的字段值 == 同一个字符串（逐字相同）",
+      "两个响应中该字段的字符串相等（时区不得改变传输值）",
+      "字段值以 \"Z\" 结尾，不以 \"+08:00\" / \"-05:00\" 等偏移结尾"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "★ 这条是整条 AC 唯一能在后端验证的部分。「以 T1 身份取该时间」到底验后端还是前端，AC 没写 —— 若指后端，则后端返回的仍是 UTC（正是本条），步骤 1/2 的期望值只能在前端成立。见挑刺 #9。"
+  },
+  {
+    "id": "TC-021-054",
+    "ac": "AC-S-094",
+    "title": "夏令时边界：2026-03-08T07:00:00Z 在纽约是 03:00:00 而非 02:00:00",
+    "preconditions": [
+      "2026 年美国夏令时于 3 月 8 日 02:00 本地时间开始（EST -05 → EDT -04）",
+      "本项 AC 未覆盖 DST，本用例为 QA 补充"
+    ],
+    "steps": [
+      "t.formatDate('2026-03-08T07:00:00Z', 'America/New_York')",
+      "t.formatDate('2026-11-01T05:30:00Z', 'America/New_York')"
+    ],
+    "expected": [
+      "第一个结果 == \"2026-03-08 03:00:00\"（跳过了不存在的 02:00）",
+      "第二个结果 == \"2026-11-01 01:30:00\"（DST 结束那天的重复 01:30）",
+      "两次都不抛异常"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P2",
+    "notes": "用「固定偏移量」实现时区换算（自己加减 5 小时）在这些时刻会算错。这条是「必须用 Intl 而不是自造偏移表」的行为级证据。AC 完全没提 DST —— 覆盖不足（挑刺 #26）。"
+  },
+  {
+    "id": "TC-021-055",
+    "ac": "AC-S-094",
+    "title": "「以 T1 身份取该时间」的通道存在（守卫：当前必红）",
+    "preconditions": [
+      "当前后端无任何时区能力：time crate 只启用 formatting feature（Cargo.toml:49），不含 IANA tzdb；crates/ 里 grep timeZone/timezone 0 命中",
+      "用户表无时区列（migrations/20261118000400_iam_auth.up.sql:21-40）",
+      "AC 步骤 1/2 只说「以 T1 身份取该时间」，未说走哪个接口、也不说是前端渲染"
+    ],
+    "steps": [
+      "确认存在一个可被 E2E 驱动的渲染路径（页面元素 / 接口字段 / 响应头）",
+      "确认「T1 身份」如何影响该路径（租户配置、用户偏好、还是请求参数）"
+    ],
+    "expected": [
+      "BA 明确写下：本 AC 的 layer 是 frontend-unit（纯 formatDate）还是 e2e（页面渲染）",
+      "若为 e2e：写明承载时间的页面/组件与元素选择器",
+      "若为 frontend-unit：删除「以 T1 身份」表述，改为「timezone 参数 = Asia/Shanghai」",
+      "后端侧只保留 TC-021-053 的 UTC 原值断言"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "★ 这条是 AC-S-094 的**结构性问题**，不是补充用例：AC 把「前端渲染」写成了「以租户身份取」。后端没有 tzdb，也不该有时区渲染（design §4 自己说「时区只影响展示」）。见挑刺 #9。"
+  },
+  {
+    "id": "TC-021-056",
+    "ac": "AC-S-095",
+    "title": "只有租户配置时 → 纽约时间",
+    "preconditions": [
+      "平台默认 timezone = Asia/Shanghai",
+      "租户 T1 的 timezone = America/New_York",
+      "u1 无时区偏好",
+      "固定输入 iso = \"2026-01-15T00:00:00Z\""
+    ],
+    "steps": [
+      "以 u1（T1）的身份解析有效时区",
+      "用该时区 formatDate"
+    ],
+    "expected": [
+      "有效时区 == \"America/New_York\"（精确）",
+      "formatDate 结果 == \"2026-01-14 19:00:00\"",
+      "有效时区 != 平台默认 \"Asia/Shanghai\""
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "「解析有效时区」的输出通道与 AC-S-090 的 locale 通道是同一个问题（挑刺 #5）。若 BA 只给 locale 头不给 timezone 字段，本条无法读到时区。"
+  },
+  {
+    "id": "TC-021-057",
+    "ac": "AC-S-095",
+    "title": "加上用户偏好 → 伦敦时间（用户 > 租户）",
+    "preconditions": [
+      "TC-021-056 的夹具",
+      "u1 的 timezone 偏好 = Europe/London"
+    ],
+    "steps": [
+      "以 u1 的身份解析有效时区",
+      "formatDate 同一 iso"
+    ],
+    "expected": [
+      "有效时区 == \"Europe/London\"（精确）",
+      "formatDate 结果 == \"2026-01-15 00:00:00\"",
+      "结果 != \"2026-01-14 19:00:00\"（证明不是租户的纽约）",
+      "结果 != \"2026-01-15 08:00:00\"（证明不是平台的上海）"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "★ 用户时区在后端**没有存储**（用户表无时区列），design §7.2 只存 sessionStorage → 后端拿不到「用户偏好」。若坚持后端验，必须先加用户偏好存储（DB 列或 config）；若放前端，这条 AC 的 layer 改成 frontend-unit。见挑刺 #10。"
+  },
+  {
+    "id": "TC-021-058",
+    "ac": "AC-S-095",
+    "title": "三个时区对同一 UTC 时刻给出两两不同的结果",
+    "preconditions": [
+      "Asia/Shanghai / America/New_York / Europe/London 三个时区",
+      "固定 iso = 2026-01-15T00:00:00Z"
+    ],
+    "steps": [
+      "分别 formatDate 三次",
+      "两两比较"
+    ],
+    "expected": [
+      "Shanghai == \"2026-01-15 08:00:00\"",
+      "NewYork == \"2026-01-14 19:00:00\"",
+      "London == \"2026-01-15 00:00:00\"",
+      "三个字符串两两不相等（3 对比较全部 !==）"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "时间点必须钉死：换到夏季（如 2026-07-15T00:00:00Z）时 London 是 01:00（BST），仍与另外两个不同；但如果选 2026-01-15T12:00:00Z，London 12:00 与 UTC 12:00 相同 —— 用例固定 00:00Z 即可避免。AC 写「用同一个 UTC 时间点」但没给具体值。"
+  },
+  {
+    "id": "TC-021-059",
+    "ac": "AC-S-095",
+    "title": "Accept-Language 不参与时区协商（带 en-US 头不改变时区结果）",
+    "preconditions": [
+      "租户 T1 的 timezone = America/New_York",
+      "u1 无时区偏好"
+    ],
+    "steps": [
+      "请求时带 Accept-Language: en-US",
+      "请求时带 Accept-Language: ja-JP",
+      "两次都解析有效时区并 formatDate"
+    ],
+    "expected": [
+      "两次的有效时区都 == \"America/New_York\"",
+      "两次的 formatDate 结果逐字相同",
+      "有效时区不随 Accept-Language 变化（3 个不同 header 值的结果集合势 == 1）"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "design §3.3 明确「请求头不参与时区协商」。这条守住它，防止实现偷懒复用 Accept-Language 里的区域段（如 en-US → 猜 America/New_York）。"
+  },
+  {
+    "id": "TC-021-060",
+    "ac": "AC-S-095",
+    "title": "用户时区偏好的持久化载体存在且跨标签页可见（守卫：design 与 AC 矛盾）",
+    "preconditions": [
+      "design §7.2 写「用户级偏好存 sessionStorage（与 D99 一致）」",
+      "D99 的实际内容是「token + 租户存 sessionStorage」，理由是「refresh token 长期驻留是 XSS 放大器」",
+      "AC-S-095 前置要求「用户 U1 偏好 Europe/London」—— 隐含「偏好可持久化」"
+    ],
+    "steps": [
+      "在标签页 A 设 timezone = Europe/London",
+      "在同一浏览器新开标签页 B（同源）",
+      "读标签页 B 里的有效时区"
+    ],
+    "expected": [
+      "BA 明确偏好载体：sessionStorage（单标签页，新标签丢失）还是 后端/DB（跨设备、跨标签）",
+      "若选 sessionStorage：写明「新标签页回到租户/平台默认」并在 AC 里承认这是设计取舍",
+      "若选后端：给出存储位置（用户表新列 或 config 的 user 作用域）与对应迁移",
+      "无论选哪个，都必须有一条断言能区分两种行为"
+    ],
+    "type": "功能",
+    "layer": "e2e",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "★ sessionStorage 与「用户偏好」语义冲突：用户在新标签页打开就丢偏好，那它不是「偏好」而是「当前页设置」。design 用 D99 背书，但 D99 的理由（XSS/refresh token）不适用于语言时区。见挑刺 #41。"
+  }
+]
