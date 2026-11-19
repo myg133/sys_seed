@@ -1,204 +1,278 @@
-# 修复轮复核报告 —— REQ-009（轻量）
+# 修复轮复核报告 —— REQ-011（前端 SDK 骨架）
 
-- **需求**: REQ-009「RBAC 权限与数据范围」
-- **被验提交**: `cd65640`（修复轮）· 上一轮 HEAD `05bc6bd`
-- **首轮报告**: [`qa-report.md`](./qa-report.md)（结论 PASS-WITH-RISK，HIGH 0 / MEDIUM 2 / LOW 2 / INFO 3）
-- **验证者**: QA Agent（**独立复跑；Dev 自报数字一律不采信**）
-- **日期**: 2026-11-18
-- **结论**: **PASS** —— 首轮 2 项 MEDIUM 均已消解，2 项 LOW 均已修好，无回归。
-  字面要求上只剩 1 条「异常路径用 RAII 装回」未按字面实现（风险已被 schema 隔离消除，见 LOW-1）。
+- **需求**: REQ-011「前端 SDK 骨架」
+- **被验提交**: `4ac5074`（`[Dev] 修复壳层租户来源与会话持久化`）+ `4292c4e`（BA 修 prettier 门禁）
+- **首轮报告**: [`qa-report.md`](./qa-report.md)（结论 **FAIL**：HIGH-1 + AC-S-068 步骤 3）
+- **验收基线**: `BA/demands/REQ-011-frontend-sdk/acceptance.md` **rev 3**（AC-S-068 及其「租户与会话的来源」补充）
+- **裁定依据**: D98（登录页租户输入）/ D99（`sessionStorage`）
+- **验证者**: QA Agent（**独立复核 —— 未参与本轮修复；Dev 自验数字一律不采信**）
+- **日期**: 2026-11-19
+- **结论**: **PASS-WITH-RISK**
 
-> **本轮只做修复轮复核**，不是全量重验：16 条 AC 的逐条证据沿用首轮；本轮只查首轮 4 个问题 + 回归。
+> **核心结论**
+>
+> - **HIGH-1 已真修好**：真机 + 真浏览器（Playwright/Chromium）实测登录请求带 `x-tenant-id`，
+>   值**等于用户填的租户**（填 `tenant-qa-probe` 头就是 `tenant-qa-probe`，不是硬编码），登录 **200**。
+> - **MED-1 / AC-S-068 步骤 3 已达成**：`u-perm-read` 直接敲 `/admin/roles` → 落 **`/403`**，
+>   目标接口 `/api/rbac/roles` 请求计数 **0**；`page.reload()` 后**仍**是 `/403`；
+>   写权限用户深链 → 正常进页面。
+> - **两条告警（本轮新引入，均未破坏 AC）**：
+>   1. **MED-NEW-1（用户可见）**：登录失败时页面显示 **`登录失败（TOKEN_REVOKED）`**，
+>      而不是 `INVALID_CREDENTIALS` 对应的「用户名或密码不正确」 —— 因为 SDK 对登录的 401
+>      也发起了一次**注定失败**的 refresh，refresh 的错误把登录错误**覆盖**了。
+>      Dev 报告声称的「按码分派文案」在真机上**不成立**。
+>   2. **MED-NEW-2（测试资产）**：`e2e/shell-auth.spec.ts` 依赖的三个夹具**不可复现** ——
+>      跑过 `./scripts/test-integration.sh` 之后，`u-perm-write@example.com` **不存在**、
+>      `u-perm-read@example.com` 有 **6 个同名用户**（登录 401），E2E **实测 5 failed**。
+> - **3 处变异全部被我的用例抓红**（M1 去租户 / M2 关 sessionStorage / M3 我自选的「先守卫后恢复」），
+>   变异全部**逐字节还原**（`sha256 -c` 通过、`git diff -- apps/ packages/ crates/ e2e/` 为空）。
+> - **全量回归两轮全绿**：后端 **550 passed ×2**、前端 **141 passed**、`xtask --all-targets` **49 passed**、
+>   `clippy` **0 告警**、`capabilities --check` **13 文件一致**、`eslint` **0 问题**、`prettier --check .` **全绿**。
 
 ---
 
-## 1. 逐条结论
+## 1. HIGH-1 与 MED-1 逐条复核
 
-| # | 首轮问题 | 本轮结论 | 一句话证据 |
+### 1.1 HIGH-1：壳层没有租户来源 → 登录 100% 失败
+
+| 复核项 | 首轮的问题 | 本轮实测（真机 + 真浏览器） | 结论 |
 |---|---|---|---|
-| **M1** | trait 文档与 D40 相反（非法条件返回 `None`） | **PASS** | 文档改成两值语义 + 明写「非法不得返回 `None`」；实现**一字未改**（仍是 `Some(1 = 0)`）；真库用例断言 `is_some()` 且端到端 0 行 |
-| **M2** | 全局摘唯一索引 + 跨租通配 DELETE | **PASS**（1 条字面要求由隔离替代，见 LOW-1） | 测试侧已无全局 DDL（唯一 DROP 带 schema 限定）；DELETE 带 `tenant_id`；用例改在探针 schema 跑；收尾断言**探针 + public** 两个索引都在 |
-| **L3** | 违例位置是字符偏移，文档写「文件:行」 | **PASS** | 自造夹具实测报 `lib.rs:22:4` / `:23:27`，与真实行列一致（首轮报的是 `:96`） |
-| **L4** | 同角色多 grant 的胜者靠排序副产物 | **PASS** | `contributions_for` 显式按具体度选；独立探针 9 例全过（含原随机的继承方向）；变异回旧实现→测试变红 |
-| **回归** | —— | **PASS** | 完整集成套件 **3 轮 × 461/461**（EXIT=0） |
+| 登录请求带租户头 | `createAppApi()` 不传 `tenantId` → 请求无 `x-tenant-id` → **401 `TENANT_CONTEXT_MISSING`** | 登录请求头 `x-tenant-id: "tenant-a"`，**值等于表单填的租户** | **PASS** |
+| 租户值不是硬编码 | —— | 填 `tenant-qa-probe` → 头就是 `"tenant-qa-probe"`；响应 `401 INVALID_CREDENTIALS`（不是 500、不是 `TENANT_CONTEXT_MISSING`） | **PASS** |
+| 登录成功 | 100% 失败 | `POST /api/iam/login` → **200**，落 `/` 并渲染「已就绪」 | **PASS** |
+| 后续请求沿用租户 | —— | 登录后所有经 SDK 的请求（`/api/iam/*`、`/api/rbac/*`）**全部**带 `x-tenant-id: tenant-a`，缺失 0 条 | **PASS** |
+| **refresh 也带租户头** | —— | 把 `sessionStorage` 里的 access token 改成垃圾后重载：`POST /api/iam/refresh` **确实带** `x-tenant-id: tenant-a`，刷新 **200**，重放成功 | **PASS** |
+| 空租户不发请求 | —— | 租户留空点登录 → 页面提示「请填写租户标识」，`/api/iam/login` 请求计数 **0**，仍停在 `/login` | **PASS** |
+| 恢复会话时也设租户 | —— | 整页重载后 `GET /api/rbac/me/permissions` **带** `x-tenant-id: tenant-a` + `Authorization: Bearer …` | **PASS** |
+
+**实现落点（我逐行读过）**：
+- `apps/shell/src/lib/api.ts:168-180` —— `login()` 先 `session.setTenant()` 再 `client.setContext({tenantId})`，**然后**才发登录请求；
+- `apps/shell/src/lib/api.ts:132-161` —— `restoreSession()` 先 `client.setContext({tenantId})` 再请求权限点；
+- `apps/shell/src/lib/api.ts:110` —— `createApiClient({ tenantId: session.state.tenantId })`，构造期就用已恢复的租户；
+- `apps/shell/src/pages/Login.svelte:84-94` —— 空租户 `trim()` 后直接 return，**不发请求**；
+- `apps/shell/src/pages/Login.svelte:116-122` —— 租户输入框（`name="tenant"`），无 `import.meta.env` / `VITE_*` 读取（`grep` 无命中）。
+
+**后端契约侧证（curl，同一台机器）**：
+```
+POST /api/iam/login 无 x-tenant-id          → 401 {"code":"TENANT_CONTEXT_MISSING"}
+POST /api/iam/login x-tenant-id: tenant-a   → 200 permissions=["rbac:role:read"]
+```
+
+### 1.2 MED-1 / AC-S-068 步骤 3：整页重载丢令牌 → 深链落 `/login` 而不是 `/403`
+
+| 步骤 | 首轮的问题 | 本轮实测 | 结论 |
+|---|---|---|---|
+| 2 程序化跳转 / 深链（已登录、无权限） | 已登录无权限 → 403 ✓ | `u-perm-read` 敲 `/admin/roles` → 最终 URL **`/403`**，`[data-testid=forbidden]` 可见 | **PASS** |
+| 3 **整页重载后深链** | **落 `/login`**（令牌只在内存） | 同上，**落 `/403`**；在 `/403` 上再 `reload()` **仍**是 `/403` | **PASS** |
+| 4 目标接口未被请求 | 计数 0 ✓ | `/api/rbac/roles` 请求计数 **0**（导航前被守卫拒绝，重载后仍 0） | **PASS** |
+| 3' 有写权限用户深链 | —— | `u-perm-write` 敲 `/admin/roles` → 落在该页，`/api/rbac/roles` **200**，重载后仍在页 | **PASS** |
+| 5 未登录深链 | 落登录页、无「403」字样 ✓ | 新上下文直接敲 `/admin/roles` → **`/login`**，页面正文**不含**「403」 | **PASS** |
+| 补充：无权限用户 | —— | `u-perm-none` 登录 **200** 且 `permissions === []`；首页 `<Can>` 落 fallback「无权限」；深链 → `/403` | **PASS** |
+| 补充：新标签页不继承 | —— | 同 context 新开页敲 `/admin/roles` → `/login`（`sessionStorage` 语义） | **PASS** |
+| 补充：会话内容 | —— | `sessionStorage["base.shell.session.v1"]` 键**恰好** `accessToken,refreshToken,tenantId`；**不含** `permissions` | **PASS** |
+
+**实现落点**：`apps/shell/src/lib/session.ts:25,101-197`（键 + 探测 + 降级 + 落盘）、
+`apps/shell/src/App.svelte:95-100`（**先 `await restoreSession()` 再 `router.start()`**）、
+`apps/shell/src/App.svelte:113-115`（恢复完成前不渲染页面）。
+
+> **说明（我自己的断言自审）**：`B2`（「重载后回到首页」）**不具区分度** ——
+> 首页是公开页，未登录也渲染「已就绪」。真正守住 MED-1 的是 `B1`（深链必落 403）
+> 与 `B2b`（`/403` 上重载仍 403）；M2 变异下这两条都变红（见 §3），说明判据有效。
 
 ---
 
-## 2. M1 —— trait 文档 vs D40
+## 2. 本轮新引入的问题
 
-**修好了，且只动文档。**
+### 2.1 【MEDIUM】MED-NEW-1：登录失败文案被 refresh 的错误覆盖（用户可见）
 
-1. **两值语义写清了**（`crates/platform-core/src/extension/permission.rs:180-193`）：
-   一张表分别写 `None` = 「根本没有条件」→ **直接放行**；`Some(永不匹配)` = 「条件非法」→ **判不通过**。
-2. **明确警示**（`:189`）：「⚠️ **非法条件不得返回 `None`**」—— 并把「误拒全部」与「静默放行」两种后果都写了。
-   `crates/platform-rbac/src/checker.rs:361-369` 同步补了同义文档（指向调用方 `if let Some(c) = ...` 的陷阱）。
-3. **实现未改**（这是关键，改文档不能顺手改实现）：
-   - `checker.rs:42-46` `never_match()` 仍返回 `sql = "1 = 0"`、`values` 为空；
-   - `checker.rs:53-55` `compile_condition` 仍是 `compile(...).unwrap_or_else(|_| never_match())`；
-   - `git diff 05bc6bd..cd65640 -- crates/platform-rbac/src/checker.rs` **只有 +5 行文档**，无代码行变化。
-4. **「引用白名单外属性 → `Some` 且永不匹配」有用例锁住**：
-   `crates/platform-rbac/tests/rbac_real_db.rs:1902` `a_condition_outside_the_whitelist_never_grants_access`
-   —— 用**去掉 `record.amount` 的白名单**重建判定器，让注册表里的条件变成非法，然后断言
-   `condition(...)` **`is_some()`** → `sql == "1 = 0"` → `values.is_empty()` → 端到端可见行 **0**。
-   两轮日志均 `... ok`。
-
-**残留**：首轮那句错误措辞仍出现在 `feature-meta/verification-report.md` 与首轮 `qa-report.md` 里 —— 那是**历史报告**，不是代码契约，不影响判定。
-
----
-
-## 3. M2 —— 测试夹具污染
-
-**修好了，隔离做法比要求的更彻底。**
-
-### 3.1 静态核对
-
-| 判据 | 实测 |
-|---|---|
-| **① 全局索引还有没有被 DROP/CREATE** | **没有**。全仓 `DROP INDEX` 只有两处：`migrations/...down.sql:8`（迁移回滚，正常）与 `crates/platform-rbac/tests/rbac_real_db.rs:827` 的 **`DROP INDEX IF EXISTS {schema}.user_org_one_primary_idx`**（schema 限定，不是全局）。测试侧的 `CREATE UNIQUE INDEX`（`:845`）是 `ON {schema}.user_org` —— PostgreSQL 把索引建在**表所在 schema**。`public` 的索引不再被测试碰。 |
-| **② DELETE 是否带租户条件** | **带了**。`:839` 与 `:907` 都是 `DELETE FROM user_org WHERE tenant_id = $1 AND user_id LIKE 'u-dual-primary-%'` + `.bind(tenant)`。全文件只有这两条 `DELETE FROM user_org`。 |
-| **③ 有没有 RAII/guard** | **没有 guard**（见 LOW-1）；但**不再需要**：被摘的索引在**一次性 schema** 里。 |
-| **④ 收尾有没有断言索引存在** | **有，且断言两条**：`:996`「用例结束时探针的部分唯一索引必须在位」+ `:1000`「**全局**的部分唯一索引必须仍在（这条用例**不许**动它）」。之后 `:1004` 才 drop 探针 schema。 |
-
-### 3.2 独立 schema 的实现
-
-`crates/platform-rbac/tests/common/mod.rs:359 create_probe_fixture`：
-建 `rbac_probe_<8hex>`（`run_id()` 每进程唯一）→ `CREATE TABLE ... (LIKE public.x INCLUDING ALL)` + 拷数据
-→ 把复制来的部分唯一索引改名为规范名 → 授权给 `base_platform_app` → 用 `DbOptions.schema` + `search_path` 建池。
-删除侧 `drop_probe_schema:495` + 过期清理 `drop_stale_probe_schemas:507`（TTL 1 小时，只清别人的）。
-
-### 3.3 实测（不是读代码）
-
-| 检查 | 结果 |
-|---|---|
-| 完整套件 × 3 轮后 `pg_indexes` 查 `user_org_one_primary_idx` | **`public.user_org_one_primary_idx` 三轮都在** |
-| 探针 schema 残留 | `SELECT count(*) FROM pg_namespace WHERE nspname LIKE 'rbac_probe%'` → **0** |
-| 用例确实跑到了 | 每轮日志都有 `test a_missing_or_ambiguous_primary_department_falls_back_to_self ... ok` |
-
-**一个反证**：如果这条用例其实还在 `public` 上跑，那么 `DROP {probe}.user_org_one_primary_idx` 根本解不开 `public` 的唯一约束，
-第 3 步「造两个主部门」会直接被 DB 拒绝 → 用例必红。它连续 3 轮绿 ⇒ 确实走的是探针 schema。
-
----
-
-## 4. L3 —— C-5 违例位置
-
-**修好了：现在是真正的 `文件:行:列`。**
-
-- `crates/platform-contracts/src/authz_scan.rs:145 line_and_column` / `:160 position`；三处报错点（`:116`、`:132`、以及 non-literal 分支）统一走 `position()`。
-- **自造夹具**（`/tmp/qa-req009/fakerepo/modules/v7_line_probe`，与首轮同一套 `check_c5` 探针）：第 22 行 `fn check_perm(...)`、第 23 行 `pub fn other() -> usize { require_permission(PERM) }`。实测输出：
+- **触发条件**：登录返回 **401**（最常见：密码错 / 用户名不存在 / 租户填错）。
+- **观察到的行为**（真浏览器，`u-perm-wildcard@example.com` + 故意错密码）：
   ```
-  VIOLATION[C-5] ... lib.rs:23:27 does not use a string literal ...
-  VIOLATION[C-5] ... lib.rs:22:4 bypasses the platform entry point `require_permission`
+  REQ POST /api/iam/login
+  REQ POST /api/iam/refresh                 ← 多出来的一次请求（必然失败）
+  RES 401 /api/iam/refresh code=TOKEN_REVOKED
+  RES 401 /api/iam/login   code=INVALID_CREDENTIALS
+  页面文案: 登录失败（TOKEN_REVOKED）        ← ✗ 不是「用户名或密码不正确」
+  URL: /login
   ```
-  22 行 / 23 行**完全对得上**，列号 4 / 27 也正是标识符在行内的起始列。首轮同一条夹具报的是 `lib.rs:96`（文件只有 2 行）。
-- 两个新单测（`a_violation_points_at_the_line_it_is_on`、`a_non_literal_call_points_at_the_line_it_is_on`）在套件里 **ok**。
-- 格式变化的兼容性：唯二消费方 `checks.rs:530/540` 只是把字符串插进错误消息，**没有解析**，不会被打断。
+- **根因链**：
+  1. `packages/auth/src/index.ts:278` —— 登录走 `client.post(loginPath, …)`，与普通请求同一条通道；
+  2. `packages/sdk/src/index.ts:314-327` —— 任何 `attempt === 0` 的 **401** 都会尝试 refresh
+     （`RequestOptions` 没有「跳过刷新」的开关，`packages/sdk/src/index.ts` 的 `RequestOptions` 只有
+     `method/path/body/query/headers/idempotent`）；
+  3. 登录时 `session.state.refreshToken` 为 `undefined`，回调拿空串去刷 → 后端 `TOKEN_REVOKED`；
+  4. SDK 把**刷新错误**抛出，登录错误被替换；
+  5. `apps/shell/src/pages/Login.svelte:61-82` 的 `messageFor()` 按 `code` 分派，于是显示 `TOKEN_REVOKED`。
+- **这是本轮引入的**：首轮版本 `Login.svelte`（`efc5084:apps/shell/src/pages/Login.svelte:40-42`）
+  对所有失败**固定**显示「登录失败：用户名或密码不正确」—— 虽然笼统，但对最常见的密码错是**对的**。
+  本轮把「按码分派」写上去后，最常见路径反而变成**误导性文案**。
+  同时 `dev-report-fix.md:25` 声称「`INVALID_CREDENTIALS` / `TENANT_CONTEXT_MISSING` / … 各有文案」
+  —— **真机上不成立**（登录 401 的任何码都到不了这段 switch）。
+- **影响**：用户看到「会话已撤销」而实际是密码错；每次登录失败**多打一次** `POST /api/iam/refresh`
+  （无谓的登录限流计数与日志噪声）。**不是安全漏洞**（无令牌泄漏、无放行）。
+- **建议**（本轮未改，只提建议）：登录 / 刷新请求不触发自动刷新
+  （在 `RequestOptions` 增 `skipRefresh`，或 SDK 对 `loginPath` 特判）；
+  或 `messageFor` 优先用首个错误；并补一条**真浏览器**用例断言错密码时的文案。
 
-**已知小瑕疵（已在代码注释里声明，非缺陷）**：同一行存在**块注释**时列号会偏小（`strip_comments` 会抹掉块注释内容但保留换行）；**行号始终精确**。
+### 2.2 【MEDIUM】MED-NEW-2：E2E 夹具不可复现（干净库上 E2E 必红）
 
----
+- **触发条件**：按本轮验收命令的顺序跑 —— 先 `./scripts/test-integration.sh`，再跑 E2E。
+- **实测**（集成两轮之后、`base serve` 仍在此库上）：
+  ```
+  $ BASE_E2E_URL=http://127.0.0.1:8097 npx playwright test e2e/
+    5 failed / 4 passed
+  ```
+  库内实际情况：
+  ```
+  username=u-perm-read@example.com  count=6      ← 重名，登录 401 INVALID_CREDENTIALS
+  username=u-perm-none@example.com  count=2
+  username=u-perm-write@example.com count=0      ← 根本不存在
+  ```
+  `curl` 复验：`POST /api/iam/login {username:"u-perm-read@example.com"}` → **401 INVALID_CREDENTIALS**。
+- **根因**：
+  - E2E 硬编码三个账号（`e2e/shell-auth.spec.ts:16-19,27-40`），但**没有任何播种脚本**创建它们；
+  - 唯一的创建者是 `crates/platform-rbac/tests/me_permissions.rs:110-124,331`，
+    它把 `username` 当邮箱再拼一次域名（`email = format!("{username}@example.com")`
+    → 库里出现 `u-perm-read@example.com@example.com`），且**同一次套件内重复注册 6 次**；
+  - `u-perm-write@example.com` **没有任何测试创建**（`grep -rn u-perm-write --include=*.rs crates/` 无命中）。
+- **影响**：Dev 报告的「7 passed / 9 passed」只在**手工准备好的库状态**下成立；
+  任何人照「跑回归 → 跑 E2E」的顺序都会得到红。**产品本身没问题**（我的 34 条断言在同一套件
+  于正确夹具状态下全绿），红的是**测试资产的可复现性**。
+- **建议**：给 E2E 加显式播种（`scripts/e2e-seed.sh` 或 Playwright 的 `globalSetup`），
+  用**独立的用户名**（不与后端测试共用），并在 `playwright.config.ts` 里串起来。
 
-## 5. L4 —— 同角色多 grant 的胜者（D43）
+### 2.3 已核对、**未**被本轮破坏的项（C 节逐项）
 
-**修好了：胜负由具体度显式决定，不再是遍历顺序的副产物。**
-
-- `crates/platform-rbac/src/service.rs:884 contributions_for`：每条 grant 变成 `MatchedGrant { specificity, override_scope }`；
-  `:964 pattern_specificity` 给 **精确=3 / `module:resource:*`=2 / `module:*`=1**；
-  `:991 stricter` 在同具体度时按 **`ALL` < `OWN_ORG_AND_BELOW` < `OWN_ORG` < `SELF`** 取更严；`:975 containment_strictness` 对 `CUSTOM` 返回 `None`（**不参与**比较）。
-- 角色级 scope 先算好（`role_scope`），「grant 无覆盖」时按角色级参与比较，最终仍 `override > 角色级`。
-
-### 5.1 独立探针（自造夹具，直接调 `contributions_for`，不经 Dev 的测试）
-
-`/tmp/qa-req009/l4probe`（独立 crate，path 依赖真实 `platform-rbac`）。9 例**全 PASS**：
-
-| 场景 | 期望 | 实测 |
+| 项 | 怎么验的 | 结果 |
 |---|---|---|
-| 同角色 `sandbox:*`(ALL) + 精确 `sandbox:scope-item:read`(SELF) | SELF | **SELF** |
-| 父角色上同时有这两条，子角色继承 | SELF | **SELF** |
-| 父=精确 / 子=通配，**角色 ID 字典序两个方向**都跑 | SELF | **两个方向都 SELF** ← 首轮「等同随机」的场景 |
-| **具体度 vs 严格度**：通配(SELF) + 精确(ALL) | **ALL**（精确赢，不是「总取更严」） | **ALL** ✓ 证明不是靠「取最严」蒙对 |
-| `sandbox:scope-item:*`(ALL) vs `sandbox:*`(SELF) | 资源通配赢 → ALL | **ALL** |
-| 同具体度重复 grant：`sandbox:*`(ALL) + `sandbox:*`(SELF) | 更严 → SELF | **SELF** |
-| 同具体度含 `CUSTOM` + `OWN_ORG_AND_BELOW` | CUSTOM 不参与 → OWN_ORG_AND_BELOW | **OWN_ORG_AND_BELOW** |
-| **跨角色仍并集**（D37 回归）：A=精确 SELF、B=通配 ALL | 两条贡献都在 | **{SELF, ALL}** |
+| **权限点不被持久化** | 真机读 `sessionStorage`：键恰好 3 个、全文不含 `permission`；重载后**现取** `/api/rbac/me/permissions`（计数 1 次） | **PASS** |
+| **刷新不覆盖权限点** | 代码：`api.ts:97-109` 的 `refreshToken` 回调**只** `session.setTokens(...)`，不碰权限点；单测 `apps/shell/test/api.test.ts:211-250` 用带 `permissions: []` 的刷新响应断言权限点仍是登录时的集合 | **PASS（代码 + 单测级，见 §4 局限）** |
+| **降级路径** | 真浏览器 `addInitScript` 让 `window.sessionStorage` 的 getter 抛错：**0 个 pageerror**，console 有「`[session] sessionStorage 不可用，退回内存模式`」告警，**仍能登录并渲染首页** | **PASS** |
+| **D92（重放不带幂等键）** | `packages/sdk/src/index.ts:286-294`：`attempt > 0` 时 `headers.delete('idempotency-key')`，且首轮的双点变异仍能抓红对应单测 | **PASS** |
+| **AC-S-067 `<Can>`** | 真浏览器：无权限用户首页原始 `innerHTML` **不含**「新建角色」，也不含 `display:none` / `visibility:hidden`；fallback「无权限」可见 | **PASS** |
+| **AC-S-073/074 主题** | 真浏览器：9 个令牌变量全在；`--base-primary = #111111`（**等于**品牌接口值）；`color-scheme`/`data-theme` = `light`；本轮 `git diff` **未触碰** `packages/theme`、`packages/ui`、`apps/shell/src/lib/branding.ts` | **PASS** |
 
-### 5.2 变异验证（证明测试不是摆设）
-
-把 `contributions_for` 的选取临时改回旧语义「**取最后一条匹配的**」（`matched = Some(candidate)`），
-`crates/platform-rbac/src/service.rs` 净变 3 增 14 删：
-- 单测 `an_exact_grant_on_a_parent_role_wins_over_a_wildcard_grant_on_the_child_role` **FAILED**（`left: All / right: OnlySelf`）
-- 真库 `an_exact_grant_on_the_parent_role_wins_over_a_wildcard_grant_on_the_child_role` **FAILED**（看到 11 条，期望 1 条）
-- 还原：`git checkout --` + **sha256 与变异前逐字节一致**（`1d330fce…3ec3fa`）；复跑 D43 子集 **4+3 全绿**。
+> **INFO（非本轮引入）**：会话中途失效时 `onUnauthorized` 会把 `api.ts` 内部的 `current` 置为
+> anonymous，但 `App.svelte` 的 `authState` 只在登录/登出/启动时同步（`efc5084` 的版本同样是这个模式），
+> 页面会按「已登录」渲染到下一次导航为止。服务端仍会 401，不构成越权，登记备查。
 
 ---
 
-## 6. 回归
+## 3. 变异验证表
 
-| 跑法 | 结果 |
+> 纪律：**改 → `pnpm --filter @base/shell build`（E2E 打的是 dist）→ 跑真浏览器用例 →
+> `cp` 原文件回来 → `sha256sum -c` + `git diff --exit-code -- apps/ packages/ crates/ e2e/` → 重建 → 复跑确认绿**。
+> 三次变异后源码树与 `HEAD` 逐字节一致。
+
+| # | 变异点 | 预期变红的用例 | **实际是否变红** | 结论 |
+|---|---|---|---|---|
+| **M1** | 登录前不绑租户：删 `apps/shell/src/lib/api.ts:177` 的 `client.setContext({tenantId})` | 我的 A1（头部）/ A2（200）/ A2b / C1 | **变红 ✓**：`A1 x-tenant-id=undefined`、`A2 status=401`、`A2b url=/login`、`C1 keys=`（4 条）；仓库 E2E **5 failed / 4 passed** | 抓到 |
+| **M2** | 关掉 `sessionStorage`：`apps/shell/src/lib/session.ts:103` 令 `const storage = undefined`（`detectStorage()` 恒返回 `null`） | B1（深链 → 403）/ B2b / B4c / C1 | **变红 ✓**：`B1 url=/login`、`B1b forbidden=0`、`B2b url=/login`、`B4c url=/login`、`C1 keys=`；仓库 E2E **4 failed** | 抓到（**深链确实退回登录页**） |
+| **M3**（我自选） | 启动顺序反过来：`apps/shell/src/App.svelte:96-99` 把 `router.start()` 提到 `await restoreSession()` **之前** | B1 / B2b / B4c | **变红 ✓**：`B1 url=/login`、`B1b`、`B2b`、`B4c` 全红（22/26） | 抓到（证明「先恢复再守卫」是**承重**的） |
+
+### 3.1 对「变异没变红」的自审
+
+- **M2 下 `B2`（重载后回首页）仍是绿的** —— 这是我的断言**不具区分度**，不是实现漏了：
+  首页 `/` 是**公开路由**，未登录也渲染「已就绪」。真正的判据是 `B1`/`B2b`/`B4c`（全部变红）。
+  报告已如实标注，不把这条当作「通过」。
+- **M1 只删「登录前 setContext」就足以打红**：因为 `createApiClient` 构造时读的是
+  `session.state.tenantId`（新会话为空），不存在第二道闸门。
+- 我**没有**去变异「恢复会话时的 `setContext`」（`api.ts:139`）：后端在缺 `x-tenant-id` 时会
+  **从令牌推断租户**（AC-S-072 步骤 2 的原因），所以那一行是**防御性**的，单点变异预期不红 ——
+  这是分析结论，不是我实测过的（未列入上表）。
+
+---
+
+## 4. 没验到的（**不要**当成通过）
+
+| 项 | 状态 | 原因 / 说明 |
+|---|---|---|
+| **「刷新不覆盖权限点」真机隔离验证** | **仅代码 + 单测级** | 要让真机在**会话中途**触发 refresh，需要篡改内存里的 access token；我不改实现就做不到。代码上 `api.ts:97-109` 明确只写令牌，且 `current.permissions` 只在登录/恢复时赋值 —— 结论可靠但**不是端到端实测**。另外我注意到该单测的 `expect(api.auth.state.permissions)` 断言**偏弱**（`current` 是登录时的快照，即便回调覆盖了 store 的权限点也不一定翻红）；真正的保护来自代码结构。 |
+| **AC-S-073 暗色模式切换** | **只跑了包级单测** | `apps/shell` 没有暗色切换入口（`App.svelte:104` 固定 `setThemeMode('light')`）；本轮**未改** `packages/theme`。`pnpm -r test` 中 theme **12 passed**。真机只验了亮色令牌与品牌主色。 |
+| **AC-S-070 并发刷新只 1 次** | **只跑了既有单测** | AC 明确要求该步骤是前端单测（禁止对真后端并发 refresh），我未改判据。 |
+| **断网 / 离线时的 `restoreSession` 行为** | **未验** | 只验了 `sessionStorage` 不可用的降级，没做网络层断连。Dev 自述「保留会话、按未登录渲染」，我**未复现**。 |
+| **跨浏览器** | **未验** | 只用 Chromium（项目配置只有一个 project）。 |
+| **新标签页继承的边界（复制标签页 vs 新开）** | **部分** | 只验了 `context.newPage()`（同一 context 的新页）→ 不继承。浏览器「复制标签页」会复制 `sessionStorage`，未验。 |
+| **`429 / 账号锁定` 等非 401 登录失败的文案** | **未验** | 需要构造限流/锁定状态；从代码看非 401 不会被 refresh 覆盖，但**未实测**。 |
+
+---
+
+## 5. 实跑数字（全部我自己跑，未采信 Dev 报告）
+
+### 5.1 环境
+
+```
+真实服务：cargo run -p platform-server --bin base -- serve
+  SERVER_PORT=8097  DATABASE_URL=postgres://base_app:base@127.0.0.1:5432/base_test
+  BASE_STATIC_DIR=apps/shell/dist  BASE_MANIFEST_ROOT=.  BASE_LOG_LEVEL=warn
+  PKCS#8 EC 私钥 + base64url secret（/tmp/jwt-qa3.pem / /tmp/secret-qa3.txt）
+  /health/live → 200，/ → 200
+浏览器：Playwright + Chromium（node v26.13.1 / pnpm 12.19.0 / rustc 1.98.1）
+```
+
+### 5.2 我的独立浏览器脚本（**不是** Dev 的 E2E）
+
+```
+BASE_E2E_URL=http://127.0.0.1:8097 node /tmp/qa3-verify.mjs     → 34/34 passed
+  覆盖：A1 A2 A2b A3 A3b-i/ii/iii/iv A4 C1 C1b C2 B1 B1b B2 B2b B3 B3b
+        B4a B4b B4c B5 B5b B6 B6b B7 C3a C3b C3c C5 C5b C6a C6b C6c
+补充脚本（A1b/A1c/A1d/A1e 通过；A5 因库被集成测试重置而**未跑完**，见 §2.2）
+```
+
+> ⚠️ **诚实声明**：34/34 是在**集成回归之前**、夹具完好的库状态下取得的（当时 SQL 核对过
+> 三个用户都在 `tenant-a`）。跑完 `test-integration.sh` 后夹具被冲掉，**同一份脚本无法复跑** —— 见 MED-NEW-2。
+
+### 5.3 仓库自带 E2E
+
+```
+# 夹具完好时（集成回归之前）
+BASE_E2E_URL=http://127.0.0.1:8097 npx playwright test e2e/
+  → 9 passed (7.1s)      # shell-auth 7 条 + shell 2 条
+
+# 跑过两轮集成回归之后（同一命令）
+  → 5 failed / 4 passed (39.2s)    # 夹具被重置，见 MED-NEW-2
+```
+
+### 5.4 全量回归（两轮）
+
+| 命令 | 结果 |
 |---|---|
-| `bash scripts/test-integration.sh` 第 1 轮（未变异树） | **461 passed / 0 failed / 0 ignored**，23 个二进制，EXIT=0 |
-| 同上 第 2 轮（未变异树） | **461 passed / 0 failed / 0 ignored**，EXIT=0 |
-| 同上 第 3 轮（**变异还原之后**） | **461 passed / 0 failed / 0 ignored**，EXIT=0 |
+| `./scripts/test-integration.sh`（第 1 轮） | **EXIT=0**，合计 **550 passed**（29 个套件，0 failed） |
+| `./scripts/test-integration.sh`（第 2 轮） | **EXIT=0**，合计 **550 passed**（0 failed） |
+| `pnpm -r check` | **0 errors / 0 warnings**（svelte-check） |
+| `pnpm -r test` | **141 passed**（schema 3 · i18n 3 · hooks 17 · sdk 30 · theme 12 · auth 25 · ui 14 · shell 37） |
+| `pnpm -r build` | **exit 0**（shell：132 modules → `dist/assets/index-CpyjVosp.js` 64.09 kB） |
+| `pnpm exec eslint .` | **exit 0**（无输出 = 0 问题） |
+| `npx prettier --check .` | **All matched files use Prettier code style!**（exit 0） |
+| `cargo clippy --workspace --all-targets -- -D warnings` | **exit 0，0 告警** |
+| `cargo xtask capabilities --check` | **13 个文件与源码一致**（exit 0） |
+| `cargo test -p xtask --all-targets` | **49 passed / 0 failed**（含 `agents_doc_matches_catalog`） |
 
-- 每轮都 `--include-ignored` + **只有一个 `--`**；只碰 `base_test`（脚本自带白名单重置）。
-- **数字自洽**：首轮基线 452 + 本修复轮新增 **9** 个测试（`platform-rbac` lib 3 + `rbac_real_db` 4 + `authz_scan` 2）= **461** ⇒ 没有测试被删/被忽略。
-- Dev 自报的 461/461 与「提交后 1 轮全绿」：**我只把它当参考**；上述 3 轮是我自己跑的。
+### 5.5 纪律确认
 
----
-
-## 7. 契约与基建（复跑）
-
-| 检查 | 命令 | 结果 |
-|---|---|---|
-| 依赖预算 | `Cargo.lock` 计数（核 diff，不看 `Cargo.toml`） | **294 包**（第三方 registry **284**）；**修复轮 `Cargo.lock` 零改动** |
-| Lint | `cargo clippy --workspace --all-targets -- -D warnings` | **EXIT=0 / 0 告警**（首次命中了缓存，`touch` 6 个改动文件后**强制重建**，9 个 unit 真正重新检查） |
-| 格式 | `cargo fmt --all --check` | EXIT=0 |
-| 契约门禁 | `bash scripts/sync-contracts.sh` | **EXIT=0**（两份快照一致） |
-| 能力索引 | `cargo xtask capabilities --check` | 通过（13 个文件） |
-| 依赖方向 | `cargo xtask check-deps` | 通过 |
-| 模块目录 | `cargo xtask check-modules` | 通过（1 个模块 sandbox） |
-| 工作树 | `git status --short` | 仅两个 QA 报告：` M feature-meta/qa-report.md`、` M feature-meta/qa-report-recheck.md`（**QA 产物，未提交属正常**）；**无实现文件改动**。⚠️ 说明：`qa-report-recheck.md` 在本分支 HEAD 里**原本是 REQ-008 的归档版**（`qa-report.md` 同理），按本仓「每个需求覆盖同名报告、由 BA 归档」的惯例（见 `1110c00`/`5f426ee`）本次写入 REQ-009 版本；首轮 `qa-report.md` 未被改动。 |
+```
+sha256sum -c /tmp/qa3-before.sha256                     → 3 个文件全部「成功」
+git diff --exit-code -- apps/ packages/ crates/ e2e/   → 空（源码树与 HEAD 逐字节一致）
+git status --porcelain                                  → 只有 feature-meta/qa-report.md（上一轮 QA 的未提交改动，非我所改）+ 本报告
+本轮未 commit、未改实现（除已还原的 3 处变异）
+```
 
 ---
 
-## 8. 残留问题
+## 6. 结论与建议
 
-### LOW-1（低）M2 的「异常路径也保证装回」是**用隔离实现**的，不是 RAII guard
+**VERDICT: PASS-WITH-RISK**
 
-- **事实**：`drop_probe_primary_index` 与 `restore_probe_primary_index` 之间**没有 Drop guard**。若断言在此之间 panic，**探针 schema 里的索引**会保持被摘状态，该 schema 残留到 `drop_stale_probe_schemas` 的 1 小时 TTL 才被清。
-- **影响**：**不影响任何其它用例** —— 被摘的是 `rbac_probe_*` 里的一次性索引，`public` 的预防层从未被触碰（3 轮实测索引均在位）。首轮 MEDIUM 的实质危害（全局预防层留在关闭状态）已**结构性消除**。
-- **为什么仍要记**：交付说明里写的是「异常路径也保证装回」，字面上**没有实现**。若要按字面达标，加一个 `Drop` guard 即可；不加也可接受。
+- **HIGH-1：已修好**（真机验证，非单测）。
+- **MED-1 / AC-S-068 步骤 3：已达成**（深链、整页重载、目标接口计数 0 全部实测）。
+- **AC-S-068 补充（D98/D99）的 5 条验收要求逐条达成**：
+  登录页有租户输入 ✓ / 登录请求带租户头且等于用户填的值 ✓ / 后续请求沿用 ✓ /
+  重载后会话仍在 ✓ / 新标签页不继承 ✓。
 
-### INFO-1 D43 的回归灵敏度集中在**一条**用例
+**合入前建议（不影响 AC 判定，但建议同轮修）**：
 
-- 变异回「取最后一条匹配」后：3 条单测里**只有 1 条红**，4 条真库里**只有 1 条红**。
-- 原因：同角色内 grant 的**插入/排序顺序**恰好是「通配在前、精确在后」（`'*' < 小写字母`），旧实现**碰巧**也选到精确；只有「父角色精确 + 子角色通配且子角色 ID 排序在后」才暴露。
-- **不是缺陷**（至少有一条能红），但要知道护栏只有一道：**别删** `an_exact_grant_on_the_parent_role_wins_over_a_wildcard_grant_on_the_child_role`（单测 + 真库各一条）。
-
-### INFO-2 L3 的列号在「同一行有块注释」时偏小
-
-- `line_and_column` 在**剥注释后**的源码上算列；块注释内容被抹掉但换行保留 ⇒ **行号精确**，列号可能偏小。代码注释（`authz_scan.rs:141-143`）已声明。
-
-### INFO-3 探针 schema 每次复制 `public` 全表
-
-- `CREATE TABLE ... (LIKE ... INCLUDING ALL)` + `INSERT SELECT *` 覆盖 public 所有表。当前测试库很小（该二进制 ~10s 内跑完），未成瓶颈。数据量变大后这里会变慢（不影响正确性）。
-
----
-
-## 9. 未覆盖（如实列）
-
-| 项 | 状态 | 原因 |
-|---|---|---|
-| 真实多实例部署的 epoch 收敛 / Redis 形态 / CI 真跑 / 前端 E2E | **未覆盖** | 同首轮，属部署侧或本需求范围外（修复轮也没改前端，`git diff` 无前端文件） |
-| **panic 路径**下探针 schema 的残留与 TTL 清理 | **未实测** | 需要故意让用例 panic；只做了代码级核对（`drop_stale_probe_schemas` 的 `created_at` 注释解析分支未用**真正过期**的 schema 跑过） |
-| `pnpm -r test` | **未重跑** | 修复轮无前端改动（已核 `git diff --name-only`），首轮 23/23 仍有效 |
-| 首轮其余 AC 的端到端复跑 | **未重做** | 本轮定位是轻量复核；完整套件 461 条已覆盖对应断言 |
-
----
-
-## 10. 结论
-
-- **VERDICT: PASS**
-- **问题计数**：HIGH **0** / MEDIUM **0**（首轮 2 项已消解）/ LOW **1**（新增，见 LOW-1，不阻塞）/ INFO **3**
-- **实际 passed**：完整集成套件 **461/461 × 3 轮**（含 ignored，23 个二进制，EXIT=0）；`rbac_real_db` 单二进制 22 条；`platform-rbac` lib 42 条
-- **建议**：可直接进入合并；LOW-1 与 INFO-1 交给 BA/Dev 决定是否顺手处理。
-- **纪律**：本轮**未改实现、未改规格、未 commit**；报告只写了 `feature-meta/qa-report-recheck.md`（该路径在本分支原有 REQ-008 归档内容，按既有惯例替换为 REQ-009 版本；首轮 `qa-report.md` 未动）；只做过 1 处临时变异（`service.rs`），已 `git checkout` 还原并**逐字节校验**；`touch` 6 个文件仅改 mtime（内容 sha256 校验未变）；夹具与探针全部落在 `/tmp/qa-req009/`。
+1. **MED-NEW-1**（2~3 行）：登录/刷新的 401 不应触发自动刷新，否则「按码分派文案」这句改进
+   在真机上是失效的，且每次登录失败多打一个 refresh 请求。**建议加一条真浏览器用例**
+   （错密码 → 断言文案含「用户名或密码不正确」），否则下一轮还会「看起来修了实际没修」。
+2. **MED-NEW-2**：给 E2E 加**显式播种**（不复用后端测试的账号），否则「跑完回归再跑 E2E」必红，
+   下一轮复核会为此重新排查一遍。
