@@ -39,6 +39,12 @@ REQ-009 给了服务端鉴权，REQ-011 给了前端 SDK。但「**新增一个 
 "schema": {
   "demoItem": {
     "label": "示例条目",
+    "api": {
+      "list":   "/api/sandbox/demo-items",
+      "create": "/api/sandbox/demo-items",
+      "update": "/api/sandbox/demo-items/{id}",
+      "delete": "/api/sandbox/demo-items/{id}"
+    },
     "fields": [
       { "key": "id",     "label": "ID",   "type": "text",  "readonly": true },
       { "key": "title",  "label": "标题", "type": "text",  "required": true, "maxLength": 200 },
@@ -48,11 +54,38 @@ REQ-009 给了服务端鉴权，REQ-011 给了前端 SDK。但「**新增一个 
       { "key": "ownerId","label": "负责人", "type": "reference",
         "reference": { "module": "org", "entity": "user" } },
       { "key": "secret", "label": "内部备注", "type": "text",
-        "permission": "sandbox:demo:secret:read" }
+        "permission": "sandbox:demo:secret" }
     ]
   }
 }
 ```
+
+### 2.1.1 `api` 子段（rev 2 新增，D102）
+
+| 键 | 必填 | 含义 |
+|---|---|---|
+| `list` | ✅ | 列表接口（前端 `SchemaTable` 向它取数据） |
+| `create` | ✅ | 创建接口 |
+| `update` | — | 更新接口（不声明 → 前端不渲染「编辑」） |
+| `delete` | — | 删除接口（不声明 → 前端不渲染「删除」） |
+
+- `{id}` 是**唯一**占位符，渲染时替换为记录的 `id`
+- **启动校验**：每个路径必须以 `/api/` 开头
+  （**安全约束**：防止声明外部 URL 让前端把请求发到站外）
+
+> **为什么显式而不是约定式**（`/api/<module>/<entityPlural>`）：
+> 复数化规则要么靠猜（`item→items` 还行，`person→people` 就错），要么强制命名。
+> 显式只多几行，但**永远不会猜错**。
+
+### 2.1.2 权限点段数（rev 2 修正）
+
+⚠️ **权限点编码必须是恰好 3 段**（`module:resource:action`）——
+`manifest.rs:367-370` 的 `is_permission_code` 强制 `parts.len() == 3`。
+
+rev 1 的示例 `sandbox:demo:secret:read` 是 **4 段，非法**。正确写法：**`sandbox:demo:secret`**。
+
+`PermissionType` 枚举**已含 `Field` 变体**（`manifest.rs:86-95`），
+所以字段级权限点直接写 `"type": "field"`，**不需要扩枚举**。
 
 ### 2.2 字段类型的允许集合（**写死**）
 
@@ -62,7 +95,11 @@ REQ-009 给了服务端鉴权，REQ-011 给了前端 SDK。但「**新增一个 
 | `number` | 数字 | 数字输入 | `min` / `max` |
 | `boolean` | 布尔 | 开关 | — |
 | `date` | 日期 | 日期选择 | — |
-| `reference` | 引用其它实体 | 下拉 | `reference: { module, entity }` |
+| `reference` | 引用其它实体 | **只读 id 文本**（本期降级，D105） | `reference: { module, entity }` |
+
+> ⚠️ **`reference` 本期不做下拉**（rev 2，D105）。
+> 选项接口需要定义路径 / 形状 / 权限 / 上限 / 分页 / 搜索 —— 是一整块能力。
+> **降级比「定义了接口却实现不了」诚实**：让 AC 如实描述能做的事。
 
 > **为什么只有 5 种**：本轮不做「富文本 / 附件 / 枚举 / 多值」——
 > 它们各自需要控件与校验语义，等真实需求出现再加。
@@ -79,18 +116,40 @@ REQ-009 给了服务端鉴权，REQ-011 给了前端 SDK。但「**新增一个 
 | `permission` | — | 字段级权限点；**声明后无权用户看不到、接口也不返回** |
 | `readonly` | — | 只读（表单里不渲染输入控件） |
 
-### 2.4 校验时机与顺序（**写死**）
+### 2.4 校验时机与顺序（**rev 2 重大修正**）
 
-启动校验，**按此顺序**，**首个失败即退出**（不做错误汇总 —— 一次只报一个，
-逼开发者逐个修，避免「一次改十处又引入新错」）：
+#### 2.4.1 是**聚合**，不是「首个失败即退出」
 
-1. `schema` 的键（实体名）符合 `^[a-z][a-zA-Z0-9]*$`
+rev 1 写的「首个失败即退出」**与现有实现冲突**：
+`manifest.rs:230-243` 的 `parse_checked` 返回 `Vec<ManifestError>`，
+`validate()` 收集**全部**问题；三处调用点（`platform-config/src/registry.rs:118`、
+`platform-rbac/src/registry.rs:130`、`platform-db/src/scopes.rs:83`）都依赖这个 `Vec`。
+
+**改成首个失败是破坏性改动，不做。** 保留聚合 —— 对开发者更友好（一次看到所有问题）。
+
+验收侧对应：单条违规断言 `issues.len() == 1`，两条违规断言 `== 2`。
+
+#### 2.4.2 两阶段校验（rev 2 新增）
+
+有些规则**需要全局上下文**，不可能在单文件解析时判出：
+
+| 阶段 | 时机 | 内容 |
+|---|---|---|
+| **阶段 1（单文件）** | 每个 manifest 解析时（`validate()`） | 实体键格式、`fields` 非空、字段 `key`/`label`/`type` 合法、同实体内 `key` 不重复、`api` 路径以 `/api/` 开头 |
+| **阶段 2（全局）** | **所有** manifest 加载完后 | 字段的 `permission` **已登记**（在权限点注册表里）、`reference.module/entity` **存在** |
+
+阶段 2 失败 → 同样**进程起不来**，点名「谁的哪个引用指向了不存在的东西」。
+
+> 这与 REQ-009 的 D27（启动时权限点对账）同源：
+> **跨文件一致性只能在所有文件都加载后才能判**。
+
+#### 2.4.3 阶段 1 内部顺序（写死）
+
+1. 实体键符合 `^[a-z][a-zA-Z0-9]*$`
 2. `fields` **非空**
 3. 每个字段：`key` 格式 → `label` 非空 → `type` 在允许集合内
 4. 同一实体内 `key` **不重复**
-5. `permission` 若声明，必须是**已登记**的权限点
-   （与 D27 的权限点对账同源 —— 声明一个不存在的权限点 = 永久权限拒绝）
-6. `reference` 若声明，`module` / `entity` 必须存在
+5. `api` 的每个已声明路径以 `/api/` 开头
 
 > **为什么顺序写死**：与 REQ-010 的 D64 同源。不写顺序时，
 > 「被拦住」可能来自任意规则，无法证明**具体规则**生效。
@@ -239,7 +298,14 @@ Json(out)
 | `apps/shell/src/components/SchemaForm.svelte` | 表单组件 |
 | `apps/shell/src/pages/SchemaPage.svelte` | **一条通配路由**的页面 |
 
-### 5.2 ★ 零代码的关键：通配路由
+> ⚠️ **`SchemaTable` 不复用 `@base/ui` 的 Table**（rev 2，D106）。
+> `Table.svelte` **恒渲染 `thead`**、空态**渲染一行**、分页需要 `total`；
+> 而本需求要「空态不渲染空壳表」+ **游标分页没有 `total`** —— 语义不同。
+> 改 Table 会动 REQ-011 已通过的契约（AC-S-075 双向断言）。
+> **同步要求**：`capabilities/index.json` 的 `ui_table_component` 说明要更新为
+> 「Table 是**页码分页**的只读表格；**游标分页**请用 `SchemaTable`」。
+
+### 5.2 ★ 零代码的关键：通配路由（rev 2：需要先扩 router）
 
 ```
 /schema/:moduleId/:entityKey
@@ -252,6 +318,22 @@ Json(out)
 > **这是 AC-S-085 能成立的原因**。如果每加一个实体就要在路由表里注册一行，
 > 那「零前端代码」就是假的。
 > 导航入口（菜单）来自 manifest 的 `menus` 段（REQ-002 已有），也不需要改前端。
+
+#### 5.2.1 ⚠️ 前提：router 目前**不支持** `:param`（rev 2，D104）
+
+`apps/shell/src/lib/router.ts:101` 现在是：
+```ts
+const match = (path) => routes.find((route) => route.path === path);
+```
+**只做精确匹配** —— 通配路由**不存在**。
+
+**必须扩它**，要求：
+- **向后兼容**：精确路径仍按精确匹配（REQ-011 的现有路由不受影响）
+- **匹配优先级**：精确 **>** 含 `:param` 的（避免通配抢走精确路由）
+- **参数提取**：`match('/schema/a/b')` → `{ route, params: { moduleId: 'a', entityKey: 'b' } }`
+- **权限**：`RouteDefinition.permission` 仍按静态声明；通配路由声明**模块级**权限点
+
+**这是对 REQ-011 产物的扩展，不是破坏** —— 但必须在提交信息与复盘里写明。
 
 ### 5.3 包内的纯逻辑（可单测，不依赖 DOM）
 
