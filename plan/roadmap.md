@@ -18,13 +18,12 @@
 > （`91d8e09` → `a0a8d7a` → `400cefa`），Rust 303/303（连跑 8 轮全绿）、前端 23/23、E2E 1/1。
 > 复盘见 [sprint-02-retro.md](../sprint/sprint-02-retro.md)（34 个 QA 问题的归因）。
 >
-> **当前迭代：Sprint 4（SDK 与二次开发面）** —— REQ-011（前端 SDK）**已完成**
-> （`develop` @ `b38715f`；QA 挑刺 **40 条**全接受 → 规格 rev 4；决策 **D92~D101**；
-> 验证链：Pre-merge **FAIL**(1 HIGH) → 修复轮1 → 独立复核1 **PASS-WITH-RISK**(2 新 MEDIUM)
-> → 修复轮2 → 独立复核2 **PASS** → 修复轮3；后端 **550** / 前端 **151** / E2E **11**）。
-> 下一棒 **REQ-012（元数据驱动渲染）** —— 底座可用性的第一块试金石。
-> Sprint 4 复盘见 [sprint-04-retro.md](../sprint/sprint-04-retro.md)。
-> 已知技术债见 [tech-debt.md](tech-debt.md)（**9 条**，含「CI 从未真跑」）。
+> **当前迭代：Sprint 4（SDK 与二次开发面）** —— REQ-011（前端 SDK）、REQ-012（元数据驱动渲染）**均已完成**
+> （REQ-011 @ `b38715f`：12 条 AC、两轮独立复核 PASS、后端 550 / 前端 151 / E2E 11；
+> REQ-012 @ `88b7ca3`：12 条 AC、独立复核 PASS、后端 618 / 前端 240 / E2E 17 **且 0 skipped**）。
+> 两棒的复盘：[sprint-04-retro.md](../sprint/sprint-04-retro.md)、[req-012-retro.md](../sprint/req-012-retro.md)。
+> 下一棒建议 **REQ-021（国际化）** 或 **REQ-013（SSO）**。
+> 已知技术债见 [tech-debt.md](tech-debt.md)（**14 条**，含「CI 从未真跑」）。
 
 ## 拆分总览
 
@@ -40,7 +39,7 @@
 | REQ-009 | RBAC 权限与数据范围 | P0 | 3 | REQ-006, REQ-008 | AC-001/002 | AC-S-033~048（16 条） | **已完成**（Sprint 3，`develop` @ `12366e9`） |
 | REQ-010 | 配置、品牌与 Feature Flag | P1 | 3 | REQ-006, REQ-009 | AC-013/014/015 | AC-S-049~063（**15 条**） | **已完成**（Sprint 3，`develop` @ `a3fae66`） |
 | REQ-011 | 前端 SDK 骨架 | P0 | 4 | REQ-002, REQ-009, REQ-010 | AC-016/017/019 | AC-S-064~075（**12 条**） | **已完成**（Sprint 4，`develop` @ `b38715f`；两轮独立复核 PASS；后端 550 / 前端 151 / E2E 11） |
-| REQ-012 | 元数据驱动渲染 | P0 | 4 | REQ-009, REQ-011 | AC-018 | AC-S-018/019 | 草稿 |
+| REQ-012 | 元数据驱动渲染 | P0 | 4 | REQ-009, REQ-011 | AC-018 | AC-S-076~087（**12 条**） | **已完成**（Sprint 4，`develop` @ `88b7ca3`；独立复核 PASS；618/240/E2E 17 且 0 skipped） |
 | REQ-013 | SSO 多协议与出站 IdP | P1 | 4 | REQ-007, REQ-009 | AC-005/006 | AC-S-020/021 | 草稿 |
 | REQ-014 | **审计日志** | P1 | 4 | REQ-002, REQ-006 | AC-022 | AC-S-022 | 草稿 |
 | REQ-021 | **国际化与本地化** | P1 | 4 | REQ-006, REQ-010, REQ-011 | F12 | AC-S-029~032 | 草稿 |
