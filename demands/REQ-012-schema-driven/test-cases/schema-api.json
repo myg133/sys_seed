@@ -1,0 +1,252 @@
+[
+  {
+    "id": "TC-012-014",
+    "ac": "AC-S-078",
+    "title": "已认证且全字段可见的用户取元数据 → 200 且响应体键集合精确",
+    "preconditions": [
+      "夹具见 index.md §3.1：实体 sandbox/demoItem（7 字段）",
+      "用户 U2 拥有 sandbox:demo:secret（因此 7 个字段全部可见）",
+      "U2 的 access token 有效，请求头带 x-tenant-id: tenant-a"
+    ],
+    "steps": [
+      "GET /api/schema/sandbox/demoItem（带 U2 令牌）",
+      "断言状态码",
+      "断言响应体顶层键集合",
+      "断言顶层字段取值"
+    ],
+    "expected": [
+      "HTTP 200",
+      "Object.keys(body).sort() == [\"entity\",\"fields\",\"label\",\"module\"]",
+      "body.module == \"sandbox\"",
+      "body.entity == \"demoItem\"",
+      "body.label == \"示例条目\"",
+      "Array.isArray(body.fields) == true"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "响应体含 module（design §3.2）但 AC-S-078 步骤 2 只列了 entity/label/fields —— 两处形状不一致（挑刺 #40），本用例按 design 写，需 BA 同步。"
+  },
+  {
+    "id": "TC-012-015",
+    "ac": "AC-S-078",
+    "title": "字段的集合与顺序精确等于 manifest 声明顺序",
+    "preconditions": ["同 TC-012-014（U2 全字段可见）"],
+    "steps": ["GET /api/schema/sandbox/demoItem", "取出 body.fields.map(f => f.key)", "与声明顺序逐项比对"],
+    "expected": [
+      "keys 数组**深度等于** [\"id\",\"title\",\"amount\",\"paid\",\"dueAt\",\"ownerId\",\"secret\"]",
+      "keys.length == 7（不是 8、不是 6）",
+      "keys 是数组，不是对象（顺序必须可表达）"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "前端表头顺序完全依赖它（design §3.2）。若实现用 HashMap/BTreeMap 承载字段，顺序会变成字典序 → 本断言必红。"
+  },
+  {
+    "id": "TC-012-016",
+    "ac": "AC-S-078",
+    "title": "required / permission 如实出现；未声明的可选属性**省略该键**（不是 null）",
+    "preconditions": ["同 TC-012-014（U2 全字段可见）"],
+    "steps": [
+      "GET /api/schema/sandbox/demoItem",
+      "取 fields 中 key==\"title\" 的元素",
+      "取 fields 中 key==\"id\" 的元素",
+      "取 fields 中 key==\"secret\" 的元素"
+    ],
+    "expected": [
+      "title 元素：required == true，且 Object.keys(title).sort() == [\"key\",\"label\",\"required\",\"type\"]",
+      "title 元素：maxLength == 200（类型专属校验参数必须透传）",
+      "id 元素：Object.prototype.hasOwnProperty.call(id, \"required\") == false（未声明 → 键不出现，不是 null 也不是 false）",
+      "id 元素：Object.prototype.hasOwnProperty.call(id, \"permission\") == false",
+      "id 元素：readonly == true",
+      "secret 元素：permission == \"sandbox:demo:secret\"",
+      "body 全文不出现 null 值：JSON.stringify(body) 不匹配 /:\\s*null/"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "AC 原文「未声明时字段可以省略，但不得是 null」是二选一 → 不可判定（挑刺 #26）。design §3.2 已写「省略该键」，本用例按 design 写。另注：required 缺省为 false 时**也不允许**下发 required:false（否则「未声明」与「显式 false」不可区分）。"
+  },
+  {
+    "id": "TC-012-017",
+    "ac": "AC-S-078",
+    "title": "实体不存在 → 404 SCHEMA_ENTITY_NOT_FOUND",
+    "preconditions": ["模块 sandbox 存在且声明了 demoItem"],
+    "steps": ["GET /api/schema/sandbox/notARealEntity（带 U2 令牌）", "断言状态码与 code"],
+    "expected": [
+      "HTTP 404",
+      "body.code == \"SCHEMA_ENTITY_NOT_FOUND\"",
+      "body.status == 404",
+      "body.instance == \"/api/schema/sandbox/notARealEntity\""
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "错误体沿用 RFC 9457（platform_core::problem）。SCHEMA_* 是新码，需登记（挑刺 #29）。"
+  },
+  {
+    "id": "TC-012-018",
+    "ac": "AC-S-078",
+    "title": "模块不存在 → 404 SCHEMA_MODULE_NOT_FOUND（与实体不存在可区分）",
+    "preconditions": ["已知存在的模块 id 集合 = {\"sandbox\"}"],
+    "steps": [
+      "GET /api/schema/notAModule/demoItem（带 U2 令牌）",
+      "GET /api/schema/sandbox/demoItem（对照组）",
+      "比对两个响应的 code"
+    ],
+    "expected": [
+      "第一个请求 HTTP 404，body.code == \"SCHEMA_MODULE_NOT_FOUND\"",
+      "第二个请求 HTTP 200",
+      "两个 404 场景的 code 不相等（模块名写错与实体名写错必须可区分）"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "「模块存在但 enabled:false」的语义未定义（挑刺 #29）：建议 BA 明确为 SCHEMA_MODULE_NOT_FOUND，否则同一 URL 的返回取决于部署配置。"
+  },
+  {
+    "id": "TC-012-019",
+    "ac": "AC-S-078",
+    "title": "不带令牌 → 401 UNAUTHENTICATED（且在读取任何元数据之前）",
+    "preconditions": ["服务可达"],
+    "steps": [
+      "GET /api/schema/sandbox/demoItem（不带 Authorization）",
+      "断言状态码与 code",
+      "断言响应体不含任何字段名"
+    ],
+    "expected": [
+      "HTTP 401",
+      "body.code == \"UNAUTHENTICATED\"",
+      "Object.keys(body).sort() 深度等于 [\"code\",\"detail\",\"instance\",\"status\",\"title\",\"traceId\",\"type\"]（错误体形状与既有 401 一致，没有多带业务键）",
+      "body.status == 401",
+      "JSON.stringify(body) 中 token \"\\\"demoItem\\\"\" 的出现次数 == 0",
+      "JSON.stringify(body) 中 token \"\\\"title\\\"\" 的出现次数 == 0"
+    ],
+    "type": "安全",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "现有 401 语义与码均有先例（platform-core/src/problem.rs:33,115-120；platform-rbac/src/http.rs:174-179）。"
+  },
+  {
+    "id": "TC-012-020",
+    "ac": "AC-S-078",
+    "title": "模块存在但未声明 schema 段 → 404 SCHEMA_ENTITY_NOT_FOUND（不是 200 空 fields）",
+    "preconditions": [
+      "构造一个仅有 permissions/menus 的模块（无 schema 段），例如把 sandbox 的 schema 段删掉后放进临时 manifest 根",
+      "服务以该临时根启动（BASE_MANIFEST_ROOT）"
+    ],
+    "steps": ["GET /api/schema/sandbox/demoItem", "断言状态码与 body"],
+    "expected": [
+      "HTTP 404",
+      "body.code == \"SCHEMA_ENTITY_NOT_FOUND\"",
+      "body 中不存在 \"fields\" 键（不得返回 fields: []）"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "fields: [] 会让前端渲染出「空表 + 可提交的空表单」，比起 404 更难发现。"
+  },
+  {
+    "id": "TC-012-021",
+    "ac": "AC-S-078",
+    "title": "已认证但对本模块**无任何权限点**的用户 → 200（design §3.1：元数据不设权限点）",
+    "preconditions": [
+      "用户 U0 在 tenant-a 下无任何 sandbox:* 权限点（无角色的账号）",
+      "U0 令牌有效"
+    ],
+    "steps": ["以 U0 请求 GET /api/schema/sandbox/demoItem", "断言状态码与可见字段"],
+    "expected": [
+      "HTTP 200",
+      "body.fields.map(f => f.key) 深度等于 [\"id\",\"title\",\"amount\",\"paid\",\"dueAt\",\"ownerId\"]（6 个，secret 被剔除）",
+      "body.fields.map(f => f.key) 不包含 \"secret\""
+    ],
+    "type": "安全",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "AC-S-078 的前置条件写「用户 U1 拥有该模块的读权限点」，与 design §3.1「不新增权限点、已认证即可读」直接矛盾（挑刺 #21）。本用例守的是 design 的版本；若 BA 选择「要权限点」，本用例的期望要改成 403。"
+  },
+  {
+    "id": "TC-012-022",
+    "ac": "AC-S-079",
+    "title": "无权字段从 fields 里被剔除（不是 hidden 标记）",
+    "preconditions": [
+      "U1 拥有 sandbox:demo:read，但**没有** sandbox:demo:secret",
+      "实体 demoItem 的 fields[6].key == \"secret\""
+    ],
+    "steps": [
+      "以 U1 请求 GET /api/schema/sandbox/demoItem",
+      "取 body.fields.map(f => f.key)",
+      "遍历每个 field 元素，检查是否含 hidden / visible / denied 之类标记键"
+    ],
+    "expected": [
+      "HTTP 200",
+      "keys 深度等于 [\"id\",\"title\",\"amount\",\"paid\",\"dueAt\",\"ownerId\"]",
+      "keys.includes(\"secret\") == false",
+      "每个 field 的 Object.keys() 都不含 \"hidden\"、\"visible\"、\"denied\"、\"redacted\"",
+      "fields.length == 6"
+    ],
+    "type": "安全",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "核心语义：不是「有但隐藏」（那等于告诉无权限用户这里有东西），是「根本不存在」。"
+  },
+  {
+    "id": "TC-012-023",
+    "ac": "AC-S-079",
+    "title": "响应全文不出现被剔除字段的**标识 token**，也不出现被剔除清单",
+    "preconditions": ["同 TC-012-022"],
+    "steps": [
+      "以 U1 请求元数据，取响应体原文 raw（字符串，不重新序列化）",
+      "对 raw 做精确 token 匹配：\"secret\"（带 JSON 引号边界的键名/字符串值）",
+      "检查是否出现计数或清单键"
+    ],
+    "expected": [
+      "raw 不包含 token \"\\\"secret\\\"\"（即 JSON 里不存在键名或字符串值 secret）",
+      "raw 不包含 \"内部备注\"（被剔除字段的 label 原文）",
+      "raw 不包含 \"hiddenFields\"、\"deniedFields\"、\"omitted\"、\"total\"、\"filteredCount\" 任一 token",
+      "Object.keys(body).sort() == [\"entity\",\"fields\",\"label\",\"module\"]（顶层没有多余键）"
+    ],
+    "type": "安全",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "AC-S-079 步骤 3 原文要求「全文不出现 'b' 这个字段名」，若照字面（子串匹配）执行则**永远失败**：响应里必有键 \"label\"，而 label 含字母 b（挑刺 #4）。本用例改成带引号边界的 token 匹配 + 顶层键集合精确断言。若 label 文案恰好等于字段 key，token 匹配也会误报 —— 因此夹具里 label 必须是中文（\"内部备注\"），BA 需把这条写进夹具约定。"
+  },
+  {
+    "id": "TC-012-024",
+    "ac": "AC-S-079",
+    "title": "授予权限后**下一个请求**即包含该字段（不靠 TTL）",
+    "preconditions": [
+      "U1 初始无 sandbox:demo:secret",
+      "授权动作必须走 /api/rbac/* 接口（会 bump epoch），不得直接 INSERT 数据库",
+      "调用方持有 rbac:role:write"
+    ],
+    "steps": [
+      "以 U1 请求元数据（基线，确认无 secret）",
+      "通过 POST /api/rbac/roles（或授予权限点接口）给 U1 的角色加 sandbox:demo:secret",
+      "同一个 U1 令牌，立刻再请求元数据（不等待、不重启、不重新登录）",
+      "断言第二次响应"
+    ],
+    "expected": [
+      "第一次：keys 不包含 \"secret\"",
+      "第二次：HTTP 200",
+      "第二次：keys 深度等于 [\"id\",\"title\",\"amount\",\"paid\",\"dueAt\",\"ownerId\",\"secret\"]（相对顺序保持）",
+      "两次请求的时间间隔 < 1s（证明不是 TTL 到期）"
+    ],
+    "type": "安全",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "RBAC 的失效主机制是 DB epoch（platform-rbac/src/checker.rs:1-12,113-142），只有走接口授权才会 bump。若测试直接写库，本用例会红而实现是对的（挑刺 #20）。另：新增权限点还要满足 D67 三件套（manifest + 种子迁移 + 重生成 capabilities），否则进程起不来。"
+  }
+]

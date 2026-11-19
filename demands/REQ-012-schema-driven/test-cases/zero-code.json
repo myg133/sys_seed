@@ -1,0 +1,200 @@
+[
+  {
+    "id": "TC-012-048",
+    "ac": "AC-S-085",
+    "title": "只在 manifest 里新增实体 E2，页面即可渲染（列表 + 表单可用）",
+    "preconditions": [
+      "E1 = demoItem 已通过 SchemaTable/SchemaForm 跑通（TC-012-036 起一组通过）",
+      "E2 = demoNote，字段组合与 E1 不同：code(text,required) / note(text) / done(boolean)",
+      "E2 的后端数据接口已存在（§3.2：这是「后端已就绪、只加元数据」的场景）",
+      "**不修改任何前端源码**"
+    ],
+    "steps": [
+      "在 sandbox 的 manifest.json 增加 E2 的 schema 段",
+      "重启 base serve（仅重启进程，不重新构建前端）",
+      "访问 /schema/sandbox/demoNote",
+      "执行：读列表 → 新建一条 → 校验报错 → 提交成功"
+    ],
+    "expected": [
+      "metadata 接口 GET /api/schema/sandbox/demoNote 返回 200，且 fields 顺序为 [\"code\",\"note\",\"done\"]",
+      "列表页表头文本数组深度等于 [\"编码\",\"备注\",\"已完成\"]",
+      "新建表单中 code 为必填（留空提交时写请求数量 == 0）",
+      "填入合法值后提交，写请求数量 == 1，URL 匹配 ^/api/sandbox/demo-notes$",
+      "提交成功后列表出现该记录（按其唯一标识断言）"
+    ],
+    "type": "功能",
+    "layer": "e2e",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "这是父 AC-018 的原话落地。三个大坑：①元数据里没有数据接口地址，列表/创建的 URL 从哪来未定义（挑刺 #5）；②「重启服务」的前提是 schema 注册表在**运行时**扫描 manifest，而不是编译期常量（design 未说明）；③demo-notes 与 demoNote 的命名转换规则未定义。"
+  },
+  {
+    "id": "TC-012-049",
+    "ac": "AC-S-085",
+    "title": "新增 E2 后 E1 完全不受影响（回归）",
+    "preconditions": ["同 TC-012-048（E2 已加）"],
+    "steps": [
+      "访问 /schema/sandbox/demoItem",
+      "断言表头、行数、分页",
+      "提交一条 E1 记录",
+      "再访问 /schema/sandbox/demoNote"
+    ],
+    "expected": [
+      "E1 表头文本数组深度等于 [\"ID\",\"标题\",\"金额\",\"已付款\",\"到期日\",\"负责人\",\"内部备注\"]",
+      "E1 行数 == 该页记录数（与 TC-012-036 基线一致）",
+      "E1 写请求数量 == 1 且 URL 匹配 ^/api/sandbox/items$",
+      "E2 页面仍可渲染（互不干扰）"
+    ],
+    "type": "功能",
+    "layer": "e2e",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "「加实体不破坏已有序」是零代码方案最容易失守的地方（渲染器若按实体名做特判，就会在 E1 上退化）。"
+  },
+  {
+    "id": "TC-012-050",
+    "ac": "AC-S-085",
+    "title": "新增 E2 前后前端源码哈希完全一致（范围必须覆盖渲染器所在的包）",
+    "preconditions": [
+      "步骤 1 在**加上 E2 之前**执行",
+      "基线工作区干净（git status --porcelain 为空）"
+    ],
+    "steps": [
+      "记录 apps/shell/src/** 下所有文件的 sha256（按路径排序）",
+      "记录 packages/schema/src/** 下所有文件的 sha256",
+      "记录 apps/shell/package.json 的 sha256",
+      "按 TC-012-048 新增 E2 并访问页面",
+      "重新计算上述三组哈希并逐项比对"
+    ],
+    "expected": [
+      "apps/shell/src/** 的文件路径集合与每个文件的 sha256 完全一致（集合相等 + 逐文件相等）",
+      "packages/schema/src/** 的文件路径集合与每个文件的 sha256 完全一致",
+      "apps/shell/package.json 的 sha256 完全一致",
+      "三组比对的差异条数均为 0"
+    ],
+    "type": "可维护性",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "AC-S-085 步骤 5 只比 apps/shell/src/**，但渲染器的**纯逻辑**在 packages/schema/src（design §5.1），在那里为 E2 加特判不会被发现（挑刺 #17）。dist/ 不必比（比的是源码，dist 由构建产生）。哈希算法写死 sha256 + 按路径排序 + 不做换行归一化（要求仓库 .gitattributes 已统一 LF，否则跨平台假红，挑刺 #35）。"
+  },
+  {
+    "id": "TC-012-051",
+    "ac": "AC-S-085",
+    "title": "前端源码全文不出现 E2 的实体键与 label（比哈希更强的零代码证据）",
+    "preconditions": ["同 TC-012-048（E2 = demoNote，label = 备注簿）"],
+    "steps": [
+      "对 apps/shell/src/** 与 packages/schema/src/** 的全部文件做全文检索",
+      "检索 token：demoNote、demo-notes、备注簿、\"code\" 这一 E2 唯一字段名"
+    ],
+    "expected": [
+      "匹配 demoNote 的文件数 == 0",
+      "匹配 demo-notes 的文件数 == 0",
+      "匹配 \"备注簿\" 的文件数 == 0",
+      "作为对照，同一检索能命中已有的业务字符串（例如 apps/shell/src/components/Table.svelte 中的 \"暂无数据\"），证明检索不是恒不命中"
+    ],
+    "type": "可维护性",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "哈希相同仍可能掩盖「配置表里加了实体映射」这类实现（哈希只保证文件没变，不保证没有按实体分支）。全文检索是更强的判据。注意 E1 的实体键 demoItem 同样不该出现在前端源码里 —— 可作为反向自检。"
+  },
+  {
+    "id": "TC-012-052",
+    "ac": "AC-S-086",
+    "title": "零代码 CRUD：新建后记录出现在列表（按唯一标识断言）",
+    "preconditions": [
+      "E1 可渲染（TC-012-048 通过）",
+      "列表按 id 升序（或按 createdAt 降序），分页 limit=2，库中已有 2 条",
+      "播种独立幂等（D101）"
+    ],
+    "steps": [
+      "打开列表页，记录首屏 id 集合",
+      "点「新建」，填合法值并提交",
+      "等待列表刷新",
+      "断言新记录的 id 是否可见（必要时翻页查找）"
+    ],
+    "expected": [
+      "写请求响应状态 == 201 或 200，body 含新记录的 id（非空字符串）",
+      "列表中出现 id 等于该值的行（逐字符相等）",
+      "该行「标题」列文本 == 提交时输入的值",
+      "断言方式不是「行数 +1」（分页边界下行数可能不变）"
+    ],
+    "type": "功能",
+    "layer": "e2e",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "AC-S-086 步骤 3 已给出正确判据（唯一标识）。前提是「列表按某种稳定顺序」—— AC 未要求排序，若列表顺序不稳定，新记录可能不在第一页导致断言失败；建议前置里钉死排序。"
+  },
+  {
+    "id": "TC-012-053",
+    "ac": "AC-S-086",
+    "title": "编辑后列表反映新值",
+    "preconditions": ["TC-012-052 已创建 item-N"],
+    "steps": [
+      "点 item-N 行的「编辑」",
+      "断言表单预填为当前值",
+      "把「标题」改成 \"改后标题\"",
+      "提交并等待列表刷新"
+    ],
+    "expected": [
+      "编辑表单中「标题」input 的 value == 原值（逐字符相等）",
+      "写请求数量 == 1，方法 == \"PATCH\"，URL 匹配 ^/api/sandbox/items/item-N$",
+      "列表该行「标题」列文本 == \"改后标题\"",
+      "该行 id 仍为 item-N（没有变成新建）"
+    ],
+    "type": "功能",
+    "layer": "e2e",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "预填断言能挡住「编辑=新建」的实现错误。"
+  },
+  {
+    "id": "TC-012-054",
+    "ac": "AC-S-086",
+    "title": "删除后该记录不再出现在列表",
+    "preconditions": ["TC-012-053 已编辑 item-N"],
+    "steps": [
+      "点 item-N 行的「删除」",
+      "在确认对话框中点「确认」",
+      "等待列表刷新",
+      "断言 item-N 是否出现"
+    ],
+    "expected": [
+      "删除请求数量 == 1，方法 == \"DELETE\"，URL 匹配 ^/api/sandbox/items/item-N$",
+      "列表中不存在 id 为 item-N 的行（按行内 id 文本检索，结果条数 == 0）",
+      "其余记录仍在（id 集合等于删除前的集合减去 item-N）"
+    ],
+    "type": "功能",
+    "layer": "e2e",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "确认对话框的交互 AC 未指定（挑刺 #33）；仓库已有 Dialog 组件（apps/shell/src/components/Dialog.svelte），按钮文案需钉死（此处用「确认」）。"
+  },
+  {
+    "id": "TC-012-055",
+    "ac": "AC-S-086",
+    "title": "全程只发出白名单内的请求（正则白名单 + 基线请求不计入）",
+    "preconditions": [
+      "网络监听从页面 first load 开始，到删除完成后停止",
+      "基线请求集：/api/config/branding、/health/*、/api/rbac/me/permissions、/api/iam/*、静态资源（.js/.css/.svg/.woff2）"
+    ],
+    "steps": [
+      "收集整段流程的全部请求（method + path，不含 query）",
+      "剔除基线请求集",
+      "把剩余请求逐条匹配白名单正则",
+      "断言不匹配条数为 0"
+    ],
+    "expected": [
+      "白名单正则集合精确为：^/api/schema/sandbox/demoItem$、^/api/sandbox/items$、^/api/sandbox/items/[^/]+$",
+      "白名单外请求条数 == 0",
+      "过程中的写请求方法全部属于 {POST, PATCH, DELETE}",
+      "元数据请求次数 == 1（页面生命周期内不重复拉取；若实现允许多次，需 BA 在 AC 里放宽）"
+    ],
+    "type": "功能",
+    "layer": "e2e",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "AC-S-086 步骤 8 的「集合 ⊆ {元数据接口、列表、创建、更新、删除}」照字面写不可判定也不可执行（挑刺 #10）：五个中文名不是路径，元数据路径含动态段；且「全程」必然包含品牌/健康/权限等基线请求 → 字面实现必红。本用例给出可执行的正则白名单。"
+  }
+]

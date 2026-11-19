@@ -1,0 +1,286 @@
+[
+  {
+    "id": "TC-012-001",
+    "ac": "AC-S-076",
+    "title": "合法的 schema 段被接受：7 个字段、5 种类型全覆盖",
+    "preconditions": [
+      "夹具见 index.md §3.1：模块 sandbox 的 manifest.json 声明实体 demoItem",
+      "字段顺序固定为 id / title / amount / paid / dueAt / ownerId / secret",
+      "字段 type 依次为 text / text / number / boolean / date / reference / text"
+    ],
+    "steps": [
+      "读 modules/sandbox/manifest.json 原文 raw",
+      "调用 Manifest::parse_checked(raw)",
+      "断言返回值与 schema 段的解析结果"
+    ],
+    "expected": [
+      "Manifest::parse_checked(raw) 返回 Ok(manifest)",
+      "manifest.schema 是 Some，且 manifest.schema.unwrap().len() == 1",
+      "实体键集合等于 [\"demoItem\"]",
+      "demoItem.label == \"示例条目\"",
+      "demoItem.fields.len() == 7",
+      "demoItem.fields[i].key 依次等于 [\"id\",\"title\",\"amount\",\"paid\",\"dueAt\",\"ownerId\",\"secret\"]",
+      "demoItem.fields[6].permission == Some(\"sandbox:demo:secret\")"
+    ],
+    "type": "功能",
+    "layer": "rust-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "这是所有其它 manifest 用例的基线。注意 permission 必须是 3 段（见挑刺 #11）：sandbox:demo:secret，不是 design §2.1 的 sandbox:demo:secret:read。"
+  },
+  {
+    "id": "TC-012-002",
+    "ac": "AC-S-076",
+    "title": "字段 type 不在允许集合 → 校验失败且点名模块/实体/字段/非法值",
+    "preconditions": [
+      "在 TC-012-001 的合法 manifest 上，把 fields[4].type 改成 \"currency\"（dueAt 字段）"
+    ],
+    "steps": [
+      "Manifest::parse_checked(raw)",
+      "断言 issues 数量、字段路径与原因文本"
+    ],
+    "expected": [
+      "返回 Err(issues)；issues.len() == 1",
+      "issues[0].field() == \"schema.demoItem.fields[4].type\"",
+      "issues[0].reason() 同时包含 \"currency\" 与 \"text, number, boolean, date, reference\"",
+      "issues[0].reason() 不包含 \"配置错误\" 这一含糊措辞"
+    ],
+    "type": "功能",
+    "layer": "rust-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "字段路径格式（schema.<entity>.fields[i].<attr>）是 QA 提案，风格对齐现有 field_error 的 permissions[0].code（manifest.rs:258-263）；需 BA 钉死。issues.len()==1 成立的前提是「首个失败即退出」真的实现（见挑刺 #1，现稿与 validate() 的聚合语义冲突）。"
+  },
+  {
+    "id": "TC-012-003",
+    "ac": "AC-S-076",
+    "title": "同一实体内两个字段 key 重复 → 校验失败且点名重复的 key",
+    "preconditions": [
+      "在 TC-012-001 的合法 manifest 上，把 fields[3].key 从 \"paid\" 改成 \"amount\"（与 fields[2] 重复）"
+    ],
+    "steps": [
+      "Manifest::parse_checked(raw)",
+      "断言 issues 的字段路径与原因文本"
+    ],
+    "expected": [
+      "返回 Err(issues)",
+      "issues 中恰好有 1 条，issues[0].field() == \"schema.demoItem.fields[3].key\"",
+      "issues[0].reason() 包含 \"amount\" 与 \"duplicate\""
+    ],
+    "type": "功能",
+    "layer": "rust-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "重复判定是「同实体作用域内」—— 不同实体可以有同名字段（两个实体各有 id 必须合法）。用例 002/003 的 issues.len()==1 都依赖单条违规，避免被聚合语义影响。"
+  },
+  {
+    "id": "TC-012-004",
+    "ac": "AC-S-076",
+    "title": "实体 fields 是空数组 → 校验失败且说明不能为空",
+    "preconditions": ["在 TC-012-001 的合法 manifest 上，把 demoItem.fields 改成 []"],
+    "steps": ["Manifest::parse_checked(raw)", "断言 issues 的字段路径与原因文本"],
+    "expected": [
+      "返回 Err(issues)",
+      "issues.len() == 1",
+      "issues[0].field() == \"schema.demoItem.fields\"",
+      "issues[0].reason() 包含 \"must not be empty\""
+    ],
+    "type": "功能",
+    "layer": "rust-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "空 fields 若被放行，前端 SchemaForm 会渲染出一个零字段表单并允许提交空体 —— 这正是 fail-fast 要挡住的东西。"
+  },
+  {
+    "id": "TC-012-005",
+    "ac": "AC-S-076",
+    "title": "实体名不符合 ^[a-z][a-zA-Z0-9]*$ → 校验失败",
+    "preconditions": ["把实体键 demoItem 改成 DemoItem"],
+    "steps": ["Manifest::parse_checked(raw)", "断言 issues"],
+    "expected": [
+      "返回 Err(issues)；issues.len() == 1",
+      "issues[0].field() == \"schema.DemoItem\"",
+      "issues[0].reason() 包含 \"^[a-z][a-zA-Z0-9]*$\""
+    ],
+    "type": "功能",
+    "layer": "rust-unit",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "实体键会成为 URL 段与前端路由参数，格式错误必须在启动时挡住（design §2.4 第 1 条）。同一用例应再用 demo_item 跑一遍（下划线同样非法），两条断言等价。"
+  },
+  {
+    "id": "TC-012-006",
+    "ac": "AC-S-076",
+    "title": "字段 key 不符合 ^[a-z][a-zA-Z0-9]*$ → 校验失败",
+    "preconditions": ["把 fields[4].key 从 \"dueAt\" 改成 \"due_at\""],
+    "steps": ["Manifest::parse_checked(raw)", "断言 issues"],
+    "expected": [
+      "返回 Err(issues)；issues.len() == 1",
+      "issues[0].field() == \"schema.demoItem.fields[4].key\"",
+      "issues[0].reason() 包含 \"^[a-z][a-zA-Z0-9]*$\""
+    ],
+    "type": "功能",
+    "layer": "rust-unit",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "key 直接对应后端实体序列化后的 JSON 键（camelCase）。允许下划线会让元数据的 key 与 serde 输出的键对不上 → 前端永远渲染空单元格。"
+  },
+  {
+    "id": "TC-012-007",
+    "ac": "AC-S-076",
+    "title": "字段 label 是空白串 → 校验失败",
+    "preconditions": ["把 fields[1].label 从 \"标题\" 改成 \"   \""],
+    "steps": ["Manifest::parse_checked(raw)", "断言 issues"],
+    "expected": [
+      "返回 Err(issues)；issues.len() == 1",
+      "issues[0].field() == \"schema.demoItem.fields[1].label\"",
+      "issues[0].reason() 包含 \"must not be empty\""
+    ],
+    "type": "功能",
+    "layer": "rust-unit",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "与 manifest 的 name 字段同一口径（TRIM 后为空即非法），见 manifest.rs:251-253。空白 label 会渲染出空表头，比报错更难排查。"
+  },
+  {
+    "id": "TC-012-008",
+    "ac": "AC-S-076",
+    "title": "字段 permission 未在本模块 permissions[] 登记 → 校验失败",
+    "preconditions": [
+      "从 sandbox 的 permissions[] 里删掉 sandbox:demo:secret",
+      "保留 fields[6].permission = \"sandbox:demo:secret\""
+    ],
+    "steps": ["Manifest::parse_checked(raw)", "断言 issues"],
+    "expected": [
+      "返回 Err(issues)；issues.len() == 1",
+      "issues[0].field() == \"schema.demoItem.fields[6].permission\"",
+      "issues[0].reason() 同时包含 \"sandbox:demo:secret\" 与 \"not declared\""
+    ],
+    "type": "功能",
+    "layer": "rust-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "design §2.4 第 5 条。声明一个不存在的权限点 = 永久拒绝（谁都不可能被授予）→ 字段永远不显示，且 C-5/D27 的对账也会挡住。注意此规则若允许跨模块引用权限点，单文件 validate(&self) 无法实现（见挑刺 #2）。"
+  },
+  {
+    "id": "TC-012-009",
+    "ac": "AC-S-076",
+    "title": "reference 指向不存在的 module/entity → 校验失败",
+    "preconditions": [
+      "把 fields[5].reference 改成 { \"module\": \"org\", \"entity\": \"notAnEntity\" }",
+      "schema 注册表在启动时先收集全部 manifest（跨文件校验，见挑刺 #2）"
+    ],
+    "steps": ["对全部 manifest 做一次 schema 注册表构建", "断言该实体的校验结果"],
+    "expected": [
+      "注册表构建返回 Err(issues)",
+      "issues 中恰好 1 条，issues[0].field() == \"schema.demoItem.fields[5].reference.entity\"",
+      "issues[0].reason() 包含 \"org\" 与 \"notAnEntity\""
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "该规则的判定需要「其它模块的实体清单」，而现有 manifest 扫描是逐文件 parse_checked（platform-config/src/registry.rs:108-137、platform-db/src/scopes.rs:76-99），没有全局上下文 → 必须先由 BA 决定校验落点（挑刺 #2），否则本用例无法实现。"
+  },
+  {
+    "id": "TC-012-010",
+    "ac": "AC-S-076",
+    "title": "进程层：manifest 里 type 非法 → base serve 退出码非 0 且 stderr 点名",
+    "preconditions": [
+      "把 modules/sandbox/manifest.json 复制到临时根 <tmp>/modules/sandbox/，在其中把 fields[4].type 改成 \"currency\"",
+      "环境变量 BASE_MANIFEST_ROOT=<tmp>",
+      "DATABASE_URL 指向一个可用但**非超级用户**的应用角色（base_app 成员），库已完成迁移",
+      "不修改仓库内任何文件（否则会污染 the_permission_registry_matches_every_manifest，config_real_db.rs:1599）"
+    ],
+    "steps": [
+      "用 std::process::Command 启动 base serve（cargo 产出的二进制，环境变量如上）",
+      "等待进程退出（最多 30s）",
+      "读取退出码与 stderr 全文"
+    ],
+    "expected": [
+      "进程在 30s 内退出，退出码 == 1（Failure::Runtime → EXIT_RUNTIME，main.rs:45）",
+      "stderr 包含 \"schema.demoItem.fields[4].type\"",
+      "stderr 包含 \"currency\"",
+      "stderr 不含 \"panicked at\"（必须是可读的 fail-fast，不是 panic）"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "这是 AC-S-076 里唯一真正验「进程起不来」的用例，但成本高：serve() 在解析 manifest **之前**先跑租户隔离自检（main.rs:250-260，需要真库且连接角色不得绕过 RLS），因此本用例必须有 DATABASE_URL_TEST。仓库没有 spawn 服务二进制的先例（只有 spawn **测试二进制**的护栏，platform-db/tests/quota_real_db.rs:222-262）。若要求无库可跑，替代形状见挑刺 #3。"
+  },
+  {
+    "id": "TC-012-011",
+    "ac": "AC-S-077",
+    "title": "manifest.schema.json 含 schema 段定义，且 type 枚举精确",
+    "preconditions": ["已实现 schema 段"],
+    "steps": [
+      "读 capabilities/schema/manifest.schema.json（该文件由 MANIFEST_JSON_SCHEMA 常量生成）",
+      "取 properties.schema 的定义",
+      "取 schema.additionalProperties.fields.items.properties.type.enum"
+    ],
+    "expected": [
+      "properties 中存在键 \"schema\"（不是 \"schemas\" / \"entities\"）",
+      "properties.schema.type == \"object\"",
+      "properties.schema.additionalProperties.required == [\"label\",\"fields\"]",
+      "properties.schema.additionalProperties.additionalProperties == false",
+      "fields.items.required == [\"key\",\"label\",\"type\"]",
+      "type.enum（排序后）== [\"boolean\",\"date\",\"number\",\"reference\",\"text\"]",
+      "manifest 顶层 additionalProperties 仍为 false（不该为此放宽）"
+    ],
+    "type": "可维护性",
+    "layer": "rust-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "断言取的是常量 MANIFEST_JSON_SCHEMA（manifest_schema.rs:23 起）与生成产物，二者由同一常量产出。Rust 结构体侧的一致性需要单独一条测试（挑刺 #15）。"
+  },
+  {
+    "id": "TC-012-012",
+    "ac": "AC-S-077",
+    "title": "实体元数据 JSON Schema 产物存在、非空、required 与 additionalProperties 正确",
+    "preconditions": ["已实现 schema 段"],
+    "steps": [
+      "读 capabilities/schema/entity.schema.json（命名待 BA 钉死，见挑刺 #14）",
+      "解析 JSON 并断言顶层键"
+    ],
+    "expected": [
+      "文件存在且 JSON.parse 成功",
+      "顶层 $schema == \"https://json-schema.org/draft/2020-12/schema\"",
+      "top.required（排序后）== [\"fields\",\"label\"]",
+      "top.additionalProperties == false",
+      "top.properties.fields.type == \"array\"",
+      "top.properties.fields.minItems == 1",
+      "top.properties.fields.items.required（排序后）== [\"key\",\"label\",\"type\"]",
+      "该文件名出现在 cargo xtask capabilities 的产物列表里（否则 prune_extra_files 会删除它，capabilities.rs:179-195）"
+    ],
+    "type": "可维护性",
+    "layer": "rust-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "AC 原文写「entity.schema.json（或等价命名）」—— 不可判定，必须钉死文件名（挑刺 #14）。现有 capabilities/schema/metadata.schema.json 是**字段级** schema（FieldMeta），与本条的**实体级** schema 不是同一个东西。"
+  },
+  {
+    "id": "TC-012-013",
+    "ac": "AC-S-077",
+    "title": "cargo xtask capabilities --check 在干净工作区退出 0",
+    "preconditions": [
+      "工作区干净（git status --porcelain 输出为空）",
+      "**未**手工改过 capabilities/ 下任何文件"
+    ],
+    "steps": [
+      "git status --porcelain 断言为空（前置校验）",
+      "cargo xtask capabilities --check",
+      "读取退出码与 stderr"
+    ],
+    "expected": [
+      "前置：git status --porcelain 输出为空字符串",
+      "退出码 == 0",
+      "stderr 不包含 \"内容不一致\" / \"缺失\" / \"多余文件\""
+    ],
+    "type": "可维护性",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "必须先在干净工作区跑。若先跑了不带 --check 的 cargo xtask capabilities，它会**写盘并 prune**（xtask/src/main.rs:94-127），随后 --check 必然通过 → 假绿（挑刺 #13）。"
+  }
+]

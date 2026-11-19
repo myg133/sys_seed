@@ -1,0 +1,241 @@
+[
+  {
+    "id": "TC-012-025",
+    "ac": "AC-S-080",
+    "title": "列表响应里每条记录**没有** secret 这个键",
+    "preconditions": [
+      "列表接口 GET /api/sandbox/items?cursor=&limit=20（见 index.md §3.2，路径待 BA 钉死）",
+      "该接口已改用平台的序列化入口（SchemaProjector::project）",
+      "tenant-a 下有 3 条 demoItem，其中 item-1 的 secret 值 = \"内部-A\"",
+      "U1 没有 sandbox:demo:secret"
+    ],
+    "steps": [
+      "以 U1 请求列表",
+      "取响应中的记录数组（按 §3.2 的信封约定）",
+      "对每条记录断言键的存在性"
+    ],
+    "expected": [
+      "HTTP 200",
+      "records.length == 3",
+      "对每条 record：Object.prototype.hasOwnProperty.call(record, \"secret\") === false",
+      "对每条 record：Object.keys(record).sort() 深度等于 [\"amount\",\"createdAt\",\"dueAt\",\"id\",\"ownerId\",\"paid\",\"title\"]（白名单，不含 secret）"
+    ],
+    "type": "安全",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "AC-S-080 的前置条件只说「业务模块的列表接口已改用平台的序列化入口」，**没指名是哪个接口**（挑刺 #9）。这里钉死为一个新建的 demo 实体列表接口，而不是改造已合并的 /api/sandbox/scope-item。"
+  },
+  {
+    "id": "TC-012-026",
+    "ac": "AC-S-080",
+    "title": "授予权限后下一个请求包含 secret，且**值等于库里的值**",
+    "preconditions": [
+      "item-1 的 secret 列在库中的值 = \"内部-A\"（由独立幂等播种写入，D101）",
+      "U1 初始无 sandbox:demo:secret"
+    ],
+    "steps": [
+      "以 U1 请求列表（基线）",
+      "走 /api/rbac/* 授予 sandbox:demo:secret",
+      "立刻再次请求列表",
+      "比对 item-1 的 secret 值"
+    ],
+    "expected": [
+      "基线：item-1 无 secret 键",
+      "授予后：HTTP 200",
+      "授予后：item-1.hasOwnProperty(\"secret\") === true",
+      "授予后：item-1.secret === \"内部-A\"（精确相等，不是掩码、不是占位、不是空串）",
+      "授予后：其余未授予的字段键仍在（没有因为投影丢掉 title 等）"
+    ],
+    "type": "安全",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "「值等于库里的值」是 AC-S-080 步骤 4 的原话，也是它区别于「掩码成 ***」的唯一判据。播种走独立脚本，禁止依赖其它测试副作用（D101）。"
+  },
+  {
+    "id": "TC-012-027",
+    "ac": "AC-S-080",
+    "title": "剔除方式是**删除键**，不是置 null / 空串 / [REDACTED]",
+    "preconditions": ["同 TC-012-025（U1 无 secret）"],
+    "steps": [
+      "以 U1 请求列表，取响应体原文 raw 字符串",
+      "断言 raw 中不存在 secret 键的任一形态",
+      "手动构造四种「错误实现」的样本，验证本断言能区分它们"
+    ],
+    "expected": [
+      "raw 不匹配 /\"secret\"\\s*:/（键完全不存在）",
+      "raw 不包含 \"[REDACTED]\"",
+      "raw 不包含 \"***\"",
+      "对照自检：{\"secret\":null} / {\"secret\":\"\"} / {\"secret\":\"[REDACTED]\"} 三种样本都能让上述第一条断言失败（即断言不是恒真）"
+    ],
+    "type": "安全",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "AC-S-080 的「假绿防护」要求断言键不存在。补充一条对照自检，防止正则写错（例如写成 /secret/ 而 JSON 里根本没有该词时恒真）。"
+  },
+  {
+    "id": "TC-012-028",
+    "ac": "AC-S-080",
+    "title": "白名单语义：实体上多出来、元数据未声明的字段被剔除（fail closed）",
+    "preconditions": [
+      "demoItem 的 Rust 结构体新增一个未写进元数据的字段 internalNote（值 = \"不应输出\"）",
+      "元数据仍只有 §3.1 的 7 个字段"
+    ],
+    "steps": [
+      "以 U2（全字段可见）请求列表",
+      "断言 internalNote 是否出现"
+    ],
+    "expected": [
+      "HTTP 200",
+      "每条记录 hasOwnProperty(\"internalNote\") === false",
+      "对象键集合精确等于元数据声明集合（7 个）",
+      "即使 U2 拥有全部权限点，internalNote 也不出现（白名单不以权限为转移）"
+    ],
+    "type": "安全",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "design §4.2 明确写了 fail closed（少显示而不是多泄露）。这是「加字段忘了写元数据」时的唯一保护。"
+  },
+  {
+    "id": "TC-012-029",
+    "ac": "AC-S-080",
+    "title": "列表信封本身不被破坏：只投影 items，游标与计数键保持",
+    "preconditions": [
+      "列表响应形状为 { \"items\": [...], \"nextCursor\": \"<字符串>\" }（§3.2，待 BA 钉死）",
+      "每页 2 条，库中 3 条"
+    ],
+    "steps": [
+      "以 U1 请求第一页（limit=2）",
+      "断言信封键集合",
+      "断言 items 内每条都被投影"
+    ],
+    "expected": [
+      "Object.keys(body).sort() == [\"items\",\"nextCursor\"]",
+      "body.items.length == 2",
+      "body.nextCursor 是非空字符串",
+      "body.items 每条都不含 \"secret\" 键"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "design 只给了 project(raw: Value) 的**单对象**语义，对数组/信封未定义（挑刺 #25）。若实现对信封整体投影，nextCursor 会被白名单剔掉 → 前端永远只有一页。"
+  },
+  {
+    "id": "TC-012-030",
+    "ac": "AC-S-080",
+    "title": "无权字段在**详情**接口同样被剔除（不是只有列表）",
+    "preconditions": ["同 TC-012-025；详情接口 GET /api/sandbox/items/item-1 存在"],
+    "steps": ["以 U1 请求详情", "断言键集合", "授予后再请求详情"],
+    "expected": [
+      "无权限时：HTTP 200，hasOwnProperty(\"secret\") === false",
+      "有权限时：hasOwnProperty(\"secret\") === true 且值 == \"内部-A\""
+    ],
+    "type": "安全",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "C-6 的判据是「至少一处调用」（挑刺 #16），所以 C-6 抓不到「列表调了、详情没调」。这条用例是 R2 局限的主要缓解。"
+  },
+  {
+    "id": "TC-012-031",
+    "ac": "AC-S-081",
+    "title": "合规状态下契约 C-6 通过",
+    "preconditions": [
+      "sandbox 的 manifest 声明了带 permission 的字段",
+      "sandbox 的 backend 源码里至少有一处 SchemaProjector::project 调用"
+    ],
+    "steps": ["cargo test -p sandbox --test contracts", "断言 C-6 测试存在且通过", "断言无 C-6 违例行"],
+    "expected": [
+      "cargo test 退出码 == 0",
+      "输出包含契约测试函数名 contract_c6_schema_projection_is_used（命名需与 C-1~C-5 的生成宏一致）",
+      "输出包含 \"1 passed\" 或以 0 failed 收尾",
+      "stderr 不含 \"[C-6] contract violation\""
+    ],
+    "type": "安全",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "C-6 要照 C-5 的写法接进 #[platform_module_contract] 宏（platform-contracts-macros/src/lib.rs 的 GENERATED_TESTS）或独立的 check_c6_for 入口（D58 先例）。AC 只说「跑契约检查」，没给命令（挑刺 #16 附带问题）。"
+  },
+  {
+    "id": "TC-012-032",
+    "ac": "AC-S-081",
+    "title": "造违规：声明了字段权限但源码无投影调用 → C-6 失败并点名模块/实体/字段",
+    "preconditions": [
+      "把 modules/sandbox 的 backend 源码复制到临时目录，删掉全部 SchemaProjector::project 调用（用不存在的函数名替换）",
+      "manifest 仍声明 secret 字段的 permission"
+    ],
+    "steps": [
+      "对临时副本调用 check_c6_for(manifest_path, src_dir)",
+      "断言违例条数与消息内容"
+    ],
+    "expected": [
+      "返回 violations.len() == 1",
+      "violations[0].check_id == \"C-6\"",
+      "violations[0].message 同时包含 \"sandbox\"、\"demoItem\"、\"secret\"",
+      "violations[0].message 包含 \"no project call site\"（或契约文档钉死的等价措辞）"
+    ],
+    "type": "安全",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "负向用例是唯一能证明「检查真的在看源码」的方式。AC-S-081 步骤 2 要求消息点名模块+实体+字段 —— 这要求 C-6 能从一个调用点缺失反查到**是哪些实体/字段**，需要按实体聚合，实现成本比 C-5 高（C-5 只按权限点）。"
+  },
+  {
+    "id": "TC-012-033",
+    "ac": "AC-S-081",
+    "title": "判据 = 「至少一处」：3 个 handler 只有 1 个调用 → 通过",
+    "preconditions": [
+      "临时副本里只保留 list handler 的投影调用，detail/create 两个 handler 改回 Json(entity) 直出"
+    ],
+    "steps": ["对临时副本调用 check_c6_for", "断言结果"],
+    "expected": [
+      "violations.len() == 0",
+      "（本用例必须与 design §4.4 的判据一致：判据为「至少一处」）"
+    ],
+    "type": "安全",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "AC-S-081 步骤 3 写的是条件式预期（「若…则通过，若…则失败」），本身不可判定（挑刺 #16）。design §4.4 已选定「至少一处」，因此本用例期望「通过」，并且它的价值是**把局限固化成一条会红的测试**：将来若有人把判据改强，这条会红，从而逼迫同步改文档。"
+  },
+  {
+    "id": "TC-012-034",
+    "ac": "AC-S-081",
+    "title": "注释与字符串里的 SchemaProjector::project 不计为调用点",
+    "preconditions": [
+      "临时副本：删掉真实调用，只在注释 // ... 与字符串 \"SchemaProjector::project\" 里保留该文本"
+    ],
+    "steps": ["对临时副本调用 check_c6_for", "断言结果"],
+    "expected": [
+      "violations.len() == 1",
+      "violations[0].check_id == \"C-6\"",
+      "违例消息点名 \"sandbox\"/\"demoItem\"/\"secret\""
+    ],
+    "type": "安全",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "authz_scan 已有 strip_comments 的先例（authz_scan.rs:71 调用、:214 定义）。照抄字面文本就能过检查的话，C-6 与没有一样 —— 这是「假绿检查比没有更坏」的具体形态（design §4.4 自述）。"
+  },
+  {
+    "id": "TC-012-035",
+    "ac": "AC-S-081",
+    "title": "未声明任何字段权限的模块 → C-6 不误报（空集不产生违例）",
+    "preconditions": [
+      "对 modules/sandbox 的 manifest 删除 secret 字段的 permission 声明（字段本身保留）",
+      "源码里也不调用投影入口"
+    ],
+    "steps": ["对临时副本调用 check_c6_for", "断言结果"],
+    "expected": ["violations.len() == 0", "（无声明即无约束，不得因为「没找到调用点」而报错）"],
+    "type": "安全",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "反向误报会让检查被关掉（design §4.4 的 C-5 教训）。同时这条也是「C-6 由 manifest 触发」而不是「无条件要求调用」的证据。"
+  }
+]

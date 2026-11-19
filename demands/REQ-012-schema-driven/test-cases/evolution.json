@@ -1,0 +1,105 @@
+[
+  {
+    "id": "TC-012-056",
+    "ac": "AC-S-087",
+    "title": "基线：用元数据快照 M1 正常渲染",
+    "preconditions": [
+      "M1 = §3.1 的 7 字段元数据（前端 fixture，不经后端）",
+      "数据行 fixture 1 条：{id:\"item-1\",title:\"示例\",amount:12.5,paid:true,dueAt:\"2026-11-19\",ownerId:\"u-1001\",secret:\"内部-A\"}"
+    ],
+    "steps": ["用 M1 + 数据行渲染 SchemaTable", "断言列数与单元格文本"],
+    "expected": [
+      "列数 == 7",
+      "第 4 列（金额）文本 == \"12.5\"",
+      "第 5 列（已付款）文本 == \"是\"",
+      "不产生任何 console.warn / console.error"
+    ],
+    "type": "可维护性",
+    "layer": "e2e",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "M1..M5 都是**前端合成元数据**，不能来自运行中的后端：后端启动校验会拒绝非法 type（AC-S-076），所以「未知类型」只能在前端 fixture 里构造（挑刺 #22）。AC-S-087 未说明数据来源。"
+  },
+  {
+    "id": "TC-012-057",
+    "ac": "AC-S-087",
+    "title": "M2 新增字段：渲染成功，新字段正常展示（向后兼容）",
+    "preconditions": ["M2 = M1 + 新字段 {key:\"memo\",label:\"备注\",type:\"text\"}（追加在末尾）"],
+    "steps": ["用 M2 + 同一数据行渲染", "断言列数、新列位置与文本"],
+    "expected": [
+      "列数 == 8",
+      "第 8 列表头文本 == \"备注\"",
+      "第 8 列单元格文本 == \"\"（数据行没有 memo 键）",
+      "前 7 列的文本与 TC-012-056 完全一致（逐列相等）"
+    ],
+    "type": "可维护性",
+    "layer": "e2e",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "「加字段不破坏」是 R1（白名单 fail closed）的正常路径证明。"
+  },
+  {
+    "id": "TC-012-058",
+    "ac": "AC-S-087",
+    "title": "M3 删除字段（数据里仍有该键）：不渲染该列，多余键被忽略",
+    "preconditions": [
+      "M3 = M1 去掉 secret 字段（6 字段）",
+      "数据行仍含 secret:\"内部-A\""
+    ],
+    "steps": ["用 M3 + 含 secret 的数据行渲染", "断言列与全文"],
+    "expected": [
+      "列数 == 6",
+      "表头文本数组不包含 \"内部备注\"",
+      "document.body.innerText 不包含 \"内部-A\"",
+      "不出现任何以 \"unknown\" / \"未知列\" 为文案的列头",
+      "不产生 console.error（console.warn == 0）"
+    ],
+    "type": "可维护性",
+    "layer": "e2e",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "AC-S-087 步骤 3 写「数据里仍可能带该键」，但 design §4.2 的白名单投影会让后端**根本不下发**未声明字段（挑刺 #23）—— 只有前端合成数据才能造出这个场景。因此本用例必须标为「前端合成」，且它守的是渲染器容错，不是后端行为。"
+  },
+  {
+    "id": "TC-012-059",
+    "ac": "AC-S-087",
+    "title": "M4 未知 type：降级为纯文本 + 恰好一条可发现的告警，整页不崩",
+    "preconditions": ["M4 = M1 把 amount 的 type 改成 \"currency\"（值仍为 12.5）", "捕获 console.warn 调用"],
+    "steps": [
+      "用 M4 渲染",
+      "断言列数与其他列",
+      "读取 console.warn 的调用记录"
+    ],
+    "expected": [
+      "渲染成功：列数 == 7（该字段**仍在**，位置不变）",
+      "该列单元格文本 == \"12.5\"（纯文本降级，不是空白、不是崩溃）",
+      "其余 6 列文本与 TC-012-056 完全一致",
+      "console.warn 调用次数 == 1",
+      "该次告警的参数字符串包含 \"currency\" 与字段 key \"amount\""
+    ],
+    "type": "可维护性",
+    "layer": "e2e",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "「控制台有一条可发现的告警」必须量化成「恰好 1 次」并带上类型名，否则写 console.warn(\"oops\") 也能过。「整页不崩」用「其余列文本与基线逐列相等」来证明，比断言「页面有内容」强。"
+  },
+  {
+    "id": "TC-012-060",
+    "ac": "AC-S-087",
+    "title": "M5 数据缺非必填字段：展示为空，不出现 undefined / NaN",
+    "preconditions": ["M5 = M1", "数据行 = {id:\"item-9\",title:\"只有标题\"}（缺 amount/paid/dueAt/ownerId/secret）"],
+    "steps": ["用 M1 + 缺字段的数据行渲染", "断言每列文本与页面全文"],
+    "expected": [
+      "渲染成功：行数 == 1，列数 == 7",
+      "缺值列的单元格文本全部 == \"\"（空字符串，逐列断言）",
+      "document.body.innerText 不包含 \"undefined\"",
+      "document.body.innerText 不包含 \"NaN\"",
+      "document.body.innerText 不包含 \"null\""
+    ],
+    "type": "可维护性",
+    "layer": "e2e",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "现有 @base/ui 的 cellValue 已把 undefined/null 转成 ''（packages/ui/src/index.ts:350-357），但经 formatCell 重写后必须保持同样语义。"
+  }
+]

@@ -1,0 +1,292 @@
+[
+  {
+    "id": "TC-012-036",
+    "ac": "AC-S-082",
+    "title": "表头列的文本与顺序精确等于元数据 fields 的 label 顺序",
+    "preconditions": [
+      "后端已按 §3.1 返回 demoItem 元数据（U2 全字段可见）",
+      "页面 /schema/sandbox/demoItem 可访问（§3.3）",
+      "库中 tenant-a 下有 3 条 demoItem"
+    ],
+    "steps": [
+      "打开 /schema/sandbox/demoItem（已登录 U2）",
+      "读取表格 thead 下所有 th 的 textContent 数组",
+      "与元数据 fields 的 label 数组逐项比对"
+    ],
+    "expected": [
+      "th 数量 == 7",
+      "th 文本数组深度等于 [\"ID\",\"标题\",\"金额\",\"已付款\",\"到期日\",\"负责人\",\"内部备注\"]",
+      "第 6 列（下标 5）文本 == \"负责人\"（不是 \"ownerId\"）"
+    ],
+    "type": "功能",
+    "layer": "e2e",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "顺序即契约（design §3.2）。断言必须比对完整数组，不能只断言「包含」—— 否则乱序也通过。"
+  },
+  {
+    "id": "TC-012-037",
+    "ac": "AC-S-082",
+    "title": "按类型格式化单元格：boolean → 是/否、date → YYYY-MM-DD、number → 十进制",
+    "preconditions": [
+      "@base/schema 已导出 formatCell(field, value): { text: string; unknownType: boolean }",
+      "夹具值：paid=true、paid=false、dueAt=\"2026-11-19\"、amount=12.5、title=\"示例\""
+    ],
+    "steps": [
+      "调用 formatCell({type:\"boolean\"}, true)",
+      "调用 formatCell({type:\"boolean\"}, false)",
+      "调用 formatCell({type:\"date\"}, \"2026-11-19\")",
+      "调用 formatCell({type:\"number\"}, 12.5)",
+      "调用 formatCell({type:\"text\"}, \"示例\")"
+    ],
+    "expected": [
+      "boolean(true).text === \"是\"",
+      "boolean(false).text === \"否\"",
+      "date(\"2026-11-19\").text === \"2026-11-19\"（固定 locale 与格式，不做时区换算）",
+      "number(12.5).text === \"12.5\"",
+      "text(\"示例\").text === \"示例\"",
+      "五次调用的 unknownType 均为 false",
+      "对照自检：若实现原样打印（String(value)），第 1 条期望会失败 —— 即本断言不是恒真"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "AC-S-082 步骤 3 只写「boolean → 是/否」，没写死字面量与日期格式/locale（挑刺 #18）。本用例把它钉死为 是/否 与 YYYY-MM-DD；BA 若不接受，需改这两条期望，不能保留「按类型格式化」这种不可判定的措辞。"
+  },
+  {
+    "id": "TC-012-038",
+    "ac": "AC-S-082",
+    "title": "游标分页的查询参数由 buildListQuery 精确构造",
+    "preconditions": ["@base/schema 已导出 buildListQuery(cursor, limit)"],
+    "steps": [
+      "buildListQuery(undefined, 20)",
+      "buildListQuery(\"c2VxOjIw\", 20)",
+      "buildListQuery(\"c2VxOjIw\", undefined)"
+    ],
+    "expected": [
+      "第一次返回对象深等于 { limit: \"20\" }（首屏不带 cursor 键）",
+      "第二次返回对象深等于 { cursor: \"c2VxOjIw\", limit: \"20\" }",
+      "第三次返回对象深等于 { cursor: \"c2VxOjIw\", limit: \"20\" }（缺省 limit 仍下发 20）",
+      "键顺序为 cursor 在前 limit 在后（序列化后为 \"cursor=...&limit=20\"）"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "AC-S-082 步骤 4 要求「请求参数里有上一页返回的 nextCursor」，但既没给参数名（cursor?) 也没给信封键名（nextCursor?）—— 现有 List<T> 只有 Rust 字段 next_cursor（repository.rs:155-160），JSON 形状未定义（挑刺 #19）。此处钉死 cursor/limit/nextCursor 三个名字，需 BA 同步。"
+  },
+  {
+    "id": "TC-012-039",
+    "ac": "AC-S-082",
+    "title": "点「下一页」发出带游标的请求，且渲染出**不等于**第一页的数据",
+    "preconditions": [
+      "库中 tenant-a 下有 5 条 demoItem，id 分别为 item-1..item-5",
+      "limit=2（第一页 item-1/item-2，nextCursor 非空）"
+    ],
+    "steps": [
+      "打开列表页，等待首屏渲染",
+      "记录首屏所有行的 id 列文本",
+      "监听网络请求，点击「下一页」",
+      "等待第二页渲染，记录行 id"
+    ],
+    "expected": [
+      "首屏 id 列文本数组 == [\"item-1\",\"item-2\"]",
+      "下一页触发的请求 URL 匹配 ^/api/sandbox/items\\?cursor=[^&]+&limit=2$",
+      "该请求的 cursor 值等于首屏响应里的 nextCursor（逐字符相等）",
+      "第二页 id 列文本数组 == [\"item-3\",\"item-4\"]",
+      "第二页与首屏 id 集合交集为空（不是同一页重复渲染）"
+    ],
+    "type": "功能",
+    "layer": "e2e",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "「渲染出下一页的数据（不等于第一页的数据）」若只写「不等于」是弱断言；这里用精确 id 数组。分页模型冲突见挑刺 #7：现有 @base/ui Table 的分页控件只在 pageCount>1（需要 total）时出现，游标分页没有 total。"
+  },
+  {
+    "id": "TC-012-040",
+    "ac": "AC-S-082",
+    "title": "数据为空时渲染独立空态：不渲染表头空壳",
+    "preconditions": [
+      "tenant-a 下 demoItem 表为空（独立幂等播种，D101）",
+      "U2 已登录"
+    ],
+    "steps": [
+      "打开 /schema/sandbox/demoItem",
+      "断言表格相关的 DOM 结构",
+      "读空态文案"
+    ],
+    "expected": [
+      "页面中不存在 table > thead（document.querySelectorAll(\"table thead\").length === 0）",
+      "页面中存在一个空态容器，其 textContent 精确等于 \"暂无数据\"",
+      "空态文案不包含 \"undefined\"、\"null\"、\"NaN\"",
+      "页面中不存在 tbody > tr（行数 0）"
+    ],
+    "type": "功能",
+    "layer": "e2e",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "AC-S-082 步骤 5 要求「不渲染表头 + 0 行的空壳表」，但这与现有 @base/ui Table 的契约**直接冲突**：Table 恒渲染 thead 与一行 emptyText（apps/shell/src/components/Table.svelte:26-34 thead、:46 emptyText 行）（挑刺 #7）。若 BA 不改这条，Dev 只能自造表格渲染，而能力索引写着「勿自造表格渲染」（capabilities/index.json 的 ui_table_component）。"
+  },
+  {
+    "id": "TC-012-041",
+    "ac": "AC-S-083",
+    "title": "5 种字段类型映射到对应控件",
+    "preconditions": [
+      "元数据含 text(required)/number/boolean/date/reference 各一",
+      "打开新建表单（点「新建」）"
+    ],
+    "steps": [
+      "打开 /schema/sandbox/demoItem 的新建表单",
+      "按 label 定位每个字段的控件",
+      "断言控件类型"
+    ],
+    "expected": [
+      "\"标题\" → input，且 input.type == \"text\"",
+      "\"金额\" → input，且 input.type == \"number\"",
+      "\"已付款\" → input，且 input.type == \"checkbox\"（或 role=switch 且 aria-checked 可读）",
+      "\"到期日\" → input，且 input.type == \"date\"",
+      "\"负责人\" → select 元素（且 option 数量 == 业务模块选项接口返回的条数）",
+      "每个控件都有关联的 label（aria-label 或 <label for>），且可被 getByLabel 定位"
+    ],
+    "type": "功能",
+    "layer": "e2e",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "reference 的下拉数据源不存在（挑刺 #8）：design §2.1 只声明 {module, entity}，R5 说「由业务模块提供选项接口」，但没有路径/形状/权限/分页，也没有任何 AC 覆盖它。本用例的 option 数量断言目前**无实现依据**。"
+  },
+  {
+    "id": "TC-012-042",
+    "ac": "AC-S-083",
+    "title": "必填字段留空提交：前端拦住、零请求、错误定位到该字段",
+    "preconditions": ["表单已渲染（TC-012-041）", "网络监听已开启"],
+    "steps": [
+      "清空「标题」输入框",
+      "点击提交",
+      "等待 300ms（给可能的异步校验留时间）",
+      "断言写请求数量、错误文案与无障碍属性"
+    ],
+    "expected": [
+      "捕获到的写请求数量 == 0（方法为 POST/PATCH/PUT 的请求一条都没有）",
+      "页面中存在文本精确等于 \"标题不能为空\" 的错误节点",
+      "该 input 的 aria-invalid == \"true\"",
+      "该 input 的 aria-describedby 指向错误节点的 id（逐字符相等）",
+      "错误节点在 DOM 中是该 input 的**兄弟或父容器内的相邻节点**（不是页面顶部的汇总区）"
+    ],
+    "type": "功能",
+    "layer": "e2e",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "错误文案字面量 AC 未给（挑刺 #27），此处钉死 \"<label>不能为空\"。若错误汇总条也存在，本用例只约束「字段旁必须有」，不禁止汇总。"
+  },
+  {
+    "id": "TC-012-043",
+    "ac": "AC-S-083",
+    "title": "number 字段填非数字：validateForm 返回该字段错误",
+    "preconditions": ["@base/schema 已导出 validateForm(meta, values)"],
+    "steps": [
+      "validateForm(meta, { title: \"x\", amount: \"abc\", dueAt: \"2026-11-19\" })",
+      "validateForm(meta, { title: \"x\", amount: \"12.5\", dueAt: \"2026-11-19\" })",
+      "validateForm(meta, { title: \"\", amount: \"1\", dueAt: \"2026-11-19\" })"
+    ],
+    "expected": [
+      "第一次返回对象深等于 { amount: \"金额必须是数字\" }（仅该字段有错误）",
+      "第二次返回对象深等于 {}",
+      "第三次返回对象深等于 { title: \"标题不能为空\" }",
+      "返回对象的键只可能是元数据声明的字段 key（不得出现 \"form\" / \"_root\" 之类的内部键）"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "纯函数层判定才能覆盖「错误只落在该字段」；DOM 层另见 TC-012-042。"
+  },
+  {
+    "id": "TC-012-044",
+    "ac": "AC-S-083",
+    "title": "合法提交：一个写请求，body 的键**只含**元数据声明的字段",
+    "preconditions": ["表单已渲染（TC-012-041）", "网络监听开启"],
+    "steps": [
+      "填入 title=\"示例条目\"、amount=\"12.5\"、paid=true、dueAt=\"2026-11-19\"、ownerId=\"u-1001\"",
+      "点击提交",
+      "捕获写请求的方法、URL 与 body"
+    ],
+    "expected": [
+      "写请求数量 == 1",
+      "请求方法 == \"POST\"，URL 匹配 ^/api/sandbox/items$",
+      "JSON.parse(body) 的 Object.keys().sort() 深度等于 [\"amount\",\"dueAt\",\"ownerId\",\"paid\",\"title\"]",
+      "body 不含 \"id\"（主键由服务端生成；见挑刺 #32）",
+      "body 不含任何以 \"$\" 或 \"_\" 开头的键（渲染器内部状态不得外泄）"
+    ],
+    "type": "功能",
+    "layer": "e2e",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "AC-S-083 步骤 6 只写「键只含元数据声明的字段」，但 id 也是声明的字段（readonly）—— 创建时是否该提交 id 未定（挑刺 #32）。本用例按「创建不带 id」写；更新（PATCH）时 id 应在 URL 而非 body，需 BA 同步。"
+  },
+  {
+    "id": "TC-012-045",
+    "ac": "AC-S-083",
+    "title": "readonly 字段不渲染输入控件",
+    "preconditions": ["元数据 id 字段声明 readonly: true"],
+    "steps": ["打开新建表单与编辑表单", "查找「ID」字段的控件", "检查是否可编辑"],
+    "expected": [
+      "新建表单中不存在 label 为 \"ID\" 的可编辑控件（input 的 disabled 不算：应为**不渲染控件**）",
+      "编辑表单中「ID」以纯文本形式展示，其 textContent == 该记录 id",
+      "编辑表单提交的 body 中不含 \"id\" 键"
+    ],
+    "type": "功能",
+    "layer": "e2e",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "design §2.3 写「readonly（表单里不渲染输入控件）」。这条比 disabled 更严：disabled 的 input 仍可被抓到值，且用户会以为「本来能改」。"
+  },
+  {
+    "id": "TC-012-046",
+    "ac": "AC-S-084",
+    "title": "无权用户看到的元数据里没有该字段 → 表头与表单都不出现它的 label",
+    "preconditions": [
+      "U1 无 sandbox:demo:secret，后端已过滤（TC-012-022 通过）",
+      "U1 已登录"
+    ],
+    "steps": [
+      "以 U1 打开 /schema/sandbox/demoItem",
+      "读取 thead 的 th 文本数组",
+      "打开新建表单，读取所有 label 文本"
+    ],
+    "expected": [
+      "th 文本数组深度等于 [\"ID\",\"标题\",\"金额\",\"已付款\",\"到期日\",\"负责人\"]（6 个）",
+      "th 文本数组不包含 \"内部备注\"",
+      "表单中不存在 label 文本为 \"内部备注\" 的控件",
+      "表单控件总数 == 5（id 只读不渲染控件，secret 不存在）"
+    ],
+    "type": "安全",
+    "layer": "e2e",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "本用例只能证明「渲染器忠实渲染后端给的元数据」，**不能**证明权限链路正确（挑刺 #24）：输入本身就是已过滤的元数据。权限正确性由 TC-012-022/025 负责；三者的依赖关系必须在 index.md 里写明。"
+  },
+  {
+    "id": "TC-012-047",
+    "ac": "AC-S-084",
+    "title": "提交 body 不含无权字段键；DOM 里不存在该 label 文本（不是 display:none）",
+    "preconditions": ["同 TC-012-046", "网络监听开启"],
+    "steps": [
+      "以 U1 填写并提交表单",
+      "捕获请求 body",
+      "检查页面 DOM 全文中是否出现 \"内部备注\"",
+      "检查是否存在隐藏元素承载该文本"
+    ],
+    "expected": [
+      "写请求数量 == 1",
+      "JSON.parse(body) 的 Object.keys() 不含 \"secret\"",
+      "document.body.innerText 不包含 \"内部备注\"",
+      "document.body.innerHTML 不包含 \"内部备注\"（排除 display:none / hidden 承载）"
+    ],
+    "type": "安全",
+    "layer": "e2e",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "AC-S-084 步骤 4 要求「DOM 里不存在 label 文本（不是 display:none）」—— 逐字保留了 E2E 的取证方式。注意本仓没有 jsdom（package.json devDependencies 无 jsdom / testing-library），design R6 又写「前端零新增依赖」→ DOM 断言只能走 Playwright（挑刺 #24）。"
+  }
+]
