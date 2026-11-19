@@ -14,9 +14,11 @@
 //! 新增一个权限点，它**自动**拥有（不靠人工补授权行）。
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
+use std::pin::Pin;
 
 use platform_core::RequestContext;
-use platform_core::extension::permission::DataScope;
+use platform_core::extension::permission::{DataScope, PermissionProvider};
 
 use crate::entity::{BUILTIN_ADMIN, BUILTIN_USER, PermissionPattern, Role, RolePermission};
 use crate::error::RbacError;
@@ -830,6 +832,36 @@ impl RbacService {
                 reason: format!("the role could not be read: {error}"),
             })?
             .ok_or(RbacError::NotFound { resource: "role" })
+    }
+}
+
+/// 平台能力接缝：让 `platform-iam`（登录响应）与 `/api/rbac/me/permissions`
+/// 拿到**同一份**权限点集合。
+///
+/// # ⚠️ 必须转调 [`RbacService::effective_permissions`]，不得另写一套展开逻辑
+///
+/// 两套逻辑一旦分叉，就会出现「前端 `can()` 说有、后端 `require_permission` 拒绝」
+/// 的经典不一致 —— 前端显示按钮，点下去却是 403。
+///
+/// # 为什么返回 `Vec` 而不是 `BTreeSet`
+///
+/// trait 的边界用 `Vec`（平台契约不暴露集合类型）；
+/// 转换时保留 `BTreeSet` 的**升序 + 去重**语义（`into_iter` 保序）。
+impl PermissionProvider for RbacService {
+    fn effective_permissions<'a>(
+        &'a self,
+        ctx: &'a RequestContext,
+        user_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, String>> + Send + 'a>> {
+        Box::pin(async move {
+            // ⚠️ 这里的 `RbacService::effective_permissions` 指的是**固有方法**
+            //    （Rust 的路径解析里固有方法优先于 trait 方法）——
+            //    调的是 [`RbacService::effective_permissions`]，不是本 trait 的方法。
+            RbacService::effective_permissions(self, ctx, user_id)
+                .await
+                .map(|permissions| permissions.into_iter().collect())
+                .map_err(|error| error.detail())
+        })
     }
 }
 

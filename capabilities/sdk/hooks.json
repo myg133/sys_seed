@@ -3,7 +3,7 @@
   "exports": [
     {
       "declaration": "export interface Toggle {",
-      "description": "通用状态钩子占位包。",
+      "description": "@base/hooks —— 通用状态容器（REQ-011）。",
       "kind": "interface",
       "name": "Toggle"
     },
@@ -12,6 +12,102 @@
       "description": "创建布尔开关状态。",
       "kind": "function",
       "name": "createToggle"
+    },
+    {
+      "declaration": "export interface PaginationState {",
+      "description": "分页状态。",
+      "kind": "interface",
+      "name": "PaginationState"
+    },
+    {
+      "declaration": "export interface PaginationOptions {",
+      "description": "分页状态的初始值。",
+      "kind": "interface",
+      "name": "PaginationOptions"
+    },
+    {
+      "declaration": "export function createPagination(options: PaginationOptions = {}): PaginationState {",
+      "description": "创建分页状态容器。",
+      "kind": "function",
+      "name": "createPagination"
+    },
+    {
+      "declaration": "export type SortDirection = 'asc' | 'desc'",
+      "description": "排序方向。",
+      "kind": "type",
+      "name": "SortDirection"
+    },
+    {
+      "declaration": "export interface TableState<Row = unknown> {",
+      "description": "表格状态。",
+      "kind": "interface",
+      "name": "TableState"
+    },
+    {
+      "declaration": "export interface TableStateOptions<Row = unknown> {",
+      "description": "表格状态的初始值。",
+      "kind": "interface",
+      "name": "TableStateOptions"
+    },
+    {
+      "declaration": "export function createTableState<Row = unknown>(",
+      "description": "创建表格状态容器。",
+      "kind": "function",
+      "name": "createTableState"
+    },
+    {
+      "declaration": "export interface WebSocketEvents {",
+      "description": "WebSocket 事件（只声明本包用到的部分）。",
+      "kind": "interface",
+      "name": "WebSocketEvents"
+    },
+    {
+      "declaration": "export type WebSocketFactory = (url: string) => WebSocketEvents",
+      "description": "WebSocket 构造器（可注入，单测用假件）。",
+      "kind": "type",
+      "name": "WebSocketFactory"
+    },
+    {
+      "declaration": "export type StreamState = 'idle' | 'connecting' | 'open' | 'closed'",
+      "description": "流连接的状态。",
+      "kind": "type",
+      "name": "StreamState"
+    },
+    {
+      "declaration": "export interface StreamOptions {",
+      "description": "流连接的选项。",
+      "kind": "interface",
+      "name": "StreamOptions"
+    },
+    {
+      "declaration": "export interface StreamConnection {",
+      "description": "流连接。",
+      "kind": "interface",
+      "name": "StreamConnection"
+    },
+    {
+      "declaration": "export function createStream(options: StreamOptions): StreamConnection {",
+      "description": "创建 SSE / WebSocket 连接（带重连退避）。",
+      "kind": "function",
+      "name": "createStream"
+    },
+    {
+      "declaration": "export interface ClipboardResult {",
+      "description": "剪贴板写入结果。",
+      "kind": "interface",
+      "name": "ClipboardResult"
+    },
+    {
+      "declaration": "export interface ClipboardLike {",
+      "description": "剪贴板（可注入，单测用假件）。",
+      "kind": "interface",
+      "name": "ClipboardLike"
+    },
+    {
+      "declaration": "export async function copyToClipboard(",
+      "description": "复制文本到剪贴板。",
+      "kind": "function",
+      "name": "copyToClipboard"
     }
   ],
   "generated_by": "cargo xtask capabilities",

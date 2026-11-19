@@ -81,11 +81,15 @@ pub const ALREADY_PROVIDED: &[ProvidedCapability] = &[
     },
     ProvidedCapability {
         key: "theme",
-        summary: "@base/theme 的 defaultTheme()/mergeTheme() 提供主题 token，勿另造主题变量",
+        summary: "@base/theme 的 applyTheme()/toggleTheme() 提供 CSS 变量令牌与暗色模式，勿另造主题变量或硬编码颜色",
     },
     ProvidedCapability {
         key: "ui_token",
         summary: "@base/ui 的 toneClass()/TONES/defaultRadius() 提供色调与圆角 token，勿另造样式变量",
+    },
+    ProvidedCapability {
+        key: "ui_table_component",
+        summary: "@base/ui 的 Table 契约与 apps/shell 的 Table.svelte 提供只读表格（只接受 props，分页状态由 @base/hooks 组合传入），勿自造表格渲染",
     },
     ProvidedCapability {
         key: "schema_field_meta",
@@ -93,15 +97,19 @@ pub const ALREADY_PROVIDED: &[ProvidedCapability] = &[
     },
     ProvidedCapability {
         key: "sdk_client",
-        summary: "@base/sdk 的 createApiClient() 提供 baseUrl 规范化与 URL 拼接，勿另造 HTTP 基类",
+        summary: "@base/sdk 的 createApiClient() 提供类型安全请求、RFC 9457 错误码、token 自动刷新与幂等键注入，勿另造 HTTP 基类",
     },
     ProvidedCapability {
         key: "auth_state",
         summary: "@base/auth 的 isAuthenticated()/tenantId() 提供登录态形状，勿另造登录态模型",
     },
     ProvidedCapability {
+        key: "permission_can",
+        summary: "@base/auth 的 can()/guard() 提供权限点判定与路由守卫（权限点来自 GET /api/rbac/me/permissions），前端别自己写一套；服务端鉴权入口仍是 require_permission",
+    },
+    ProvidedCapability {
         key: "hooks_toggle",
-        summary: "@base/hooks 的 createToggle() 提供通用布尔开关状态容器，勿另造状态容器",
+        summary: "@base/hooks 的 createToggle()/createPagination()/createTableState() 提供通用状态容器，勿另造状态容器",
     },
     ProvidedCapability {
         key: "iam_auth",
@@ -119,14 +127,6 @@ pub const ALREADY_PROVIDED: &[ProvidedCapability] = &[
 
 /// 底座**尚未**提供的能力 —— 别当成已有，别照着不存在的 API 写代码。
 pub const NOT_YET_PROVIDED: &[ProvidedCapability] = &[
-    ProvidedCapability {
-        key: "ui_table_component",
-        summary: "@base/ui 尚无表格与分页组件，列表页要自己实现（REQ-012 补）",
-    },
-    ProvidedCapability {
-        key: "permission_can",
-        summary: "前端 can() 尚未落地（REQ-011 补）；服务端鉴权中间件已在 REQ-009 提供（require_permission），前端别自己写一套",
-    },
     ProvidedCapability {
         key: "http_api_layer",
         summary: "HTTP 接口层尚未就绪（REQ-011/012 补），capabilities/api.json 目前为空",

@@ -41,9 +41,11 @@
 //! 「读旧令牌 → 作废旧令牌 → 签发新令牌」在**同一个事务**里完成，
 //! 否则并发刷新会出现「同一个旧令牌签发两次」。
 
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use platform_core::RequestContext;
+use platform_core::extension::permission::PermissionProvider;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
@@ -171,9 +173,13 @@ pub struct LoginResponse {
     pub expires_in: u64,
     /// 账号信息。
     pub user: UserView,
-    /// 权限点列表。
+    /// 权限点列表（**升序、去重**；已展开通配）。
     ///
-    /// 本期恒为空 —— RBAC 属 REQ-009（`api-conventions v1` C4）。
+    /// - **登录**时由 [`PermissionProvider`] 填充 —— 与
+    ///   `GET /api/rbac/me/permissions` **同一份**数据（两个入口不得给出不同答案）；
+    /// - **未注入**实现时是**空数组**（不是 `null`、不是省略字段）——
+    ///   fail closed 的是「判定」，**不是**「登录」；
+    /// - **刷新**响应恒为空数组（本期只改登录路径 —— 见 AC-S-065）。
     pub permissions: Vec<String>,
 }
 
@@ -189,6 +195,40 @@ pub struct MfaEnrollResponse {
     pub recovery_codes: Vec<String>,
 }
 
+/// 权限点提供者的**可选**槽位。
+///
+/// # 为什么要「后设注入」
+///
+/// 依赖方向是 `platform-rbac → platform-iam`；反过来**成环**
+/// （且违反 AGENTS.md 规则 2）。所以 `platform-iam` 只认 `platform-core` 的
+/// [`PermissionProvider`] trait，**由装配层在 RBAC 就绪后注入**。
+///
+/// # 为什么是 `OnceLock`
+///
+/// 注入只发生在**启动期一次**；`OnceLock` 正好表达「一次性、可并发读、线程安全」。
+#[derive(Clone, Default)]
+struct PermissionProviderSlot(OnceLock<Arc<dyn PermissionProvider>>);
+
+impl PermissionProviderSlot {
+    /// 注入实现；**重复注入返回 `false`**（不覆盖已装好的实现）。
+    fn set(&self, provider: Arc<dyn PermissionProvider>) -> bool {
+        self.0.set(provider).is_ok()
+    }
+
+    /// 读实现；**未注入 → `None`**。
+    fn get(&self) -> Option<&Arc<dyn PermissionProvider>> {
+        self.0.get()
+    }
+}
+
+impl std::fmt::Debug for PermissionProviderSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PermissionProviderSlot")
+            .field("installed", &self.0.get().is_some())
+            .finish()
+    }
+}
+
 /// 认证与账号体系的服务。
 #[derive(Debug, Clone)]
 pub struct IamService {
@@ -196,6 +236,8 @@ pub struct IamService {
     config: IamConfig,
     keys: JwtKeySet,
     dummy_hash: DummyHash,
+    /// 权限点提供者（**可选** —— 未注入时登录响应的 `permissions` 是空数组）。
+    permission_provider: PermissionProviderSlot,
 }
 
 impl IamService {
@@ -208,7 +250,51 @@ impl IamService {
             config,
             keys,
             dummy_hash,
+            permission_provider: PermissionProviderSlot::default(),
         })
+    }
+
+    /// 注入权限点提供者（**启动期一次**）。
+    ///
+    /// # 为什么是「后设」接口
+    ///
+    /// 依赖方向是 `platform-rbac → platform-iam`；反过来成环。
+    /// 所以 `platform-iam` 只认 `platform-core` 的 [`PermissionProvider`] trait，
+    /// 由装配层（`platform-server`）在 RBAC 就绪之后注入。
+    ///
+    /// # 未注入时
+    ///
+    /// 登录**仍然成功**，响应的 `permissions` 是**空数组** ——
+    /// fail closed 的是「判定」，**不是**「登录」（design-summary §2.2）。
+    ///
+    /// 返回 `false` 表示**已经有实现**（不覆盖）。
+    pub fn set_permission_provider(&self, provider: Arc<dyn PermissionProvider>) -> bool {
+        self.permission_provider.set(provider)
+    }
+
+    /// 当前用户的有效权限点集合（**降级**：未注入 provider → 空数组）。
+    ///
+    /// # provider 读库失败怎么办
+    ///
+    /// 登录**仍然成功**，权限点集合降级为**空数组**
+    /// （fail closed 的是「判定」，不是「登录」），
+    /// 并记一条 **warn** 日志 —— 静默降级也是**静默放行**的一种
+    /// （与 D27「告警 = 静默放行的一种」同一价值观）。
+    async fn effective_permissions(&self, ctx: &RequestContext, user_id: &str) -> Vec<String> {
+        let Some(provider) = self.permission_provider.get() else {
+            return Vec::new();
+        };
+        match provider.effective_permissions(ctx, user_id).await {
+            Ok(permissions) => permissions,
+            Err(reason) => {
+                tracing::warn!(
+                    %reason,
+                    user_id,
+                    "the permission provider failed; the login response carries an empty permission set",
+                );
+                Vec::new()
+            }
+        }
     }
 
     /// 配置（只读）。
@@ -530,13 +616,16 @@ impl IamService {
         tx.commit().await.map_err(internal)?;
 
         let access_token = self.issue_access_token(&user.id, tenant, &session_id)?;
+        // 权限点集合：与 `GET /api/rbac/me/permissions` **同一份**数据
+        // （两个入口不得给出不同答案 —— 否则前端 `can()` 与后端 403 会打架）。
+        let permissions = self.effective_permissions(ctx, &user.id).await;
         Ok(LoginResponse {
             access_token,
             refresh_token,
             token_type: "Bearer".to_string(),
             expires_in: self.config.tokens.access_ttl.as_secs(),
             user: user_view(user),
-            permissions: Vec::new(),
+            permissions,
         })
     }
 
@@ -662,6 +751,8 @@ impl IamService {
             token_type: "Bearer".to_string(),
             expires_in: self.config.tokens.access_ttl.as_secs(),
             user: user_view(&user),
+            // 刷新响应**本期不带**权限点（AC-S-065 只要求登录响应带）。
+            // 客户端拿权限点走 `GET /api/rbac/me/permissions`，或用登录时的那一份。
             permissions: Vec::new(),
         })
     }

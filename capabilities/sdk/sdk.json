@@ -2,16 +2,58 @@
   "entry": "./dist/index.js",
   "exports": [
     {
-      "declaration": "export interface ApiClientOptions {",
-      "description": "SDK 占位包。",
+      "declaration": "export const CLIENT_NETWORK_ERROR = 'client.NETWORK_ERROR'",
+      "description": "@base/sdk —— 类型安全的 API 客户端（REQ-011 / AC-S-069 ~ AC-S-072）。",
+      "kind": "const",
+      "name": "CLIENT_NETWORK_ERROR"
+    },
+    {
+      "declaration": "export const CLIENT_INTERNAL_ERROR = 'client.INTERNAL_ERROR'",
+      "description": "客户端合成码：收到响应但无法解析为错误体（非 JSON / 空体 / 截断）。",
+      "kind": "const",
+      "name": "CLIENT_INTERNAL_ERROR"
+    },
+    {
+      "declaration": "export interface ApiErrorParams {",
+      "description": "API 错误的构造参数。",
       "kind": "interface",
-      "name": "ApiClientOptions"
+      "name": "ApiErrorParams"
+    },
+    {
+      "declaration": "export class ApiError extends Error {",
+      "description": "API 错误。",
+      "kind": "class",
+      "name": "ApiError"
+    },
+    {
+      "declaration": "export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH' | 'HEAD'",
+      "description": "请求方法。",
+      "kind": "type",
+      "name": "HttpMethod"
+    },
+    {
+      "declaration": "export interface RequestOptions {",
+      "description": "请求选项。",
+      "kind": "interface",
+      "name": "RequestOptions"
+    },
+    {
+      "declaration": "export type RequestOptionsWithoutTarget = Omit<RequestOptions, 'path' | 'method'>",
+      "description": "请求选项（去掉 `path` / `method` 后的快捷方式入参）。",
+      "kind": "type",
+      "name": "RequestOptionsWithoutTarget"
     },
     {
       "declaration": "export interface ApiClient {",
       "description": "API 客户端。",
       "kind": "interface",
       "name": "ApiClient"
+    },
+    {
+      "declaration": "export interface ApiClientOptions {",
+      "description": "API 客户端构造参数。",
+      "kind": "interface",
+      "name": "ApiClientOptions"
     },
     {
       "declaration": "export function createApiClient(options: ApiClientOptions): ApiClient {",

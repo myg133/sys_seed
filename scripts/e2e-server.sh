@@ -8,6 +8,9 @@
 #   - `DATABASE_URL_TEST`：**管理员**连接串（库名必须恰好 `base_test`）；
 #   - 迁移用管理员连接跑，serve 用普通角色 `base_app`（超管会绕过 RLS，
 #     `base serve` 的启动自检会直接拒绝）。
+#
+# 夹具：起服务前会跑 `scripts/seed-e2e.sh`（显式、幂等，只写 `base_test`）——
+# E2E 需要的三个账号不再依赖任何后端测试的副作用（D101）。
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -40,6 +43,9 @@ export BASE_LOG_LEVEL="${BASE_LOG_LEVEL:-warn}"
 
 echo "迁移（管理员连接）…"
 DATABASE_URL="$ADMIN_URL" cargo run -q -p platform-server --bin base -- migrate up
+
+echo "播种 E2E 夹具（显式、幂等；D101）…"
+DATABASE_URL_TEST="$ADMIN_URL" ./scripts/seed-e2e.sh
 
 echo "启动 base serve（同源，静态目录 ${BASE_STATIC_DIR}）…"
 DATABASE_URL="$APP_URL" exec cargo run -q -p platform-server --bin base -- serve

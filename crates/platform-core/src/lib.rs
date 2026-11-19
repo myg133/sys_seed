@@ -15,8 +15,8 @@ pub use context::RequestContext;
 pub use error::{CoreError, CoreResult};
 pub use extension::{
     Auditable, ConfigResolver, ConfigSource, DataScope, FlagDecision, Manifest, ModuleContext,
-    NotificationSender, PermissionChecker, PermissionRefresher, PlatformModule, Repository,
-    ResolvedConfig, ScopeFilter, WorkflowHandler,
+    NotificationSender, PermissionChecker, PermissionProvider, PermissionRefresher, PlatformModule,
+    Repository, ResolvedConfig, ScopeFilter, WorkflowHandler,
 };
 pub use log::{NOISY_TARGETS, log_filter, log_filter_ignoring_env};
 pub use problem::ProblemDetails;

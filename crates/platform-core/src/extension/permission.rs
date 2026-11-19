@@ -217,6 +217,36 @@ pub trait PermissionRefresher: Send + Sync + 'static {
     ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>;
 }
 
+/// 权限点**全集**的提供者（平台能力，不是扩展点）。
+///
+/// # 为什么不复用 [`PermissionChecker`]
+///
+/// [`PermissionChecker`] 的语义是「**判一个**权限点」
+/// （`has` / `scope` / `effective_scope` / `condition`），方法**全是同步的**。
+/// 而「列出用户拥有的**全部**权限点」要**读库**，且权限点数量随注册表增长 ——
+/// 逐个 `has()` 是 N 次判定，更根本的是**拿不到「全集」这个语义**。
+///
+/// # 为什么返回 `Pin<Box<dyn Future>>`
+///
+/// 读库是异步的。同文件的 [`PermissionRefresher`] 用的是同一套返回类型，
+/// 于是两者都能 `Arc<dyn …>` 装配（同一个 `Arc<RbacService>` 同时实现两者）。
+///
+/// # 为什么住在 `platform-core`
+///
+/// 依赖方向是 `platform-rbac → platform-iam`；反过来会**成环**
+/// （且违反 AGENTS.md 规则 2）。trait 住在公共底座里，
+/// `platform-iam`（消费方）与 `platform-rbac`（实现方）才能**互不依赖**。
+pub trait PermissionProvider: Send + Sync + 'static {
+    /// 当前用户的**有效**权限点集合（**已展开通配**，**升序且去重**）。
+    ///
+    /// 失败时返回**英文**原因（由调用方决定降级还是报错；**不得放行**）。
+    fn effective_permissions<'a>(
+        &'a self,
+        ctx: &'a RequestContext,
+        user_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<String>, String>> + Send + 'a>>;
+}
+
 /// 鉴权入口：**平台唯一的权限判定入口**。
 ///
 /// ```ignore

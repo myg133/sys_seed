@@ -22,11 +22,18 @@
 //! | `POST /api/rbac/users/{user_id}/roles` | `rbac:user-role:write` |
 //! | `DELETE /api/rbac/users/{user_id}/roles/{role_id}` | `rbac:user-role:write` |
 //! | `GET /api/rbac/permissions` | **豁免**（任何已认证用户都可读） |
+//! | `GET /api/rbac/me/permissions` | **豁免**（任何已认证用户都可读） |
 //!
 //! # 为什么注册表查询豁免
 //!
 //! 前端 `can()` 靠它判断（前端权限组件属 REQ-011，本期只保证「注册表有接口可读」）。
 //! 把它也保护起来 → 前端拿不到注册表 → 与 REQ-009 的完成定义冲突。
+//!
+//! # 为什么「当前用户的权限点」也豁免
+//!
+//! 它的用途**就是**让前端判 `can()`。若它自己需要权限点，
+//! 就会出现「要先有权限才能问有没有权限」的循环 —— 用户第一次进页面就拿不到权限点。
+//! 豁免是**唯一自洽**的选择；**要求已认证**这一条由认证中间件保证。
 //!
 //! # 错误体（契约 C6）
 //!
@@ -133,7 +140,7 @@ impl FromRequestParts<Arc<RbacState>> for Authenticated {
         parts: &mut axum::http::request::Parts,
         _state: &Arc<RbacState>,
     ) -> Result<Self, Self::Rejection> {
-        let instance = parts.uri.path().to_string();
+        let instance = original_path(&parts.extensions, parts.uri.path());
         let ctx = parts
             .extensions
             .get::<RequestContext>()
@@ -156,6 +163,23 @@ impl FromRequestParts<Arc<RbacState>> for Authenticated {
     }
 }
 
+/// 请求的**原始路径**（含 `/api/rbac` 前缀）。
+///
+/// # 为什么不能直接用 `request.uri().path()`
+///
+/// `Router::nest` 会**剥掉前缀**（axum 的 `StripPrefix` 层）——
+/// 嵌套路由里 `uri().path()` 是 `/me/permissions`，不是调用方请求的
+/// `/api/rbac/me/permissions`。错误体的 `instance` 必须是**调用方请求的路径**
+/// —— 与 `platform-core` 的鉴权入口（`require_permission`）同一口径。
+///
+/// 扩展里没有 `OriginalUri` 时（路由没有被嵌套）退回 `fallback`。
+fn original_path(extensions: &axum::http::Extensions, fallback: &str) -> String {
+    extensions
+        .get::<OriginalUri>()
+        .map(|uri| uri.0.path().to_string())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
 /// 认证中间件：验令牌 → 写入带用户身份的上下文 → 刷新判定缓存 → 注入判定器。
 ///
 /// **必须跑在 `require_permission` 之前** —— 它是路由级层的**外层**。
@@ -164,7 +188,7 @@ pub async fn authenticate(
     mut request: Request,
     next: Next,
 ) -> Response {
-    let instance = request.uri().path().to_string();
+    let instance = original_path(request.extensions(), request.uri().path());
     let mut ctx = request
         .extensions()
         .get::<RequestContext>()
@@ -181,6 +205,15 @@ pub async fn authenticate(
         Ok(verified) => verified,
         Err(error) => return rbac_problem_response(&error, &ctx, &instance),
     };
+
+    // 租户上下文（契约 C3）：**请求头优先**；请求头缺失 → 由令牌推断。
+    //
+    // ⚠️ 请求头**必须**被读到 —— 否则「请求头租户 ≠ 令牌租户 → 404」这条
+    //    根本不可达：调用方随便改一个头就能让服务端按**令牌**的租户回答，
+    //    头与实际作用域不一致时没有任何信号。
+    if let Some(tenant) = header_value(request.headers(), TENANT_HEADER) {
+        ctx = ctx.with_tenant(tenant);
+    }
 
     // 请求头租户与令牌租户不一致 → **404**（不泄露资源存在性，契约 C3）。
     match ctx.tenant_id() {
@@ -223,6 +256,19 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
     } else {
         Some(token.to_string())
     }
+}
+
+/// 租户上下文请求头（契约 C3）。
+pub const TENANT_HEADER: &str = "x-tenant-id";
+
+/// 读一个请求头（去空白；空值视为**没有**）。
+fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 /// 把 RBAC 的错误变成响应体。
@@ -380,6 +426,19 @@ pub struct RolePermissionResponse {
     pub data_scope: Option<String>,
 }
 
+/// 当前用户的有效权限点的响应体。
+///
+/// # 为什么是**对象**而不是裸数组
+///
+/// 后续要加 `dataScope`（前端可能想按范围提示用户）或 `registryVersion` 时
+/// 不必改响应形状 —— 改形状是破坏性变更。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MyPermissionsResponse {
+    /// 权限点编码（**升序、去重**；已展开通配）。
+    pub permissions: Vec<String>,
+}
+
 // ---------------------------------------------------------------------------
 // 路由
 // ---------------------------------------------------------------------------
@@ -419,12 +478,26 @@ pub fn router<S2>(state: Arc<RbacState>) -> Router<S2> {
     // 权限点注册表 —— **豁免**：任何已认证用户都可读（前端 `can()` 靠它）。
     let registry = Router::new().route("/permissions", get(list_permissions));
 
+    // 当前用户的有效权限点 —— **豁免**权限点要求（但**要求已认证**）。
+    //
+    // # 为什么豁免
+    //
+    // 这个接口的用途就是让前端判 `can()`。若它自己需要权限点，
+    // 就会出现「要先有权限才能问有没有权限」的循环 —— 用户第一次进页面
+    // 就拿不到权限点。豁免是**唯一自洽**的选择。
+    //
+    // # 不引入新权限点
+    //
+    // 因此**不需要** `require_permission` 调用点 → 不触发 C-5 扫描与 D27 启动对账。
+    let me = Router::new().route("/me/permissions", get(my_permissions));
+
     // 认证中间件（**路由级层的外面**）：验令牌 + 刷新判定缓存 + 注入判定器。
     Router::new()
         .merge(read)
         .merge(write)
         .merge(bindings)
         .merge(registry)
+        .merge(me)
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             authenticate,
@@ -672,6 +745,31 @@ async fn list_permissions(
                     condition: permission.condition,
                 })
                 .collect();
+            Json(body).into_response()
+        }
+        Err(error) => rbac_problem_response(&error, &ctx.0, uri.path()),
+    }
+}
+
+/// 读当前用户的有效权限点（**豁免**权限点要求；**要求已认证**）。
+///
+/// 数据来自 [`RbacService::effective_permissions`] —— 与 `require_permission`
+/// 的判定**同一套展开逻辑**，保证「前端 `can()` 说有」与「后端放行」一致。
+async fn my_permissions(
+    State(state): State<Arc<RbacState>>,
+    caller: Authenticated,
+    ctx: TenantCtx,
+    uri: OriginalUri,
+) -> Response {
+    match state
+        .service
+        .effective_permissions(&ctx.0, &caller.user_id)
+        .await
+    {
+        Ok(permissions) => {
+            let body = MyPermissionsResponse {
+                permissions: permissions.into_iter().collect(),
+            };
             Json(body).into_response()
         }
         Err(error) => rbac_problem_response(&error, &ctx.0, uri.path()),

@@ -26,7 +26,7 @@ use clap::{Parser, Subcommand};
 use platform_core::RequestContext;
 use platform_core::extension::expr::CompiledCondition;
 use platform_core::extension::permission::{
-    DataScope, PermissionChecker, PermissionRefresher, ScopeFilter,
+    DataScope, PermissionChecker, PermissionProvider, PermissionRefresher, ScopeFilter,
 };
 use platform_core::log_filter;
 use platform_iam::config::IamConfig;
@@ -311,6 +311,25 @@ async fn serve() -> Result<(), Failure> {
         reconcile_permissions(&config, &rbac_state).await?;
         app = app.nest("/api/rbac", platform_rbac::http::router(rbac_state.clone()));
         tracing::info!("角色与权限已启用：/api/rbac/*");
+
+        // 权限点提供者（REQ-011）：登录响应要带上**真实**的权限点集合。
+        //
+        // `platform-iam` **不能**依赖 `platform-rbac`（依赖方向是 rbac → iam，
+        // 反过来成环）—— 所以 IAM 只认 `platform-core` 的 `PermissionProvider` trait，
+        // 由**装配层**在 RBAC 就绪之后注入。
+        //
+        // 注入的是 `RbacService` 本身 → 登录响应与 `GET /api/rbac/me/permissions`
+        // 走**同一套**展开逻辑（两套逻辑分叉 = 前端说有、后端 403）。
+        //
+        // 未注入时登录**仍然成功**（`permissions` 是空数组）——
+        // fail closed 的是「判定」，不是「登录」。
+        let permission_provider: Arc<dyn PermissionProvider> = rbac_state.service.clone();
+        if !iam_state
+            .service
+            .set_permission_provider(permission_provider)
+        {
+            tracing::warn!("权限点提供者已经注入过：保留先装好的实现");
+        }
 
         // 配置接口的令牌校验与权限判定复用同一套 IAM / RBAC 实现：
         // 令牌主体来自 IAM，权限点判定与缓存刷新来自 `RbacChecker`

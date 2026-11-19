@@ -5,21 +5,23 @@
     "config": "ConfigScope/ConfigResolver（platform-capability，不是扩展点）/AppConfig + manifest 的 config 段提供三层配置与 Feature Flag（4 个权限点 config:entry:write / config:flag:write / config:platform:write / config:platform:read），勿自建配置读取",
     "contract_suite": "#[platform_module_contract] 自动生成 C-1~C-5 五项契约测试（C-5：已登记权限点必须有鉴权调用点、鉴权入口全仓库唯一），勿自写重复的契约检查",
     "error_code_i18n": "@base/i18n 的 translate()/hasMessage() 提供错误码到文案映射，勿在后端拼中文句子",
-    "hooks_toggle": "@base/hooks 的 createToggle() 提供通用布尔开关状态容器，勿另造状态容器",
+    "hooks_toggle": "@base/hooks 的 createToggle()/createPagination()/createTableState() 提供通用状态容器，勿另造状态容器",
     "iam_auth": "platform-iam 提供 /api/iam/* 认证接口（本地账号 + JWT access / 不透明 refresh + Argon2id + TOTP）与 /.well-known/jwks.json；业务模块要鉴权请用这些接口，勿自造认证",
     "list_query": "ListQuery/SortSpec/FilterSpec 已定义游标分页（limit 默认 20、上限 200）与过滤算子白名单，勿自造分页参数",
     "manifest": "Manifest 解析与字段校验 + capabilities/schema/manifest.schema.json 已提供，勿手写 manifest 校验",
     "module_registry": "register_platform_module! + discover()/discover_enabled() 做编译期模块注册，勿自建插件或动态加载",
     "notification_sender": "NotificationSender + NotificationMessage/DeliveryResult 提供通知投递接缝，勿自建消息中心",
     "org_structure": "platform-org 提供 /api/org/* 组织架构接口（组织树用邻接表 + 递归 CTE、用户↔节点成员关系、岗位与汇报关系）、SCIM 2.0 出站与 LDAP/AD 入站、字段级同步冲突队列与人工裁决；数据范围的输入是它，勿自造组织树",
+    "permission_can": "@base/auth 的 can()/guard() 提供权限点判定与路由守卫（权限点来自 GET /api/rbac/me/permissions），前端别自己写一套；服务端鉴权入口仍是 require_permission",
     "rbac_authorization": "platform-core 的 require_permission 是平台唯一鉴权入口，platform-rbac 提供 /api/rbac/* 角色授权接口、5 种数据范围与 DB epoch 主动失效；业务模块用 require_permission + TenantQuery::with_scope，勿自写鉴权或数据范围",
     "repository": "Repository<T> 提供 find/list/insert/update/delete，业务模块实现它即可，勿另造 DAO 基类或数据访问框架",
     "request_context": "RequestContext 携带租户/空间/追踪 ID；Repository 每个方法强制传 ctx，租户隔离是编译期保证，勿自建租户上下文",
     "schema_field_meta": "@base/schema 的 FieldMeta/describeField()/findField() 提供字段元数据形状，勿另造元数据结构",
-    "sdk_client": "@base/sdk 的 createApiClient() 提供 baseUrl 规范化与 URL 拼接，勿另造 HTTP 基类",
+    "sdk_client": "@base/sdk 的 createApiClient() 提供类型安全请求、RFC 9457 错误码、token 自动刷新与幂等键注入，勿另造 HTTP 基类",
     "tenant_scoped_db": "platform-db 的 TenantDb 提供带 RequestContext 的租户作用域数据访问（事务内 SET LOCAL app.tenant_id + RLS 兜底），公开 API 拿不到裸连接，勿自建连接池或直连数据库",
-    "theme": "@base/theme 的 defaultTheme()/mergeTheme() 提供主题 token，勿另造主题变量",
+    "theme": "@base/theme 的 applyTheme()/toggleTheme() 提供 CSS 变量令牌与暗色模式，勿另造主题变量或硬编码颜色",
     "transaction_boundary": "TransactionalWrite + WriteBoundary 提供写边界声明，跨表写必须显式开平台事务（C-4 判定依据）",
+    "ui_table_component": "@base/ui 的 Table 契约与 apps/shell 的 Table.svelte 提供只读表格（只接受 props，分页状态由 @base/hooks 组合传入），勿自造表格渲染",
     "ui_token": "@base/ui 的 toneClass()/TONES/defaultRadius() 提供色调与圆角 token，勿另造样式变量",
     "workflow_handler": "WorkflowHandler + TransitionEvent 提供工作流接入接缝，勿自建流程引擎"
   },
@@ -36,10 +38,10 @@
     "schema/manifest.schema.json": {},
     "schema/metadata.schema.json": {},
     "sdk/auth.json": {
-      "exports": 4
+      "exports": 18
     },
     "sdk/hooks.json": {
-      "exports": 2
+      "exports": 18
     },
     "sdk/i18n.json": {
       "exports": 3
@@ -48,13 +50,13 @@
       "exports": 4
     },
     "sdk/sdk.json": {
-      "exports": 3
+      "exports": 10
     },
     "sdk/theme.json": {
-      "exports": 3
+      "exports": 14
     },
     "sdk/ui.json": {
-      "exports": 5
+      "exports": 32
     }
   },
   "entry_points": {
@@ -71,8 +73,6 @@
     "crud_scaffolding": "平台没有通用 CRUD/分页脚手架（模块的仓储要自己实现），但数据访问必须走 platform-db 的租户作用域入口",
     "http_api_layer": "HTTP 接口层尚未就绪（REQ-011/012 补），capabilities/api.json 目前为空",
     "notification_dispatch": "通知只到 trait，通道投递与模板待 REQ-015",
-    "permission_can": "前端 can() 尚未落地（REQ-011 补）；服务端鉴权中间件已在 REQ-009 提供（require_permission），前端别自己写一套",
-    "ui_table_component": "@base/ui 尚无表格与分页组件，列表页要自己实现（REQ-012 补）",
     "workflow_engine": "工作流只到 trait，流程定义与实例待 REQ-017"
   },
   "platform": {
@@ -81,5 +81,5 @@
     ],
     "version": "0.1.0"
   },
-  "source_fingerprint": "fnv1a64:59a20fe818fac5f5"
+  "source_fingerprint": "fnv1a64:10d1d5d18d8533a7"
 }

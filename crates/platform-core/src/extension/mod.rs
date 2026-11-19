@@ -60,8 +60,8 @@ pub use manifest::{
 };
 pub use notification::{DeliveryResult, NotificationMessage, NotificationSender};
 pub use permission::{
-    DataScope, PermissionChecker, PermissionLayer, PermissionRefresher, PermissionService,
-    ScopeFilter, require_permission,
+    DataScope, PermissionChecker, PermissionLayer, PermissionProvider, PermissionRefresher,
+    PermissionService, ScopeFilter, require_permission,
 };
 pub use platform_module::{ModuleContext, PlatformModule};
 pub use registry::{ModuleRegistration, discover, discover_enabled};

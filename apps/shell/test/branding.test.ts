@@ -4,15 +4,18 @@ import { BRANDING_ENDPOINT, applyBranding, fetchBranding } from '../src/lib/bran
 
 function fakeDocument() {
   const properties = new Map<string, string>();
+  const attributes = new Map<string, string>();
   const doc = {
     title: '',
     documentElement: {
       style: {
         setProperty: (name: string, value: string) => properties.set(name, value),
       },
+      setAttribute: (name: string, value: string) => attributes.set(name, value),
+      getAttribute: (name: string) => attributes.get(name) ?? null,
     },
   } as unknown as Document;
-  return { doc, properties };
+  return { doc, properties, attributes };
 }
 
 describe('品牌配置', () => {
@@ -23,26 +26,33 @@ describe('品牌配置', () => {
     expect(doc.title).toBe('运行时标题');
   });
 
-  it('合法主色写进 CSS 变量，非法值不写', () => {
+  it('合法主色写进 CSS 变量', () => {
     const { doc, properties } = fakeDocument();
     const applied = applyBranding({ title: 'x', primaryColor: '#123456' }, doc);
     expect(applied.primaryColor).toBe('#123456');
     expect(properties.get('--base-primary')).toBe('#123456');
+  });
 
-    const { doc: second, properties: secondProperties } = fakeDocument();
+  it('非法主色由 @base/theme 写中性兜底 currentColor', () => {
+    // REQ-011 起，shell 的品牌实现**委托** `@base/theme`：
+    // 兜底值由主题包**自己**写到根元素上（不依赖宿主样式表）——
+    // 否则宿主没有 `:root{--base-primary:currentColor}` 时读到的是空串。
+    const { doc, properties } = fakeDocument();
     const rejected = applyBranding(
       { title: 'x', primaryColor: 'url(https://evil.example/x)' },
-      second,
+      doc,
     );
-    expect(rejected.primaryColor).toBeUndefined();
-    expect(secondProperties.has('--base-primary')).toBe(false);
+    expect(rejected.primaryColor).toBe('currentColor');
+    expect(properties.get('--base-primary')).toBe('currentColor');
   });
 
   it('缺字段时留空，不回落任何旧品牌值', () => {
-    const { doc } = fakeDocument();
+    const { doc, properties } = fakeDocument();
     const applied = applyBranding({}, doc);
     expect(applied.title).toBe('');
     expect(doc.title).toBe('');
+    // 主色同样走中性兜底。
+    expect(properties.get('--base-primary')).toBe('currentColor');
   });
 
   it('从同源相对路径读取品牌配置', async () => {
