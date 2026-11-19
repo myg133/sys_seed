@@ -172,8 +172,10 @@ export function createSessionStore(storage?: KeyValueStorage | null): SessionSto
       return target !== null;
     },
     setTenant(tenantId: string): void {
+      // **不**落盘：这是「登录尝试用」的租户（登录请求本身要带 `x-tenant-id`）。
+      // 登录成功后才由 `setTokens` 连同令牌一起持久化；登录失败时不能覆盖
+      // 已建立会话的租户（REQ-011 recheck2 §4.2：换租户 + 错密码会把用户踢下线）。
       state = { ...state, tenantId };
-      persist();
     },
     setTokens(tokens): void {
       state = {

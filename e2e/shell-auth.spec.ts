@@ -130,6 +130,40 @@ test('租户为空 → 给出提示且不发登录请求', async ({ page }) => {
   expect(pathOf(page)).toBe('/login');
 });
 
+test('已登录时换租户 + 错密码：不覆盖已持久化会话的租户（recheck2 §4.2）', async ({ page }) => {
+  await login(page, 'u-perm-read@example.com');
+  const before = JSON.parse(
+    (await page.evaluate((key) => window.sessionStorage.getItem(key), SESSION_KEY)) ?? '{}',
+  ) as { accessToken?: string; tenantId?: string };
+
+  // 去登录页，填**另一个租户** + 错密码：只是一次失败的尝试，不是要切租户。
+  await page.goto('/login');
+  await page.getByLabel('租户').fill('tenant-b');
+  await page.getByLabel('用户名').fill('u-perm-read@example.com');
+  await page.getByLabel('密码').fill('definitely-the-wrong-password');
+  await page.getByRole('button', { name: '登录' }).click();
+  await expect(page.getByText('用户名或密码不正确')).toBeVisible();
+
+  // 持久化的会话逐字段不变（旧缺陷：tenantId 被改成 tenant-b → 重载后 404 → 落登录页）。
+  const after = JSON.parse(
+    (await page.evaluate((key) => window.sessionStorage.getItem(key), SESSION_KEY)) ?? '{}',
+  ) as { accessToken?: string; tenantId?: string };
+  expect(after.tenantId).toBe(TENANT);
+  expect(after.accessToken).toBe(before.accessToken);
+
+  // 整页重载：恢复会话的权限点请求必须是 200（旧缺陷这里是跨租户头带来的 404）。
+  const permissionsResponse = page.waitForResponse((response) =>
+    new URL(response.url()).pathname.endsWith('/api/rbac/me/permissions'),
+  );
+  await page.reload();
+  expect((await permissionsResponse).status()).toBe(200);
+
+  // 会话仍在：换到首页不需要重新登录。
+  await page.goto('/');
+  await expect(page.getByText('已就绪')).toBeVisible();
+  expect(pathOf(page)).toBe('/');
+});
+
 test('只读用户直接敲 /admin/roles → 403 页，目标接口不被请求（重载后仍 403）', async ({ page }) => {
   await login(page, 'u-perm-read@example.com');
   // 先整页重载：确认会话（令牌 + 租户）跨重载存活，再走深链。

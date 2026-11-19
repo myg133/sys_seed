@@ -29,6 +29,12 @@
 # 用户 / 角色 / 授权 / 绑定全部 `ON CONFLICT` 收敛；用户已存在时**修好**
 # 登录所需的字段（邮箱单域名、密码、账号状态、失败计数 / 锁定），
 # 并清掉该租户的失败流水（否则残留的限流计数会让播种后的登录仍 401）。
+#
+# ⚠️ 同名既有行的 **id 可能不是**下面的固定值（例如该用户名早先由 IAM 注册接口 /
+# 手工建过）：upsert 不修改它的 id，因此**绑定与核对一律用查出来的实际 id**
+# （写死 `e2e-user-perm-*` 会触发 `platform_user_role` 的外键违约）。
+# 也不改成 `DO UPDATE SET id = EXCLUDED.id` —— 外键（`platform_user_role` 之外的
+# `user_org` / `user_position` / `external_identity`）没有 `ON UPDATE CASCADE`。
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -115,7 +121,8 @@ E2E_PASSWORD_PHC='$argon2id$v=19$m=16384,t=2,p=1$ZTJlLWZpeHR1cmUtc2FsdC0wMDAx$uN
 # | u-perm-none@example.com  | （无）                              | fail closed |
 #
 # id 用固定值（不是随机 uuid）：重复执行时能精确命中同一行，
-# 也让「用户数不翻倍」这件事一眼可查。
+# 也让「用户数不翻倍」这件事一眼可查。**同名既有行除外** —— 冲突时沿用它的 id
+# （见文件头的说明），所以下面的绑定 / 核对都按实际 id 查，不写死这些常量。
 echo "播种 E2E 夹具（tenant-a，管理员连接）…"
 run_sql -v phc="$E2E_PASSWORD_PHC" <<'SQL'
 BEGIN;
@@ -157,15 +164,25 @@ VALUES
     ('tenant-a', 'e2e-role-write', 'rbac:role:write', NULL)
 ON CONFLICT (tenant_id, role_id, permission_code) DO NOTHING;
 
--- 4) 绑定：同样先清后写，保证「u-perm-none 一定没有角色」。
+-- 4) 绑定：**用查出来的实际 id**（第 1 步的 upsert 只把同名既有行「修好登录字段」，
+--    不改它的 id —— 该用户名可能早已由 IAM 注册接口 / 手工建过），
+--    同样先清后写，保证「u-perm-none 一定没有角色」。
 DELETE FROM platform_user_role
  WHERE tenant_id = 'tenant-a'
-   AND user_id IN ('e2e-user-perm-read', 'e2e-user-perm-write', 'e2e-user-perm-none');
+   AND user_id IN (
+       SELECT id FROM platform_iam_user
+        WHERE tenant_id = 'tenant-a'
+          AND username IN ('u-perm-read@example.com', 'u-perm-write@example.com', 'u-perm-none@example.com')
+   );
 
 INSERT INTO platform_user_role (tenant_id, user_id, role_id)
-VALUES
-    ('tenant-a', 'e2e-user-perm-read',  'e2e-role-read'),
-    ('tenant-a', 'e2e-user-perm-write', 'e2e-role-write')
+SELECT 'tenant-a', u.id, r.role_id
+  FROM platform_iam_user u
+  JOIN (VALUES
+        ('u-perm-read@example.com',  'e2e-role-read'),
+        ('u-perm-write@example.com', 'e2e-role-write')
+       ) AS r(username, role_id) ON r.username = u.username
+ WHERE u.tenant_id = 'tenant-a'
 ON CONFLICT (tenant_id, user_id, role_id) DO NOTHING;
 
 -- 5) 权限缓存 epoch +1：任何授权 / 绑定写操作都要打失效信号。

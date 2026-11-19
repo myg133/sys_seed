@@ -116,6 +116,21 @@ describe('会话持久化（D99）', () => {
     expect(createSessionStore(storage).state).toEqual({});
   });
 
+  it('setTenant 只改内存、不落盘（登录尝试的租户不能覆盖已持久化会话）', () => {
+    const { storage, map } = memoryStorage();
+    const store = createSessionStore(storage);
+    store.setTenant('tenant-a');
+    store.setTokens({ accessToken: 'access-1', refreshToken: 'refresh-1' });
+
+    // 已登录用户去登录页换成另一个租户（可能只是误填）：内存跟着走，磁盘不动。
+    store.setTenant('tenant-b');
+
+    expect(store.state.tenantId).toBe('tenant-b');
+    // 持久化的仍是**已确认会话**的租户；登录成功后由 setTokens 一并改写。
+    expect(JSON.parse(map.get(SESSION_STORAGE_KEY) ?? '{}').tenantId).toBe('tenant-a');
+    expect(createSessionStore(storage).state.tenantId).toBe('tenant-a');
+  });
+
   it('不传存储时**默认**用 globalThis.sessionStorage（两次构造之间会话保留）', () => {
     const { storage } = memoryStorage();
     const original = Object.getOwnPropertyDescriptor(globalThis, 'sessionStorage');

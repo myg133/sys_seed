@@ -173,9 +173,21 @@ export function createAppApi(options: AppApiOptions = {}): AppApi {
         throw new Error(TENANT_REQUIRED);
       }
       // 先绑租户（登录请求本身就要带 `x-tenant-id`，AC-S-072 步骤 4）。
+      // ⚠️ 这是**尝试用**的租户：只进内存，落盘由登录成功后的 `setTokens` 完成
+      // （`session.setTenant` 不 persist）—— 否则登录失败会覆盖已持久化会话的租户。
+      const previousTenant = session.state.tenantId;
       session.setTenant(tenantId);
       client.setContext({ tenantId });
-      await store.login(credentials.username, credentials.password);
+      try {
+        await store.login(credentials.username, credentials.password);
+      } catch (error) {
+        // 登录失败：回滚内存里的租户，免得同页后续请求 / 刷新带错 `x-tenant-id`。
+        if (previousTenant !== undefined) {
+          session.setTenant(previousTenant);
+          client.setContext({ tenantId: previousTenant });
+        }
+        throw error;
+      }
       current = store.state;
     },
 
