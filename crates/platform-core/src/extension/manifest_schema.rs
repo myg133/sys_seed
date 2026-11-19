@@ -85,6 +85,60 @@ pub const MANIFEST_JSON_SCHEMA: &str = r##"{
         },
         "column": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "default": "tenant_id" }
       }
+    },
+    "schema": {
+      "type": "object",
+      "description": "实体元数据：前端据此零代码渲染（REQ-012）。键是实体键。",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["label", "fields"],
+        "additionalProperties": false,
+        "properties": {
+          "label": { "type": "string", "minLength": 1, "pattern": "\\S" },
+          "api": {
+            "type": "object",
+            "description": "数据接口地址（D102）。list / create 必填，路径必须以 /api/ 开头。",
+            "additionalProperties": false,
+            "properties": {
+              "list":   { "type": "string", "pattern": "^/api/" },
+              "create": { "type": "string", "pattern": "^/api/" },
+              "update": { "type": "string", "pattern": "^/api/" },
+              "delete": { "type": "string", "pattern": "^/api/" }
+            }
+          },
+          "fields": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "required": ["key", "label", "type"],
+              "additionalProperties": false,
+              "properties": {
+                "key":   { "type": "string", "pattern": "^[a-z][a-zA-Z0-9]*$" },
+                "label": { "type": "string", "minLength": 1, "pattern": "\\S" },
+                "type":  { "enum": ["text", "number", "boolean", "date", "reference"] },
+                "required":   { "type": "boolean" },
+                "permission": { "type": "string", "pattern": "^[a-z][a-z0-9-]*:[a-z][a-z0-9-]*:[a-z][a-z0-9-]*$" },
+                "readonly":   { "type": "boolean" },
+                "minLength":  { "type": "integer", "minimum": 0 },
+                "maxLength":  { "type": "integer", "minimum": 0 },
+                "pattern":    { "type": "string" },
+                "min":        { "type": "number" },
+                "max":        { "type": "number" },
+                "reference": {
+                  "type": "object",
+                  "required": ["module", "entity"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "module": { "type": "string", "pattern": "^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$" },
+                    "entity": { "type": "string", "pattern": "^[a-z][a-zA-Z0-9]*$" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 }"##;

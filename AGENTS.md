@@ -178,7 +178,7 @@ bun run dev
 ## 已有能力
 
 **先查 `capabilities/index.json`，别重写。** 下表与索引的 `already_provided` 段
-**内容完全一致**（19 条，key 与说明逐条相同）；**行的顺序不同** ——
+**内容完全一致**（27 条，key 与说明逐条相同）；**行的顺序不同** ——
 下表按「后端接缝 → 前端包」的语义序，索引按字典序输出。
 机器守卫 `cargo test -p xtask` 的 `agents_doc_matches_catalog` 比对的是下表与能力目录
 （同序），不覆盖索引的排序。
@@ -190,8 +190,10 @@ bun run dev
 | `tenant_scoped_db` | platform-db 的 TenantDb 提供带 RequestContext 的租户作用域数据访问（事务内 SET LOCAL app.tenant_id + RLS 兜底），公开 API 拿不到裸连接，勿自建连接池或直连数据库 |
 | `list_query` | ListQuery/SortSpec/FilterSpec 已定义游标分页（limit 默认 20、上限 200）与过滤算子白名单，勿自造分页参数 |
 | `module_registry` | register_platform_module! + discover()/discover_enabled() 做编译期模块注册，勿自建插件或动态加载 |
-| `manifest` | Manifest 解析与字段校验 + capabilities/schema/manifest.schema.json 已提供，勿手写 manifest 校验 |
-| `contract_suite` | #[platform_module_contract] 自动生成 C-1~C-5 五项契约测试（C-5：已登记权限点必须有鉴权调用点、鉴权入口全仓库唯一），勿自写重复的契约检查 |
+| `manifest` | Manifest 解析与字段校验（含 schema 实体元数据段：两阶段校验、字段类型只有 text/number/boolean/date/reference）+ capabilities/schema/manifest.schema.json 与 schema/entity.schema.json 已提供，勿手写 manifest 校验 |
+| `contract_suite` | #[platform_module_contract] 自动生成 C-1~C-6 六项契约测试（C-5：已登记权限点必须有鉴权调用点；C-6：声明了字段级权限的模块必须有 SchemaProjector::project 调用点），勿自写重复的契约检查 |
+| `schema_metadata` | platform-schema 提供 GET /api/schema/<module>/<entity> 元数据接口（已认证即可读；无权字段在元数据里就被剔除，不是 hidden 标记），前端据此渲染，勿自造元数据接口或另立形状 |
+| `schema_projector` | SchemaProjector::project 是字段级权限的唯一序列化入口（白名单语义：元数据未声明的字段默认不输出，列表要逐条投影、信封不动），返回实体的 handler 必须经它，勿直接 Json(entity) |
 | `audit_declaration` | Auditable + AuditEventSpec 提供审计事件声明面，平台据此自动埋点，勿自建审计表 |
 | `notification_sender` | NotificationSender + NotificationMessage/DeliveryResult 提供通知投递接缝，勿自建消息中心 |
 | `workflow_handler` | WorkflowHandler + TransitionEvent 提供工作流接入接缝，勿自建流程引擎 |
@@ -212,7 +214,7 @@ bun run dev
 
 ## 尚未提供
 
-**别当成已有。** 下表与索引的 `not_yet_provided` 段**内容完全一致**（7 条，
+**别当成已有。** 下表与索引的 `not_yet_provided` 段**内容完全一致**（5 条，
 key 与说明逐条相同）；行的顺序同样与索引不同（语义序 vs 字典序）。
 
 | 能力 | 说明 |

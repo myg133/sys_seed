@@ -21,6 +21,8 @@
 //! `platform-db` 只暴露**带租户上下文**的入口，拿不到裸连接 ——
 //! 所以业务模块绕不过租户条件。
 
+pub mod demo_item;
+pub mod demo_item_http;
 pub mod entity;
 pub mod http;
 pub mod permission;
@@ -29,8 +31,15 @@ pub mod scope_item;
 pub mod service;
 pub mod tenant_repository;
 
+use std::path::Path;
+use std::sync::Arc;
+
 use anyhow::Result;
+use axum::Router;
 use platform_core::extension::platform_module::{ModuleContext, PlatformModule};
+use platform_db::{DbOptions, TenantDb};
+
+use crate::http::SandboxState;
 
 /// 沙箱模块实现。
 #[derive(Debug, Clone, Copy, Default)]
@@ -62,6 +71,25 @@ impl PlatformModule for SandboxModule {
     fn enabled(&self) -> bool {
         true
     }
+}
+
+/// 把沙箱模块的 HTTP 路由装配起来（REQ-012 D103）。
+///
+/// 平台在启动时调用它并 `nest("/api/sandbox", ...)` —— 沙箱不再是「只在测试里存在
+/// 的参考实现」，而是服务里**真能调**的活样例。
+///
+/// # 为什么要传 `manifest_root`
+///
+/// `demoItem` 的字段级权限判定要用 manifest 里的 `schema` 段；元数据接口
+/// （`platform-schema`）读的也是同一份文件。传**同一个根**保证单一来源 ——
+/// 模块自己另存一份元数据就会分叉（元数据说可见、数据却剔掉）。
+pub async fn mount<S2>(database_url: &str, manifest_root: &Path) -> Result<Router<S2>> {
+    // 数据访问走 `platform-db` 的租户作用域入口（**不得**直连池）。
+    let db = TenantDb::connect(database_url, DbOptions::default())
+        .await
+        .map_err(|error| anyhow::anyhow!("the sandbox database connection failed: {error}"))?;
+    let state = Arc::new(SandboxState::from_manifest(db, manifest_root)?);
+    Ok(crate::http::router::<S2>(state))
 }
 
 /// 沙箱模块实例（编译期注册用）。

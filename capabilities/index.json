@@ -3,12 +3,12 @@
     "audit_declaration": "Auditable + AuditEventSpec 提供审计事件声明面，平台据此自动埋点，勿自建审计表",
     "auth_state": "@base/auth 的 isAuthenticated()/tenantId() 提供登录态形状，勿另造登录态模型",
     "config": "ConfigScope/ConfigResolver（platform-capability，不是扩展点）/AppConfig + manifest 的 config 段提供三层配置与 Feature Flag（4 个权限点 config:entry:write / config:flag:write / config:platform:write / config:platform:read），勿自建配置读取",
-    "contract_suite": "#[platform_module_contract] 自动生成 C-1~C-5 五项契约测试（C-5：已登记权限点必须有鉴权调用点、鉴权入口全仓库唯一），勿自写重复的契约检查",
+    "contract_suite": "#[platform_module_contract] 自动生成 C-1~C-6 六项契约测试（C-5：已登记权限点必须有鉴权调用点；C-6：声明了字段级权限的模块必须有 SchemaProjector::project 调用点），勿自写重复的契约检查",
     "error_code_i18n": "@base/i18n 的 translate()/hasMessage() 提供错误码到文案映射，勿在后端拼中文句子",
     "hooks_toggle": "@base/hooks 的 createToggle()/createPagination()/createTableState() 提供通用状态容器，勿另造状态容器",
     "iam_auth": "platform-iam 提供 /api/iam/* 认证接口（本地账号 + JWT access / 不透明 refresh + Argon2id + TOTP）与 /.well-known/jwks.json；业务模块要鉴权请用这些接口，勿自造认证",
     "list_query": "ListQuery/SortSpec/FilterSpec 已定义游标分页（limit 默认 20、上限 200）与过滤算子白名单，勿自造分页参数",
-    "manifest": "Manifest 解析与字段校验 + capabilities/schema/manifest.schema.json 已提供，勿手写 manifest 校验",
+    "manifest": "Manifest 解析与字段校验（含 schema 实体元数据段：两阶段校验、字段类型只有 text/number/boolean/date/reference）+ capabilities/schema/manifest.schema.json 与 schema/entity.schema.json 已提供，勿手写 manifest 校验",
     "module_registry": "register_platform_module! + discover()/discover_enabled() 做编译期模块注册，勿自建插件或动态加载",
     "notification_sender": "NotificationSender + NotificationMessage/DeliveryResult 提供通知投递接缝，勿自建消息中心",
     "org_structure": "platform-org 提供 /api/org/* 组织架构接口（组织树用邻接表 + 递归 CTE、用户↔节点成员关系、岗位与汇报关系）、SCIM 2.0 出站与 LDAP/AD 入站、字段级同步冲突队列与人工裁决；数据范围的输入是它，勿自造组织树",
@@ -17,6 +17,8 @@
     "repository": "Repository<T> 提供 find/list/insert/update/delete，业务模块实现它即可，勿另造 DAO 基类或数据访问框架",
     "request_context": "RequestContext 携带租户/空间/追踪 ID；Repository 每个方法强制传 ctx，租户隔离是编译期保证，勿自建租户上下文",
     "schema_field_meta": "@base/schema 的 FieldMeta/describeField()/findField() 提供字段元数据形状，勿另造元数据结构",
+    "schema_metadata": "platform-schema 提供 GET /api/schema/<module>/<entity> 元数据接口（已认证即可读；无权字段在元数据里就被剔除，不是 hidden 标记），前端据此渲染，勿自造元数据接口或另立形状",
+    "schema_projector": "SchemaProjector::project 是字段级权限的唯一序列化入口（白名单语义：元数据未声明的字段默认不输出，列表要逐条投影、信封不动），返回实体的 handler 必须经它，勿直接 Json(entity)",
     "sdk_client": "@base/sdk 的 createApiClient() 提供类型安全请求、RFC 9457 错误码、token 自动刷新与幂等键注入，勿另造 HTTP 基类",
     "tenant_scoped_db": "platform-db 的 TenantDb 提供带 RequestContext 的租户作用域数据访问（事务内 SET LOCAL app.tenant_id + RLS 兜底），公开 API 拿不到裸连接，勿自建连接池或直连数据库",
     "theme": "@base/theme 的 applyTheme()/toggleTheme() 提供 CSS 变量令牌与暗色模式，勿另造主题变量或硬编码颜色",
@@ -33,8 +35,9 @@
       "traits": 5
     },
     "permissions.json": {
-      "total": 22
+      "total": 23
     },
+    "schema/entity.schema.json": {},
     "schema/manifest.schema.json": {},
     "schema/metadata.schema.json": {},
     "sdk/auth.json": {
@@ -47,7 +50,7 @@
       "exports": 3
     },
     "sdk/schema.json": {
-      "exports": 4
+      "exports": 25
     },
     "sdk/sdk.json": {
       "exports": 10
@@ -81,5 +84,5 @@
     ],
     "version": "0.1.0"
   },
-  "source_fingerprint": "fnv1a64:10d1d5d18d8533a7"
+  "source_fingerprint": "fnv1a64:d2f4d28a346f2e56"
 }

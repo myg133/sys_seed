@@ -28,6 +28,11 @@ platform-org.workspace = true
 platform-rbac.workspace = true
 # 配置、品牌与 Feature Flag（REQ-010）：/api/config/* + /api/feature-flags/*
 platform-config.workspace = true
+# 元数据读取接口（REQ-012）：/api/schema/<module>/<entity>
+platform-schema.workspace = true
+# 业务模块装配（REQ-012 D103）：编译期注册的模块必须在**装配层**被链接进来，
+# 否则 inventory 里没有它 —— 只在测试里存在 = 服务里 404。
+sandbox.workspace = true
 # 部署期数据库客户端：迁移 + 健康检查；不承担业务数据访问
 sqlx.workspace = true
 

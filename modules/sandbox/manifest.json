@@ -6,6 +6,7 @@
   "permissions": [
     { "code": "sandbox:demo:read", "name": "查看沙箱示例", "type": "menu" },
     { "code": "sandbox:demo:write", "name": "编辑沙箱示例", "type": "button" },
+    { "code": "sandbox:demo:secret", "name": "查看示例内部备注", "type": "field" },
     { "code": "sandbox:scope-item:read", "name": "查看数据范围示例", "type": "button" },
     {
       "code": "sandbox:scope-item:approve",
@@ -18,10 +19,40 @@
   "menus": [{ "label": "沙箱", "icon": "flask", "route": "/sandbox", "perm": "sandbox:demo:read" }],
   "dependencies": [],
   "tenantScoped": {
-    "tables": ["sandbox_tenant_item", "sandbox_scope_item"],
+    "tables": ["sandbox_tenant_item", "sandbox_scope_item", "sandbox_demo_item"],
     "column": "tenant_id"
   },
   "config": {
     "pageSize": { "type": "number", "default": 20, "scope": "tenant", "label": "每页条数" }
+  },
+  "schema": {
+    "demoItem": {
+      "label": "示例条目",
+      "api": {
+        "list": "/api/sandbox/demo-items",
+        "create": "/api/sandbox/demo-items",
+        "update": "/api/sandbox/demo-items/{id}",
+        "delete": "/api/sandbox/demo-items/{id}"
+      },
+      "fields": [
+        { "key": "id", "label": "ID", "type": "text", "readonly": true },
+        { "key": "title", "label": "标题", "type": "text", "required": true, "maxLength": 200 },
+        { "key": "amount", "label": "金额", "type": "number", "min": 0 },
+        { "key": "paid", "label": "已付款", "type": "boolean" },
+        { "key": "dueAt", "label": "到期日", "type": "date" },
+        {
+          "key": "ownerId",
+          "label": "负责人",
+          "type": "reference",
+          "reference": { "module": "sandbox", "entity": "demoItem" }
+        },
+        {
+          "key": "secret",
+          "label": "内部备注",
+          "type": "text",
+          "permission": "sandbox:demo:secret"
+        }
+      ]
+    }
   }
 }

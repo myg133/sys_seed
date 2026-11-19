@@ -14,6 +14,7 @@
 //! | `extension-points.json` | 解析 `crates/platform-core/src/extension/` 的 trait 声明 |
 //! | `schema/manifest.schema.json` | `platform-core` 内置的 manifest Schema 常量 |
 //! | `schema/metadata.schema.json` | `packages/schema/src/index.ts` 的字段类型枚举 |
+//! | `schema/entity.schema.json` | `platform-core` 的**实体**元数据（`EntitySchema` + 字段类型枚举） |
 //! | `sdk/<package>.json` | 各 `packages/*/package.json` + `src/index.ts` 的导出清单 |
 //! | `api.json` | HTTP 层未就绪，占位并注明补齐需求 |
 //!
@@ -62,6 +63,7 @@ pub fn generate(root: &Path) -> Result<GeneratedFiles> {
         "schema/metadata.schema.json".into(),
         metadata_schema_json(root)?,
     );
+    files.insert("schema/entity.schema.json".into(), entity_schema_json());
     for (name, content) in sdk_files(root)? {
         files.insert(name, content);
     }
@@ -367,6 +369,81 @@ fn metadata_schema_json(root: &Path) -> Result<String> {
             "required": { "type": "boolean", "default": false },
         },
     })))
+}
+
+/// **实体**元数据的 JSON Schema（`manifest.json` 的 `schema.<entity>`）。
+///
+/// # 与 `schema/metadata.schema.json` 的区别
+///
+/// | 产物 | 粒度 |
+/// |------|------|
+/// | `schema/metadata.schema.json` | **字段**（`@base/schema` 的 `FieldMeta`） |
+/// | `schema/entity.schema.json` | **实体**（`label` + `api` + `fields[]`） |
+///
+/// # 枚举权威链
+///
+/// 字段类型的唯一来源是 Rust 的 `FieldType::ALL` —— 本文件由
+/// `cargo xtask capabilities` **生成**；手改会被下次生成覆盖（`--check` 会失败）。
+/// 文件名是钉死的（AC-S-077 步骤 4）：不许「或等价命名」，否则第三方/AI 找不到。
+fn entity_schema_json() -> String {
+    let field_types: Vec<&str> = platform_core::extension::schema::FieldType::ALL
+        .iter()
+        .map(platform_core::extension::schema::FieldType::as_str)
+        .collect();
+
+    to_json(&json!({
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Base Platform Entity Metadata",
+        "description": "实体元数据的形状，来源：platform-core 的 EntitySchema / FieldSchema / FieldType（manifest.json 的 schema 段）",
+        "type": "object",
+        "required": ["label", "fields"],
+        "additionalProperties": false,
+        "properties": {
+            "label": { "type": "string", "minLength": 1, "pattern": "\\S" },
+            "api": {
+                "type": "object",
+                "description": "数据接口地址（D102）。list / create 必填，路径必须以 /api/ 开头。",
+                "additionalProperties": false,
+                "properties": {
+                    "list":   { "type": "string", "pattern": "^/api/" },
+                    "create": { "type": "string", "pattern": "^/api/" },
+                    "update": { "type": "string", "pattern": "^/api/" },
+                    "delete": { "type": "string", "pattern": "^/api/" }
+                }
+            },
+            "fields": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                    "type": "object",
+                    "required": ["key", "label", "type"],
+                    "additionalProperties": false,
+                    "properties": {
+                        "key":   { "type": "string", "pattern": "^[a-z][a-zA-Z0-9]*$" },
+                        "label": { "type": "string", "minLength": 1, "pattern": "\\S" },
+                        "type":  { "enum": field_types },
+                        "required":   { "type": "boolean" },
+                        "permission": { "type": "string", "pattern": "^[a-z][a-z0-9-]*:[a-z][a-z0-9-]*:[a-z][a-z0-9-]*$" },
+                        "readonly":   { "type": "boolean" },
+                        "minLength":  { "type": "integer", "minimum": 0 },
+                        "maxLength":  { "type": "integer", "minimum": 0 },
+                        "pattern":    { "type": "string" },
+                        "min":        { "type": "number" },
+                        "max":        { "type": "number" },
+                        "reference": {
+                            "type": "object",
+                            "required": ["module", "entity"],
+                            "additionalProperties": false,
+                            "properties": {
+                                "module": { "type": "string", "pattern": "^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$" },
+                                "entity": { "type": "string", "pattern": "^[a-z][a-zA-Z0-9]*$" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }))
 }
 
 /// HTTP 接口清单：本期未就绪。
@@ -777,6 +854,66 @@ mod tests {
             serde_json::from_str(platform_core::extension::manifest_schema::MANIFEST_JSON_SCHEMA)
                 .expect("内置 Schema 必须是合法 JSON");
         assert_eq!(parsed, constant);
+    }
+
+    /// 实体元数据的 JSON Schema：形状钉死（AC-S-077 步骤 4）。
+    ///
+    /// 断言的是 `capabilities/schema/entity.schema.json` 的**内容**，
+    /// 不是「某个等价产物」—— 文件名与键名都钉死，否则第三方/AI 找不到。
+    #[test]
+    fn entity_schema_has_the_pinned_shape() {
+        let generated = entity_schema_json();
+        let schema: Value = serde_json::from_str(&generated).expect("实体 Schema 必须是合法 JSON");
+
+        assert_eq!(
+            schema["$schema"],
+            json!("https://json-schema.org/draft/2020-12/schema")
+        );
+        let mut required: Vec<String> = schema["required"]
+            .as_array()
+            .expect("required 必须是数组")
+            .iter()
+            .map(|value| value.as_str().expect("required 项是字符串").to_string())
+            .collect();
+        required.sort();
+        assert_eq!(required, vec!["fields".to_string(), "label".to_string()]);
+        assert_eq!(schema["additionalProperties"], json!(false));
+
+        let fields = &schema["properties"]["fields"];
+        assert_eq!(fields["type"], json!("array"));
+        assert_eq!(fields["minItems"], json!(1));
+
+        let mut item_required: Vec<String> = fields["items"]["required"]
+            .as_array()
+            .expect("items.required 必须是数组")
+            .iter()
+            .map(|value| value.as_str().expect("项是字符串").to_string())
+            .collect();
+        item_required.sort();
+        assert_eq!(
+            item_required,
+            vec!["key".to_string(), "label".to_string(), "type".to_string()]
+        );
+        assert_eq!(fields["items"]["additionalProperties"], json!(false));
+
+        // 枚举权威链：Rust 的 `FieldType::ALL` 是唯一来源。
+        let mut enum_values: Vec<String> = fields["items"]["properties"]["type"]["enum"]
+            .as_array()
+            .expect("type.enum 必须是数组")
+            .iter()
+            .map(|value| value.as_str().expect("枚举项是字符串").to_string())
+            .collect();
+        enum_values.sort();
+        assert_eq!(
+            enum_values,
+            vec![
+                "boolean".to_string(),
+                "date".to_string(),
+                "number".to_string(),
+                "reference".to_string(),
+                "text".to_string()
+            ]
+        );
     }
 
     /// 「源码里已删掉一个包」之后，残留的产物必须能被重新生成清掉。

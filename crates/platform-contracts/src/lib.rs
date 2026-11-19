@@ -27,6 +27,7 @@
 //! | C-3 | 租户隔离生效（多租户同名数据集下不串数据） |
 //! | C-4 | 事务边界（单次写全有或全无；跨表写必须显式开事务） |
 //! | C-5 | 已登记权限点必须有鉴权调用点，且鉴权入口全仓库唯一 |
+//! | C-6 | 声明了字段级权限的模块，源码里必须有 `SchemaProjector::project` 调用点 |
 //!
 //! # C-3 为什么不需要连数据库
 //!
@@ -42,10 +43,12 @@ pub mod checks;
 pub mod fixture;
 pub mod manifest_scan;
 pub mod runtime;
+pub mod schema_scan;
 pub mod suite;
 
 pub use checks::{
     CheckOutcome, assert_compliant, check_c1, check_c2, check_c3, check_c4, check_c5, check_c5_for,
+    check_c6, check_c6_for,
 };
 pub use fixture::{ContractFixture, ContractSubject, Seeded};
 pub use runtime::block_on;
@@ -57,7 +60,7 @@ pub use platform_contracts_macros::platform_module_contract;
 pub mod prelude {
     pub use crate::checks::{
         CheckOutcome, assert_compliant, check_c1, check_c2, check_c3, check_c4, check_c5,
-        check_c5_for,
+        check_c5_for, check_c6, check_c6_for,
     };
     pub use crate::fixture::{ContractFixture, ContractSubject, Seeded};
     pub use crate::runtime::block_on;

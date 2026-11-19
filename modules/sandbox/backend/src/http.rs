@@ -18,42 +18,113 @@
 //!
 //! 判定实现由**平台**通过请求扩展注入（`Arc<dyn PermissionChecker>`）。
 
+use std::path::Path as FsPath;
 use std::sync::Arc;
 
+use anyhow::{Context as _, Result};
 use axum::extract::{FromRequestParts, OriginalUri, Path, Request, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post, put};
 use axum::{Json, Router};
 use platform_core::RequestContext;
+use platform_core::extension::manifest::Manifest;
 use platform_core::extension::permission::{PermissionChecker, ScopeFilter, require_permission};
+use platform_core::extension::schema::EntitySchema;
 use platform_core::problem::{ProblemDetails, problem_response};
 use platform_db::TenantDb;
 use serde::Serialize;
 
+use crate::demo_item_http;
 use crate::permission::{
     PERMISSION_DEMO_READ, PERMISSION_DEMO_WRITE, PERMISSION_SCOPE_ITEM_APPROVE,
     PERMISSION_SCOPE_ITEM_EXPORT, PERMISSION_SCOPE_ITEM_READ,
 };
 use crate::scope_item::{PgScopeItemRepository, ScopeItem};
 
+/// `demoItem` 实体的键（元数据驱动渲染的样本实体）。
+pub const DEMO_ITEM_ENTITY: &str = "demoItem";
+
+/// 模块自己的 `manifest.json`（**编译期**读入）。
+///
+/// # 为什么可以编译期读
+///
+/// 这份 manifest 与模块代码同源（同一个仓库、同一个提交），
+/// 而**运行期**的 `BASE_MANIFEST_ROOT` 版本由平台在启动时校验（阶段 1 + 阶段 2）。
+/// 两者不一致的窗口只在「部署时换了另一份 manifest」—— 那种情况下平台会在启动时
+/// 因为所有者不同而 fail-fast。
+///
+/// 生产装配走 [`SandboxState::from_manifest`]（读**运行期**那一份，单一来源）；
+/// 这个常量只给**测试**与 [`SandboxState::new`] 用，并由
+/// `tests/demo_items.rs` 的 `the_baked_schema_matches_the_manifest_on_disk` 守住一致性。
+const BAKED_MANIFEST: &str = include_str!("../../manifest.json");
+
 /// HTTP 层共享的状态。
 #[derive(Debug, Clone)]
 pub struct SandboxState {
     /// 租户作用域的数据访问层。
     pub db: TenantDb,
+    /// `demoItem` 的元数据（字段级权限判定的依据）。
+    ///
+    /// 与 `GET /api/schema/sandbox/demoItem` 返回的是**同一份**声明 ——
+    /// 元数据说可见、数据却剔掉（或反过来）这种分叉在代码层面就该不存在。
+    pub demo_item_schema: Arc<EntitySchema>,
 }
 
 impl SandboxState {
-    /// 构造状态。
+    /// 构造状态（元数据取自**编译期**的 manifest —— 测试用）。
+    ///
+    /// # Panics
+    ///
+    /// manifest 里没有 `schema.demoItem` 时 panic：那是模块自身的编译期资产，
+    /// 缺了说明有人把契约改坏了（`tests/demo_items.rs` 会先红）。
     pub fn new(db: TenantDb) -> Self {
-        Self { db }
+        let schema = baked_demo_item_schema()
+            .expect("modules/sandbox/manifest.json 必须声明 schema.demoItem");
+        Self {
+            db,
+            demo_item_schema: Arc::new(schema),
+        }
+    }
+
+    /// 构造状态：元数据取自**运行期**的 manifest（装配层用 —— 单一来源）。
+    pub fn from_manifest(db: TenantDb, manifest_root: &FsPath) -> Result<Self> {
+        let path = manifest_root.join("modules/sandbox/manifest.json");
+        let manifest = Manifest::from_path(&path)
+            .with_context(|| format!("cannot read {}", path.display()))?;
+        let schema = manifest
+            .schema
+            .as_ref()
+            .and_then(|schemas| schemas.get(DEMO_ITEM_ENTITY))
+            .cloned()
+            .with_context(|| {
+                format!(
+                    "{} declares no schema.{DEMO_ITEM_ENTITY} entity",
+                    path.display()
+                )
+            })?;
+        Ok(Self {
+            db,
+            demo_item_schema: Arc::new(schema),
+        })
     }
 
     /// 数据范围示例仓储。
     fn scope_items(&self) -> PgScopeItemRepository {
         PgScopeItemRepository::new(self.db.clone())
     }
+}
+
+/// 从编译期读入的 manifest 取 `schema.demoItem`。
+fn baked_demo_item_schema() -> Result<EntitySchema> {
+    let manifest = Manifest::parse_str(BAKED_MANIFEST)
+        .map_err(|error| anyhow::anyhow!("the baked manifest is invalid: {error}"))?;
+    manifest
+        .schema
+        .as_ref()
+        .and_then(|schemas| schemas.get(DEMO_ITEM_ENTITY))
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("the baked manifest declares no schema.{DEMO_ITEM_ENTITY}"))
 }
 
 /// 带租户上下文的请求上下文提取器。
@@ -161,6 +232,15 @@ pub fn router<S2>(state: Arc<SandboxState>) -> Router<S2> {
     // `sandbox:demo:write`
     let demo_write_routes = Router::new().route("/demo", post(demo_write));
 
+    // `sandbox:demo:read` —— 元数据驱动渲染的列表（**响应经 SchemaProjector**）。
+    let demo_item_read_routes = Router::new().route("/demo-items", get(demo_item_http::list));
+
+    // `sandbox:demo:write` —— 元数据的 create / update / delete 三个动作。
+    let demo_item_write_routes = Router::new()
+        .route("/demo-items", post(demo_item_http::create))
+        .route("/demo-items/{id}", put(demo_item_http::update))
+        .route("/demo-items/{id}", delete(demo_item_http::delete));
+
     // `sandbox:scope-item:read`
     let scope_read_routes = Router::new()
         .route("/scope-item", get(list_scope_items))
@@ -174,7 +254,13 @@ pub fn router<S2>(state: Arc<SandboxState>) -> Router<S2> {
 
     Router::new()
         .merge(demo_read_routes.route_layer(require_permission("sandbox:demo:read")))
+        .merge(
+            demo_item_read_routes.route_layer(require_permission("sandbox:demo:read")),
+        )
         .merge(demo_write_routes.route_layer(require_permission("sandbox:demo:write")))
+        .merge(
+            demo_item_write_routes.route_layer(require_permission("sandbox:demo:write")),
+        )
         .merge(scope_read_routes.route_layer(require_permission("sandbox:scope-item:read")))
         .merge(approve_routes.route_layer(require_permission("sandbox:scope-item:approve")))
         .merge(export_routes.route_layer(require_permission("sandbox:scope-item:export")))

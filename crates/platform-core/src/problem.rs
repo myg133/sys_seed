@@ -37,6 +37,13 @@ pub const CODE_INSUFFICIENT_PERMISSION: &str = "INSUFFICIENT_PERMISSION";
 pub const CODE_NOT_FOUND: &str = "NOT_FOUND";
 /// 稳定的机器可读错误码：服务内部错误。
 pub const CODE_INTERNAL_ERROR: &str = "INTERNAL_ERROR";
+/// 稳定的机器可读错误码：元数据里的**模块**不存在（REQ-012）。
+///
+/// 与 [`CODE_SCHEMA_ENTITY_NOT_FOUND`] **分开**是有意的：模块名通常是常量（写错就知道），
+/// 实体名来自 URL（用户可随便填），分开报更容易定位。
+pub const CODE_SCHEMA_MODULE_NOT_FOUND: &str = "SCHEMA_MODULE_NOT_FOUND";
+/// 稳定的机器可读错误码：模块存在，但**实体**没声明元数据（REQ-012）。
+pub const CODE_SCHEMA_ENTITY_NOT_FOUND: &str = "SCHEMA_ENTITY_NOT_FOUND";
 
 /// 错误类型 URI 的前缀。
 pub const PROBLEM_TYPE_BASE: &str = "https://errors.base.example";

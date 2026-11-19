@@ -45,6 +45,7 @@ pub mod permission;
 pub mod platform_module;
 pub mod registry;
 pub mod repository;
+pub mod schema;
 pub mod transaction;
 pub mod workflow;
 
@@ -66,5 +67,9 @@ pub use permission::{
 pub use platform_module::{ModuleContext, PlatformModule};
 pub use registry::{ModuleRegistration, discover, discover_enabled};
 pub use repository::{FilterOp, FilterSpec, List, ListQuery, Repository, SortSpec};
+pub use schema::{
+    EntityApi, EntitySchema, EntitySchemas, FieldSchema, FieldType, ReferenceSpec, SchemaProjector,
+    field_is_visible, is_entity_key,
+};
 pub use transaction::{TransactionalWrite, WriteBoundary};
 pub use workflow::{TransitionEvent, WorkflowHandler};

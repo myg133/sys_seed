@@ -19,6 +19,7 @@
 //! | `dependencies[]` | 与 `id` 同规则 |
 //! | `tenantScoped.tables[]` | `^[a-z][a-z0-9_]*$`（表名；会被拼进 DDL，不能放宽） |
 //! | `tenantScoped.column` | `^[a-z][a-z0-9_]*$`（租户列名，默认 `tenant_id`） |
+//! | `schema.<entity>` | 实体键 `^[a-z][a-zA-Z0-9]*$`；规则见 [`crate::extension::schema::EntitySchema::validate`] |
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -28,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::config::ConfigScope;
+use crate::extension::schema::EntitySchemas;
 
 /// `manifest.json` 的解析或校验错误。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -204,6 +206,12 @@ pub struct Manifest {
     /// 租户作用域声明：平台据此统一生成 RLS 策略。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tenant_scoped: Option<TenantScopedSpec>,
+    /// 实体元数据声明：前端据此**零代码**渲染列表与表单（REQ-012）。
+    ///
+    /// 键是实体键（`^[a-z][a-zA-Z0-9]*$`），值见
+    /// [`crate::extension::schema::EntitySchema`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema: Option<EntitySchemas>,
 }
 
 fn default_enabled() -> bool {
@@ -320,6 +328,15 @@ impl Manifest {
                     "tenantScoped.column",
                     "must match ^[a-z][a-z0-9_]*$",
                 ));
+            }
+        }
+
+        // 实体元数据（REQ-012）的**阶段 1**校验：只判单文件能判的事。
+        // 跨文件的两条（字段权限点是否已登记、reference 是否指向存在的实体）
+        // 由 `platform-schema` 的注册表在**全部 manifest 加载完后**判（阶段 2）。
+        if let Some(schemas) = &self.schema {
+            for (entity, spec) in schemas {
+                issues.extend(spec.validate(entity));
             }
         }
 

@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "实体元数据的形状，来源：platform-core 的 EntitySchema / FieldSchema / FieldType（manifest.json 的 schema 段）",
+  "properties": {
+    "api": {
+      "additionalProperties": false,
+      "description": "数据接口地址（D102）。list / create 必填，路径必须以 /api/ 开头。",
+      "properties": {
+        "create": {
+          "pattern": "^/api/",
+          "type": "string"
+        },
+        "delete": {
+          "pattern": "^/api/",
+          "type": "string"
+        },
+        "list": {
+          "pattern": "^/api/",
+          "type": "string"
+        },
+        "update": {
+          "pattern": "^/api/",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "fields": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "pattern": "^[a-z][a-zA-Z0-9]*$",
+            "type": "string"
+          },
+          "label": {
+            "minLength": 1,
+            "pattern": "\\S",
+            "type": "string"
+          },
+          "max": {
+            "type": "number"
+          },
+          "maxLength": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "min": {
+            "type": "number"
+          },
+          "minLength": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "pattern": {
+            "type": "string"
+          },
+          "permission": {
+            "pattern": "^[a-z][a-z0-9-]*:[a-z][a-z0-9-]*:[a-z][a-z0-9-]*$",
+            "type": "string"
+          },
+          "readonly": {
+            "type": "boolean"
+          },
+          "reference": {
+            "additionalProperties": false,
+            "properties": {
+              "entity": {
+                "pattern": "^[a-z][a-zA-Z0-9]*$",
+                "type": "string"
+              },
+              "module": {
+                "pattern": "^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "module",
+              "entity"
+            ],
+            "type": "object"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "type": {
+            "enum": [
+              "text",
+              "number",
+              "boolean",
+              "date",
+              "reference"
+            ]
+          }
+        },
+        "required": [
+          "key",
+          "label",
+          "type"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "label": {
+      "minLength": 1,
+      "pattern": "\\S",
+      "type": "string"
+    }
+  },
+  "required": [
+    "label",
+    "fields"
+  ],
+  "title": "Base Platform Entity Metadata",
+  "type": "object"
+}
