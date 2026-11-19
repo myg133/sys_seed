@@ -51,7 +51,7 @@
 | 7 | `error.rs` 测试的 `variants` 数组 | 「清单里有码从未产出」失败 |
 | 8 | `error.rs` 测试的 `errors` 数组 | 「detail 非 ASCII」失败 |
 
-**本轮新增 21 个码** → `TITLES.len()` 期望值从 **56** 变为 **77**。
+**本轮新增 21 个码** → `TITLES.len()` 期望值从 **58** 变为 **79**。
 
 ### G3 其它
 
@@ -71,6 +71,29 @@
 且**只要 `keys` 里含任何 `scope: platform` 的键，整请求 403**（`PlatformKeyOnGenericRoute`）。
 
 → **本需求一律「按精确键名读那 12 个 SSO 键」**。**「全量导出配置」是不存在的能力**。
+
+### P16 `simple_bind` 的 rc 映射必须可机械验证（rev 3.3，D128 / Q4）
+
+**问题**：rev 3 的所有 LDAP 测试都用可计数的 `RecordingLdap` **直接返回 `Ok(false)`**，
+**绕过了「`LdapResult{rc!=0}` → `false`」这一行映射** ——
+而这一行正是「任意密码都能登录」的唯一防线。**若被改坏，753 条测试仍全绿。**
+
+**要求（二选一，都必须做到）**：
+
+- **(A)** 抽成纯函数 `pub fn bind_succeeded(rc: u32) -> bool`，
+  直接单测 `bind_succeeded(0)==true` / `bind_succeeded(49)==false` / `bind_succeeded(32)==false`
+- **(B)** 用构造的 `ldap3::LdapResult { rc: 49, .. }` 驱动生产包装层，断言返回 `Ok(false)`
+
+**不接受「实现我核对过是对的」—— 没有被测试执行过的代码，等于没有该代码。**
+
+### P17 D127 的 config 推导改动必须有专测（rev 3.3，D128 / Q7）
+
+`platform-config` 的 `boolean ⇒ flag` 加了 `&& is_valid_flag_name(...)` 约束，是**跨需求改动**。
+QA 实测**没有破坏既有契约**（`is_flag("beta")`/`is_flag("newInvoice")` 仍成立，12 键写入成功）。
+但**新行为本身无专测**，只在「12 键恰好没报错」里被间接覆盖。要求补两条：
+
+1. `assert!(!registry.is_flag("sso.enforce"))` —— 带点号的布尔键**不是** flag
+2. 带点号布尔键走 **Scoped 写路由成功**、走 **Flag 路由被拒**（原来两条都不可写）
 
 ### P2 阳性对照用哪个键（修 S3）
 
@@ -231,11 +254,19 @@ callback 失败 → 302 {前端基址}/sso/callback?error=<ERROR_CODE>
 
 ### 预期结果
 
-1. 步骤 1 → `403` `SSO_REQUIRED`，`params.ssoProviders` 是可用 provider 列表（**写死在 `params`**）
+1. 步骤 1 → `403` `SSO_REQUIRED`，`params.ssoProviders` 是可用 provider 列表（**写死在 `params`**），
+   且 **`len() == 2`、`type` 集合 == `{oidc, ldap}`**
+   —— **rev 3.3（D128 / Q5）**：原断言只有 `is_array()`，无法区分「正确列表」与「空数组」
 2. 步骤 2、3 → 与步骤 1 **响应体完全一致**
 3. 步骤 5 → **Argon2id 调用次数 == 0**；**对照组**：`enforce=false` 时同一批请求 **> 0**
    —— **S15**：原判据「耗时同量级 1.5×」**没有区分力**（正确实现下三条都走同一早退路径，即使跑 Argon2id 也同量级）
-4. 步骤 4 → `200`（`enforce` 是租户级）
+4. 步骤 4 → `200`（`enforce` 是租户级）。
+   **rev 3.3（D128 / Q6）**：必须用**真实 `ConfigService` 的双租户**验 ——
+   `tenant-a` 写 `sso.enforce=true`、`tenant-b` **不写**，断言 **a → 403 且 Argon2 计数 0 /
+   b → 200 且 Argon2 计数 > 0**。
+   原用例用 `StaticSsoConfigSource`，它**忽略 `ctx`**（`config.rs:318-320`），
+   全局只有一份配置，靠手动 `set(false)` 切回 —— 那验的是「关掉后能登录」，
+   **不是「a 开 b 关」并存**
 5. 步骤 6 → OIDC 登录成功，响应同构
 6. 步骤 7 → `200`，本地登录恢复
 7. 步骤 8 → **`403 SSO_REQUIRED`（fail-closed）** —— **S16**：配置读不出来**绝不能**当 `false`，
@@ -278,7 +309,9 @@ callback 失败 → 302 {前端基址}/sso/callback?error=<ERROR_CODE>
 3. 步骤 3 → **`302`** 到 `{前端基址}/sso/callback?ticket=…`（**不是 200+JSON**，P4/S27）
 4. 步骤 4 → `200`，`LoginResponse` 与本地登录**键集合相同**，取值语义一致：
    `tokenType == "Bearer"`、`expiresIn` 是**正整数**、`permissions` **恒为数组**（S48）
-5. 步骤 5 → `200`，返回 `bob` 的真实权限点（非空）
+5. 步骤 5 → `200`，`permissions` **`len() > 0`** 且包含 `bob` 角色对应的**具体权限点**
+   —— **rev 3.3（D128 / Q3）**：原用例只断言 `permissions.is_array()`，
+   那是本节**预期 4** 的「恒为数组」，**空权限集也会全绿** → 步骤 5 实际上从未被验过
 6. 步骤 6 → `200`，返回新 access token
 7. 步骤 7 → 列表含本次 SSO 会话（来源字段见 AC-S-107）
 8. 步骤 8 → `401 SSO_TICKET_INVALID`（**ticket 一次性**）
@@ -374,7 +407,7 @@ mock IdP 可返回**自定义构造**的 `id_token`（测试专用开关）；�
 4. 步骤 4 → `401 SSO_OIDC_ALG_NOT_ALLOWED`
 5. 步骤 5 → `401 SSO_OIDC_ALG_NOT_ALLOWED`（**算法混淆必须被拒**）
 6. 步骤 6 → `401 SSO_OIDC_ALG_NOT_ALLOWED`
-7. 步骤 7 → **登录成功**（未知 `kid` 触发 JWKS 刷新）
+7. 步骤 7 → **登录成功**，**且 mock 的 `/jwks` 被请求次数 `>= 2`**（证明真的触发了一次刷新，而不是「碰巧 mock 又能签发」）—— **rev 3.3（D128 / Q9）**
 8. 步骤 8 → `401 SSO_OIDC_TOKEN_INVALID`
 9. 步骤 9 → `401`，**且步骤 11 的攻击者端点被请求次数 == 0**（从未去那个地址取公钥）
 10. 步骤 10 → `401 SSO_OIDC_TOKEN_INVALID`（不采信 `x5c`）
@@ -516,7 +549,7 @@ pub trait SsoLdapConn: Send + Sync {
 3. 检查两条路径落到的是否同一 user
 4. 检查 `platform_iam_user` 里 `frank` 的 `password_hash`
 5. LDAP 侧改密码 → 旧密码登录 / 新密码登录
-6. LDAP 侧把 `frank` 的 `mail` 改成**已被本地账号 `gina` 绑定**的邮箱 → 登录
+6. 用**未绑定**的 LDAP 身份 `henry`（`mail = gina@example.com`，该邮箱**已被本地账号 `gina` 在该 provider 下绑定**）→ 登录
 7. 改掉 `frank` 的 `mail` 但 `external_id`（DN）不变 → 登录
 
 ### 预期结果
@@ -527,6 +560,10 @@ pub trait SsoLdapConn: Send + Sync {
    也**未**新增「LDAP 密码摘要」类字段
 5. 步骤 5 → 旧密码 `401`，新密码 `200`
 6. 步骤 6 → `409 SSO_IDENTITY_LINK_CONFLICT`（**不**静默绑定到别人账号）
+   —— **rev 3.3 由 D128 裁定改写**：原步骤「把 `frank` 的 `mail` 改成已被 `gina` 绑定的邮箱」
+   因 **P6「`external_id`（DN）优先」而物理不可达**（DN 未变 → 第一步就命中 `frank`，
+   永远走不到 mail 匹配）→ **是我的规格缺陷**，与 REQ-012 的 `input[type=number]`、
+   D126 的整页导航同源：**写 AC 时只在纸上推演，没走一遍真实执行路径**
 7. 步骤 7 → `200`，**仍然**落到 `frank`（P6 优先 `external_id`）
 
 > **rev 3 修订**：**S21** —— `409` 在「已绑定」路径上**不可达**（design 没说 `external_id` 与 `mail` 谁优先）→ P6 + 步骤 7
@@ -608,7 +645,11 @@ pub trait SsoLdapConn: Send + Sync {
 2. `authProvider` 字段存在，值是 **`"local"` / `"oidc"` / `"ldap"`** 之一；
    **它是唯一允许两条会话取值不同的字段**（其余字段只是值不同，键必须相同）
 3. 步骤 3 → `DELETE` 返回 **`204`** 且响应体长度为 **0**；随后 refresh 失败 `TOKEN_REVOKED`
-4. 步骤 4 → `204`；该用户**全部** family 作废，含 SSO 会话
+4. 步骤 4 → **`200 {"revokedSessions": n}`**（**rev 3.3 由 D128 裁定**：原写 `204` 与
+   REQ-007 已合并的 `logout-all` 契约冲突，且 `iam_real_db.rs` 已断言 200。
+   **选改规格而非改实现**：为一条字面去改已交付的跨需求契约，收益不抵风险；
+   且 200 带 `revokedSessions` 回执**语义更优** —— 204 无法告知作废了几个会话）。
+   该用户**全部** family 作废，含 SSO 会话
 5. 步骤 5 → 两条会话结构**同构**；**无「SSO 专用会话表」**
 6. 步骤 6 → access token 的 `alg`/`kid`/claim 结构**完全一致**；无第二套 token 体系
 
@@ -637,7 +678,11 @@ pub trait SsoLdapConn: Send + Sync {
 2. 注入 recorder，跑一次 OIDC 成功登录
 3. 跑一次 OIDC 失败登录（`alg=none`）
 4. 跑一次 LDAP 成功 + 一次失败
-5. 对录制到的**全部 payload** 做敏感值扫描（canary + 阳性对照）
+5. 对录制到的**全部 payload** 做敏感值扫描，**且阳性对照必须是真的**：
+   往一个真实的 `SsoAuditPayload`（如 `user_agent = CANARY`）注入 canary，
+   用**同一个扫描判据**跑一遍，断言**命中**。
+   —— **rev 3.3（D128 / Q1）**：原测试写成 `format!("{dump}\n{CANARY}").contains(CANARY)`，
+   **该断言对任何输入都成立**，等于没有阳性对照（违反出口标准 9.2）
 6. **不注入** recorder（默认实现），跑一次成功登录
 7. 检查事件是否落入任何表
 
@@ -748,7 +793,9 @@ impl IamService {
 | 20 | `SSO_ACCOUNT_NOT_LINKED` | 403 | 未绑定且 JIT 关闭 |
 | 21 | `SSO_TICKET_INVALID` | 401 | ticket 不存在 / 已用 / 过期 |
 
-**`TITLES.len()` 期望值 = 56（基线）+ 21 = 77。**
+**`TITLES.len()` 期望值 = 58（基线）+ 21 = 79。**
+
+> ⚠️ **rev 3.2 修正**：原写 56/77 是**我数错了** —— 我只用 `grep '^    ("'` 数了**全大写**的 HTTP 错误码，漏掉了 6 条 `org.member-added` 这类**事件码**（也登记在同一张 `TITLES` 表里）。实测基线 **58**（HTTP 52 + 事件 6），新增 21 后为 **79**。Dev 按实测值固定断言，是对的；**是我的规格数字错**。
 
 ---
 
@@ -772,5 +819,5 @@ impl IamService {
 | 每条 AC 的主体都存在吗？ | 已逐项核实。**rev 3 新增 3 个必须新建的接缝**：`SsoLdapClient`（P12）、`SsoAuditRecorder`（P14）、`SessionView.authProvider`（AC-S-107）。**审计 sink 仍不存在**（REQ-014）→ AC-S-108 显式排除落库 |
 | 有没有物理不可达的前置？ | rev 3 已消除 4 处：LDAP 替身（S6）、`code_verifier` 客户端篡改（S5）、用 OIDC state 打 LDAP（S4）、`?scope=tenant`（S2）。https 用测试根（P10）后可达 |
 | 失败路径都有明确错误码吗？ | 21 个码，每条 AC 的失败分支都点名 |
-| 数字是否自洽？ | 错误码 **21**（全文统一）；AC **12** 条；`TITLES.len()` 期望 **77** |
+| 数字是否自洽？ | 错误码 **21**（全文统一）；AC **12** 条；`TITLES.len()` 期望 **79** |
 | 有没有依赖未交付的需求？ | 依赖 REQ-007/009/010，均已合并。**不依赖** REQ-014 / REQ-022 |

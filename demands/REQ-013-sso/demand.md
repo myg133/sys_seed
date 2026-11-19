@@ -160,7 +160,7 @@ SSO 审计事件只记：provider、外部 subject、结果、错误码、IP、U
 
 | 改什么 | 为什么 | 是否破坏既有契约 |
 |---|---|---|
-| `platform-iam` 新增错误码（**21 个**，rev 3 定稿） | AC-S-020 要求可区分 | **否**，但**必须改 8 处**（D125）：code 常量 / enum 变体 / `code()` / `detail()` / `ALL_CODES` / `TITLES` / 测试的两个数组。漏一处就红在 `i18n_titles.rs` 或 `error.rs` 的测试里。`TITLES.len()` 期望 **77** |
+| `platform-iam` 新增错误码（**21 个**，rev 3 定稿） | AC-S-020 要求可区分 | **否**，但**必须改 8 处**（D125）：code 常量 / enum 变体 / `code()` / `detail()` / `ALL_CODES` / `TITLES` / 测试的两个数组。漏一处就红在 `i18n_titles.rs` 或 `error.rs` 的测试里。`TITLES.len()` 期望 **79** |
 | `platform-iam` 新增 `sso` 模块 + 迁移（2 张表） | `oidc_state`（state/nonce/verifier 一次性凭证）、`sso_identity_link` 审计辅助（可选，若复用 `external_identity` 则只要 `oidc_state`） | 否（纯新增） |
 | `platform-iam` 依赖 `ldap3` | LDAP bind 认证 | 否（`ldap3` 已在 `Cargo.lock`，由 `platform-org` 引入） |
 | **新增 TLS 依赖（`rustls` + `ring` + `hyper-rustls`）** | **真实 IdP 全是 https，没有 TLS 的 OIDC 在真实环境不可用** | **依赖预算破例** —— 用户 2026-11-19 明确批准（**D123**）。`Cargo.lock` 包数会从 **296** 增加，**具体增量必须实测报告**。只换 connector，**不引 `reqwest`** |
@@ -199,7 +199,7 @@ SSO 审计事件只记：provider、外部 subject、结果、错误码、IP、U
 - LDAP 空密码攻击被拒
 - `id_token` 的 `alg=none` 与算法混淆攻击被拒
 - `client_secret` 在三处扫描（配置导出 / 错误体 / 日志）中 0 命中
-- 新增 **21 个**错误码全部按 **8 个编辑点**同步（D125），REQ-021 的完备性测试仍绿（`TITLES.len()` = 77）
+- 新增 **21 个**错误码全部按 **8 个编辑点**同步（D125），REQ-021 的完备性测试仍绿（`TITLES.len()` = 79）
 - **不需要** `SSO_OIDC_TLS_UNSUPPORTED`（D123 后已删除）
 - **依赖预算（D123 破例）**：新增 TLS 依赖是被用户批准的**唯一破例**；
   `Cargo.lock` 包数增量必须实测报告（基线 **296**），且**不得引入 `reqwest`**

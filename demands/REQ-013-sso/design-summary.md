@@ -383,7 +383,7 @@ POST /api/iam/sso/ldap/login {username, password}
 > ⑧ `error.rs` 测试的 `errors` 数组。
 > 漏 ⑦ 红在「清单里有码从未产出」，漏 ⑧ 红在「detail 非 ASCII」。
 
-**本轮 21 个码 → `TITLES.len()` 期望值 = 56（基线）+ 21 = 77。**
+**本轮 21 个码 → `TITLES.len()` 期望值 = 58（基线）+ 21 = 79。**
 
 | # | code | HTTP | title（ASCII） | 何时 |
 |---|---|---|---|---|
@@ -477,7 +477,7 @@ URL 校验不是枚举，塞进去会污染那个机制的语义。
 
 | 文件 | 动作 |
 |---|---|
-| `crates/platform-core/src/titles.rs` | 改：**21 个**新码的 ASCII title（`TITLES.len()` → **77**） |
+| `crates/platform-core/src/titles.rs` | 改：**21 个**新码的 ASCII title（`TITLES.len()` 58 → **79**） |
 | `crates/platform-config/manifest.json` | 改：12 个配置键登记（`scope: tenant`） |
 | `crates/platform-server/src/main.rs` | 改：nest `sso_router`（**只在 IAM 就绪时挂**） |
 | `crates/platform-iam/Cargo.toml` | 改：见下方「依赖变更」 |

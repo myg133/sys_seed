@@ -88,7 +88,7 @@ LDAP 覆盖 AD / OpenLDAP。**这两条覆盖绝大多数企业身份源**。
 | 6 | **`client_secret` 不能进 config** | `platform_config.value` 是**明文 JSONB**，且 `GET /api/config/entries` 可读 → 必须走环境变量 |
 | 7 | **审计 sink 不存在** | `platform-org/src/audit.rs` 明写「审计的落库与查询在 REQ-014…本期没有平台 sink 可调」，`platform-iam` 里 `grep audit` **0 命中** → AC-S-108 **只声明+发出，不验落库** |
 | 8 | 登录限流**已有** | `platform_iam_login_rate` / `platform_iam_login_attempt` 表，LDAP 失败复用同一套 |
-| 9 | 新增错误码会被卡住 | REQ-021 的完备性测试机械校验 `TITLES ⊇ ALL_CODES`。**但「改两处」是错的**（D125）：实际要改 **8 处**。本轮 **21 个**新码 → `TITLES.len()` 期望 **77** |
+| 9 | 新增错误码会被卡住 | REQ-021 的完备性测试机械校验 `TITLES ⊇ ALL_CODES`。**但「改两处」是错的**（D125）：实际要改 **8 处**。本轮 **21 个**新码 → `TITLES.len()` 期望 **79**（基线 58 = HTTP 码 52 + 事件码 6） |
 
 **第 7 条是本轮最关键的「主体不存在」排查**：如果 AC 写成「SSO 登录产生审计记录」，
 验收时会发现**根本没有审计表** —— 那是 REQ-021 踩过的坑（AC 的前置物理不可达）。
