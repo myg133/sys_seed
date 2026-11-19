@@ -23,7 +23,7 @@
     "tenant_scoped_db": "platform-db 的 TenantDb 提供带 RequestContext 的租户作用域数据访问（事务内 SET LOCAL app.tenant_id + RLS 兜底），公开 API 拿不到裸连接，勿自建连接池或直连数据库",
     "theme": "@base/theme 的 applyTheme()/toggleTheme() 提供 CSS 变量令牌与暗色模式，勿另造主题变量或硬编码颜色",
     "transaction_boundary": "TransactionalWrite + WriteBoundary 提供写边界声明，跨表写必须显式开平台事务（C-4 判定依据）",
-    "ui_table_component": "@base/ui 的 Table 契约与 apps/shell 的 Table.svelte 提供只读表格（只接受 props，分页状态由 @base/hooks 组合传入），勿自造表格渲染",
+    "ui_table_component": "@base/ui 的 Table 是页码分页（依赖 total）的只读表格；游标分页没有 total、且空态不能渲染表头空壳，请用 apps/shell 的 SchemaTable，勿自造表格渲染",
     "ui_token": "@base/ui 的 toneClass()/TONES/defaultRadius() 提供色调与圆角 token，勿另造样式变量",
     "workflow_handler": "WorkflowHandler + TransitionEvent 提供工作流接入接缝，勿自建流程引擎"
   },

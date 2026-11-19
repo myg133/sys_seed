@@ -10,14 +10,36 @@ import { expect, test, type Page } from '@playwright/test';
  * 点击「下一页」发出的**请求**、表单校验失败时**零请求**、字段级权限的 DOM 取证。
  * REQ-011 的教训是「单测全绿 ≠ 能用」，这些只能真浏览器验。
  *
- * # 前置（依赖后端；未就绪时用例 **skip 并写明原因**，不写成通过）
+ * # skip 的判定规则（**D108**，2026-11-19 Pre-merge FAIL 的根因）
  *
- * - 后端已挂载 `sandbox` 模块并声明 `demoItem` 的 schema 段（D103）；
- * - `GET /api/schema/sandbox/demoItem` 返回 200 且响应含 `api` 子段（D102）；
- * - `scripts/seed-e2e.sh` 的夹具用户可登录（REQ-011 的既有夹具）。
+ * | 情形 | 处置 | 理由 |
+ * |---|---|---|
+ * | 元数据 **404**（后端未声明实体） | **skip** | 这是「另一个 Dev 还没做完」的前置 |
+ * | 列表 **403** | **fail** | 授权缺失 = 配置 bug，必须红（曾静默 skip → 假绿） |
+ * | 列表 **500** | **fail** | 服务端错误 |
+ * | 网络不可达 | **skip** | 环境没起（`baseURL` 打不通） |
  *
- * 第二个实体（零代码用例）默认 `demoNote`，可用 `SCHEMA_SECOND_ENTITY` 覆盖；
- * 它不存在时该用例 skip（不会假装通过）。
+ * 换句话说：**skip 只用于「被测系统尚未就绪」，「夹具/授权不对」必须 fail。**
+ * 旧版本把 403 也 skip 掉，于是「夹具少一个权限点」时 6 条用例全跳过、exit 0 ——
+ * CI 绿着但一条都没跑。这类「假绿」比红灯更坏，因为没人会去看。
+ *
+ * # 数据前置：每条用例**自己管**（H-2）
+ *
+ * 用例之间不共享数据，也不依赖「库里恰好有什么」：
+ * - 需要数据 → 用 API 造自己的记录（标题带唯一后缀），`finally` 里删掉；
+ * - 需要空表 → 先把这个实体的记录全删掉（只动 `tenant-a` 的沙箱示例数据）。
+ *
+ * 所以本 spec **正序 / 反序 / 只跑单条**都必须全绿（`--shuffle` 可验）。
+ * 之前「空态用例要求表空、零代码用例要求表非空」是同一实体上互斥的隐含前置，
+ * 任何库状态都必有一条红 —— 那不是夹具的问题，是用例设计缺陷。
+ *
+ * # 夹具
+ *
+ * `scripts/seed-e2e.sh` 的 `u-perm-write@example.com` 必须持有
+ * `sandbox:demo:read` + `sandbox:demo:write` + `sandbox:demo:secret`，
+ * `u-perm-read@example.com` 只持有 `sandbox:demo:read`（字段级权限的对照）。
+ *
+ * 第二个实体（零代码用例）默认 `demoNote`，可用 `SCHEMA_SECOND_ENTITY` 覆盖。
  */
 
 const TENANT = 'tenant-a';
@@ -29,9 +51,9 @@ const MODULE = 'sandbox';
 const PRIMARY_ENTITY = 'demoItem';
 const SECOND_ENTITY = process.env.SCHEMA_SECOND_ENTITY ?? 'demoNote';
 
-/** 有写权限的夹具用户。 */
+/** 有写权限的夹具用户（含字段级权限点）。 */
 const USER_WRITE = process.env.SCHEMA_USER_WRITE ?? 'u-perm-write@example.com';
-/** 无写权限的夹具用户。 */
+/** 无写权限的夹具用户（只读，且不含 `sandbox:demo:secret`）。 */
 const USER_READ = process.env.SCHEMA_USER_READ ?? 'u-perm-read@example.com';
 
 /** 登录（REQ-011 的夹具账号）。 */
@@ -82,34 +104,139 @@ interface EntityMetaBody {
   fields?: { key?: string; label?: string; type?: string }[];
 }
 
-/** 取元数据；后端未就绪时返回 `undefined`（调用方据此 skip）。 */
-async function fetchMeta(page: Page, entity: string): Promise<EntityMetaBody | undefined> {
-  const response = await apiRequest(page, `/api/schema/${MODULE}/${entity}`);
-  if (response.status !== 200 || response.body === null || typeof response.body !== 'object') {
-    return undefined;
-  }
-  return response.body as EntityMetaBody;
+/** 列表信封。 */
+interface ListBody {
+  items?: Record<string, unknown>[];
+  nextCursor?: string | null;
 }
 
-/** 表头文本（按 DOM 顺序）。 */
-async function headerTexts(page: Page): Promise<string[]> {
-  return page.locator('table thead th').allTextContents();
+/** 元数据探测结果：**保留状态码**，因为 404 与 403 的处置不同（D108）。 */
+interface MetaProbe {
+  status: number;
+  meta?: EntityMetaBody;
+}
+
+async function probeMeta(page: Page, entity: string): Promise<MetaProbe> {
+  const response = await apiRequest(page, `/api/schema/${MODULE}/${entity}`);
+  const body = response.body;
+  if (response.status === 200 && body !== null && typeof body === 'object') {
+    return { status: 200, meta: body as EntityMetaBody };
+  }
+  return { status: response.status };
 }
 
 /**
- * 列表接口是否可读（200）。
+ * 元数据前置（D108）：**只有 404 才 skip**。
  *
- * 后端把 `/api/sandbox/demo-items` 绑在 `sandbox:demo:read` 上；
- * E2E 夹具用户若没有该权限点，渲染用例没有判据 —— **skip 并写明原因**，
- * 不把「没权限」伪装成「渲染通过」。修夹具（种子授权 / `SCHEMA_USER_*` 换人）后即可跑。
+ * 403 / 500 / 其它状态都 fail —— 后端已声明实体却读不到，是配置或实现缺陷。
  */
-async function listStatus(page: Page, meta: EntityMetaBody | undefined): Promise<number> {
-  const listPath = meta?.api?.list;
+function requireMeta(probe: MetaProbe, entity: string): EntityMetaBody {
+  if (probe.status === 404) {
+    test.skip(true, `被测系统未就绪：/api/schema/${MODULE}/${entity} 返回 404（实体未声明）`);
+  }
+  expect(
+    probe.status,
+    `/api/schema/${MODULE}/${entity} 返回 ${probe.status}；只有 404 才允许 skip（D108）`,
+  ).toBe(200);
+  expect(probe.meta, `元数据 /api/schema/${MODULE}/${entity} 的响应体不是对象`).toBeDefined();
+  return probe.meta as EntityMetaBody;
+}
+
+/** 取实体的一个必需 API 路径（缺失即 fail，不是 skip）。 */
+function requireApiPath(
+  meta: EntityMetaBody,
+  key: 'list' | 'create' | 'update' | 'delete',
+): string {
+  const path = meta.api?.[key];
+  expect(path, `元数据未声明 api.${key}：渲染器无法走该动作`).toBeDefined();
+  return String(path);
+}
+
+/** 表头文本（按 DOM 顺序；**排除行操作列** —— 它是 `<th scope="col">` 但没有字段标签）。 */
+async function headerTexts(page: Page): Promise<string[]> {
+  return page.locator('table thead th:not(.base-schema-actions)').allTextContents();
+}
+
+/** 列表接口状态（`api.list` 未声明时为 `0`）。 */
+async function listStatus(page: Page, meta: EntityMetaBody): Promise<number> {
+  const listPath = meta.api?.list;
   if (listPath === undefined) {
     return 0;
   }
   const response = await apiRequest(page, `${listPath}?limit=1`);
   return response.status;
+}
+
+/** 列表必须可读（D108）：**403 是夹具授权缺失，必须 fail，不许 skip**。 */
+function expectListReadable(status: number, entity: string): void {
+  expect(
+    status,
+    `${entity} 列表返回 ${status}：403 表示夹具缺 sandbox:demo:* 授权（先跑 scripts/seed-e2e.sh），不是环境前置（D108）`,
+  ).toBe(200);
+}
+
+/** 一页取的记录（后端 limit 上限 200；E2E 的数据量远小于此）。 */
+async function listAll(page: Page, meta: EntityMetaBody): Promise<Record<string, unknown>[]> {
+  const listPath = requireApiPath(meta, 'list');
+  const response = await apiRequest(page, `${listPath}?limit=200`);
+  expect(response.status, `列表 ${listPath} 返回 ${response.status}`).toBe(200);
+  return ((response.body ?? {}) as ListBody).items ?? [];
+}
+
+/** 用 API 造一条记录，返回 id（用例自己造的数据，`finally` 里必须删）。 */
+async function createViaApi(
+  page: Page,
+  meta: EntityMetaBody,
+  body: Record<string, unknown>,
+): Promise<string> {
+  const createPath = requireApiPath(meta, 'create');
+  const response = await apiRequest(page, createPath, { method: 'POST', body });
+  expect(response.status, `创建 ${createPath} 返回 ${response.status}`).toBe(201);
+  const id = ((response.body ?? {}) as { id?: unknown }).id;
+  expect(typeof id, '创建响应没有 id').toBe('string');
+  return String(id);
+}
+
+/** 删除自己造的数据（失败时 `finally` 也会调到）。 */
+async function deleteIds(page: Page, meta: EntityMetaBody, ids: readonly string[]): Promise<void> {
+  const deletePath = meta.api?.delete;
+  if (deletePath === undefined) {
+    return;
+  }
+  for (const id of ids) {
+    await apiRequest(page, deletePath.replace('{id}', encodeURIComponent(id)), {
+      method: 'DELETE',
+    });
+  }
+}
+
+/** 记录 id（列表项里的 `id` 字段）。 */
+function idOf(item: Record<string, unknown>): string {
+  return typeof item['id'] === 'string' ? item['id'] : '';
+}
+
+/**
+ * 清空某实体的全部记录 → **空态用例自己的前置**（H-2）。
+ *
+ * 只动 `tenant-a` 的沙箱示例数据（`demoNote`），不碰任何业务表。
+ * 其它用例都自己造数据，所以清空不影响它们 —— 这正是不再需要「隐含前置」的原因。
+ */
+async function clearEntity(page: Page, meta: EntityMetaBody): Promise<number> {
+  let deleted = 0;
+  // 分页兜底：每轮最多删 200 条，最多 10 轮（防止写逻辑出错时死循环）。
+  for (let round = 0; round < 10; round += 1) {
+    const items = await listAll(page, meta);
+    const ids = items.map(idOf).filter((id) => id !== '');
+    if (ids.length === 0) {
+      return deleted;
+    }
+    await deleteIds(page, meta, ids);
+    deleted += ids.length;
+    if (ids.length < 200) {
+      return deleted;
+    }
+  }
+  return deleted;
 }
 
 /** 打开数据页面并等到「表头 / 空态 / 错误」之一出现。 */
@@ -122,30 +249,35 @@ async function openSchema(page: Page, entity: string): Promise<void> {
 
 test('表头文本与顺序精确等于元数据 fields 的 label（AC-S-082）', async ({ page }) => {
   await login(page, USER_WRITE);
-  const meta = await fetchMeta(page, PRIMARY_ENTITY);
-  test.skip(meta === undefined, `后端未就绪：/api/schema/${MODULE}/${PRIMARY_ENTITY} 非 200`);
-  const labels = (meta?.fields ?? []).map((field) => field.label ?? '');
+  const meta = requireMeta(await probeMeta(page, PRIMARY_ENTITY), PRIMARY_ENTITY);
+  const labels = (meta.fields ?? []).map((field) => field.label ?? '');
   expect(labels.length).toBeGreaterThan(0);
+  expectListReadable(await listStatus(page, meta), PRIMARY_ENTITY);
 
-  const status = await listStatus(page, meta);
-  test.skip(status !== 200, `夹具不可读列表（HTTP ${status}）—— 需要 sandbox:demo:read`);
+  // 数据前置自己造（AC-S-082 要求 ≥ 3 条）：不依赖夹具残留、也不依赖别的用例。
+  const marker = `hdr-${Date.now()}`;
+  const ids: string[] = [];
+  try {
+    for (let index = 0; index < 3; index += 1) {
+      ids.push(await createViaApi(page, meta, { title: `${marker}-${index}` }));
+    }
 
-  await openSchema(page, PRIMARY_ENTITY);
-  test.skip(
-    (await page.locator('.base-schema-empty').count()) > 0,
-    '夹具没有数据（AC-S-082 前置要求 ≥ 3 条）',
-  );
-
-  // 逐项相等（不是「包含」—— 否则乱序也会通过）。
-  expect(await headerTexts(page)).toEqual(labels);
+    await openSchema(page, PRIMARY_ENTITY);
+    // 逐项相等（不是「包含」—— 否则乱序也会通过）。
+    expect(await headerTexts(page)).toEqual(labels);
+  } finally {
+    await deleteIds(page, meta, ids);
+  }
 });
 
 test('空态：不渲染表头空壳，只渲染「暂无数据」（AC-S-082 步骤 5）', async ({ page }) => {
   await login(page, USER_WRITE);
-  const meta = await fetchMeta(page, SECOND_ENTITY);
-  test.skip(meta === undefined, `后端未声明第二个实体 ${SECOND_ENTITY}，空态用例待就绪后复跑`);
-  const status = await listStatus(page, meta);
-  test.skip(status !== 200, `夹具不可读 ${SECOND_ENTITY} 列表（HTTP ${status}）`);
+  const meta = requireMeta(await probeMeta(page, SECOND_ENTITY), SECOND_ENTITY);
+  expectListReadable(await listStatus(page, meta), SECOND_ENTITY);
+
+  // 前置：**先把这个实体清空**（H-2）—— 不假设库里「恰好没有数据」。
+  await clearEntity(page, meta);
+  expect((await listAll(page, meta)).length, '清空后列表仍有数据，空态前置不成立').toBe(0);
 
   await page.goto(`/schema/${MODULE}/${SECOND_ENTITY}`);
 
@@ -162,141 +294,141 @@ test('空态：不渲染表头空壳，只渲染「暂无数据」（AC-S-082 �
 
 test('字段级权限：无权用户看不到字段，接口也不返回该键（AC-S-084）', async ({ page }) => {
   await login(page, USER_WRITE);
-  const full = await fetchMeta(page, PRIMARY_ENTITY);
-  test.skip(full === undefined, '后端未就绪：元数据接口不可用');
-  const fullKeys = (full?.fields ?? []).map((field) => field.key ?? '');
+  const full = requireMeta(await probeMeta(page, PRIMARY_ENTITY), PRIMARY_ENTITY);
+  const fullKeys = (full.fields ?? []).map((field) => field.key ?? '');
 
-  await login(page, USER_READ);
-  const limited = await fetchMeta(page, PRIMARY_ENTITY);
-  test.skip(limited === undefined, '无写权限用户也读不到元数据（夹具权限配置待就绪）');
-  const limitedKeys = (limited?.fields ?? []).map((field) => field.key ?? '');
-  test.skip(
-    limitedKeys.length === fullKeys.length,
-    '夹具用户之间没有字段级权限差异（后端种子未授予 sandbox:demo:secret）',
-  );
+  // 数据前置：字段可见性要有行才能取证 → 自己造一条。
+  let id = '';
+  try {
+    id = await createViaApi(page, full, { title: `perm-${Date.now()}` });
 
-  const limitedStatus = await listStatus(page, limited);
-  test.skip(
-    limitedStatus !== 200,
-    `无权用户也读不到列表（HTTP ${limitedStatus}）—— 夹具权限待就绪`,
-  );
+    await login(page, USER_READ);
+    const limited = requireMeta(await probeMeta(page, PRIMARY_ENTITY), PRIMARY_ENTITY);
+    const limitedKeys = (limited.fields ?? []).map((field) => field.key ?? '');
 
-  await openSchema(page, PRIMARY_ENTITY);
-  test.skip(
-    (await page.locator('.base-schema-empty').count()) > 0,
-    '夹具没有数据（字段可见性无法在空表上取证）',
-  );
-  expect(await headerTexts(page)).toEqual((limited?.fields ?? []).map((f) => f.label ?? ''));
+    // 两个用户看到的字段必须不同。**没有差异 = 夹具没授 sandbox:demo:secret**，
+    // 那是配置缺陷 → fail（D108），不是「待就绪」。
+    expect(
+      limitedKeys.length,
+      '只读用户与写用户看到的字段数相同：夹具缺 sandbox:demo:secret 授权差（D108，不许 skip）',
+    ).toBeLessThan(fullKeys.length);
 
-  // 被过滤字段的 label 不能出现在 DOM 里（不是 display:none）。
-  const bodyText = await page.locator('body').innerText();
-  for (const key of fullKeys.filter((candidate) => !limitedKeys.includes(candidate))) {
-    const label = (full?.fields ?? []).find((field) => field.key === key)?.label ?? key;
-    expect(bodyText).not.toContain(label);
+    expectListReadable(await listStatus(page, limited), PRIMARY_ENTITY);
+
+    await openSchema(page, PRIMARY_ENTITY);
+    expect(await headerTexts(page)).toEqual((limited.fields ?? []).map((f) => f.label ?? ''));
+
+    // 被过滤字段的 label 不能出现在 DOM 里（不是 display:none）。
+    const bodyText = await page.locator('body').innerText();
+    for (const key of fullKeys.filter((candidate) => !limitedKeys.includes(candidate))) {
+      const label = (full.fields ?? []).find((field) => field.key === key)?.label ?? key;
+      expect(bodyText).not.toContain(label);
+    }
+  } finally {
+    // 清理要用写用户（只读用户没有写权限）。
+    if (id !== '') {
+      await login(page, USER_WRITE);
+      await deleteIds(page, full, [id]);
+    }
   }
 });
 
 test('零代码：同一个页面渲染两个不同实体（AC-S-085 / AC-S-086）', async ({ page }) => {
   await login(page, USER_WRITE);
-  const primary = await fetchMeta(page, PRIMARY_ENTITY);
-  const second = await fetchMeta(page, SECOND_ENTITY);
-  test.skip(primary === undefined, '后端未就绪：demoItem 元数据不可用');
-  test.skip(second === undefined, `后端未声明第二个实体 ${SECOND_ENTITY}，零代码用例待就绪后复跑`);
+  const primary = requireMeta(await probeMeta(page, PRIMARY_ENTITY), PRIMARY_ENTITY);
+  const second = requireMeta(await probeMeta(page, SECOND_ENTITY), SECOND_ENTITY);
+  expectListReadable(await listStatus(page, primary), PRIMARY_ENTITY);
+  expectListReadable(await listStatus(page, second), SECOND_ENTITY);
 
-  const primaryStatus = await listStatus(page, primary);
-  const secondStatus = await listStatus(page, second);
-  test.skip(
-    primaryStatus !== 200 || secondStatus !== 200,
-    `实体的列表不可读（demoItem=${primaryStatus}，${SECOND_ENTITY}=${secondStatus}）`,
-  );
+  // 数据前置：两个实体各造一条（**空表不渲染 thead**，所以不能靠夹具残留）。
+  const created: { meta: EntityMetaBody; ids: string[] }[] = [
+    { meta: primary, ids: [] },
+    { meta: second, ids: [] },
+  ];
+  try {
+    created[0]?.ids.push(await createViaApi(page, primary, { title: `zc-${Date.now()}` }));
+    created[1]?.ids.push(
+      await createViaApi(page, second, { title: `zc-${Date.now()}`, content: 'e2e' }),
+    );
 
-  await openSchema(page, PRIMARY_ENTITY);
-  expect(await headerTexts(page)).toEqual((primary?.fields ?? []).map((f) => f.label ?? ''));
+    await openSchema(page, PRIMARY_ENTITY);
+    expect(await headerTexts(page)).toEqual((primary.fields ?? []).map((f) => f.label ?? ''));
 
-  await openSchema(page, SECOND_ENTITY);
-  expect(await headerTexts(page)).toEqual((second?.fields ?? []).map((f) => f.label ?? ''));
+    await openSchema(page, SECOND_ENTITY);
+    expect(await headerTexts(page)).toEqual((second.fields ?? []).map((f) => f.label ?? ''));
+  } finally {
+    for (const entry of created) {
+      await deleteIds(page, entry.meta, entry.ids);
+    }
+  }
 });
 
 test('CRUD 闭环：新建 → 编辑 → 删除（AC-S-086）', async ({ page }) => {
   await login(page, USER_WRITE);
-  const meta = await fetchMeta(page, PRIMARY_ENTITY);
-  test.skip(meta === undefined, '后端未就绪：demoItem 元数据不可用');
-  const api = meta?.api ?? {};
-  test.skip(
-    api.update === undefined || api.delete === undefined,
-    '元数据未声明 update / delete，CRUD 用例待后端就绪后复跑',
-  );
-  const status = await listStatus(page, meta);
-  test.skip(
-    status !== 200,
-    `夹具不可读 / 写 demoItem（HTTP ${status}）—— 需要 sandbox:demo:read + write`,
-  );
+  const meta = requireMeta(await probeMeta(page, PRIMARY_ENTITY), PRIMARY_ENTITY);
+  // 元数据声明了 update / delete，渲染器才有按钮；缺了就是实现缺陷 → fail。
+  requireApiPath(meta, 'update');
+  requireApiPath(meta, 'delete');
+  expectListReadable(await listStatus(page, meta), PRIMARY_ENTITY);
 
   await openSchema(page, PRIMARY_ENTITY);
 
   const marker = `e2e-${Date.now()}`;
+  const ids: string[] = [];
+  try {
+    // 新建：用真实 UI（不用 API 直连 —— 这条用例守的就是渲染器 + 表单）。
+    await page.getByRole('button', { name: '新建' }).click();
+    await page.getByLabel('标题').fill(marker);
+    await page.getByRole('button', { name: '创建' }).click();
 
-  // 新建：用真实 UI（不用 API 直连 —— 这条用例守的就是渲染器 + 表单）。
-  await page.getByRole('button', { name: '新建' }).click();
-  await page.getByLabel('标题').fill(marker);
-  await page.getByRole('button', { name: '创建' }).click();
+    // 新记录出现在列表里（按唯一标识断言，不是「行数 +1」）。
+    const row = page.locator('tbody tr', { hasText: marker });
+    await expect(row).toHaveCount(1);
 
-  // 新记录出现在列表里（按唯一标识断言，不是「行数 +1」）。
-  const row = page.locator('tbody tr', { hasText: marker });
-  await expect(row).toHaveCount(1);
+    // 编辑：改成新标题，列表反映新值。
+    await row.getByRole('button', { name: '编辑' }).click();
+    await page.getByLabel('标题').fill(`${marker}-edited`);
+    await page.getByRole('button', { name: '保存' }).click();
+    await expect(page.locator('tbody tr', { hasText: `${marker}-edited` })).toHaveCount(1);
 
-  // 编辑：改成新标题，列表反映新值。
-  await row.getByRole('button', { name: '编辑' }).click();
-  await page.getByLabel('标题').fill(`${marker}-edited`);
-  await page.getByRole('button', { name: '保存' }).click();
-  await expect(page.locator('tbody tr', { hasText: `${marker}-edited` })).toHaveCount(1);
-
-  // 删除：先确认对话框，再断言记录不在列表里。
-  await page
-    .locator('tbody tr', { hasText: `${marker}-edited` })
-    .getByRole('button', { name: '删除' })
-    .click();
-  await page.getByRole('button', { name: '确认' }).click();
-  await expect(page.locator('tbody tr', { hasText: `${marker}-edited` })).toHaveCount(0);
+    // 删除：先确认对话框，再断言记录不在列表里。
+    await page
+      .locator('tbody tr', { hasText: `${marker}-edited` })
+      .getByRole('button', { name: '删除' })
+      .click();
+    await page.getByRole('button', { name: '确认' }).click();
+    await expect(page.locator('tbody tr', { hasText: `${marker}-edited` })).toHaveCount(0);
+  } finally {
+    // UI 中途失败时，把自己造的那条兜底删掉（按 marker 从列表里找回来）。
+    const leftovers = (await listAll(page, meta))
+      .filter((item) => String(item['title'] ?? '').startsWith(marker))
+      .map(idOf)
+      .filter((candidate) => candidate !== '');
+    ids.push(...leftovers);
+    await deleteIds(page, meta, ids);
+  }
 });
 
 test('游标分页：下一页请求带上一页的 nextCursor（AC-S-082 步骤 4）', async ({ page }) => {
   await login(page, USER_WRITE);
-  const meta = await fetchMeta(page, PRIMARY_ENTITY);
-  test.skip(meta === undefined, '后端未就绪：demoItem 元数据不可用');
-  const listPath = meta?.api?.list;
-  const createPath = meta?.api?.create;
-  const deletePath = meta?.api?.delete;
-  test.skip(
-    listPath === undefined || createPath === undefined || deletePath === undefined,
-    '元数据缺 api.list / create / delete，分页用例待后端就绪后复跑',
-  );
-  const status = await listStatus(page, meta);
-  test.skip(status !== 200, `夹具不可读列表（HTTP ${status}）—— 需要 sandbox:demo:read`);
+  const meta = requireMeta(await probeMeta(page, PRIMARY_ENTITY), PRIMARY_ENTITY);
+  const listPath = requireApiPath(meta, 'list');
+  requireApiPath(meta, 'create');
+  requireApiPath(meta, 'delete');
+  expectListReadable(await listStatus(page, meta), PRIMARY_ENTITY);
 
-  // 先看首页是否已有下一页；没有就通过 API 播种到超过一页（20 条）。
+  // 数据前置：自己播 21 条（一页 20），保证一定有第二页；
+  // 不依赖「库里恰好有 20 条以上」这个隐含状态。
+  const marker = `page-seed-${Date.now()}`;
   const created: string[] = [];
-  const first = await apiRequest(page, `${String(listPath)}?limit=20`);
-  const firstBody = (first.body ?? {}) as {
-    items?: Record<string, unknown>[];
-    nextCursor?: string | null;
-  };
-  if (typeof firstBody.nextCursor !== 'string') {
-    for (let index = 0; index < 21; index += 1) {
-      const createdResponse = await apiRequest(page, String(createPath), {
-        method: 'POST',
-        body: { title: `page-seed-${index}` },
-      });
-      const createdBody = (createdResponse.body ?? {}) as { id?: unknown };
-      if (typeof createdBody.id === 'string') {
-        created.push(createdBody.id);
-      }
-    }
-  }
-
   try {
+    for (let index = 0; index < 21; index += 1) {
+      created.push(await createViaApi(page, meta, { title: `${marker}-${index}` }));
+    }
+
     await openSchema(page, PRIMARY_ENTITY);
     const firstPageIds = await page.locator('tbody tr td:first-child').allTextContents();
+    expect(firstPageIds.length).toBeGreaterThan(0);
 
     const nextRequest = page.waitForRequest(
       (request) =>
@@ -313,10 +445,6 @@ test('游标分页：下一页请求带上一页的 nextCursor（AC-S-082 步骤
     const secondPageIds = await page.locator('tbody tr td:first-child').allTextContents();
     expect(secondPageIds).not.toEqual(firstPageIds);
   } finally {
-    for (const id of created) {
-      await apiRequest(page, String(deletePath).replace('{id}', encodeURIComponent(id)), {
-        method: 'DELETE',
-      });
-    }
+    await deleteIds(page, meta, created);
   }
 });

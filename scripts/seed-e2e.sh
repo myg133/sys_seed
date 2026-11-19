@@ -116,9 +116,14 @@ E2E_PASSWORD_PHC='$argon2id$v=19$m=16384,t=2,p=1$ZTJlLWZpeHR1cmUtc2FsdC0wMDAx$uN
 #
 # | 用户 | 权限点 | 用途 |
 # |---|---|---|
-# | u-perm-read@example.com  | rbac:role:read                      | 只读 → 深链 403 |
-# | u-perm-write@example.com | rbac:role:read + rbac:role:write     | 写用户 → 深链可达 |
+# | u-perm-read@example.com  | rbac:role:read + sandbox:demo:read  | 只读 → 能读列表、不能写；看不到 `secret` 字段 |
+# | u-perm-write@example.com | rbac:role:read + rbac:role:write + sandbox:demo:read + sandbox:demo:write + sandbox:demo:secret | 写用户 → 深链可达、CRUD 可跑、能看到 `secret` 字段 |
 # | u-perm-none@example.com  | （无）                              | fail closed |
+#
+# `sandbox:demo:*` 是 REQ-012 的权限点（`sandbox` 模块的两个实体共用）。
+# **漏授就会让 `e2e/schema-driven.spec.ts` 的列表请求 403**，而按 D108，
+# 403 必须让用例 **fail**（不是 skip）—— 所以这份清单是 E2E 能否真跑的前提。
+# `sandbox:demo:secret` 只授给写用户：AC-S-084 要的就是「两个用户看到的字段不同」。
 #
 # id 用固定值（不是随机 uuid）：重复执行时能精确命中同一行，
 # 也让「用户数不翻倍」这件事一眼可查。**同名既有行除外** —— 冲突时沿用它的 id
@@ -159,9 +164,13 @@ DELETE FROM platform_role_permission
 
 INSERT INTO platform_role_permission (tenant_id, role_id, permission_code, data_scope)
 VALUES
-    ('tenant-a', 'e2e-role-read',  'rbac:role:read',  NULL),
-    ('tenant-a', 'e2e-role-write', 'rbac:role:read',  NULL),
-    ('tenant-a', 'e2e-role-write', 'rbac:role:write', NULL)
+    ('tenant-a', 'e2e-role-read',  'rbac:role:read',     NULL),
+    ('tenant-a', 'e2e-role-read',  'sandbox:demo:read',  NULL),
+    ('tenant-a', 'e2e-role-write', 'rbac:role:read',     NULL),
+    ('tenant-a', 'e2e-role-write', 'rbac:role:write',    NULL),
+    ('tenant-a', 'e2e-role-write', 'sandbox:demo:read',  NULL),
+    ('tenant-a', 'e2e-role-write', 'sandbox:demo:write', NULL),
+    ('tenant-a', 'e2e-role-write', 'sandbox:demo:secret', NULL)
 ON CONFLICT (tenant_id, role_id, permission_code) DO NOTHING;
 
 -- 4) 绑定：**用查出来的实际 id**（第 1 步的 upsert 只把同名既有行「修好登录字段」，

@@ -107,10 +107,14 @@
             {/each}
             {#if hasActions}
               <!--
-                行操作列没有字段标签：用 td 而不是 th，
-                否则表头多一列（AC-S-082 步骤 2：th 文本与顺序 = 元数据 label）。
+                行操作列没有字段标签，但**必须**是 `<th scope="col">`：
+                `<tr>` 的 content model 只允许 th/td 混排时保持「表头单元格」语义 ——
+                在 `<thead><tr>` 里放 `<td>` 违反 HTML content model，
+                读屏软件会把它当成数据单元格（L-4）。
+                列本身没有文案，所以留空；断言表头文案的用例按
+                `th:not(.base-schema-actions)` 取值（AC-S-082 步骤 2：th 文本与顺序 = 元数据 label）。
               -->
-              <td class="base-schema-actions"></td>
+              <th scope="col" class="base-schema-actions"></th>
             {/if}
           </tr>
         </thead>

@@ -7,13 +7,18 @@
  * 组件里直接写 `client.get(...)` 会让「路径怎么拼」「写请求发几次」无法单测 ——
  * 而这两件事正是 AC-S-083 / 086 的判据。
  *
- * # 更新方法：PATCH，405 时退回 PUT
+ * # 更新方法：PATCH，405 时退回 PUT，**并记住结果**
  *
  * 前端与后端并行开发，更新动词没有在元数据里声明。平台既有写接口用 PUT
  * （`platform-config` 的 `put(entries)`），而 `@base/sdk` 同时支持 PATCH / PUT。
  * 这里先发 PATCH；**只有**收到 405（路径存在但方法不允许）才退回 PUT ——
  * 405 意味着服务端**什么都没做**，重试是安全的；其它错误一律不重试，
  * 否则会把「真正的失败」变成两次写入。
+ *
+ * 退回一次之后**把方法记下来**：同一个 `api.update` 路径模板的后续编辑直接发 PUT。
+ * 否则每次编辑都要先吃一个必定 405 的请求（多一次写请求、多一行服务端日志），
+ * 在这条路径上是纯粹的浪费（L-2）。缓存按**路径模板**而不是按记录 id ——
+ * 服务端方法由路由决定，与具体记录无关。
  */
 
 import type { ListPage, ApiEndpoints } from '@base/schema';
@@ -75,8 +80,26 @@ export async function createRecord(
 }
 
 /**
- * 更新：`PATCH api.update`（`{id}` 替换为记录 id）；405 时退回 `PUT`。
+ * 更新方法缓存：`api.update` 路径模板 → 已知可用的方法（L-2）。
  *
+ * 首次 PATCH 成功就记 `PATCH`，遇到 405 记 `PUT`；之后同一实体的编辑直接发缓存的方法，
+ * 不再固定先吃一次 405。模块级（前端只有一个页面进程），按**路径模板**区分实体。
+ */
+const updateMethods = new Map<string, 'PATCH' | 'PUT'>();
+
+/**
+ * 清空更新方法缓存（**仅供测试**）。
+ *
+ * 缓存是模块级的，会跨用例存活；断言「首个请求是 PATCH」的用例需要干净的起点。
+ */
+export function resetUpdateMethodCache(): void {
+  updateMethods.clear();
+}
+
+/**
+ * 更新：按已知方法写 `api.update`（`{id}` 替换为记录 id）。
+ *
+ * 未缓存时先发 `PATCH`，**只有** 405 才退回 `PUT` 并记住（见文件头注释）。
  * 未声明 `update` 时**抛错**（调用方本来就不该渲染「编辑」按钮）。
  */
 export async function updateRecord(
@@ -89,12 +112,19 @@ export async function updateRecord(
     throw new Error('该实体未声明更新接口（api.update）');
   }
   const path = resolveApiPath(api.update, id);
+  const remembered = updateMethods.get(api.update);
+  if (remembered !== undefined) {
+    await client.request({ method: remembered, path, body });
+    return;
+  }
   try {
     await client.request({ method: 'PATCH', path, body });
+    updateMethods.set(api.update, 'PATCH');
   } catch (error) {
     if (error instanceof ApiError && error.status === 405) {
       // 405 = 路径存在但方法不允许 → 服务端没有处理，退回 PUT 不会重复写入。
       await client.request({ method: 'PUT', path, body });
+      updateMethods.set(api.update, 'PUT');
       return;
     }
     throw error;

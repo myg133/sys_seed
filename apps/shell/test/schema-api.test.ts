@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 
 import type { ApiEndpoints } from '@base/schema';
 import { ApiError, type ApiClient, type RequestOptions } from '@base/sdk';
@@ -9,6 +9,7 @@ import {
   describeError,
   loadEntityMeta,
   loadPage,
+  resetUpdateMethodCache,
   updateRecord,
 } from '../src/lib/schema-api';
 
@@ -112,6 +113,12 @@ describe('loadPage —— 游标分页请求（TC-012-038 / 039）', () => {
 });
 
 describe('写请求（AC-S-086）', () => {
+  // 更新方法缓存是模块级的（L-2）：每条用例都要从「不知道方法」开始，
+  // 否则前一条用例的 405 会让后一条直接发 PUT，断言就失真了。
+  beforeEach(() => {
+    resetUpdateMethodCache();
+  });
+
   it('创建 → POST api.create，body 原样', async () => {
     const { client, calls } = fakeClient();
     await createRecord(client, API, { title: '示例' });
@@ -151,6 +158,31 @@ describe('写请求（AC-S-086）', () => {
     });
     await expect(updateRecord(client, API, 'item-1', { title: 'x' })).rejects.toThrow('INTERNAL');
     expect(calls.map((call) => call.method)).toEqual(['PATCH']);
+  });
+
+  it('405 之后记住 PUT：下一次编辑只发一个 PUT（L-2）', async () => {
+    const { client, calls } = fakeClient((call) => {
+      if (call.method === 'PATCH') {
+        throw new ApiError({ code: 'METHOD_NOT_ALLOWED', status: 405 });
+      }
+      return undefined;
+    });
+
+    // 第一次：PATCH 405 → PUT 成功，并把方法记下来。
+    await updateRecord(client, API, 'item-1', { title: 'x' });
+    expect(calls.map((call) => call.method)).toEqual(['PATCH', 'PUT']);
+
+    // 第二次编辑：不再先吃一个必定 405 的 PATCH（否则每次编辑都是两次写请求）。
+    await updateRecord(client, API, 'item-2', { title: 'y' });
+    expect(calls.map((call) => call.method)).toEqual(['PATCH', 'PUT', 'PUT']);
+    expect(calls[2]?.path).toBe('/api/sandbox/demo-items/item-2');
+  });
+
+  it('PATCH 成功也记住：下一次编辑直接发一个 PATCH', async () => {
+    const { client, calls } = fakeClient(() => undefined);
+    await updateRecord(client, API, 'item-1', { title: 'x' });
+    await updateRecord(client, API, 'item-2', { title: 'y' });
+    expect(calls.map((call) => call.method)).toEqual(['PATCH', 'PATCH']);
   });
 
   it('删除 → DELETE 路径替换 {id}', async () => {

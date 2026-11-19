@@ -97,7 +97,7 @@ pub const ALREADY_PROVIDED: &[ProvidedCapability] = &[
     },
     ProvidedCapability {
         key: "ui_table_component",
-        summary: "@base/ui 的 Table 契约与 apps/shell 的 Table.svelte 提供只读表格（只接受 props，分页状态由 @base/hooks 组合传入），勿自造表格渲染",
+        summary: "@base/ui 的 Table 是页码分页（依赖 total）的只读表格；游标分页没有 total、且空态不能渲染表头空壳，请用 apps/shell 的 SchemaTable，勿自造表格渲染",
     },
     ProvidedCapability {
         key: "schema_field_meta",

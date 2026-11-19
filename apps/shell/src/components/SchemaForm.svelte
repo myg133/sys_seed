@@ -14,7 +14,9 @@
 
   # 校验失败**不发请求**
 
-  提交时先走 `prepareSubmit()`：有错误就只渲染错误、**不调用** `onSubmit`。
+  提交时先走 `gateSubmit()`（`src/lib/schema-submit.ts`，内部即 `prepareSubmit`）：
+  有错误就只渲染错误、**不调用** `onSubmit`。这层被单拉成纯函数，是因为 SSR 单测
+  点不到按钮 —— 组件里内联的闸门没有任何用例守得住（QA L-5 的假绿）。
   错误文案挂在**该字段旁边**，输入控件带 `aria-invalid="true"` +
   `aria-describedby` 指向错误节点（AC-S-083 步骤 4）。
 
@@ -28,12 +30,13 @@
     formatCell,
     formValues,
     isKnownFieldType,
-    prepareSubmit,
     unknownTypeWarning,
     visibleFields,
     type EntityMeta,
     type FieldMeta,
   } from '@base/schema';
+
+  import { gateSubmit } from '../lib/schema-submit';
 
   /** 组件 props（D97：必须有类型）。 */
   interface SchemaFormProps {
@@ -122,13 +125,10 @@
 
   function handleSubmit(event: SubmitEvent): void {
     event.preventDefault();
-    const prepared = prepareSubmit(props.meta, values);
-    errors = prepared.errors;
-    if (prepared.body === undefined) {
-      // 校验失败：**不发请求**（由父组件的 onSubmit 触发写请求）。
-      return;
-    }
-    props.onSubmit?.(prepared.body);
+    // 闸门是纯函数（`src/lib/schema-submit.ts`）：校验失败时**根本不会**碰
+    // `props.onSubmit` —— 于是也不会发出写请求（AC-S-083 步骤 3 / 5）。
+    // 单拉出来的原因见该文件头：SSR 单测点不到按钮，只能测这层。
+    errors = gateSubmit(props.meta, values, (body) => props.onSubmit?.(body)).errors;
   }
 </script>
 

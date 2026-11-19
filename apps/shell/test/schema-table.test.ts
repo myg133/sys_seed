@@ -38,9 +38,16 @@ const ROW: Record<string, unknown> = {
   secret: '内部-A',
 };
 
-/** 表头文本（按出现顺序）。 */
+/**
+ * 表头文本（按出现顺序）。
+ *
+ * **排除行操作列**：它是 `<th scope="col" class="base-schema-actions">`，没有字段标签
+ * （L-4 之前是 `<td>`，那违反 HTML content model）。
+ */
 function headers(html: string): string[] {
-  return [...html.matchAll(/<th>([\s\S]*?)<\/th>/g)].map((match) => (match[1] ?? '').trim());
+  return [...html.matchAll(/<th(?:\s[^>]*)?>([\s\S]*?)<\/th>/g)]
+    .filter((match) => !(match[0] ?? '').includes('base-schema-actions'))
+    .map((match) => (match[1] ?? '').trim());
 }
 
 /** 数据单元格文本（不含行操作列 —— 那是带 class 的 td）。 */
@@ -152,6 +159,14 @@ describe('SchemaTable —— 按钮由元数据声明决定（D102）', () => {
   it('没有 onCreate → 不渲染新建按钮', () => {
     const { body } = renderTable({});
     expect(body).not.toContain('新建');
+  });
+
+  it('行操作列在 thead 里是 th[scope=col]，不是 td（L-4：HTML content model）', () => {
+    const { body } = renderTable({ onEdit: () => undefined, onDelete: () => undefined });
+    const thead = /<thead>([\s\S]*?)<\/thead>/.exec(body)?.[1] ?? '';
+    // `<tr>` 里只能有 th/td，但**表头行**里出现 td 是 content model 违规（读屏会当数据单元格）。
+    expect(thead).not.toContain('<td');
+    expect(thead).toMatch(/<th[^>]*scope="col"[^>]*base-schema-actions[^>]*>/);
   });
 });
 

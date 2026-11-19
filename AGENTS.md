@@ -82,7 +82,17 @@ docs/contracts/              契约正文快照（**勿手改**，正本在 BA �
    验收前先看输出里的「N passed」，**N 必须 > 0**。
 
 > 规则 1 与 2 由 CI 机械检查：`cargo xtask check-deps` 扫 `cargo metadata` 的依赖图，
-> 平台 crate 一旦反向依赖业务模块即失败。
+> 平台 crate 一旦反向依赖业务模块即失败（**装配层 `platform-server` 除外**）。
+>
+> **例外只有 `platform-server`**（`crates/xtask/src/deps.rs` 的 `ASSEMBLY_CRATES` 白名单）：
+> 它是**可执行交付物**，职责就是把各业务模块装起来（路由、启动、迁移），
+> 所以它**必须**能依赖业务模块 —— 否则「装配」无处可写。库 crate 一律不行。
+> 加进白名单等于放弃这条硬规则对该 crate 的约束，只有可执行交付物有资格。
+>
+> | 谁 | 能否依赖业务模块 |
+> |---|---|
+> | `platform-core` / `platform-db` / `platform-iam` / `platform-org` / `platform-rbac` / `platform-schema`（以及 `platform-config`、`platform-contracts*`） | ❌ **不能** |
+> | **`platform-server`** | ✅ **可以**（唯一例外，`ASSEMBLY_CRATES` 白名单） |
 
 ## 配置怎么读（REQ-010 起）
 
@@ -202,7 +212,7 @@ bun run dev
 | `error_code_i18n` | @base/i18n 的 translate()/hasMessage() 提供错误码到文案映射，勿在后端拼中文句子 |
 | `theme` | @base/theme 的 applyTheme()/toggleTheme() 提供 CSS 变量令牌与暗色模式，勿另造主题变量或硬编码颜色 |
 | `ui_token` | @base/ui 的 toneClass()/TONES/defaultRadius() 提供色调与圆角 token，勿另造样式变量 |
-| `ui_table_component` | @base/ui 的 Table 契约与 apps/shell 的 Table.svelte 提供只读表格（只接受 props，分页状态由 @base/hooks 组合传入），勿自造表格渲染 |
+| `ui_table_component` | @base/ui 的 Table 是页码分页（依赖 total）的只读表格；游标分页没有 total、且空态不能渲染表头空壳，请用 apps/shell 的 SchemaTable，勿自造表格渲染 |
 | `schema_field_meta` | @base/schema 的 FieldMeta/describeField()/findField() 提供字段元数据形状，勿另造元数据结构 |
 | `sdk_client` | @base/sdk 的 createApiClient() 提供类型安全请求、RFC 9457 错误码、token 自动刷新与幂等键注入，勿另造 HTTP 基类 |
 | `auth_state` | @base/auth 的 isAuthenticated()/tenantId() 提供登录态形状，勿另造登录态模型 |
