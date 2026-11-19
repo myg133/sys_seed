@@ -91,6 +91,21 @@
     },
     {
       "associated_types": [],
+      "description": "权限点**全集**的提供者（平台能力，不是扩展点）。",
+      "generics": "",
+      "kind": "platform-capability",
+      "methods": [
+        {
+          "declaration": "fn effective_permissions<'a>(&'a self, ctx: &'a RequestContext, user_id: &'a str) -> Pin<Box<dyn Future<Output = Result<Vec<String>, String>> + Send + 'a>>",
+          "has_default": false,
+          "name": "effective_permissions"
+        }
+      ],
+      "name": "PermissionProvider",
+      "supertraits": "Send + Sync + 'static"
+    },
+    {
+      "associated_types": [],
       "description": "权限判定的**异步刷新**接缝（平台能力，不是扩展点）。",
       "generics": "",
       "kind": "platform-capability",

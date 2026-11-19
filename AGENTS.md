@@ -122,6 +122,21 @@ Router::new()
   缺权限点 **403 `INSUFFICIENT_PERMISSION`**；
   记录不在数据范围内 **404 `NOT_FOUND`**（不泄露资源存在性）。
 
+### 「我有哪些权限点」（REQ-011 起）
+
+`platform_core::extension::permission::PermissionProvider` 是**平台能力**
+（`kind = "platform-capability"`，**不是扩展点**；`extension_point_count` 仍是 5）。
+实现方是 `platform-rbac`（`RbacService`），装配由 `platform-server` 注入。
+
+- 它给的是**权限点全集**（已展开通配、升序去重），
+  与 `PermissionChecker` 的「判一个权限点」是**两件事** —— 后者方法全同步，
+  逐个 `has()` 是 N 次判定，且拿不到「全集」语义。
+- `platform-iam` **不能**依赖 `platform-rbac`（依赖方向是 rbac → iam，反过来成环），
+  所以登录响应里的 `permissions` 靠**这个 trait** 注入，**未注入时是空数组**、
+  登录**仍然成功**（fail closed 的是「判定」，不是「登录」）。
+- 业务模块**不需要**它 —— 「当前用户有哪些权限点」是前端 SDK 的事
+  （`GET /api/rbac/me/permissions`）。
+
 
 ## 命令
 
