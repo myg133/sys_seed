@@ -21,7 +21,7 @@
 | 静态加密 | `platform_iam/src/crypto.rs`：`encrypt` / `decrypt`（ChaCha20-Poly1305，密钥来自 `BASE_IAM_SECRET_KEY`） | 租户级 secret 加密列留接口时用 |
 | 高熵随机串 | 同上 `random_base64url` | `state` / `nonce` / `code_verifier` |
 | LDAP 客户端 | `platform-org/src/ldap.rs` 的 `Ldap3Source`（`ldap3` 0.11.5） | **照搬连接方式**：`LdapConnAsync::new` + `ldap3::drive!` |
-| LDAP 密码校验原语 | `ldap3::Ldap::simple_bind(bind_dn, bind_pw)`（源码 `ldap.rs:238` 已确认存在） | 直接调用 |
+| LDAP 密码校验原语 | `ldap3::Ldap::simple_bind(bind_dn, bind_pw)` → `LdapResult`。⚠️ **返回 `Ok` 不代表认证成功**，`rc != 0` 时外层仍是 `Ok`，**必须**再 `.success()` | 包一层 `SsoLdapClient`（见 §5.2），`simple_bind` 后 `.success()` 判 `rc == 0`。正确用法先例：`platform-org/src/ldap.rs:481-495` |
 | 出站 HTTP | `platform-org/src/scim.rs` 的 `HttpScimGateway`（`hyper_util::client::legacy` + `HttpConnector`） | **照搬这个模式**，不引 `reqwest` |
 | 账号外部身份映射 | `external_identity(tenant_id, provider, external_id, user_id)`，唯一键 `(tenant_id, provider, external_id)` | SSO 绑定写这张表 |
 | 登录限流 | `platform_iam_login_rate` / `platform_iam_login_attempt` 表 | LDAP 失败复用同一套限流 |
@@ -78,6 +78,37 @@ CREATE INDEX IF NOT EXISTS platform_iam_oidc_state_tenant_idx
   只能靠 `state` 反查。**安全由「`state` 是不可猜的高熵串」保证**，不是由 RLS 保证。
   租户校验在应用层做（`state.tenant_id` 必须等于请求头租户）。
 - 表名用 `platform_iam_` 前缀，与既有 IAM 表一致。
+- ⚠️ **必须 `GRANT`（rev 3 新增，QA 的 S37）**：本仓 IAM 表在迁移里显式授权给应用角色；
+  新表不授权 → 应用角色 `INSERT` 会 `permission denied for table`。
+  **本表明确不启用 RLS，就更需要 GRANT**。写法照 `20261118000500_iam_login_rate.up.sql:38-44`
+  （带 `IF EXISTS (SELECT 1 FROM pg_roles …)` 守卫，兼容没有该角色的环境）。
+
+### 2.1.1 新建：`platform_iam_sso_ticket`（rev 3 新增，P4 / D124 决策①）
+
+回调不能直接返回 JSON（浏览器会渲染成文本），所以回调 302 到前端并携带**一次性 ticket**。
+
+```sql
+CREATE TABLE IF NOT EXISTS platform_iam_sso_ticket (
+    ticket       TEXT        PRIMARY KEY,          -- base64url(32B)
+    tenant_id    TEXT        NOT NULL,
+    user_id      TEXT        NOT NULL,
+    session_id   TEXT        NOT NULL,             -- 已建好的会话
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at   TIMESTAMPTZ NOT NULL,             -- created_at + 30 秒
+    consumed_at  TIMESTAMPTZ                       -- 非空 = 已换过
+);
+
+CREATE INDEX IF NOT EXISTS platform_iam_sso_ticket_expiry_idx
+    ON platform_iam_sso_ticket (expires_at);
+```
+
+**要点**：
+
+- **TTL 只有 30 秒** —— 它只在「回调 302 → 前端加载完成 → 调 exchange」之间存活
+- **一次性**：`consumed_at` 非空即拒（`SSO_TICKET_INVALID`）
+- **不存 token**：只存 `session_id`，exchange 时复用 `issue_session` 的同一套逻辑 ——
+  **token 绝不进 URL、绝不进数据库**
+- 同样**不启用 RLS**（exchange 时前端还没令牌，拿不到权威租户来源）+ **必须 GRANT**
 
 ### 2.2 改：`platform_iam_session` 加来源列
 
@@ -107,6 +138,15 @@ ALTER TABLE platform_iam_session
 不值得为它立一个 trait 再加一层注入；两处写同一张表的风险由**唯一约束**兜住
 （`(tenant_id, provider, external_id)` 冲突时 `ON CONFLICT DO UPDATE`，不会产生重复）。
 
+> ⚠️ **rev 3 修正（QA 的 S19）：绝对不要照抄 org 的 upsert。**
+> 既有实现是 `ON CONFLICT (tenant_id, provider, external_id) DO UPDATE SET user_id = EXCLUDED.user_id`
+> （`platform-org/src/store.rs:655-656`）—— 这是**改指**语义：同一个外部身份再写一次，
+> 会把绑定**静默改到另一个本地用户**。在组织同步场景合理（LDAP 管理员改了映射），
+> **但在认证路径上是账号接管**。
+>
+> **认证路径必须用 `ON CONFLICT DO NOTHING` + 读回比对**：读回的 `user_id` 与期望不一致
+> → `409 SSO_IDENTITY_LINK_CONFLICT`，**不静默改指**。AC-S-103 步骤 7 专门守这一条。
+
 > 这是**有意的重复**，理由写在这里，避免下一个人以为是疏漏。
 
 ---
@@ -122,6 +162,7 @@ ALTER TABLE platform_iam_session
 | `GET` | `/api/iam/sso/oidc/authorize` | **无**（但要租户头） | 302 到 IdP；落一条 `oidc_state` |
 | `GET` | `/api/iam/sso/oidc/callback` | **无** | 收 `code` + `state`；换 token、验签、绑定、建会话 |
 | `POST` | `/api/iam/sso/ldap/login` | **无** | body：`{username, password}`；bind 校验后建会话 |
+| `POST` | `/api/iam/sso/exchange` | **无** | body：`{ticket}`；**rev 3 新增**（见 §3.2）：把一次性 ticket 换成 `LoginResponse` |
 
 **为什么这些端点都不需要认证**：它们是**登录入口**，用户此刻还没令牌。
 
@@ -147,8 +188,20 @@ SSO **配置的写入**走 REQ-010 的通用配置接口（已有 `config:entry:
 
 未配置任何 provider → `{"providers": []}` + **200**（不是 404：这是「查了但没有」，不是「没有这个接口」）。
 
-`oidc/callback` 与 `ldap/login` 成功 → **与 `POST /api/iam/login` 完全相同的 `LoginResponse`**。
+`ldap/login` 与 `POST /api/iam/sso/exchange` 成功 → **与 `POST /api/iam/login` 完全相同的 `LoginResponse`**。
 这是 AC-S-107「同构」的直接要求。
+
+> **rev 3 修正（QA 的 S27）**：`oidc/callback` **不返回** `LoginResponse`。
+> 它是**顶层浏览器导航**的落点 —— 返回 `200 + JSON` 会被浏览器渲染成文本，
+> SPA 拿不到 `refreshToken`。rev 2 让 callback 直接返 JSON，靠「AC 用脚本客户端测」**恰好掩盖**了这条。
+>
+> **rev 3 改为 ticket 交接（§2.1.1）**：
+> ```
+> callback → 302 {前端基址}/sso/callback?ticket=<ticket>
+> 前端 SsoCallback 页 → POST /api/iam/sso/exchange {ticket} → LoginResponse
+> ```
+> 前端因此需要新增 `SsoCallback.svelte` + `/sso/callback` 路由（见 §8）。
+> **不选 cookie 方案**：那会破坏 D99（会话存 `sessionStorage`），引入第二套会话机制。
 
 ---
 
@@ -260,8 +313,9 @@ POST /api/iam/sso/ldap/login {username, password}
    │      ⚠️ 必须在发请求之前，且不得连接目录服务
    ├─ 3. 连接（LdapConnAsync + drive!），用**服务账号** bind（若要 search）
    ├─ 4. search 出用户 DN（filter 代入 username，**必须做转义**）
-   ├─ 5. 用用户 DN + 用户密码 simple_bind
-   │      成功 → 继续；失败 → 401 SSO_LDAP_BIND_FAILED（与「用户不存在」同一个码）
+   ├─ 5. 用用户 DN + 用户密码 simple_bind → **LdapResult** → **必须** `.success()`
+   │      ⚠️ 外层 `Ok` 只代表「请求发出并收到响应」；`rc != 0`（如 rc=49）才是密码错
+   │      `.success()` 成功 → 继续；失败 → 401 SSO_LDAP_BIND_FAILED（与「用户不存在」同一个码）
    ├─ 6. 从条目取映射字段（如 mail）→ 匹配/建本地 user
    ├─ 7. issue_session（auth_provider='ldap'）
    └─ 8. 发审计事件
@@ -292,34 +346,44 @@ POST /api/iam/sso/ldap/login {username, password}
 
 ---
 
-## 6. 错误码清单（13 个新增）
+## 6. 错误码清单（**21 个**新增，rev 3 定稿）
 
-全部加到 `platform-iam/src/error.rs` 的 `IamError` + `ALL_CODES`，
-**同时**加到 `platform-core/src/titles.rs` 的 `TITLES`（ASCII title）。
-漏一处 → `i18n_titles.rs::titles_cover_every_code` 直接红。
+全部加到 `platform-iam/src/error.rs` 的 `IamError`。
+
+> ⚠️ **rev 3 修正（D125 / QA 的 S36）**：原文档说「加 `ALL_CODES` + `TITLES` 两处」——
+> **这个说法是错的，会让人以为改完就对了**。实测新增一个变体要动 **8 个地方**：
+> ① code 常量 ② enum 变体 ③ `code()` match ④ `detail()` match ⑤ `ALL_CODES` 数组
+> ⑥ `platform-core/src/titles.rs` 的 `TITLES` ⑦ `error.rs` 测试的 `variants` 数组
+> ⑧ `error.rs` 测试的 `errors` 数组。
+> 漏 ⑦ 红在「清单里有码从未产出」，漏 ⑧ 红在「detail 非 ASCII」。
+
+**本轮 21 个码 → `TITLES.len()` 期望值 = 56（基线）+ 21 = 77。**
 
 | # | code | HTTP | title（ASCII） | 何时 |
 |---|---|---|---|---|
 | 1 | `SSO_REQUIRED` | 403 | `SSO login is required` | 强制 SSO，本地登录被拒（**在密码校验前**） |
-| 2 | `SSO_PROVIDER_NOT_CONFIGURED` | 400 | `SSO provider is not configured` | 租户未配或已禁用该协议 |
-| 3 | `SSO_OIDC_DISCOVERY_FAILED` | 503 | `SSO discovery endpoint is unreachable` | 拿不到 `.well-known` |
-| 4 | `SSO_OIDC_DISCOVERY_INVALID` | 502 | `SSO discovery document is invalid` | 拿到了但不是合法 JSON / 缺端点 |
-| 5 | `SSO_OIDC_STATE_INVALID` | 400 | `SSO state is invalid` | 不存在 / 已被消费 / 租户或 provider 不匹配 |
-| 6 | `SSO_OIDC_STATE_EXPIRED` | 400 | `SSO state has expired` | 超过 TTL |
-| 7 | `SSO_OIDC_TOKEN_EXCHANGE_FAILED` | 400 | `SSO token exchange failed` | code 换 token 失败（code 伪造/已用） |
-| 8 | `SSO_OIDC_TOKEN_INVALID` | 401 | `SSO ID token is invalid` | 签名 / iss / aud / iat 不匹配 |
-| 9 | `SSO_OIDC_TOKEN_EXPIRED` | 401 | `SSO ID token has expired` | `exp` 已过 |
-| 10 | `SSO_OIDC_ALG_NOT_ALLOWED` | 401 | `SSO ID token algorithm is not allowed` | `none` / `HS*` / 白名单外算法 |
-| 11 | `SSO_OIDC_NONCE_MISMATCH` | 401 | `SSO nonce does not match` | `nonce` 与 state 记录不符 |
-| 12 | `SSO_OIDC_PKCE_MISMATCH` | 400 | `SSO PKCE verification failed` | `code_verifier` 与 challenge 不符 |
-| 13 | `SSO_LDAP_UNREACHABLE` | 503 | `LDAP server is unreachable` | 连不上 |
-| 14 | `SSO_LDAP_BIND_FAILED` | 401 | `LDAP authentication failed` | 密码错**或**用户不存在（**同一个码**） |
-| 15 | `SSO_LDAP_EMPTY_PASSWORD` | 401 | `LDAP password must not be empty` | **空/纯空白密码**（攻击识别用） |
-| 16 | `SSO_LDAP_IDENTITY_CONFLICT` | 409 | `LDAP identity conflicts with an existing account` | 映射字段撞了另一个已绑定账号 |
-| 17 | `SSO_ACCOUNT_NOT_LINKED` | 403 | `SSO account is not linked` | 未绑定且 JIT 关闭 |
+| 2 | `SSO_PROVIDER_NOT_CONFIGURED` | 400 | `SSO provider is not configured` | 租户未配**或已禁用**（合并，不暴露内部状态） |
+| 3 | `SSO_CONFIG_INVALID` | 400 | `SSO configuration is invalid` | **rev 3 新增**：配置值非法（`ldaps://` / 相对 redirectUri / filter 缺占位符 / 空 issuer） |
+| 4 | `SSO_OIDC_DISCOVERY_FAILED` | 503 | `SSO discovery endpoint is unreachable` | 拿不到 `.well-known` |
+| 5 | `SSO_OIDC_DISCOVERY_INVALID` | 502 | `SSO discovery document is invalid` | 拿到了但不合法 / 缺端点 |
+| 6 | `SSO_OIDC_STATE_INVALID` | 400 | `SSO state is invalid` | 不存在 / 已消费 / 租户或 provider 不匹配 |
+| 7 | `SSO_OIDC_STATE_EXPIRED` | 400 | `SSO state has expired` | 超过 TTL |
+| 8 | `SSO_OIDC_CALLBACK_PARAM_MISSING` | 400 | `SSO callback parameter is missing` | **rev 3 新增**：缺 `code` 或 `state` |
+| 9 | `SSO_OIDC_TOKEN_EXCHANGE_FAILED` | 400 | `SSO token exchange failed` | **我们发错了**：code 伪造 / 已用 / PKCE 不符 |
+| 10 | `SSO_OIDC_TOKEN_ENDPOINT_UNAVAILABLE` | 502 | `SSO token endpoint is unavailable` | **rev 3 新增**（D124 决策④）：**IdP 挂了 / 超时** |
+| 11 | `SSO_OIDC_TOKEN_INVALID` | 401 | `SSO ID token is invalid` | 签名 / iss / aud / iat 不匹配 |
+| 12 | `SSO_OIDC_TOKEN_EXPIRED` | 401 | `SSO ID token has expired` | `exp` 已过 |
+| 13 | `SSO_OIDC_ALG_NOT_ALLOWED` | 401 | `SSO ID token algorithm is not allowed` | `none` / `HS*` / 白名单外 |
+| 14 | `SSO_OIDC_NONCE_MISMATCH` | 401 | `SSO nonce does not match` | `nonce` 不符 |
+| 15 | `SSO_OIDC_PKCE_MISMATCH` | 400 | `SSO PKCE verification failed` | `code_verifier` 与 challenge 不符 |
+| 16 | `SSO_LDAP_UNREACHABLE` | 503 | `LDAP server is unreachable` | 连不上 |
+| 17 | `SSO_LDAP_BIND_FAILED` | 401 | `LDAP authentication failed` | 密码错**或**用户不存在（**同一个码**） |
+| 18 | `SSO_LDAP_EMPTY_PASSWORD` | **400** | `LDAP password must not be empty` | 空 / 纯空白密码。**rev 3 从 401 改 400**（D124 决策③） |
+| 19 | `SSO_IDENTITY_LINK_CONFLICT` | 409 | `SSO identity conflicts with an existing account` | **rev 3 合并 + 扩充**：绑定改指 / `mail` 撞他人绑定 / JIT 撞既有 username（原 `SSO_LDAP_IDENTITY_CONFLICT` 并入） |
+| 20 | `SSO_ACCOUNT_NOT_LINKED` | 403 | `SSO account is not linked` | 未绑定且 JIT 关闭 |
+| 21 | `SSO_TICKET_INVALID` | 401 | `SSO login ticket is invalid` | **rev 3 新增**（P4）：ticket 不存在 / 已用 / 过期 |
 
-> 表里实际 **17 个**码（acceptance 里说「13 个」是下限估计，**以本表为准**）。
-> 原第 18 个 `SSO_OIDC_TLS_UNSUPPORTED` 已删除 —— **D123 决定支持 https，不再需要这个码**。
+> **`SSO_OIDC_TLS_UNSUPPORTED` 已删除**（D123 决定支持 https）。
 > 若 Dev 认为某码可以合并，**必须在自验报告里说明并更新 acceptance**，不得静默减少。
 
 ---
@@ -338,7 +402,7 @@ POST /api/iam/sso/ldap/login {username, password}
 | `sso.oidc.scopes` | string | `"openid email profile"` | 空格分隔 |
 | `sso.oidc.redirectUri` | string | `""` | 必须是**绝对 URL**，且与 IdP 侧登记逐字一致 |
 | `sso.ldap.enabled` | boolean | `false` | LDAP 开关 |
-| `sso.ldap.url` | string | `""` | `ldap://host:389`（本轮只支持明文，见 §4.2 风险） |
+| `sso.ldap.url` | string | `""` | `ldap://host:389`。**rev 3 说明（S43）**：`ldaps://` 本轮**仍不支持**，理由**不是**「树里没有 TLS」（D123 已引入 TLS 栈），而是：`ldap3` 的 `tls-rustls` feature 需要单独启用并配置客户端证书校验，**属于 LDAP 侧的独立工作量**，本轮不扩范围。配置成 `ldaps://` → `400 SSO_CONFIG_INVALID` |
 | `sso.ldap.baseDn` | string | `""` | search 起点 |
 | `sso.ldap.userSearchFilter` | string | `"(uid={username})"` | **必须含 `{username}` 占位符**，否则匹配不到 |
 | `sso.ldap.mailAttribute` | string | `"mail"` | 映射到本地用户的属性名 |
@@ -354,60 +418,92 @@ URL 校验不是枚举，塞进去会污染那个机制的语义。
 
 ## 8. 代码落点（Dev 按此切文件，避免冲突）
 
+> **rev 3 修正（QA 的 S22 / S35 / S44 / S49）**：本表补了 **3 处 rev 2 漏掉的落点**，
+> 每一处漏掉都会导致「AC 写了但实现没做，或做在运行期炸」：
+> ① `SessionView` + 两条 SELECT（漏了 → `GET /api/iam/sessions` **运行期 500**，不是编译错）
+> ② `SsoLdapClient` trait（漏了 → 「0 条 bind」断言**没有观测面**）
+> ③ `SsoAuditRecorder` 自建（漏了 → 照搬 org 的 recorder 会**成环**且 payload 不存在）
+
 ### 后端（`crates/platform-iam/`）
 
 | 文件 | 动作 | 内容 |
 |---|---|---|
 | `src/sso/mod.rs` | 新建 | 模块根 + 公共类型（`SsoProviderView`、`SsoConfig`） |
-| `src/sso/oidc.rs` | 新建 | 发现、JWKS、换 token、验签、state 管理 |
-| `src/sso/ldap.rs` | 新建 | bind 认证、filter 转义、空密码拦截 |
-| `src/sso/binding.rs` | 新建 | `external_identity` upsert（含 JIT） |
-| `src/sso/audit.rs` | 新建 | `AuditEventSpec` 声明 + `AuditRecorder` 接缝 |
-| `src/sso/config.rs` | 新建 | 从 config 读 SSO 配置 + `validate()` |
-| `src/http.rs` | 改 | 加 `sso_router(state)`，4 个端点 |
-| `src/error.rs` | 改 | 18 个新变体 + `code()` / `detail()` / `ALL_CODES` |
-| `src/service.rs` | 改 | `login()` 开头插强制 SSO 判定；新增 `login_via_sso()` 复用 `issue_session` |
-| `src/store.rs` | 改 | `oidc_state` 的 insert / consume；session 插入时带 `auth_provider` |
+| `src/sso/oidc.rs` | 新建 | 发现、JWKS（含未知 `kid` 刷新）、换 token、验签、state 管理 |
+| `src/sso/ldap.rs` | 新建 | **`SsoLdapClient` / `SsoLdapConn` trait**（§5.2）+ `ldap3` 实现 + filter 转义 + 空密码拦截 |
+| `src/sso/binding.rs` | 新建 | `external_identity` **`DO NOTHING` + 读回比对**（§2.3，**不是** `DO UPDATE`）+ JIT |
+| `src/sso/audit.rs` | 新建 | **`SsoAuditEvent` + `SsoAuditRecorder`（自建，不依赖 org）** + `Auditable` 声明 |
+| `src/sso/config.rs` | 新建 | 从 config 读 SSO 配置 + `validate()` + **读取失败 fail-closed** |
+| `src/sso/ticket.rs` | 新建 | **rev 3 新增**：loginTicket 的生成 / 消费（P4） |
+| `src/http.rs` | 改 | 加 `sso_router(state)`，**5 个端点**（providers / authorize / callback / ldap.login / **exchange**） |
+| `src/error.rs` | 改 | **21 个**新变体 + `code()` / `detail()` / `ALL_CODES` + 两个测试数组（共 8 处，见 §6） |
+| `src/service.rs` | 改 | `login()` 开头插强制 SSO 判定（**加载用户之前**）；新增 `login_via_sso()` 复用 `issue_session`；**`SessionView` 加 `authProvider` 字段**；`with_sso_audit_recorder()` 后设槽 |
+| `src/store.rs` | 改 | `oidc_state` / `sso_ticket` 的 insert / consume；**session 插入带 `auth_provider`**；**两条会话 SELECT 必须补该列**（否则 `tenant_row!` 运行期报列不存在） |
 | `src/lib.rs` | 改 | 导出 `sso` 模块 |
 
 ### 数据库（`migrations/`）
 
 | 文件 | 动作 |
 |---|---|
-| `2026xxxx_iam_sso.up.sql` / `.down.sql` | `platform_iam_oidc_state` 建表 + `platform_iam_session.auth_provider` 加列；down 可逆 |
+| `2026xxxx_iam_sso.up.sql` / `.down.sql` | `platform_iam_oidc_state` + `platform_iam_sso_ticket` 建表；`platform_iam_session.auth_provider` 加列；**两张新表都要 `GRANT` 给应用角色**（S37，否则 `permission denied`）；down 可逆（`DROP COLUMN` 但**不删表**） |
 
 ### 平台侧
 
 | 文件 | 动作 |
 |---|---|
-| `crates/platform-core/src/titles.rs` | 改：18 个新码的 ASCII title |
-| `crates/platform-config/manifest.json` | 改：12 个配置键登记 |
-| `crates/platform-server/src/main.rs` | 改：nest `sso_router`（**只在 IAM 就绪时挂**，与既有逻辑一致） |
-| `crates/platform-iam/Cargo.toml` | 改：加 `ldap3` / `hyper` / `hyper-util` / `http` / `base64` / `sha2`（**全部已在 `Cargo.lock`**） |
+| `crates/platform-core/src/titles.rs` | 改：**21 个**新码的 ASCII title（`TITLES.len()` → **77**） |
+| `crates/platform-config/manifest.json` | 改：12 个配置键登记（`scope: tenant`） |
+| `crates/platform-server/src/main.rs` | 改：nest `sso_router`（**只在 IAM 就绪时挂**） |
+| `crates/platform-iam/Cargo.toml` | 改：见下方「依赖变更」 |
+
+### 依赖变更（rev 3 拆成两类，修 S44 / S49）
+
+**A. 已在 `Cargo.lock` 里 —— 只加 `[dependencies]` 引用，包数不变：**
+
+| crate | 备注 |
+|---|---|
+| `ldap3` | 由 `platform-org` 引入，锁文件已有 0.11.5 |
+| `hyper` / `hyper-util` / `http` | SCIM 出站已在用 |
+| `base64` / `sha2` | **`platform-iam` 已经依赖了**，无需再加（S44） |
+
+**B. D123 破例新增 —— 会进锁文件，增量必须实测报告：**
+
+| crate | 用途 |
+|---|---|
+| `rustls` + `ring` | TLS 实现（生产） |
+| `hyper-rustls` | hyper 的 rustls connector |
+
+**C. 只进 `[dev-dependencies]`（不进生产依赖树，D124 决策②）：**
+
+| crate | 用途 |
+|---|---|
+| `tokio-rustls` / `axum-server` | mock IdP 的**服务端** TLS |
+| `rcgen` | 测试根证书生成 |
 
 ### 前端
 
 | 文件 | 动作 |
 |---|---|
-| `apps/shell/src/pages/Login.svelte` | 改：增加「用企业账号登录」入口（按 `/api/iam/sso/providers` 渲染） |
+| `apps/shell/src/pages/Login.svelte` | 改：增加「用企业账号登录」入口 |
+| `apps/shell/src/pages/SsoCallback.svelte` | **rev 3 新增**：接 `?ticket=`，调 `/sso/exchange` 换会话（P4） |
 | `apps/shell/src/components/SsoButtons.svelte` | 新建 |
 | `apps/shell/src/lib/sso-api.ts` | 新建 |
+| `apps/shell/src/lib/routes.ts` | 改：加 `/sso/callback` 路由 |
 | `packages/i18n/src/locales/{zh-CN,en-US}.json` | 改：加 SSO 相关键（**中英键集合必须相等**） |
 
 ### 测试
 
 | 文件 | 内容 |
 |---|---|
-| `crates/platform-iam/tests/sso_oidc.rs` | OIDC 全链路（mock IdP，用 axum 起本地假 IdP） |
-| `crates/platform-iam/tests/sso_oidc_security.rs` | AC-S-102 的攻击样例（alg=none / HS 混淆 / 篡改 payload） |
-| `crates/platform-iam/tests/sso_ldap.rs` | AC-S-104（含空密码 0 请求断言） |
-| `crates/platform-iam/tests/sso_binding.rs` | AC-S-103（JIT / 禁用 / 并发幂等） |
-| `crates/platform-iam/tests/sso_config_secret.rs` | AC-S-106（三处扫描 + 阳性对照） |
+| `crates/platform-iam/tests/sso_oidc.rs` | OIDC 全链路（进程内 axum mock IdP） |
+| `crates/platform-iam/tests/sso_oidc_security.rs` | AC-S-102：`alg=none` / HS 混淆 / 篡改 payload / **`jku` / `x5c`** |
+| `crates/platform-iam/tests/sso_ldap.rs` | AC-S-104：**用 `SsoLdapClient` 的计数实现**断言 bind 次数 / 空密码 0 请求 / filter 注入 |
+| `crates/platform-iam/tests/sso_binding.rs` | AC-S-103：JIT / 禁用 / 并发幂等 / **不可改指** |
+| `crates/platform-iam/tests/sso_config_secret.rs` | AC-S-106：三处扫描 + 阳性对照 |
+| `crates/platform-iam/tests/sso_ticket.rs` | **rev 3 新增**：ticket 一次性 / 过期 |
 | `crates/platform-server/tests/sso_real_db.rs` | 真实库端到端（AC-S-100 / 107 / 109） |
-| `apps/shell/test/sso.test.ts` | 前端 providers 渲染 |
-| `e2e/sso.spec.ts` | 登录页出现企业登录入口（mock IdP 在 E2E 里起） |
-
----
+| `apps/shell/test/sso.test.ts` | 前端 providers 渲染 + callback 页 |
+| `e2e/sso.spec.ts` | 登录页出现企业登录入口 |
 
 ## 9. 开工前必答项（Dev 不得自行决定）
 
@@ -415,7 +511,9 @@ URL 校验不是枚举，塞进去会污染那个机制的语义。
 |---|---|---|---|
 | 1 | ~~**IdP 的 https 支持**~~ | ~~(A) 加 TLS 依赖 / (B) 只支持 http~~ | ✅ **已定（D123，用户批准）**：**加 TLS 依赖支持 https**。只换 connector 不引 `reqwest`；`https_or_http()` 两者都能用；包数增量 / 编译耗时 / 低配机可编性必须实测报告 |
 | 2 | **mock IdP 怎么起** | 用 axum 在测试进程内起 / 用外部容器 | **进程内 axum**（零外部依赖、更快、可在 CI 无网络环境跑） |
-| 3 | **LDAP 测试替身** | 真实 OpenLDAP 容器 / `Ldap3Source` 的内存替身 | **内存替身**（`platform-org` 已有 `InMemoryLdapSource` 先例）；但**空密码「0 请求」断言需要能观察请求**，替身要记录 bind 调用 |
+| 3 | ~~**LDAP 测试替身**~~ | ~~内存替身~~ | ✅ **rev 3 已定（QA 的 S6/S7）**：`ldap3` **没有**服务端/内存实现，`platform-org` 的 `InMemoryLdapSource` **只实现 `search`、不能测 bind** —— 原「内存替身」是**错误假设**。改为 **`SsoLdapClient` trait + 可计数的测试实现**（§5.2） |
+| 4 | **LDAP 是否用服务账号 search** | 用 / 不用 | **用**（P13）：不改的话无法按 filter 从用户名找 DN。代价是**每次登录 2 次 bind**，AC-S-104 步骤 8 的计数期望依赖它 |
+| 5 | **mock IdP 的 https 怎么起** | 加 `[dev-dependencies]` 做服务端 TLS / 外部反代终止 TLS | **加 dev-dependencies**（D124 决策②）：用 `tokio-rustls`/`axum-server`，**不进生产依赖树**，与 REQ-021 加 `tower`/`http-body-util` 同做法。外部反代要额外起进程，低配机不划算 |
 
 ---
 
@@ -428,9 +526,21 @@ URL 校验不是枚举，塞进去会污染那个机制的语义。
 - `cargo test -p <crate>` 必须带 `--all-targets`
 - 后台服务用 `setsid … & disown`，停止用 `ss -tlnp` 取 pid（**不要** `pkill -f`）
 
-本需求新增的编译成本主要来自给 `platform-iam` 加 `ldap3` / `hyper` 依赖 ——
-全是 `Cargo.lock` 里已有的包，**不会引入新的编译单元**，但会重编 `platform-iam`。
-预计首次 `cargo test -p platform-iam` 需要几分钟（可接受）。
+### ⚠️ rev 3 修正（QA 的 S42）：编译成本**不能沿用旧估计**
+
+rev 2 这里写「全是 `Cargo.lock` 里已有的包，**不会引入新的编译单元**」—— **在 D123 之后这是错的**：
+
+| 依赖 | 是否新编译单元 | 说明 |
+|---|---|---|
+| `ldap3` / `hyper` / `hyper-util` | 否 | 锁文件里已有 |
+| **`rustls` / `ring` / `hyper-rustls`** | **是** | **约 20~30 个新包**；`ring` 还要**编 C/汇编** |
+| dev-only（`tokio-rustls` / `axum-server` / `rcgen`） | **是** | 只影响测试构建，但**也进锁文件** |
+
+**所以**：
+- 锁文件增量与「首次 `cargo build` 耗时」**必须实测后填在这里**，不得沿用 rev 2 的乐观估计
+- `ring` 的汇编编译在 8 线程低配机上可能明显拉长首次构建 —— 若超过可接受范围，
+  按 D123 的备选方案改用 `native-tls`（系统 OpenSSL）并回报 BA
+- 之后增量编译只重编 `platform-iam`，不受影响
 
 ---
 
@@ -440,13 +550,13 @@ URL 校验不是枚举，塞进去会污染那个机制的语义。
 |---|---|
 | AC-S-020 协议失败可诊断 | `sso/oidc.rs` / `sso/ldap.rs` / `error.rs` |
 | AC-S-021 强制 SSO | `service.rs`（`login` 开头）/ `sso/config.rs` |
-| AC-S-100 OIDC 端到端 | `sso/oidc.rs` / `http.rs` |
+| AC-S-100 OIDC 端到端 | `sso/oidc.rs` / `http.rs` / **`sso/ticket.rs`** / **前端 `SsoCallback.svelte`** |
 | AC-S-101 state/nonce/PKCE | `sso/oidc.rs` / `store.rs` / 迁移 |
 | AC-S-102 验签与算法白名单 | `sso/oidc.rs` |
 | AC-S-103 绑定与 JIT | `sso/binding.rs` |
-| AC-S-104 LDAP bind | `sso/ldap.rs` |
+| AC-S-104 LDAP bind | `sso/ldap.rs`（含 **`SsoLdapClient` trait**） |
 | AC-S-105 LDAP 与本地共存 | `sso/ldap.rs` / `sso/binding.rs` |
 | AC-S-106 密钥保护 | `sso/config.rs` / `error.rs`（不泄露）/ 全链日志 |
-| AC-S-107 会话同构 | `service.rs`（`issue_session`）/ 迁移（`auth_provider`）|
-| AC-S-108 审计事件 | `sso/audit.rs` |
+| AC-S-107 会话同构 | `service.rs`（`issue_session` + **`SessionView`**）/ `store.rs`（**两条 SELECT**）/ 迁移 |
+| AC-S-108 审计事件 | `sso/audit.rs`（**自建 `SsoAuditRecorder`** + `Auditable` 声明） |
 | AC-S-109 多 IdP 与租户隔离 | `sso/config.rs` / `sso/oidc.rs`（state 绑租户）|

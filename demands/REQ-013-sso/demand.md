@@ -24,7 +24,7 @@
 | 能力 | 可行性依据 |
 |---|---|
 | OIDC / OAuth2 入站（授权码流程） | 树里已有 `hyper`（出站 HTTP，SCIM 已在用）、`jsonwebtoken`（RS256/ES256 验签，rust_crypto 后端）、`serde_json`。**但 TLS 需新增依赖** —— 用户 2026-11-19 批准（**D123**，本项目唯一一次破例） |
-| LDAP / AD 入站认证 | 树里已有 `ldap3` 0.11.5（REQ-008 引入，现用于组织同步的 search）；`Ldap::simple_bind(bind_dn, bind_pw)` 可直接校验密码 → **零新增依赖** |
+| LDAP / AD 入站认证 | 树里已有 `ldap3` 0.11.5（REQ-008 引入，现用于组织同步的 search）；`Ldap::simple_bind(bind_dn, bind_pw)` 可用，但 ⚠️ **返回 `Ok` 不代表认证成功**（`rc != 0` 时外层仍是 `Ok`），**必须**再 `.success()` 判 `rc == 0` → **零新增依赖** |
 | 强制 SSO 策略 | 走 REQ-010 已交付的 config 三层覆盖 |
 | SSO 会话 | 复用 REQ-007 已交付的 session / refresh family / access token / JWKS |
 
@@ -142,17 +142,33 @@ SSO 审计事件只记：provider、外部 subject、结果、错误码、IP、U
 **不含** token、密码、client_secret、完整 claim 集。
 判据：AC-S-108 对事件 payload 做同样的敏感值扫描。
 
+### §7 LDAP filter 必须按 RFC 4515 转义（rev 3 新增）
+
+`username` 拼进 `(uid={username})` 前必须转义五个字符：`\`、`*`、`(`、`)`、`NUL`。
+不转义 = **LDAP 注入**：用户名填 `*` 或 `)(uid=*` 可绕过匹配。
+这是 LDAP 集成的第二经典漏洞（第一是 §1 的空密码）。
+判据：AC-S-104 步骤 9 用三个注入载荷，断言均不产生越权结果。
+
+### §8 token 不得进 URL（rev 3 新增）
+
+回调是顶层浏览器导航，**不得**把 `accessToken` / `refreshToken` 放进 URL
+（会进浏览器历史、`Referer` 头、以及服务端访问日志）。
+判据：AC-S-100 预期 3 —— 回调只 302 携带**一次性 ticket**，token 只经
+`POST /api/iam/sso/exchange` 的响应体返回。
+
 ## 与既有交付物的关系（跨需求改动必须声明，D109）
 
 | 改什么 | 为什么 | 是否破坏既有契约 |
 |---|---|---|
-| `platform-iam` 新增错误码（约 9 个） | AC-S-020 要求可区分 | **否**，但**必须同步 `ALL_CODES` + `titles.rs` 的 `TITLES`**，否则 REQ-021 的完备性测试会红（`i18n_titles.rs::titles_cover_every_code`） |
+| `platform-iam` 新增错误码（**21 个**，rev 3 定稿） | AC-S-020 要求可区分 | **否**，但**必须改 8 处**（D125）：code 常量 / enum 变体 / `code()` / `detail()` / `ALL_CODES` / `TITLES` / 测试的两个数组。漏一处就红在 `i18n_titles.rs` 或 `error.rs` 的测试里。`TITLES.len()` 期望 **77** |
 | `platform-iam` 新增 `sso` 模块 + 迁移（2 张表） | `oidc_state`（state/nonce/verifier 一次性凭证）、`sso_identity_link` 审计辅助（可选，若复用 `external_identity` 则只要 `oidc_state`） | 否（纯新增） |
 | `platform-iam` 依赖 `ldap3` | LDAP bind 认证 | 否（`ldap3` 已在 `Cargo.lock`，由 `platform-org` 引入） |
 | **新增 TLS 依赖（`rustls` + `ring` + `hyper-rustls`）** | **真实 IdP 全是 https，没有 TLS 的 OIDC 在真实环境不可用** | **依赖预算破例** —— 用户 2026-11-19 明确批准（**D123**）。`Cargo.lock` 包数会从 **296** 增加，**具体增量必须实测报告**。只换 connector，**不引 `reqwest`** |
 | `platform-config/manifest.json` 新增约 12 个键 | 非敏感 SSO 配置 | 否（纯新增登记） |
 | `packages/i18n` 新增 SSO 相关错误文案键 | AC-S-089 要求前端能渲染完整文案 | 否（纯新增键，中英键集合仍须相等） |
-| `apps/shell` 登录页增加「用企业账号登录」入口 | 用户可用性 | 否（纯新增组件） |
+| `apps/shell` 登录页增加「用企业账号登录」入口 + **新增 `SsoCallback.svelte` 与 `/sso/callback` 路由** | 回调需要 ticket 交接（D124 决策①） | 否（纯新增） |
+| `IamService` 加 `with_sso_audit_recorder()` **后设槽** | 审计事件注入 | 否 —— **用后设槽不破 `new()` 签名**，因此不破坏 4 处既有调用点（含 `platform-rbac` 的 2 处测试） |
+| `SessionView` 加 `authProvider` + `store.rs` **两条 SELECT 补该列** | AC-S-107 要求「会话能看出 SSO 来源」 | 否，但**陷阱**：`tenant_row!` 按列名 `try_get`，加 struct 字段却不加进 SELECT 会在**运行期**报列不存在（不是编译错） |
 
 ## 不在范围内
 
@@ -183,6 +199,7 @@ SSO 审计事件只记：provider、外部 subject、结果、错误码、IP、U
 - LDAP 空密码攻击被拒
 - `id_token` 的 `alg=none` 与算法混淆攻击被拒
 - `client_secret` 在三处扫描（配置导出 / 错误体 / 日志）中 0 命中
-- 新增错误码全部进 `TITLES`，REQ-021 的完备性测试仍绿
+- 新增 **21 个**错误码全部按 **8 个编辑点**同步（D125），REQ-021 的完备性测试仍绿（`TITLES.len()` = 77）
+- **不需要** `SSO_OIDC_TLS_UNSUPPORTED`（D123 后已删除）
 - **依赖预算（D123 破例）**：新增 TLS 依赖是被用户批准的**唯一破例**；
   `Cargo.lock` 包数增量必须实测报告（基线 **296**），且**不得引入 `reqwest`**
