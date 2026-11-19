@@ -226,17 +226,30 @@ importers:
 
   apps/shell:
     dependencies:
+      '@base/auth':
+        specifier: workspace:*
+        version: link:../../packages/auth
+      '@base/hooks':
+        specifier: workspace:*
+        version: link:../../packages/hooks
       '@base/i18n':
         specifier: workspace:*
         version: link:../../packages/i18n
       '@base/sdk':
         specifier: workspace:*
         version: link:../../packages/sdk
+      '@base/theme':
+        specifier: workspace:*
+        version: link:../../packages/theme
       '@base/ui':
         specifier: workspace:*
         version: link:../../packages/ui
 
-  packages/auth: {}
+  packages/auth:
+    dependencies:
+      '@base/sdk':
+        specifier: workspace:*
+        version: link:../sdk
 
   packages/hooks: {}
 
@@ -248,7 +261,11 @@ importers:
 
   packages/theme: {}
 
-  packages/ui: {}
+  packages/ui:
+    dependencies:
+      '@base/theme':
+        specifier: workspace:*
+        version: link:../theme
 
 packages:
 

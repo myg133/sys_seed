@@ -11,8 +11,11 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@base/auth": "workspace:*",
+    "@base/hooks": "workspace:*",
     "@base/i18n": "workspace:*",
     "@base/sdk": "workspace:*",
+    "@base/theme": "workspace:*",
     "@base/ui": "workspace:*"
   }
 }

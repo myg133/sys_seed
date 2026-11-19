@@ -3,7 +3,7 @@
   "exports": [
     {
       "declaration": "export type Tone = 'default' | 'primary' | 'danger'",
-      "description": "基础 UI 占位包。",
+      "description": "@base/ui —— 基础组件的**逻辑与样式契约**（REQ-011 / AC-S-075）。",
       "kind": "type",
       "name": "Tone"
     },
@@ -30,6 +30,120 @@
       "description": "默认圆角 token。",
       "kind": "function",
       "name": "defaultRadius"
+    },
+    {
+      "declaration": "export type ButtonVariant = 'primary' | 'secondary' | 'danger' | 'ghost'",
+      "description": "按钮变体。",
+      "kind": "type",
+      "name": "ButtonVariant"
+    },
+    {
+      "declaration": "export const BUTTON_VARIANTS: readonly ButtonVariant[] = [",
+      "description": "全部按钮变体。",
+      "kind": "const",
+      "name": "BUTTON_VARIANTS"
+    },
+    {
+      "declaration": "export type ButtonSize = 'small' | 'medium' | 'large'",
+      "description": "按钮尺寸。",
+      "kind": "type",
+      "name": "ButtonSize"
+    },
+    {
+      "declaration": "export interface ButtonProps {",
+      "description": "按钮属性契约。",
+      "kind": "interface",
+      "name": "ButtonProps"
+    },
+    {
+      "declaration": "export function buttonClass(props: ButtonProps = {}): string {",
+      "description": "按钮类名（样式契约）。",
+      "kind": "function",
+      "name": "buttonClass"
+    },
+    {
+      "declaration": "export type InputType = 'text' | 'password' | 'email' | 'number' | 'search'",
+      "description": "输入框类型。",
+      "kind": "type",
+      "name": "InputType"
+    },
+    {
+      "declaration": "export interface InputProps {",
+      "description": "输入框属性契约。",
+      "kind": "interface",
+      "name": "InputProps"
+    },
+    {
+      "declaration": "export function inputClass(props: InputProps = {}): string {",
+      "description": "输入框类名（样式契约）。",
+      "kind": "function",
+      "name": "inputClass"
+    },
+    {
+      "declaration": "export interface CardProps {",
+      "description": "卡片属性契约。",
+      "kind": "interface",
+      "name": "CardProps"
+    },
+    {
+      "declaration": "export function cardClass(props: CardProps = {}): string {",
+      "description": "卡片类名（样式契约）。",
+      "kind": "function",
+      "name": "cardClass"
+    },
+    {
+      "declaration": "export interface TableColumn<Row = unknown> {",
+      "description": "表格列定义。",
+      "kind": "interface",
+      "name": "TableColumn"
+    },
+    {
+      "declaration": "export interface TableProps<Row = unknown> {",
+      "description": "表格属性契约。",
+      "kind": "interface",
+      "name": "TableProps"
+    },
+    {
+      "declaration": "export function tableClass(props: { class?: string } = {}): string {",
+      "description": "表格类名（样式契约）。",
+      "kind": "function",
+      "name": "tableClass"
+    },
+    {
+      "declaration": "export interface PageInfo {",
+      "description": "分页信息（纯计算，不持有状态）。",
+      "kind": "interface",
+      "name": "PageInfo"
+    },
+    {
+      "declaration": "export function pageInfo(page: number, pageSize: number, total: number): PageInfo {",
+      "description": "计算分页信息。",
+      "kind": "function",
+      "name": "pageInfo"
+    },
+    {
+      "declaration": "export interface DialogProps {",
+      "description": "对话框属性契约。",
+      "kind": "interface",
+      "name": "DialogProps"
+    },
+    {
+      "declaration": "export function dialogClass(props: DialogProps = {}): string {",
+      "description": "对话框类名（样式契约）。",
+      "kind": "function",
+      "name": "dialogClass"
+    },
+    {
+      "declaration": "export function rowKeyOf<Row>(",
+      "description": "取行的键（默认用行索引）。",
+      "kind": "function",
+      "name": "rowKeyOf"
+    },
+    {
+      "declaration": "export function cellValue<Row>(row: Row, column: TableColumn<Row>): string {",
+      "description": "取单元格的文本（列给了 `render` 就用它，否则按列键取字段）。",
+      "kind": "function",
+      "name": "cellValue"
     }
   ],
   "generated_by": "cargo xtask capabilities",

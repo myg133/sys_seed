@@ -36,10 +36,10 @@
     "schema/manifest.schema.json": {},
     "schema/metadata.schema.json": {},
     "sdk/auth.json": {
-      "exports": 4
+      "exports": 16
     },
     "sdk/hooks.json": {
-      "exports": 2
+      "exports": 18
     },
     "sdk/i18n.json": {
       "exports": 3
@@ -48,13 +48,13 @@
       "exports": 4
     },
     "sdk/sdk.json": {
-      "exports": 3
+      "exports": 10
     },
     "sdk/theme.json": {
-      "exports": 3
+      "exports": 14
     },
     "sdk/ui.json": {
-      "exports": 5
+      "exports": 24
     }
   },
   "entry_points": {
@@ -81,5 +81,5 @@
     ],
     "version": "0.1.0"
   },
-  "source_fingerprint": "fnv1a64:765ee80956bc61d1"
+  "source_fingerprint": "fnv1a64:f501cc43afe55303"
 }

@@ -1,17 +1,32 @@
+/*
+ * 应用样式。
+ *
+ * # 颜色一律走 CSS 变量
+ *
+ * 令牌由 `@base/theme` 在**运行期**写到根元素的 inline style（品牌主色再覆盖一层），
+ * 所以这里**不写任何颜色字面量** —— 只消费 `var(--base-xxx)`。
+ *
+ * :root 里的取值只是「令牌还没落下来」时的兜底（中性，不是品牌值）。
+ */
 :root {
   color-scheme: light;
-  /* 主色由品牌接口写入（`--base-primary`）；没取到时用 currentColor（中性，不是品牌兜底）。 */
   --base-primary: currentColor;
-  font-family:
-    system-ui,
-    -apple-system,
-    'Segoe UI',
-    sans-serif;
+  --base-primary-hover: currentColor;
+  --base-danger: currentColor;
+  --base-text: inherit;
+  --base-text-secondary: inherit;
+  --base-bg: transparent;
+  --base-border: currentColor;
+  --base-radius: 4;
+  --base-font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
 }
 
 body {
   margin: 0;
   padding: 2rem;
+  color: var(--base-text);
+  background: var(--base-bg);
+  font-family: var(--base-font-family);
 }
 
 .base-tone--primary {
@@ -19,9 +34,151 @@ body {
 }
 
 .base-tone--danger {
-  color: #d4380d;
+  color: var(--base-danger);
 }
 
 .muted {
-  color: #8c8c8c;
+  color: var(--base-text-secondary);
+}
+
+/* ── 基础组件（类名契约在 `@base/ui`）──────────────────────────── */
+
+.base-button {
+  padding: 0.4rem 0.9rem;
+  border: 1px solid var(--base-border);
+  border-radius: calc(var(--base-radius) * 1px);
+  background: var(--base-bg);
+  color: var(--base-text);
+  cursor: pointer;
+}
+
+.base-button--primary {
+  border-color: var(--base-primary);
+  color: var(--base-primary);
+}
+
+.base-button--primary:hover {
+  color: var(--base-primary-hover);
+}
+
+.base-button--danger {
+  border-color: var(--base-danger);
+  color: var(--base-danger);
+}
+
+.base-button--disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.base-field {
+  display: inline-flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  margin-bottom: 0.75rem;
+}
+
+.base-field-label {
+  color: var(--base-text-secondary);
+}
+
+.base-field-error {
+  color: var(--base-danger);
+}
+
+.base-input {
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--base-border);
+  border-radius: calc(var(--base-radius) * 1px);
+  background: var(--base-bg);
+  color: var(--base-text);
+}
+
+.base-input--error {
+  border-color: var(--base-danger);
+}
+
+.base-card {
+  border: 1px solid var(--base-border);
+  border-radius: calc(var(--base-radius) * 1px);
+  padding: 1rem;
+}
+
+.base-card-header {
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+}
+
+.base-card-footer {
+  border-top: 1px solid var(--base-border);
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+}
+
+.base-table {
+  border-collapse: collapse;
+  width: 100%;
+}
+
+.base-table th,
+.base-table td {
+  border-bottom: 1px solid var(--base-border);
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+}
+
+.base-table-pager {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+}
+
+.base-dialog-mask {
+  position: fixed;
+  inset: 0;
+  background: var(--base-text);
+  opacity: 0.35;
+}
+
+.base-dialog {
+  position: fixed;
+  top: 20%;
+  left: 50%;
+  transform: translateX(-50%);
+  min-width: 20rem;
+  border: 1px solid var(--base-border);
+  border-radius: calc(var(--base-radius) * 1px);
+  background: var(--base-bg);
+  color: var(--base-text);
+  padding: 1rem;
+}
+
+.base-dialog-header {
+  font-weight: 600;
+  margin-bottom: 0.5rem;
+}
+
+.base-dialog-close {
+  float: right;
+  border: none;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+
+/* ── 应用侧页面 ─────────────────────────────────────────────── */
+
+.base-login {
+  display: flex;
+  flex-direction: column;
+  max-width: 20rem;
+}
+
+.base-login-error {
+  color: var(--base-danger);
+}
+
+.base-forbidden h2 {
+  color: var(--base-danger);
 }

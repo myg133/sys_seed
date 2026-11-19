@@ -2,10 +2,76 @@
   "entry": "./dist/index.js",
   "exports": [
     {
+      "declaration": "export type ThemeMode = 'light' | 'dark'",
+      "description": "主题模式。",
+      "kind": "type",
+      "name": "ThemeMode"
+    },
+    {
+      "declaration": "export interface ThemeTokenValues {",
+      "description": "令牌值表（CSS 变量名 → 取值；**精确 9 个**）。",
+      "kind": "interface",
+      "name": "ThemeTokenValues"
+    },
+    {
+      "declaration": "export interface ThemeTarget {",
+      "description": "令牌写入目标（默认 `document`）。",
+      "kind": "interface",
+      "name": "ThemeTarget"
+    },
+    {
+      "declaration": "export interface ThemeOptions {",
+      "description": "应用主题的选项。",
+      "kind": "interface",
+      "name": "ThemeOptions"
+    },
+    {
+      "declaration": "export type Branding = Record<string, unknown>",
+      "description": "品牌配置（扁平 map）。",
+      "kind": "type",
+      "name": "Branding"
+    },
+    {
       "declaration": "export interface ThemeTokens {",
-      "description": "主题占位包。",
+      "description": "主题 token（取值层面的形状）。",
       "kind": "interface",
       "name": "ThemeTokens"
+    },
+    {
+      "declaration": "export function themeTokens(mode: ThemeMode): ThemeTokenValues {",
+      "description": "取某个模式的令牌值表。",
+      "kind": "function",
+      "name": "themeTokens"
+    },
+    {
+      "declaration": "export function applyTheme(tokens: ThemeTokenValues, options?: ThemeOptions): void {",
+      "description": "应用令牌：把令牌值写到根元素的 CSS 变量上。",
+      "kind": "function",
+      "name": "applyTheme"
+    },
+    {
+      "declaration": "export function setThemeMode(mode: ThemeMode, options?: ThemeOptions): void {",
+      "description": "切换主题模式。",
+      "kind": "function",
+      "name": "setThemeMode"
+    },
+    {
+      "declaration": "export function currentMode(options?: ThemeOptions): ThemeMode {",
+      "description": "取当前模式（按根元素的 `data-theme` 属性；没有则视为亮色）。",
+      "kind": "function",
+      "name": "currentMode"
+    },
+    {
+      "declaration": "export function resolvePrimaryColor(branding: Branding): string {",
+      "description": "解析品牌主色。",
+      "kind": "function",
+      "name": "resolvePrimaryColor"
+    },
+    {
+      "declaration": "export function applyBranding(branding: Branding, options?: ThemeOptions): void {",
+      "description": "应用品牌配置。",
+      "kind": "function",
+      "name": "applyBranding"
     },
     {
       "declaration": "export function defaultTheme(): ThemeTokens {",
