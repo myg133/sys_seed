@@ -1,0 +1,273 @@
+[
+  {
+    "id": "TC-011-001",
+    "ac": "AC-S-064",
+    "title": "有效权限点接口返回 200，响应体是对象而不是裸数组",
+    "preconditions": [
+      "租户 T1 = 'tenant-a' 已存在",
+      "用户 U1 = 'u-perm-read@example.com' 在 T1 下存在，初始密码 'Passw0rd!'",
+      "自定义角色 R1 = 'role-perm-read' 已创建，**只**授予 'rbac:role:read'，**不含任何通配授权**",
+      "U1 已绑定 R1；U1 **未**绑定内置角色 platform-admin（内置管理员持有注册表全集，见 crates/platform-rbac/src/service.rs:857-863）"
+    ],
+    "steps": [
+      "POST /api/iam/login，body = {username:'u-perm-read@example.com', password:'Passw0rd!'}，头 x-tenant-id: tenant-a",
+      "从登录响应取 access_token",
+      "GET /api/rbac/me/permissions，头 Authorization: Bearer <access_token>、x-tenant-id: tenant-a",
+      "读取 HTTP 状态码与响应体并 JSON.parse"
+    ],
+    "expected": [
+      "HTTP 状态码 == 200",
+      "响应体 JSON.parse 成功",
+      "typeof 响应体 === 'object' 且 响应体 !== null 且 !Array.isArray(响应体)",
+      "Object.keys(响应体).sort() 深度等于 ['permissions']（恰好一个键）",
+      "Array.isArray(响应体.permissions) === true",
+      "响应体.permissions.every((v) => typeof v === 'string') === true"
+    ],
+    "type": "安全",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "design": "等价类划分（对象体 / 裸数组体）",
+    "refs": [
+      "code/crates/platform-rbac/src/http.rs:420 —— 现有注册表路由 /permissions 同样无 route_layer（豁免权限点）",
+      "code/crates/platform-rbac/src/http.rs:428-430 —— 整个 /api/rbac 路由有 authenticate 中间件（豁免权限点但要求已认证）"
+    ]
+  },
+  {
+    "id": "TC-011-002",
+    "ac": "AC-S-064",
+    "title": "权限点集合内容：含 rbac:role:read、不含 rbac:role:write",
+    "preconditions": [
+      "TC-011-001 的前置条件全部成立",
+      "权限点注册表中存在 'rbac:role:read' 与 'rbac:role:write'（crates/platform-rbac/manifest.json:9-10）"
+    ],
+    "steps": [
+      "按 TC-011-001 的步骤取得 GET /api/rbac/me/permissions 的响应体",
+      "对 响应体.permissions 做去重并按字节序升序排序，得到集合 S"
+    ],
+    "expected": [
+      "S 深度等于 ['rbac:role:read']（**集合整体相等**，不只是包含关系）",
+      "响应体.permissions.length == 1",
+      "响应体.permissions 中 'rbac:role:read' 的出现次数 == 1"
+    ],
+    "type": "安全",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "design": "边界值 / 集合相等断言（不用否定式包含）",
+    "refs": [
+      "code/crates/platform-rbac/src/service.rs:780-790 —— effective_permissions 返回 BTreeSet<String>"
+    ],
+    "notes": "AC-S-064 步骤 3 的「包含 / 不包含」在本用例里被收敛成一次**集合相等**断言 —— 既满足 AC 的两条子句，又避免否定式断言假绿（父需求 D83）。"
+  },
+  {
+    "id": "TC-011-003",
+    "ac": "AC-S-064",
+    "title": "不带令牌请求有效权限点接口 → 401 UNAUTHENTICATED",
+    "preconditions": ["租户 T1 = 'tenant-a' 已存在"],
+    "steps": [
+      "GET /api/rbac/me/permissions，不带 Authorization 头",
+      "读取 HTTP 状态码与响应体"
+    ],
+    "expected": [
+      "HTTP 状态码 == 401",
+      "响应体 code == 'UNAUTHENTICATED'",
+      "响应体 status == 401",
+      "响应体 instance == '/api/rbac/me/permissions'"
+    ],
+    "type": "安全",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "design": "失败路径（缺令牌）",
+    "refs": [
+      "code/crates/platform-rbac/src/http.rs:174-179 —— authenticate 无 bearer 令牌即 401",
+      "code/crates/platform-core/src/problem.rs:117 —— 401 的 code 是 UNAUTHENTICATED"
+    ]
+  },
+  {
+    "id": "TC-011-004",
+    "ac": "AC-S-064",
+    "title": "带令牌但请求头租户与令牌租户不一致 → 404 NOT_FOUND",
+    "preconditions": [
+      "租户 T1 = 'tenant-a'、T2 = 'tenant-b' 均存在",
+      "U1 属于 T1，持有 T1 的 access token"
+    ],
+    "steps": [
+      "用 U1 的 access token 请求 GET /api/rbac/me/permissions，头 x-tenant-id: tenant-b",
+      "读取 HTTP 状态码与响应体"
+    ],
+    "expected": [
+      "HTTP 状态码 == 404",
+      "响应体 code == 'NOT_FOUND'",
+      "Object.prototype.hasOwnProperty.call(响应体, 'permissions') === false（404 体不是权限点集合）"
+    ],
+    "type": "安全",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P1",
+    "design": "失败路径（跨租户）—— 派生自挑刺 #15",
+    "refs": [
+      "code/crates/platform-rbac/src/http.rs:186-189 —— 请求头租户与令牌租户不一致 → 404（不泄露资源存在性）"
+    ],
+    "notes": "**派生用例**：AC-S-064 只写了 200 与 401 两条预期，漏掉了跨租户这条真实存在的第三条路径（404，不是 401/403）。"
+  },
+  {
+    "id": "TC-011-005",
+    "ac": "AC-S-064",
+    "title": "权限点数组升序且无重复",
+    "preconditions": [
+      "U1 绑定两个自定义角色：R1 授予 'rbac:role:read'，R2 授予 'rbac:role:read'（**重复授予**同一权限点）"
+    ],
+    "steps": [
+      "按 TC-011-001 的步骤取得 GET /api/rbac/me/permissions 的响应体",
+      "对 响应体.permissions 逐对比较相邻元素"
+    ],
+    "expected": [
+      "对所有 i，响应体.permissions[i] >= 响应体.permissions[i-1]（按字节序比较，升序）",
+      "new Set(响应体.permissions).size == 响应体.permissions.length（无重复元素）"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P1",
+    "design": "不变量断言（顺序 / 去重）—— 派生自挑刺 #17",
+    "refs": [
+      "code/crates/platform-rbac/src/service.rs:847 —— expand_user_permissions 用 BTreeSet 累积 → 天然升序去重"
+    ],
+    "notes": "**派生用例**：AC 未规定顺序与去重规则，导致 AC-S-065 的「两个入口逐项相等」无法做确定性断言。"
+  },
+  {
+    "id": "TC-011-006",
+    "ac": "AC-S-065",
+    "title": "登录响应带真实权限点集合",
+    "preconditions": ["TC-011-001 的前置条件全部成立"],
+    "steps": [
+      "POST /api/iam/login，body = {username:'u-perm-read@example.com', password:'Passw0rd!'}，头 x-tenant-id: tenant-a",
+      "读取 HTTP 状态码与响应体的 permissions 字段"
+    ],
+    "expected": [
+      "HTTP 状态码 == 200",
+      "响应体有键 'permissions'",
+      "Array.isArray(响应体.permissions) === true",
+      "响应体.permissions 去重升序后深度等于 ['rbac:role:read']"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "design": "正常路径",
+    "refs": [
+      "code/crates/platform-iam/src/service.rs:539 —— 现状写死 permissions: Vec::new()，本用例是它转绿后的守门"
+    ]
+  },
+  {
+    "id": "TC-011-007",
+    "ac": "AC-S-065",
+    "title": "无任何角色的用户登录 → permissions 是空数组（不是 null、不是缺字段）",
+    "preconditions": [
+      "用户 U2 = 'u-perm-none@example.com' 在 T1 下存在，初始密码 'Passw0rd!'",
+      "U2 **未**绑定任何角色（内置 platform-user 也不绑定）"
+    ],
+    "steps": [
+      "POST /api/iam/login，body = {username:'u-perm-none@example.com', password:'Passw0rd!'}，头 x-tenant-id: tenant-a",
+      "读取 HTTP 状态码与响应体"
+    ],
+    "expected": [
+      "HTTP 状态码 == 200",
+      "Object.prototype.hasOwnProperty.call(响应体, 'permissions') === true（字段恒在）",
+      "响应体.permissions 深度等于 []（是数组且长度为 0，不是 null）"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "design": "边界值（空集合）+ 字段存在性",
+    "refs": [
+      "code/crates/platform-iam/src/service.rs:177 —— LoginResponse.permissions: Vec<String>（非 Option，序列化恒出现）"
+    ]
+  },
+  {
+    "id": "TC-011-008",
+    "ac": "AC-S-065",
+    "title": "登录响应与 /me/permissions 两个入口给出同一答案",
+    "preconditions": [
+      "TC-011-001 的前置条件全部成立",
+      "**两次调用之间不发生任何角色绑定/解绑/授权变更**（本用例的前置冻结条件）"
+    ],
+    "steps": [
+      "POST /api/iam/login 取得 access_token 与 响应体.permissions，记为 P1",
+      "GET /api/rbac/me/permissions（同一 token、同一租户），记 响应体.permissions 为 P2",
+      "对 P1、P2 各自去重升序后比较"
+    ],
+    "expected": [
+      "两次 HTTP 状态码都 == 200",
+      "P1 去重升序后深度等于 P2 去重升序后",
+      "P1 去重升序后深度等于 ['rbac:role:read']"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "design": "双入口一致性（等价类：同一时刻同一答案）",
+    "refs": [
+      "code/crates/platform-rbac/src/service.rs:780-790 —— 两个入口都应走 effective_permissions"
+    ],
+    "notes": "**挑刺 #12 的落地**：AC-S-065 步骤 2 写「与 AC-S-064 步骤 3 逐项相等」，但 AC-S-064 步骤 3 是包含关系断言，两个包含关系无法「逐项相等」。本用例把它改成**集合相等**并补上「两次调用之间状态不变」的前置条件。"
+  },
+  {
+    "id": "TC-011-009",
+    "ac": "AC-S-064",
+    "title": "通配授权被展开（澄清 AC 前置条件的唯一性）",
+    "preconditions": [
+      "自定义角色 R3 = 'role-perm-wildcard' 授予 'rbac:role:*'（通配）",
+      "用户 U3 = 'u-perm-wildcard@example.com' 绑定 R3"
+    ],
+    "steps": [
+      "U3 登录取得 access_token",
+      "GET /api/rbac/me/permissions",
+      "对 响应体.permissions 去重升序"
+    ],
+    "expected": [
+      "HTTP 状态码 == 200",
+      "集合深度等于 ['rbac:role:read', 'rbac:role:write']（通配已展开为具体权限点）",
+      "集合长度 == 2"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P1",
+    "design": "等价类划分（精确授权 / 通配授权）—— 派生自挑刺 #13",
+    "refs": [
+      "code/crates/platform-rbac/src/service.rs:842-867 —— expand_user_permissions 对每个 grant 做 pattern.expand(registry)"
+    ],
+    "notes": "**派生用例**：AC-S-064 的前置条件只说「R1 授予 rbac:role:read」，未排除通配。在通配授权下 AC 的「不包含 rbac:role:write」不成立 → 本用例把该歧义固化为可执行的行为。"
+  },
+  {
+    "id": "TC-011-010",
+    "ac": "AC-S-065",
+    "title": "RBAC 未启用 / PermissionProvider 未注入时，登录仍成功且 permissions 为空数组",
+    "preconditions": [
+      "以**未配置 IAM/RBAC** 的形态启动一个 platform-server 实例（或以单元/集成方式构造一个未注入 PermissionProvider 的 IamService）",
+      "该形态下不存在 /api/rbac 路由"
+    ],
+    "steps": [
+      "在该实例上走一次登录（若该形态不提供 /api/iam，则改为直接调用 IamService::login）",
+      "读取返回值与错误"
+    ],
+    "expected": [
+      "登录调用返回 Ok（不返回 Err）",
+      "返回值的 permissions 字段存在且深度等于 []",
+      "返回值的 permissions 字段不是 null"
+    ],
+    "type": "功能",
+    "layer": "rust-unit",
+    "automatable": true,
+    "priority": "P1",
+    "design": "降级路径 —— 派生自挑刺 #16",
+    "refs": [
+      "BA/demands/REQ-011-frontend-sdk/design-summary.md:89-91 —— 设计承诺「未注入实现时 permissions 为空数组，登录仍然成功」"
+    ],
+    "notes": "**派生用例**：design §2.2 明确承诺了降级行为，但 12 条 AC 里没有一条覆盖它。若 Dev 用「注入失败 → 登录失败」实现，本用例立刻抓住。"
+  }
+]

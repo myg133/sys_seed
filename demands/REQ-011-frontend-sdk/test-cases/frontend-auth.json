@@ -1,0 +1,308 @@
+[
+  {
+    "id": "TC-011-011",
+    "ac": "AC-S-066",
+    "title": "can() 对集合内权限点返回 true",
+    "preconditions": [
+      "前端权限点集合 state.permissions = ['rbac:role:read']"
+    ],
+    "steps": [
+      "用 createAuthStore 构造 auth，其 state.permissions 置为 ['rbac:role:read']",
+      "调用 auth.can('rbac:role:read')"
+    ],
+    "expected": [
+      "返回值 === true（严格布尔，不是真值）"
+    ],
+    "type": "安全",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "design": "正常路径",
+    "refs": [
+      "BA/demands/REQ-011-frontend-sdk/design-summary.md:174-177 —— can() 的三条语义"
+    ]
+  },
+  {
+    "id": "TC-011-012",
+    "ac": "AC-S-066",
+    "title": "can() 对集合外权限点返回 false",
+    "preconditions": [
+      "前端权限点集合 state.permissions = ['rbac:role:read']"
+    ],
+    "steps": [
+      "调用 auth.can('rbac:role:write')"
+    ],
+    "expected": [
+      "返回值 === false（严格布尔）"
+    ],
+    "type": "安全",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "design": "正常路径",
+    "refs": []
+  },
+  {
+    "id": "TC-011-013",
+    "ac": "AC-S-066",
+    "title": "can() 对未登记的权限点返回 false 且不抛错",
+    "preconditions": [
+      "前端权限点集合 state.permissions = ['rbac:role:read']",
+      "'order:invoice:delete' 不在权限点注册表中（crates/platform-rbac/manifest.json 与 crates/platform-config/manifest.json 均无 order 模块）"
+    ],
+    "steps": [
+      "在 try/catch 中调用 auth.can('order:invoice:delete')"
+    ],
+    "expected": [
+      "调用未抛出任何异常（catch 分支未进入）",
+      "返回值 === false"
+    ],
+    "type": "安全",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P1",
+    "design": "边界值（未登记权限点）",
+    "refs": [
+      "code/capabilities/permissions.json —— 注册表里没有 order 模块"
+    ],
+    "notes": "本用例只验「不抛错 + false」；它对「集合判定」实现不构成额外约束（自然结果），价值在于守住「不抛错」这一条。"
+  },
+  {
+    "id": "TC-011-014",
+    "ac": "AC-S-066",
+    "title": "权限点集合为空时 can() 一律返回 false（fail closed）",
+    "preconditions": [
+      "前端权限点集合 state.permissions = []（含「集合尚未加载完成」这一中间态）"
+    ],
+    "steps": [
+      "调用 auth.can('rbac:role:read')",
+      "调用 auth.can('*')",
+      "调用 auth.can('rbac:*')"
+    ],
+    "expected": [
+      "三次返回值全部 === false",
+      "三次调用均未抛出异常"
+    ],
+    "type": "安全",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "design": "边界值（空集合 / 通配形态）",
+    "refs": [
+      "code/crates/platform-rbac/src/service.rs:11 —— '*' 与 '*:*' 在后端不被允许"
+    ],
+    "notes": "空集合必须判 false（**不是** true）：空集合 ≠ 全权限。"
+  },
+  {
+    "id": "TC-011-015",
+    "ac": "AC-S-066",
+    "title": "前端 can() 与后端 require_permission 对同一权限点判定一致（金标准夹具）",
+    "preconditions": [
+      "存在一份**双方共用**的权限矩阵夹具（JSON）：每个条目形如 { user, permissions[], probe: { permission, expectAllowed } }",
+      "夹具的 permissions[] 由后端 effective_permissions 实测产出并落库为金标准（不是手写）",
+      "后端探针路由已就绪：GET /api/rbac/roles 受 'rbac:role:read' 保护、POST /api/rbac/roles 受 'rbac:role:write' 保护（crates/platform-rbac/src/http.rs:397-411）"
+    ],
+    "steps": [
+      "后端侧：对夹具中的每个 (user, probe) 发一次真实 HTTP 请求到对应探针路由，记录状态码（200 = 放行；403 = 拒绝）",
+      "前端侧：把同一个 user 的 permissions[] 喂给 auth.can(probe.permission)",
+      "逐条比对 can() 的布尔值与后端探针的「放行/拒绝」"
+    ],
+    "expected": [
+      "每个 (user, probe) 条目上，auth.can(probe.permission) === (后端探针状态码 == 200)",
+      "被拒条目的后端状态码精确等于 403（不是 401：夹具必须带有效令牌）",
+      "被拒条目的后端响应体 code == 'INSUFFICIENT_PERMISSION'"
+    ],
+    "type": "集成",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "design": "跨层契约一致性（金标准夹具 + 双侧同跑）",
+    "refs": [
+      "code/crates/platform-core/src/extension/permission.rs:243-273 —— require_permission 是 axum Layer，**不是**可调用的判定函数；只能通过「打真实路由」来观察后端判定"
+    ],
+    "notes": "**挑刺 #11 的落地**：AC-S-066 步骤 5 说「用后端 require_permission 判定同一权限点」——require_permission 只能作为路由层生效，不能被单测直接调用。本用例把机制钉死为「真实路由探针 + 双方共用金标准夹具」，否则该步骤无法执行。"
+  },
+  {
+    "id": "TC-011-016",
+    "ac": "AC-S-067",
+    "title": "<Can> 有权限时渲染子内容",
+    "preconditions": [
+      "权限点集合 state.permissions = ['rbac:role:read']"
+    ],
+    "steps": [
+      "渲染 <Can permission=\"rbac:role:read\">可见</Can> 到一个空容器",
+      "读取容器的 innerHTML 与 textContent"
+    ],
+    "expected": [
+      "容器.textContent === '可见'",
+      "容器.querySelectorAll('*').length >= 1（子内容确实被渲染进 DOM，而不是被当作字符串塞进属性）",
+      "容器.innerHTML 中不出现 'display:none' / 'visibility:hidden' 的样式串"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "design": "正常路径",
+    "refs": []
+  },
+  {
+    "id": "TC-011-017",
+    "ac": "AC-S-067",
+    "title": "<Can> 无权限时子内容不在 DOM 里",
+    "preconditions": [
+      "权限点集合 state.permissions = ['rbac:role:read']"
+    ],
+    "steps": [
+      "渲染 <Can permission=\"rbac:role:write\">不可见</Can> 到一个空容器",
+      "读取容器的 innerHTML 与 textContent"
+    ],
+    "expected": [
+      "容器.textContent === ''",
+      "容器.innerHTML === ''（**精确等于空串** —— 判定的是具体值，不是 'not.toContain' 这类否定式断言）",
+      "容器.querySelectorAll('*').length == 0"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "design": "反向路径 + 精确 DOM 断言",
+    "refs": [
+      "BA/demands/REQ-011-frontend-sdk/design-summary.md:181 —— 「不是 display:none：内容仍在 DOM 里」"
+    ],
+    "notes": "「内容不在 DOM 里」被收敛成 innerHTML 的**精确相等**断言，避免「只隐藏没移除」与「渲染了空壳」两种实现混过去。"
+  },
+  {
+    "id": "TC-011-018",
+    "ac": "AC-S-067",
+    "title": "<Can> 无权限且提供 fallback 时渲染 fallback",
+    "preconditions": [
+      "权限点集合 state.permissions = ['rbac:role:read']"
+    ],
+    "steps": [
+      "渲染 <Can permission=\"rbac:role:write\" fallback=\"无权限\">兜底</Can> 到一个空容器",
+      "读取容器的 innerHTML 与 textContent"
+    ],
+    "expected": [
+      "容器.textContent === '无权限'",
+      "容器.innerHTML === '<span>无权限</span>'（或实现约定的等价标签；断言以**精确 innerHTML** 为准，标签名在实现定稿后写进本用例）",
+      "容器.textContent 中 '兜底' 的出现次数 == 0"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "design": "反向路径 + 插槽",
+    "refs": [],
+    "notes": "fallback 的**标签结构**未在 AC 中定义；本用例以精确 innerHTML 断言，实现定稿后需把期望串回填（否则标签一改就假红/假绿）。"
+  },
+  {
+    "id": "TC-011-019",
+    "ac": "AC-S-068",
+    "title": "路由守卫：无权限时给出拒绝判定与 403 落点",
+    "preconditions": [
+      "用户 U1 已登录，权限点集合不含 'rbac:role:write'",
+      "受保护路由的元数据声明了所需权限点 'rbac:role:write'"
+    ],
+    "steps": [
+      "调用 auth.guard('rbac:role:write')",
+      "读取返回值"
+    ],
+    "expected": [
+      "返回值.allowed === false",
+      "返回值.redirectTo === '/403'（**精确等于**约定的 403 路径，不是 'not.toBe(target)'）",
+      "返回值.redirectTo === '/admin/roles' 的判定结果 === false（落点不是受保护页面）"
+    ],
+    "type": "安全",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "design": "正常路径（拒绝分支）",
+    "refs": [
+      "BA/demands/REQ-011-frontend-sdk/design-summary.md:184-186 —— guard(permission): RouteGuard"
+    ],
+    "notes": "**挑刺 #8 的落地（包级部分）**：AC-S-068 描述的是端到端的 SPA 行为，但本期不存在可承载它的路由（见 apps/shell 无路由库）。本用例先把**包级**判定语义钉死，端到端部分单列 TC-011-021/022。"
+  },
+  {
+    "id": "TC-011-020",
+    "ac": "AC-S-068",
+    "title": "路由守卫不依赖「是否由程序化跳转触发」这一输入（深链同样被拦）",
+    "preconditions": [
+      "用户 U1 已登录，权限点集合不含 'rbac:role:write'",
+      "受保护路由的元数据声明了所需权限点 'rbac:role:write'"
+    ],
+    "steps": [
+      "构造「程序化跳转」场景：调用 auth.guard('rbac:role:write')，记录返回值 G1",
+      "构造「直接输入 URL」场景：调用 auth.guard('rbac:role:write')，其入参携带当前 URL 字符串 'https://app.example/admin/roles'，记录返回值 G2",
+      "比较 G1 与 G2"
+    ],
+    "expected": [
+      "G2.allowed === false",
+      "G2.redirectTo === '/403'",
+      "G1.allowed === G2.allowed 且 G1.redirectTo === G2.redirectTo（两种进入方式判定完全一致）"
+    ],
+    "type": "安全",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "design": "等价类划分（进入方式：程序化 vs 直接输入）",
+    "refs": [
+      "code/crates/platform-server/src/static_files.rs:32-39 —— 无扩展名路径回落 index.html，深链会真的进到前端 → 守卫必须能在深链上生效"
+    ],
+    "notes": "**挑刺 #8 的落地**：深链在服务端是能到达前端的（static_files.rs 的 SPA 回落），所以「守卫只在程序化跳转时生效」是可被观测的差异。本用例是它的**包级**等价物；端到端版本见 TC-011-021。"
+  },
+  {
+    "id": "TC-011-021",
+    "ac": "AC-S-068",
+    "title": "端到端：落到 403 页，且 403 页不发起目标接口的请求",
+    "preconditions": [
+      "应用侧已具备：登录页、路由、受保护页面 /admin/roles（声明 'rbac:role:write'）、403 页",
+      "U1 已登录且不含 'rbac:role:write'",
+      "浏览器侧可拦截并记录出站请求（Playwright request 监听）"
+    ],
+    "steps": [
+      "在浏览器中直接打开 'https://<host>/admin/roles'（深链，不经程序化跳转）",
+      "等待页面稳定后记录最终 URL",
+      "记录本次页面生命周期内发出的全部 XHR/fetch 请求的 URL 列表"
+    ],
+    "expected": [
+      "最终 URL 的 pathname === '/403'",
+      "最终页面可见的标题/标识文本 === 403 页的约定文案（**精确等于**，不是 'not.toContain(受保护页文案)'）",
+      "请求列表.filter((u) => u.startsWith('/api/rbac/roles')).length === 0",
+      "请求列表.filter((u) => u.includes('/admin/roles')).length === 0"
+    ],
+    "type": "安全",
+    "layer": "e2e",
+    "automatable": false,
+    "priority": "P0",
+    "design": "端到端（深链 + 出站请求观测）",
+    "refs": [
+      "code/e2e/shell.spec.ts —— 现有 E2E 走同源托管（scripts/e2e-server.sh）"
+    ],
+    "notes": "⚠️ **当前不可自动化**：apps/shell 没有任何路由（无 routes/ 目录、package.json 无路由库）、没有登录页、没有 403 页 → 本用例缺少承载主体。见挑刺 #8。BA 需先裁定：把「路由 + 登录页 + 403 页」纳入 REQ-011 范围，或把本用例移到 REQ-012/REQ-020。"
+  },
+  {
+    "id": "TC-011-022",
+    "ac": "AC-S-068",
+    "title": "未登录访问受保护路径 → 落登录页而不是 403 页",
+    "preconditions": [
+      "应用侧已具备登录页与路由（与 TC-011-021 同一前提）",
+      "浏览器处于未登录状态（无 access token）"
+    ],
+    "steps": [
+      "在浏览器中直接打开 'https://<host>/admin/roles'",
+      "等待页面稳定后记录最终 URL 与可见文案"
+    ],
+    "expected": [
+      "最终 URL 的 pathname === '/login'（精确等于）",
+      "最终页面可见文案 === 登录页的约定文案",
+      "最终页面不包含 '403' 字样"
+    ],
+    "type": "安全",
+    "layer": "e2e",
+    "automatable": false,
+    "priority": "P1",
+    "design": "失败路径（未认证）—— 派生自挑刺 #35",
+    "refs": [],
+    "notes": "⚠️ **当前不可自动化**（同 TC-011-021，缺路由与登录页）。本用例是**派生用例**：AC-S-068 只覆盖「已登录但无权限」，没有区分「未认证」——两者混同会让未登录用户看到 403 而不是登录入口。"
+  }
+]

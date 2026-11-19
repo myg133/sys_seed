@@ -1,0 +1,126 @@
+[
+  {
+    "id": "TC-011-045",
+    "ac": "AC-S-075",
+    "title": "五个包的依赖方向：禁止项不存在，且规定项存在",
+    "preconditions": [
+      "仓库处于已实现状态，packages/{sdk,auth,ui,theme,hooks}/package.json 存在",
+      "本用例的范围是 REQ-011 涉及的 **5 个包**（packages/i18n 与 packages/schema 属 REQ-021 / REQ-012，不在本用例范围）"
+    ],
+    "steps": [
+      "读 packages/sdk/package.json 的 dependencies（或 dependencies + devDependencies）键集 D_sdk",
+      "读 packages/auth/package.json 的依赖键集 D_auth",
+      "读 packages/ui/package.json 的依赖键集 D_ui",
+      "读 packages/hooks/package.json 的依赖键集 D_hooks",
+      "读 packages/theme/package.json 的依赖键集 D_theme"
+    ],
+    "expected": [
+      "D_sdk 与 '@base/ui'、'@base/theme'、'@base/hooks' 的交集元素个数 == 0",
+      "D_auth 与 '@base/ui' 的交集元素个数 == 0",
+      "D_ui 与 '@base/hooks' 的交集元素个数 == 0",
+      "D_hooks 与 '@base/ui' 的交集元素个数 == 0",
+      "D_theme 的元素个数 == 0（主题包无内部依赖）",
+      "D_auth 包含 '@base/sdk'",
+      "D_ui 包含 '@base/theme'",
+      "上述所有以 '@base/' 开头的依赖值都 === 'workspace:*'"
+    ],
+    "type": "性能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "design": "静态检查 + **双向**依赖断言",
+    "refs": [
+      "code/packages/sdk/package.json —— 现状 7 个包都没有 dependencies 字段",
+      "BA/demands/REQ-011-frontend-sdk/design-summary.md:104-110 —— 规定的依赖方向图"
+    ],
+    "notes": "**挑刺 #9 的落地**：AC-S-075 步骤 1 只有「不依赖」这类否定式断言 —— 在当前仓库状态下**必然通过**（7 个包的 package.json 都没有 dependencies），是纯假绿。本用例补上「规定项存在」的正向断言（D_auth 含 @base/sdk、D_ui 含 @base/theme），这样「五个包完全互不相连」也算不过去。"
+  },
+  {
+    "id": "TC-011-046",
+    "ac": "AC-S-075",
+    "title": "构建后各包 dist 只 import 自己的依赖",
+    "preconditions": [
+      "已执行 pnpm -r build（packages/*/dist 存在；dist/ 被 .gitignore 忽略，必须先构建）",
+      "扫描范围：packages/*/dist/**/*.js 与 packages/*/dist/**/*.d.ts"
+    ],
+    "steps": [
+      "对每个包 P，收集其 dist 里出现的全部 '@base/xxx' 导入目标集合 I_P",
+      "读 P 的 package.json 依赖键集 D_P",
+      "比较 I_P 与 D_P"
+    ],
+    "expected": [
+      "对每个包 P：(I_P \\ D_P) 的元素个数 == 0（dist 里没有声明之外的内部依赖）",
+      "对 packages/sdk：I_sdk 的元素个数 == 0",
+      "对 packages/theme：I_theme 的元素个数 == 0",
+      "对 packages/hooks：I_hooks 的元素个数 == 0",
+      "对 packages/ui：I_ui ⊆ {'@base/theme'}",
+      "对 packages/auth：I_auth ⊆ {'@base/sdk'}",
+      "5 个包的 dist 目录都存在且至少含 1 个 .js 文件（确认构建确实产出、不是扫了空目录）"
+    ],
+    "type": "性能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "design": "静态检查 + 集合包含关系",
+    "refs": [
+      "code/packages/sdk/tsconfig.json —— module ESNext / outDir dist → dist 是 ESM，import 语句原样保留，可直接扫",
+      "code/.gitignore —— dist/ 被忽略"
+    ],
+    "notes": "**挑刺 #40 的落地**：AC-S-075 步骤 2 没说明扫描对象（.js 还是含 .d.ts）、也没提「必须先构建」。本用例把扫描集与「dist 非空」写成显式断言，避免「扫了空目录 → 假绿」。"
+  },
+  {
+    "id": "TC-011-047",
+    "ac": "AC-S-075",
+    "title": "@base/sdk 的产物不含 UI / 组件相关代码",
+    "preconditions": ["已执行 pnpm -r build，packages/sdk/dist 存在"],
+    "steps": [
+      "扫描 packages/sdk/dist/** 全部文件的内容",
+      "匹配导入式：/from\\s+['\"]@base\\/(ui|theme|hooks)['\"]/ 与 /require\\(['\"]@base\\/(ui|theme|hooks)['\"]\\)/",
+      "匹配 DOM API 式：/\\bdocument\\.|\\bwindow\\.|\\bHTMLElement\\b|\\bcustomElements\\b/"
+    ],
+    "expected": [
+      "导入式匹配的**文件路径集合**元素个数 == 0",
+      "DOM API 式匹配的**文件路径集合**元素个数 == 0",
+      "扫描到的文件总数 >= 1"
+    ],
+    "type": "性能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "design": "静态检查 + 精确集合断言",
+    "refs": [
+      "code/packages/sdk/src/index.ts —— 现状只有 url() 拼接，无 DOM 依赖"
+    ],
+    "notes": "**挑刺 #30 的落地**：AC-S-075 步骤 3 的「不含 UI / 组件相关代码」没有定义，且与步骤 1/2 重叠。本用例给出可机械判定的两条规则（无跨包导入 + 无 DOM API 引用），并合并进步骤 2 的同类检查。"
+  },
+  {
+    "id": "TC-011-048",
+    "ac": "AC-S-075",
+    "title": "@base/ui 不依赖 @base/hooks，且表格状态由消费方组合传入",
+    "preconditions": [
+      "packages/ui/package.json 与 packages/ui/src/** 存在",
+      "packages/ui/src 下存在表格组件（本期组件集含 Table）"
+    ],
+    "steps": [
+      "读 packages/ui/package.json 的依赖键集 D_ui，断言其与 '@base/hooks' 的交集为空",
+      "扫描 packages/ui/src/** 的全部 .ts / .svelte 文件，匹配 /from\\s+['\"]@base\\/hooks['\"]/",
+      "读取表格组件的 props 契约（类型声明或 props 声明），列出其全部 prop 名"
+    ],
+    "expected": [
+      "D_ui 与 '@base/hooks' 的交集元素个数 == 0",
+      "匹配 '@base/hooks' 导入的文件路径集合元素个数 == 0",
+      "表格组件的 prop 名单**不包含**任何表示内部状态容器的名字（'state' / 'store' / 'pageState' / 'tableState' / 'usePagination' / 'createTableState' 之类）",
+      "表格组件的 prop 名单包含表示数据与分页入参的名字（'rows' / 'columns' / 'page' / 'pageSize' / 'total' / 'onPageChange' 之类）"
+    ],
+    "type": "性能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P1",
+    "design": "静态检查 + 组合契约断言",
+    "refs": [
+      "BA/demands/REQ-011-frontend-sdk/design-summary.md:209 —— 本期组件含 Table",
+      "BA/demands/REQ-011-frontend-sdk/design-summary.md:218-220 —— 分页/表格状态放在 @base/hooks"
+    ],
+    "notes": "**挑刺 #31 的落地**：AC-S-075 禁止 ui → hooks，但本期 Table 组件与 hooks 的「分页/表格状态」天然相邻，且 AC 没有给出口 —— 实现者只有三条路：内联一份逻辑（与 hooks 分叉）、违反 AC、或把 Table 做成纯展示组件（正确）。本用例把第三条路写成可断言的 prop 契约。prop 名清单在实现定稿后需回填。"
+  }
+]

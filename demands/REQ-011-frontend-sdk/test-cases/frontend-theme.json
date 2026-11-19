@@ -1,0 +1,208 @@
+[
+  {
+    "id": "TC-011-038",
+    "ac": "AC-S-073",
+    "title": "应用主题令牌 → 根元素上出现约定的 CSS 变量（精确集合）",
+    "preconditions": [
+      "已准备一个可注入的 document（jsdom 或注入式 Document 假件）",
+      "令牌契约（**QA 提案，待 BA 固化 —— 见挑刺 #5/#26**）：令牌名集合 = ['--base-primary','--base-primary-hover','--base-danger','--base-text','--base-text-secondary','--base-bg','--base-border','--base-radius','--base-font-family']"
+    ],
+    "steps": [
+      "调用 @base/theme 的应用主题接口（提案签名：applyTheme(tokens, { target: doc })）",
+      "读取 doc.documentElement.style 上全部以 '--base-' 开头的自定义属性名与值"
+    ],
+    "expected": [
+      "9 个约定变量逐个 getPropertyValue 返回**非空字符串**（每个变量的值长度 >= 1）",
+      "以 '--base-' 开头的变量名集合（去重升序）深度等于上面列出的 9 个（**精确集合**，不多不少）",
+      "--base-radius 的值 === '4px'（**带单位**）",
+      "--base-font-family 的值 === 'system-ui, -apple-system, \"Segoe UI\", sans-serif'"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "design": "正常路径 + 精确集合断言",
+    "refs": [
+      "code/crates/platform-config/manifest.json:58-64 —— 品牌键 theme.radius 是 number（默认 4）",
+      "code/crates/platform-config/manifest.json:78-84 —— 品牌键 theme.fontStack 是 array（默认 ['system-ui']）"
+    ],
+    "notes": "**挑刺 #26 的落地**：AC-S-073 步骤 1 只列了 3 个变量加一个「等」，是开放集合 → 不可判定。本用例把变量集合写成**精确 9 个**，并把 radius 的单位（px）与 font-family 的取值写死。注意后端键名是 theme.radius / theme.fontStack，与 CSS 变量名 --base-radius / --base-font-family **不同名**，AC 需要写清映射关系。"
+  },
+  {
+    "id": "TC-011-039",
+    "ac": "AC-S-073",
+    "title": "切到暗色模式 → 颜色变量等于暗色期望值（不是「不等于亮色值」）",
+    "preconditions": [
+      "已应用亮色主题（TC-011-038 的前置）",
+      "暗色令牌契约（**QA 提案，待 BA 固化 —— 见挑刺 #5**）：",
+      "  --base-danger = '#ff7875'、--base-text = '#e6e6e6'、--base-text-secondary = '#a6a6a6'、--base-bg = '#141414'、--base-border = '#303030'",
+      "  --base-radius 与 --base-font-family 与亮色**同值**（模式无关变量）"
+    ],
+    "steps": [
+      "调用暗色模式切换接口（提案签名：setThemeMode('dark', { target: doc })）",
+      "读取 5 个颜色变量、2 个模式无关变量、doc.documentElement 的 data-theme 属性与根元素计算后的 color-scheme"
+    ],
+    "expected": [
+      "--base-danger === '#ff7875'",
+      "--base-text === '#e6e6e6'",
+      "--base-text-secondary === '#a6a6a6'",
+      "--base-bg === '#141414'",
+      "--base-border === '#303030'",
+      "--base-radius === '4px'（与亮色同值）",
+      "--base-font-family === 'system-ui, -apple-system, \"Segoe UI\", sans-serif'（与亮色同值）",
+      "doc.documentElement.getAttribute('data-theme') === 'dark'",
+      "根元素计算后的 color-scheme === 'dark'"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "design": "模式切换 + 肯定式期望值断言（父需求 D83）",
+    "refs": [
+      "BA/demands/REQ-011-frontend-sdk/design-summary.md:198-200 —— 暗色模式 = data-theme=\"dark\" + 换一组颜色变量"
+    ],
+    "notes": "**挑刺 #5 的落地**：AC-S-073 步骤 2 只说「与亮色不同」并给了「color-scheme 或颜色变量」的二选一，还要求「等于暗色期望值」却**没给期望值**。本用例给出具体数值并区分「模式相关变量」与「模式无关变量」—— 若对全部变量都断言「变了」，radius / font-family 会假红。"
+  },
+  {
+    "id": "TC-011-040",
+    "ac": "AC-S-073",
+    "title": "从暗色切回亮色 → 变量回到亮色期望值（可逆）",
+    "preconditions": ["已按 TC-011-039 切到暗色模式"],
+    "steps": [
+      "调用 setThemeMode('light', { target: doc })",
+      "读取 5 个颜色变量、2 个模式无关变量与 data-theme 属性"
+    ],
+    "expected": [
+      "--base-danger === '#d4380d'",
+      "--base-text === '#1f1f1f'",
+      "--base-text-secondary === '#595959'",
+      "--base-bg === '#ffffff'",
+      "--base-border === '#d9d9d9'",
+      "--base-radius === '4px'",
+      "--base-font-family === 'system-ui, -apple-system, \"Segoe UI\", sans-serif'",
+      "doc.documentElement.getAttribute('data-theme') === 'light'"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "design": "可逆性断言",
+    "refs": [],
+    "notes": "亮色期望值与 TC-011-039 的暗色期望值成对给出；BA 固化令牌表后，两个用例的期望值必须同步更新。"
+  },
+  {
+    "id": "TC-011-041",
+    "ac": "AC-S-074",
+    "title": "品牌主色接品牌接口 → --base-primary 等于接口返回值",
+    "preconditions": [
+      "品牌接口返回 { primaryColor:'#0055aa', title:'X', ... }",
+      "调用 @base/theme 的品牌应用接口（提案签名：applyBranding(branding, { target: doc })）"
+    ],
+    "steps": [
+      "调用 applyBranding({ primaryColor:'#0055aa' }, { target: doc })",
+      "读取 doc.documentElement.style.getPropertyValue('--base-primary')"
+    ],
+    "expected": [
+      "--base-primary === '#0055aa'（**精确等于**接口值，大小写逐字符相同）",
+      "--base-primary 的小写形式 !== '#1677ff'（源码里的旧默认色没有残留）"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "design": "正常路径 + 肯定式期望值",
+    "refs": [
+      "code/crates/platform-config/src/http.rs:341-360 —— 品牌接口返回扁平 map",
+      "code/crates/platform-config/src/whitelist.rs:14-27 —— primaryColor 在 11 个白名单键内",
+      "code/apps/shell/src/lib/branding.ts:53-68 —— REQ-010 已有同形状实现，主题包应接管而非并存"
+    ],
+    "notes": "**挑刺 #27 的落地**：apps/shell 已经实现了「品牌 → --base-primary」（app.css:4 的 currentColor 兜底 + branding.ts:26 的 HEX_COLOR 正则）。本用例断言的是 **@base/theme 的实现**，shell 必须改为委托 @base/theme，否则两套实现会漂移。"
+  },
+  {
+    "id": "TC-011-042",
+    "ac": "AC-S-074",
+    "title": "品牌主色非法 → --base-primary 保持中性兜底 currentColor",
+    "preconditions": [
+      "品牌接口返回 { primaryColor:'#zzz' }（非法十六进制）",
+      "另测一次 { primaryColor:'red' }（颜色名）"
+    ],
+    "steps": [
+      "调用 applyBranding({ primaryColor:'#zzz' }, { target: doc })",
+      "读取 --base-primary",
+      "重置为干净 document 后，调用 applyBranding({ primaryColor:'red' }, { target: doc })",
+      "读取 --base-primary"
+    ],
+    "expected": [
+      "两次读到的 --base-primary 均为 'currentColor'（**精确等于**中性兜底）",
+      "--base-primary !== '#zzz'",
+      "--base-primary !== 'red'",
+      "两次调用都**没有**抛出异常"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "design": "失败路径（输入校验）",
+    "refs": [
+      "code/apps/shell/src/app.css:4 —— 现有中性兜底是 :root { --base-primary: currentColor }",
+      "code/crates/platform-config/manifest.json:51-56 —— primaryColor 是 type:string，后端**不校验**颜色格式 → 非法值确实能从接口出来"
+    ],
+    "notes": "**挑刺 #28 的落地**：兜底值必须由**主题包自己**写到根元素上。若主题包只在品牌合法时才写属性，而宿主页面没有 `:root{--base-primary:currentColor}`，读到的是空串而不是 currentColor → AC 的预期不成立。AC 需要写明这条责任归属。"
+  },
+  {
+    "id": "TC-011-043",
+    "ac": "AC-S-073",
+    "title": "@base/ui 源码里没有硬编码的颜色字面量（机械扫描）",
+    "preconditions": [
+      "扫描范围：packages/ui/src/** 下扩展名为 .ts / .svelte / .css 的文件",
+      "排除范围：路径含 'test' 的文件、'*.test.ts'、'*.spec.ts'",
+      "颜色字面量正则：/#[0-9a-fA-F]{3,8}\\b|\\brgba?\\s*\\(|\\bhsla?\\s*\\(/（匹配前先剔除 // 行注释与 /* */ 块注释）"
+    ],
+    "steps": [
+      "遍历扫描范围的文件，剔除注释后逐个匹配颜色字面量正则",
+      "收集**匹配到的文件路径集合** M"
+    ],
+    "expected": [
+      "M 的元素个数 == 0（集合为空）",
+      "扫描到的文件总数 >= 1（确认扫描确实覆盖到了 @base/ui 的源码，而不是空集假绿）"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "design": "静态扫描 + 集合断言（带非空前置防假绿）",
+    "refs": [
+      "code/packages/ui/src/index.ts —— 现状只有 Tone 类型，无颜色字面量"
+    ],
+    "notes": "**挑刺 #6 的落地**：AC-S-073 步骤 4 只说「检查源码」，没定义文件集、正则与排除集 —— 三者任缺其一都会假绿。本用例额外断言「扫描到的文件总数 >= 1」，防止「扫了 0 个文件 → 空集 → 通过」。"
+  },
+  {
+    "id": "TC-011-044",
+    "ac": "AC-S-073",
+    "title": "@base/theme 的颜色字面量只允许出现在约定的令牌定义文件里",
+    "preconditions": [
+      "扫描范围：packages/theme/src/** 下扩展名为 .ts / .svelte / .css 的文件",
+      "排除范围：路径含 'test' 的文件、'*.test.ts'、'*.spec.ts'",
+      "颜色字面量正则同 TC-011-043",
+      "**允许存放令牌字面量的文件**由 BA 指定（提案：packages/theme/src/tokens.css，或 packages/theme/src/tokens.ts 之一，且**只能有一个**）"
+    ],
+    "steps": [
+      "遍历扫描范围的文件，剔除注释后逐个匹配颜色字面量正则",
+      "收集匹配到的文件路径集合 M"
+    ],
+    "expected": [
+      "M 是**单元素集合**，其唯一元素 === BA 指定的令牌定义文件路径",
+      "扫描到的文件总数 >= 1"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "design": "静态扫描 + 白名单集合断言",
+    "refs": [
+      "code/packages/theme/src/index.ts:21 —— 现状 defaultTheme() 里有 primaryColor:'#1677ff'（AC 点名要处理的示例）",
+      "code/packages/ui/src/index.ts:1 —— @base/ui 当前无颜色字面量"
+    ],
+    "notes": "**挑刺 #6 / #10 的落地**：令牌体系必然需要颜色字面量（暗色/亮色调色板），所以「@base/theme 源码里没有硬编码颜色字面量」按字面执行会让令牌体系无法实现 —— 必须指定一个**受控的令牌定义文件**并要求其余文件零字面量。BA 固化该文件路径后，本用例的期望值要回填。"
+  }
+]

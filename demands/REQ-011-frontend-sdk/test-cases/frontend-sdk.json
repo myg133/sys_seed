@@ -1,0 +1,422 @@
+[
+  {
+    "id": "TC-011-023",
+    "ac": "AC-S-069",
+    "title": "SDK 把 RFC 9457 错误体解析为稳定错误码，code 精确等于响应体的 code",
+    "preconditions": [
+      "注入式 fake fetch：第一次返回 HTTP 403，body = { type:'https://errors.base.example/insufficient-permission', title:'权限不足', status:403, detail:'the current role does not grant the permission `rbac:role:write`', instance:'/api/rbac/roles', code:'INSUFFICIENT_PERMISSION', trace_id:'trace-abc', params:{required:'rbac:role:write'} }",
+      "SDK 的请求方法：client.request({ method:'GET', path:'/api/rbac/roles' })"
+    ],
+    "steps": [
+      "调用 client.request({ method:'GET', path:'/api/rbac/roles' })",
+      "捕获抛出的错误对象"
+    ],
+    "expected": [
+      "调用以**异常**结束（不 resolve）",
+      "error.code === 'INSUFFICIENT_PERMISSION'（**精确等于**响应体的 code，不是 title 的 '权限不足'，也不是 detail 原文）",
+      "error.status === 403",
+      "error 不是原生 TypeError（error.name !== 'TypeError'）",
+      "error.code !== '权限不足' 且 error.code !== 'the current role does not grant the permission `rbac:role:write`'"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "design": "正常路径（错误解析）",
+    "refs": [
+      "code/crates/platform-core/src/problem.rs:56-84 —— ProblemDetails 字段集：type/title/status/detail/instance/code/trace_id/params",
+      "code/crates/platform-core/src/problem.rs:141 —— 403 的 title 是「权限不足」、code 是 INSUFFICIENT_PERMISSION"
+    ],
+    "notes": "本用例使用的错误体是**后端真实会返回**的形状（AC-S-069 前置条件里给的 title='未认证' 配 403 是 BA 自己写错的，见挑刺 #18）。"
+  },
+  {
+    "id": "TC-011-024",
+    "ac": "AC-S-069",
+    "title": "响应体不是 JSON 时抛 INTERNAL_ERROR，而不是裸 TypeError",
+    "preconditions": [
+      "注入式 fake fetch：返回 HTTP 500，body = '<!doctype html><html><body>500 Internal Server Error</body></html>'，Content-Type: text/html"
+    ],
+    "steps": [
+      "调用 client.request({ method:'GET', path:'/api/anything' })",
+      "捕获抛出的错误对象"
+    ],
+    "expected": [
+      "调用以异常结束",
+      "error.code === 'INTERNAL_ERROR'",
+      "error.status === 500",
+      "error.name !== 'TypeError' 且 error.name !== 'SyntaxError'",
+      "error 不是 fetch 原生 TypeError（说明 SDK 捕获了 JSON 解析失败）"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "design": "失败路径（非 JSON 体）",
+    "refs": [
+      "code/crates/platform-core/src/problem.rs:38 —— 后端错误码表里的 INTERNAL_ERROR"
+    ]
+  },
+  {
+    "id": "TC-011-025",
+    "ac": "AC-S-069",
+    "title": "网络层失败抛 NETWORK_ERROR",
+    "preconditions": [
+      "注入式 fake fetch：直接 reject(new TypeError('Failed to fetch'))"
+    ],
+    "steps": [
+      "调用 client.request({ method:'GET', path:'/api/anything' })",
+      "捕获抛出的错误对象"
+    ],
+    "expected": [
+      "调用以异常结束",
+      "error.code === 'NETWORK_ERROR'",
+      "error.status === 0（**提案值**：HTTP 未发生；AC 未定义网络错误的 status，需 BA 固化）",
+      "error.name !== 'TypeError'"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "design": "失败路径（传输层失败）",
+    "refs": [],
+    "notes": "NETWORK_ERROR 是**客户端合成码**，后端错误码表里没有它（code/crates/platform-core/src/problem.rs:31-38）。AC 未说明客户端合成码的归属，见挑刺 #19。"
+  },
+  {
+    "id": "TC-011-026",
+    "ac": "AC-S-069",
+    "title": "错误对象不携带原始响应体",
+    "preconditions": [
+      "注入式 fake fetch：返回 HTTP 500，body = 'SECRET-UPSTREAM-DETAIL-XYZ'（非 JSON）"
+    ],
+    "steps": [
+      "调用 client.request({ method:'GET', path:'/api/anything' })",
+      "捕获抛出的错误对象",
+      "取 error.message、error.detail、error.title、JSON.stringify(error) 四个字符串"
+    ],
+    "expected": [
+      "四个字符串都不包含子串 'SECRET-UPSTREAM-DETAIL-XYZ'",
+      "四个字符串中至少有一个是**固定的、不含响应体内容**的文案（error.code === 'INTERNAL_ERROR'）"
+    ],
+    "type": "安全",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "design": "信息泄露检查",
+    "refs": [
+      "BA/demands/REQ-011-frontend-sdk/design-summary.md:137 —— 「不把原始响应体塞进错误信息」"
+    ],
+    "notes": "**挑刺 #20 的落地**：AC 只说「不塞进错误信息」，没说要检查**哪些字段**。本用例把受检字段清单写死（message / detail / title / 整体序列化）。"
+  },
+  {
+    "id": "TC-011-027",
+    "ac": "AC-S-070",
+    "title": "access token 过期 → 自动刷新 → 重放原请求 → 调用方拿到 200 的业务结果",
+    "preconditions": [
+      "注入式 fake fetch：",
+      "  - 对 '/api/rbac/me/permissions'：第一次返回 401（body = { code:'TOKEN_EXPIRED', status:401, ... }），第二次返回 200（body = { permissions:['rbac:role:read'] }）",
+      "  - 对 '/api/iam/refresh'：返回 200（body = { access_token:'new-token', refresh_token:'new-refresh' }）",
+      "getAccessToken 返回 'expired-token'；refreshToken 返回 'valid-refresh-token'"
+    ],
+    "steps": [
+      "调用 client.request({ method:'GET', path:'/api/rbac/me/permissions' })",
+      "捕获 resolve 的值或抛出的错误"
+    ],
+    "expected": [
+      "调用**以 resolve 结束**（调用方感知不到中间的 401）",
+      "resolve 值深度等于 { permissions:['rbac:role:read'] }",
+      "'/api/iam/refresh' 被调用 1 次",
+      "'/api/rbac/me/permissions' 被调用 2 次（第 1 次 401、第 2 次 200）",
+      "第 2 次请求的 Authorization 头 === 'Bearer new-token'"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "design": "正常路径（401 → 刷新 → 重放）",
+    "refs": [
+      "code/crates/platform-iam/src/error.rs:42,154,176 —— 过期令牌的错误码是 TOKEN_EXPIRED，状态码 401",
+      "code/crates/platform-iam/src/service.rs:566-571 —— verify_access_token 过期即 TokenExpired"
+    ]
+  },
+  {
+    "id": "TC-011-028",
+    "ac": "AC-S-070",
+    "title": "5 个并发请求同时遇到 401 → 刷新接口只被调用 1 次",
+    "preconditions": [
+      "注入式 fake fetch：",
+      "  - 对业务路径：返回 401（body = { code:'TOKEN_EXPIRED', status:401 }）",
+      "  - 对 '/api/iam/refresh'：返回一个**受控的 pending Promise**（测试手动 resolve），确保 5 个请求都在刷新完成前处于等待态",
+      "getAccessToken 返回 'expired-token'"
+    ],
+    "steps": [
+      "并发发起 5 个 client.request({ method:'GET', path:'/api/business/1' })，不 await",
+      "等待所有 5 个请求都走到 401（fake fetch 的调用计数 == 5）",
+      "统计此刻 '/api/iam/refresh' 的调用次数 N1",
+      "手动 resolve 刷新 Promise（返回新 access token），并让业务路径第二次返回 200",
+      "await Promise.allSettled(5 个请求)"
+    ],
+    "expected": [
+      "N1 === 1（刷新接口在并发窗口内**只被调用 1 次**）",
+      "'/api/iam/refresh' 的**总**调用次数 === 1",
+      "5 个请求全部以 resolve 结束，resolve 值深度等于 { ok:true }",
+      "业务路径的总调用次数 === 10（每个请求各一次 401 + 一次重放）"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "design": "并发去重（共享 in-flight Promise）",
+    "refs": [
+      "code/crates/platform-iam/src/service.rs:606-615 —— 同一个 refresh token 用第二次即判 TokenReuseDetected 并**作废整个 family**",
+      "BA/demands/REQ-011-frontend-sdk/design-summary.md:142-144 —— 5 次 refresh 会把用户踢下线"
+    ],
+    "notes": "**挑刺 #3 的落地**：本用例在**前端单测**层用受控 pending Promise 构造并发窗口，不对真实后端并发打 refresh（那会作废会话 family）。端到端版本见 TC-011-029 的备注。"
+  },
+  {
+    "id": "TC-011-029",
+    "ac": "AC-S-070",
+    "title": "刷新失败 → 抛出带 code 的错误，且不无限重试",
+    "preconditions": [
+      "注入式 fake fetch：业务路径返回 401；'/api/iam/refresh' 返回 401（body = { code:'TOKEN_REVOKED', status:401 }）",
+      "refreshToken 返回 'revoked-refresh-token'"
+    ],
+    "steps": [
+      "调用 client.request({ method:'GET', path:'/api/business/1' })",
+      "捕获抛出的错误对象",
+      "统计业务路径与刷新路径的总调用次数"
+    ],
+    "expected": [
+      "调用以异常结束",
+      "error.code === 'UNAUTHENTICATED'（**按 AC-S-070 步骤 3 原文**）",
+      "error.status === 401",
+      "业务路径的调用次数 === 1（失败后不重发）",
+      "'/api/iam/refresh' 的调用次数 === 1（刷新失败后不反复试）",
+      "总调用次数 <= 2（无死循环）"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "design": "失败路径（刷新失败）",
+    "refs": [
+      "code/crates/platform-iam/src/error.rs:44,155,176 —— 刷新失败的后端码是 TOKEN_REVOKED / TOKEN_EXPIRED / TOKEN_REUSE_DETECTED，状态码 401"
+    ],
+    "notes": "⚠️ **AC 冲突（挑刺 #4）**：本用例按 AC-S-070 步骤 3 断言 code='UNAUTHENTICATED'，但 AC-S-069 要求「code 精确等于响应体的 code」，而后端刷新失败返回的是 TOKEN_REVOKED 等。两条 AC 不可同时满足 → AC 修订后本条预期必须同步改写。"
+  },
+  {
+    "id": "TC-011-030",
+    "ac": "AC-S-070",
+    "title": "重放时原请求体逐字节相同",
+    "preconditions": [
+      "注入式 fake fetch：业务路径第一次返回 401，第二次返回 200；'/api/iam/refresh' 返回 200",
+      "请求体为一个含非 ASCII 字符的 JSON 串：{ \"title\": \"订单 A\" }",
+      "fake fetch 记录每次收到的 Request 对象的 body 字节"
+    ],
+    "steps": [
+      "调用 client.request({ method:'POST', path:'/api/business/1', body:{ title:'订单 A' } })",
+      "取第 1 次与第 2 次业务请求的 body 字节（new Uint8Array(await request.clone().arrayBuffer())）"
+    ],
+    "expected": [
+      "两次业务请求都被发出（次数 === 2）",
+      "第 1 次与第 2 次的 body 字节长度相等",
+      "第 1 次与第 2 次的 body 字节逐字节相等（Uint8Array 深度相等）",
+      "第 2 次的 body UTF-8 解码后 === '{\"title\":\"订单 A\"}'（含中文未被转义丢失）"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "design": "不变量（重放保真）",
+    "refs": [
+      "BA/demands/REQ-011-frontend-sdk/design-summary.md:145-146 —— 流式 body 不可复用 → 重放会发空 body"
+    ],
+    "notes": "**挑刺 #36 的落地**：AC 说「逐字节相同」但没给取证方式。本用例用 fake fetch 读 `Request.arrayBuffer()` 取字节 —— 只断言字符串相等会漏掉编码差异。"
+  },
+  {
+    "id": "TC-011-031",
+    "ac": "AC-S-071",
+    "title": "写方法自动注入 idempotency-key",
+    "preconditions": [
+      "注入式 fake fetch：任意路径返回 200",
+      "SDK 注入的 fetch 能读到请求头"
+    ],
+    "steps": [
+      "分别调用 client.request({ method:'POST', path:'/api/a' })",
+      "分别调用 client.request({ method:'PUT', path:'/api/b' })",
+      "分别调用 client.request({ method:'DELETE', path:'/api/c' })",
+      "读取三次请求的 idempotency-key 头"
+    ],
+    "expected": [
+      "三次请求的 idempotency-key 头均**存在**（非 null）",
+      "三次的键值都匹配 /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/（UUID v4）"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "design": "等价类划分（按 HTTP 方法）",
+    "refs": [
+      "code/crates/platform-iam/src/http.rs:54 —— 后端读的头名是 'idempotency-key'",
+      "BA/demands/REQ-011-frontend-sdk/design-summary.md:149 —— 写方法生成 UUID v4"
+    ],
+    "notes": "**挑刺 #23 的落地**：AC 只说「带 idempotency-key 头」，没规定格式 —— 用计数器也能通过「两个键不同」。本用例追加 UUID v4 正则断言。"
+  },
+  {
+    "id": "TC-011-032",
+    "ac": "AC-S-071",
+    "title": "读方法不注入 idempotency-key",
+    "preconditions": ["注入式 fake fetch：任意路径返回 200"],
+    "steps": [
+      "调用 client.request({ method:'GET', path:'/api/a' })",
+      "调用 client.request({ method:'HEAD', path:'/api/b' })",
+      "读取两次请求的 idempotency-key 头"
+    ],
+    "expected": [
+      "GET 请求的 idempotency-key 头 === null",
+      "HEAD 请求的 idempotency-key 头 === null",
+      "两次请求实际都发出了（次数各 === 1），不是被客户端拦下"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "design": "等价类划分（读方法）",
+    "refs": [
+      "code/crates/platform-iam/src/http.rs:301-304 —— 后端幂等中间件对 GET/HEAD 直接放行"
+    ],
+    "notes": "「不带」被写成 `=== null` 的**具体值断言**，而不是「不等于某个键」。"
+  },
+  {
+    "id": "TC-011-033",
+    "ac": "AC-S-071",
+    "title": "同一 SDK 实例连续两次写请求的幂等键不同",
+    "preconditions": ["注入式 fake fetch：任意路径返回 200"],
+    "steps": [
+      "调用 client.request({ method:'POST', path:'/api/a', body:{x:1} })",
+      "调用 client.request({ method:'POST', path:'/api/a', body:{x:2} })",
+      "读取两次请求的 idempotency-key 头"
+    ],
+    "expected": [
+      "两个键都匹配 UUID v4 正则",
+      "第 1 次的键 !== 第 2 次的键",
+      "两次请求体分别等于 '{\"x\":1}' 与 '{\"x\":2}'（请求确实各自发出，没有被合并）"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "design": "边界值（键不复用）",
+    "refs": [
+      "code/crates/platform-iam/src/http.rs:336-356 —— 同键第二次直接返回首次结果，新数据不落库"
+    ]
+  },
+  {
+    "id": "TC-011-034",
+    "ac": "AC-S-071",
+    "title": "401 刷新后的重放请求使用**新的**幂等键（否则后端返回 409）",
+    "preconditions": [
+      "注入式 fake fetch：",
+      "  - 业务路径 POST 第一次返回 401，第二次返回 200",
+      "  - '/api/iam/refresh' 返回 200（新 access token）",
+      "记录每次业务请求的 idempotency-key 头"
+    ],
+    "steps": [
+      "调用 client.request({ method:'POST', path:'/api/iam/password/change', body:{old:'a',new:'b'} })",
+      "取第 1 次与第 2 次业务请求的 idempotency-key 头"
+    ],
+    "expected": [
+      "两次业务请求都被发出（次数 === 2）",
+      "第 2 次请求的 idempotency-key !== 第 1 次的 idempotency-key",
+      "两个键都匹配 UUID v4 正则",
+      "调用以 resolve 结束（拿到第 2 次的 200 结果），不是以 409 CONFLICT 结束"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "design": "跨 AC 回归（AC-S-070 × AC-S-071 组合）",
+    "refs": [
+      "code/crates/platform-iam/src/http.rs:303-320 —— 幂等键先被 claim（status=0）",
+      "code/crates/platform-iam/src/http.rs:365-372 —— **只有成功响应**才 complete_idempotency；401 之后键停留在 status=0",
+      "code/crates/platform-iam/src/http.rs:336-356 —— 命中 status=0 的已声明键 → 返回 **409 CONFLICT**",
+      "code/crates/platform-iam/src/store.rs:1042-1059 —— claim 是 INSERT ... status=0 ... ON CONFLICT DO NOTHING"
+    ],
+    "notes": "⚠️ **这是本用例集里最危险的一条（挑刺 #1 / 硬伤）**：首个请求因令牌过期返回 401，但幂等键**已经被 claim 且没被 complete**；若重放沿用同一个键，后端会返回 409「the idempotent request is still being processed」而不是 200 —— 用户点保存没反应。AC-S-070 步骤 1 与 AC-S-071 步骤 1 合起来会让实现者自然地犯这个错，必须由 AC 明文约束。"
+  },
+  {
+    "id": "TC-011-035",
+    "ac": "AC-S-072",
+    "title": "配置 tenantId 时注入 x-tenant-id 头",
+    "preconditions": [
+      "createApiClient({ baseUrl:'', tenantId:'tenant-a', fetch: fakeFetch })",
+      "fake fetch 能读到请求头"
+    ],
+    "steps": [
+      "调用 client.request({ method:'GET', path:'/api/x' })",
+      "读取请求头 x-tenant-id"
+    ],
+    "expected": [
+      "请求头 x-tenant-id === 'tenant-a'（精确等于配置值）",
+      "请求实际发出（次数 === 1）"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "design": "正常路径",
+    "refs": [
+      "code/crates/platform-iam/src/http.rs:48 —— 后端租户头名是 'x-tenant-id'"
+    ]
+  },
+  {
+    "id": "TC-011-036",
+    "ac": "AC-S-072",
+    "title": "未配置 tenantId 时不注入 x-tenant-id 头",
+    "preconditions": [
+      "createApiClient({ baseUrl:'', fetch: fakeFetch })（不传 tenantId）",
+      "fake fetch 能读到请求头"
+    ],
+    "steps": [
+      "调用 client.request({ method:'GET', path:'/api/x' })",
+      "读取请求头 x-tenant-id"
+    ],
+    "expected": [
+      "请求头 x-tenant-id === null（头**不存在**，不是空串）",
+      "请求实际发出（次数 === 1）"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P0",
+    "design": "边界值（未配置）",
+    "refs": [
+      "code/crates/platform-rbac/src/http.rs:191-194 —— 后端在请求头缺租户时**从令牌推断**租户"
+    ],
+    "notes": "「空串 ≠ 不带」：头不存在（get 返回 null）与头存在但值为空串（get 返回 ''）在 HTTP 层是两种语义，本用例断的是前者。"
+  },
+  {
+    "id": "TC-011-037",
+    "ac": "AC-S-072",
+    "title": "配置 spaceId 时注入 x-space-id 头",
+    "preconditions": [
+      "createApiClient({ baseUrl:'', tenantId:'tenant-a', spaceId:'space-sales-1', fetch: fakeFetch })"
+    ],
+    "steps": [
+      "调用 client.request({ method:'GET', path:'/api/x' })",
+      "读取请求头 x-space-id 与 x-tenant-id"
+    ],
+    "expected": [
+      "请求头 x-space-id === 'space-sales-1'（精确等于配置值）",
+      "请求头 x-tenant-id === 'tenant-a'（两个头互不影响）"
+    ],
+    "type": "功能",
+    "layer": "frontend-unit",
+    "automatable": true,
+    "priority": "P1",
+    "design": "正常路径",
+    "refs": [
+      "code/crates/platform-iam/src/http.rs:50 —— 后端空间头名是 'x-space-id'"
+    ],
+    "notes": "后端并非所有路由都读 x-space-id（platform-rbac 的路由不读）；本用例只验 SDK 侧的注入行为。"
+  }
+]
