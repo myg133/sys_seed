@@ -18,12 +18,15 @@
 > （`91d8e09` → `a0a8d7a` → `400cefa`），Rust 303/303（连跑 8 轮全绿）、前端 23/23、E2E 1/1。
 > 复盘见 [sprint-02-retro.md](../sprint/sprint-02-retro.md)（34 个 QA 问题的归因）。
 >
-> **当前迭代：Sprint 4（SDK 与二次开发面）** —— REQ-011（前端 SDK）、REQ-012（元数据驱动渲染）**均已完成**
+> **当前迭代：Sprint 4（SDK 与二次开发面）** —— REQ-011（前端 SDK）、REQ-012（元数据驱动渲染）、
+> **REQ-021（国际化与本地化）均已完成**
 > （REQ-011 @ `b38715f`：12 条 AC、两轮独立复核 PASS、后端 550 / 前端 151 / E2E 11；
-> REQ-012 @ `88b7ca3`：12 条 AC、独立复核 PASS、后端 618 / 前端 240 / E2E 17 **且 0 skipped**）。
-> 两棒的复盘：[sprint-04-retro.md](../sprint/sprint-04-retro.md)、[req-012-retro.md](../sprint/req-012-retro.md)。
-> 下一棒建议 **REQ-021（国际化）** 或 **REQ-013（SSO）**。
-> 已知技术债见 [tech-debt.md](tech-debt.md)（**14 条**，含「CI 从未真跑」）。
+> REQ-012 @ `88b7ca3`：12 条 AC、独立复核 PASS、后端 618 / 前端 240 / E2E 17 **且 0 skipped**；
+> REQ-021 @ `59486d0`：12 条 AC、独立复核 PASS、后端 **642** / 前端 **208** / E2E **20 且 0 skipped**）。
+> 三棒的复盘：[sprint-04-retro.md](../sprint/sprint-04-retro.md)、[req-012-retro.md](../sprint/req-012-retro.md)、
+> [req-021-retro.md](../sprint/req-021-retro.md)。
+> 下一棒建议 **REQ-014（审计日志）** 或 **REQ-013（SSO）**。
+> 已知技术债见 [tech-debt.md](tech-debt.md)（**20 条**，含「CI 从未真跑」）。
 
 ## 拆分总览
 
@@ -42,7 +45,7 @@
 | REQ-012 | 元数据驱动渲染 | P0 | 4 | REQ-009, REQ-011 | AC-018 | AC-S-076~087（**12 条**） | **已完成**（Sprint 4，`develop` @ `88b7ca3`；独立复核 PASS；618/240/E2E 17 且 0 skipped） |
 | REQ-013 | SSO 多协议与出站 IdP | P1 | 4 | REQ-007, REQ-009 | AC-005/006 | AC-S-020/021 | 草稿 |
 | REQ-014 | **审计日志** | P1 | 4 | REQ-002, REQ-006 | AC-022 | AC-S-022 | 草稿 |
-| REQ-021 | **国际化与本地化** | P1 | 4 | REQ-006, REQ-010, REQ-011 | F12 | AC-S-029~032 | 草稿 |
+| REQ-021 | **国际化与本地化** | P1 | 4 | REQ-006, REQ-010, REQ-011 | F12 | AC-S-088~099（**12 条**） | **已完成**（Sprint 4，`develop` @ `59486d0`；独立复核 PASS；642/208/E2E 20 且 0 skipped） |
 | REQ-015 | 通知系统 | P1 | 5 | REQ-002, REQ-021 | AC-023 | AC-S-023 | 草稿 |
 | REQ-016 | 应用接入与应用注册表 | P1 | 5 | REQ-007, REQ-013 | AC-020/021 | AC-S-024 | 草稿 |
 | REQ-018 | 文件存储与导入导出 | P2 | 5 | REQ-002 | AC-025/026 | AC-S-026 | 草稿 |
