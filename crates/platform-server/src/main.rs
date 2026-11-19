@@ -36,6 +36,7 @@ use platform_iam::service::IamService;
 use platform_iam::store::IamStore;
 use platform_schema::{SchemaRegistry, SchemaState};
 use platform_server::config::{ConfigError, DeployConfig, Environment};
+use platform_server::sso_source::ConfigServiceSsoSource;
 use platform_server::{db, health, isolation, migrate, policies, probe, static_files};
 use serde::Serialize;
 use sqlx::PgPool;
@@ -299,6 +300,9 @@ async fn serve() -> Result<(), Failure> {
         Arc::new(RejectAllSchemaTokens);
     // 业务模块路由的认证层需要 IAM（未配置 → 模块路由一律 401，fail closed）。
     let mut module_iam: Option<Arc<platform_iam::service::IamService>> = None;
+    // SSO 入站（REQ-013）的配置源要用 `ConfigService` 实现 —— 而配置服务在本函数
+    // 较后才构造（它依赖注册表）。所以先留一个句柄，等配置服务就绪再注入。
+    let mut sso_iam: Option<Arc<platform_iam::service::IamService>> = None;
     let mut config_checker: Arc<dyn PermissionChecker> = Arc::new(DenyAllPermissions);
     let mut config_permissions: Arc<dyn PermissionRefresher> = Arc::new(DenyAllPermissions);
 
@@ -311,7 +315,13 @@ async fn serve() -> Result<(), Failure> {
         let iam_state = build_iam_state(&config).await?;
         app = app
             .nest("/api/iam", platform_iam::http::router(iam_state.clone()))
-            .merge(platform_iam::http::jwks_router(iam_state.clone()));
+            .merge(platform_iam::http::jwks_router(iam_state.clone()))
+            // SSO 入站（REQ-013）：`/api/iam/sso/*`（与 `/api/iam` 同一层 nest）。
+            .nest(
+                "/api/iam",
+                platform_iam::http::sso_router(iam_state.clone()),
+            );
+        sso_iam = Some(iam_state.service.clone());
 
         // 用户与组织架构（REQ-008）：`/api/org/*`。
         //
@@ -438,6 +448,32 @@ async fn serve() -> Result<(), Failure> {
     });
     let app = app.merge(platform_config::http::router(config_state));
     tracing::info!("配置与品牌已启用：/api/config/*、/api/feature-flags/*");
+
+    // SSO 入站（REQ-013）：把「配置源」等后设槽接到 IAM 服务上。
+    //
+    // 配置源用 `ConfigService::read_entries` 实现 —— 与 `GET /api/config/entries`
+    // **同一套解析**（三层覆盖 + manifest 默认值），不另开读路径。
+    if let Some(service) = sso_iam {
+        let source = Arc::new(ConfigServiceSsoSource::new(config_service.clone()));
+        if !service.set_sso_config_source(source) {
+            tracing::warn!("SSO 配置源已经注入过：保留先装好的实现");
+        }
+        if let Ok(base) = std::env::var("BASE_SSO_FRONTEND_BASE_URL") {
+            service.set_sso_frontend_base_url(base);
+        }
+        // `client_secret` **只从环境变量来**，绝不进 config / 响应 / 日志（AC-S-106）。
+        if let Ok(secret) = std::env::var(platform_iam::sso::config::OIDC_CLIENT_SECRET_ENV) {
+            service.set_sso_oidc_client_secret(secret);
+        }
+        // LDAP 服务账号（可选；不配则匿名 bind）。
+        if let (Ok(dn), Ok(password)) = (
+            std::env::var(platform_iam::sso::config::LDAP_SERVICE_BIND_DN_ENV),
+            std::env::var(platform_iam::sso::config::LDAP_SERVICE_BIND_PASSWORD_ENV),
+        ) {
+            service.set_sso_ldap_service_bind(dn, password);
+        }
+        tracing::info!("SSO 入站已启用：/api/iam/sso/*");
+    }
 
     // 国际化与本地化（REQ-021）：`/api/i18n/context` + `/api/i18n/fx/convert`。
     //

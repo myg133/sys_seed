@@ -30,6 +30,7 @@ argon2.workspace = true
 jsonwebtoken.workspace = true
 # TOTP：HMAC-SHA1 + base32，纯 Rust
 totp-rs.workspace = true
+# SSO 测试：mock IdP 的**服务端** TLS + 自签根证书（D124 决策 ②：只进 dev）。
 # 随机数：refresh token / 恢复码 / TOTP secret 的熵源
 rand.workspace = true
 # 高熵值摘要：refresh token / 重置令牌 / 恢复码的**哈希存储**
@@ -40,6 +41,19 @@ p256.workspace = true
 base64.workspace = true
 # AEAD：TOTP secret 的静态加密（密钥只从环境注入）
 chacha20poly1305.workspace = true
+
+# --- SSO 入站（REQ-013）---------------------------------------------------
+# LDAP bind 认证（已在锁文件里：由 platform-org 引入）。
+ldap3.workspace = true
+# OIDC 的出站 HTTP：**继续用 hyper + hyper-util，不引 reqwest**（只换 connector）。
+hyper.workspace = true
+hyper-util.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+bytes.workspace = true
+# D123 破例：TLS（生产只信任公网根；测试注入自签根）。
+rustls.workspace = true
+hyper-rustls.workspace = true
 
 [dev-dependencies]
 # 直接驱动 axum Router（不连网络）：`ServiceExt::oneshot`
@@ -52,3 +66,8 @@ uuid.workspace = true
 time.workspace = true
 base64.workspace = true
 totp-rs.workspace = true
+# SSO 测试：mock IdP 的**服务端** TLS + 自签根证书（D124 决策 ②：只进 dev）。
+tokio-rustls.workspace = true
+rcgen.workspace = true
+# SSO 测试：捕获 tracing 输出做敏感值扫描（AC-S-106 步骤 4）。
+tracing-subscriber.workspace = true

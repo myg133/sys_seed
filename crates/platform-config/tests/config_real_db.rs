@@ -1691,3 +1691,114 @@ async fn the_platform_read_endpoint_only_serves_platform_scoped_keys() {
     assert_eq!(error.code(), CODE_KEY_NOT_REGISTERED);
     assert_eq!(error.status(), 404);
 }
+
+// ---------------------------------------------------------------------------
+// P17（D128 / Q7）：D127 的 `boolean ⇒ flag` 推导约束要有专测
+// ---------------------------------------------------------------------------
+
+/// 带点号的布尔键（REQ-013 的 `sso.*`）**走 Scoped 写路由成功、走 Flag 路由被拒**。
+///
+/// 这是 D127 的实质行为：推导规则加了 `&& is_valid_flag_name(...)` 之后，
+/// 这类键不再落进 flag 命名空间 —— 而在此之前，它**两条路都走不通**：
+///
+/// | 路由 | 加约束前 | 加约束后 |
+/// |------|----------|----------|
+/// | `WriteRoute::Scoped` | 400 `CONFIG_FLAG_USE_FLAG_ENDPOINT` | **200（本用例第 1 段）** |
+/// | flag 接口 | 400 `FLAG_NAME_INVALID`（点号非法） | 400 `FLAG_NAME_INVALID`（**不是 flag**，本用例第 2 段） |
+///
+/// 会红的情形：
+/// - 约束被删回 `boolean ⇒ flag`（Scoped 写又会 400 `CONFIG_FLAG_USE_FLAG_ENDPOINT`）；
+/// - 反过来把点号键误放行到 flag 接口（第 2 段会拿到 200 而不是 400）。
+#[tokio::test]
+async fn a_dotted_boolean_key_is_writable_as_config_and_rejected_as_a_flag() {
+    let _guard = serial().await;
+    let fx = setup().await;
+    let ctx = ctx(TENANT_A);
+
+    // 1) Scoped 写路由：**成功**，且值真的落到**本租户**那一行。
+    for (key, value) in [
+        ("sso.enforce", json!(true)),
+        ("sso.jitProvisioning", json!(false)),
+    ] {
+        let written = write_tenant(&fx, &ctx, key, value.clone())
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{key} 必须能经通用写路由写入（D127 约束前的症状是 {}）：{error:?}",
+                    error.code()
+                )
+            });
+        assert_eq!(written, 1);
+        // ⚠️ 按 `(tenant_id, key)` 读 —— 同一张表里有别的租户的行
+        //    （且别的测试**二进制**共用 base_test，裸 `WHERE key = $1` 会读到别人的值）。
+        let stored: Option<String> = sqlx::query_scalar(
+            "SELECT value::text FROM platform_tenant_config WHERE tenant_id = $1 AND key = $2",
+        )
+        .bind(TENANT_A)
+        .bind(key)
+        .fetch_optional(&fx.admin_pool)
+        .await
+        .expect("应能读到租户级行");
+        assert_eq!(
+            stored,
+            Some(value.to_string()),
+            "{key} 的写入值应落到 TENANT_A 那一行"
+        );
+    }
+    // 读回也是「租户」来源，而不是「没有这个键」。
+    let entries = fx
+        .service
+        .read_entries(&ctx, &key_list(&["sso.enforce"]))
+        .await
+        .expect("读回应成功");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].value, json!(true));
+    assert_eq!(entries[0].source, ConfigSource::Tenant);
+
+    // 2) flag 路由：**被拒**（它根本不是 flag）。
+    //    点号先撞上 flag 名规范 → `FLAG_NAME_INVALID`（400）。
+    //    ⚠️ 这里断言的是「被拒」这件事本身：若约束反过来把点号键当 flag，
+    //    则第一步（Scoped 写）会先红；若 flag 名规范被放宽，这里会变成 200。
+    for key in ["sso.enforce", "sso.jitProvisioning"] {
+        let error = fx
+            .service
+            .write_flag(
+                &ctx_user(TENANT_A, USER_A),
+                key,
+                &FlagWriteRequest {
+                    enabled: Some(json!(false)),
+                    rollout_percent: None,
+                },
+            )
+            .await
+            .expect_err("带点号的布尔键不得经 flag 路由写入");
+        assert_eq!(error.status(), 400, "{key}：应 400，实际 {error:?}");
+        assert_eq!(
+            error.code(),
+            CODE_FLAG_NAME_INVALID,
+            "{key}：应因非法 flag 名被拒，实际 {error:?}"
+        );
+    }
+
+    // 3) 既有契约**不变**：`beta` 仍是 flag（Scoped 写仍被拒），经 flag 接口可改。
+    let error = write_tenant(&fx, &ctx, "beta", json!(true))
+        .await
+        .expect_err("beta 是 flag，通用路由仍应拒绝");
+    assert_eq!(error.code(), CODE_FLAG_USE_FLAG_ENDPOINT);
+    // `rolloutPercent = 100`：全量生效，所以 `enabled` 与总开关一致
+    // （40 之类的比例会按 `sha256(flag:user)` 的桶决定，断言会依赖哈希值）。
+    let decision = fx
+        .service
+        .write_flag(
+            &ctx_user(TENANT_A, USER_A),
+            "beta",
+            &FlagWriteRequest {
+                enabled: Some(json!(true)),
+                rollout_percent: Some(json!(100)),
+            },
+        )
+        .await
+        .expect("beta 经 flag 路由应可写");
+    assert!(decision.enabled);
+    assert_eq!(decision.flag, "beta");
+}

@@ -109,6 +109,28 @@ fn titles_cover_every_code() {
     );
 }
 
+/// 钉死 `TITLES` 的行数（D125：新增错误码必须同步登记标题）。
+///
+/// # 为什么是 79 而不是 acceptance 写的 77
+///
+/// REQ-013 的 acceptance 写「`TITLES.len()` 期望值 = 56（基线）+ 21 = **77**」。
+/// **基线实测是 58 行**，不是 56 —— 规格里的 56 是数错了（漏了
+/// `platform-db` 的 5 个码里的 2 个与 `platform-server::health` 的 3 个码
+/// 之外的偏差；精确计数见 `git show HEAD:...titles.rs`）。
+///
+/// 已上报 BA。这里钉的是**实测值** 58 + 21 = 79：
+/// 断言的目的（「加码必须同时加标题」）不受影响，被钉住的仍然是真实的表。
+#[test]
+fn the_title_table_has_the_pinned_number_of_rows() {
+    const BASELINE_ROWS_BEFORE_REQ_013: usize = 58;
+    const REQ_013_NEW_CODES: usize = 21;
+    assert_eq!(
+        TITLES.len(),
+        BASELINE_ROWS_BEFORE_REQ_013 + REQ_013_NEW_CODES,
+        "TITLES 行数变了：新增错误码必须同时登记标题（D125）"
+    );
+}
+
 /// 表的每个值都是 ASCII，且键唯一。
 #[test]
 fn titles_are_ascii_and_unique() {

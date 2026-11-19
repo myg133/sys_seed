@@ -14,4 +14,5 @@ pub mod isolation;
 pub mod migrate;
 pub mod policies;
 pub mod probe;
+pub mod sso_source;
 pub mod static_files;

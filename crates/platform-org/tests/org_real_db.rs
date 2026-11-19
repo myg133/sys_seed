@@ -671,6 +671,7 @@ async fn departure_disables_the_account_and_revokes_every_session() {
                 ip: "127.0.0.1".to_string(),
                 user_agent: "test".to_string(),
                 family_id: "family-1".to_string(),
+                auth_provider: "local".to_string(),
                 created_at: now,
                 last_used_at: now,
                 revoked_at: None,

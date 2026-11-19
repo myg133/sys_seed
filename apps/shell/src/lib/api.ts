@@ -17,9 +17,15 @@
  */
 
 import { ANONYMOUS, createAuthStore, type AuthState } from '@base/auth';
-import { ApiError, createApiClient, type ApiClient } from '@base/sdk';
+import { ApiError, CLIENT_INTERNAL_ERROR, createApiClient, type ApiClient } from '@base/sdk';
 
 import { createSessionStore, type KeyValueStorage } from './session';
+import {
+  exchangeTicket,
+  ldapLogin,
+  type SsoLdapCredentials,
+  type SsoLoginResponse,
+} from './sso-api';
 
 /** 登录接口。 */
 export const LOGIN_PATH = '/api/iam/login';
@@ -49,6 +55,19 @@ export interface AppAuth {
   readonly state: AuthState;
   /** 登录：先绑定租户，再走 SDK 登录。 */
   login(credentials: Credentials): Promise<void>;
+  /**
+   * SSO 登录：LDAP bind（AC-S-104）。
+   *
+   * 响应与本地登录**同构**（AC-S-107），所以落会话的代码路径也共用
+   * （`applySsoLogin`），只有「怎么拿到 LoginResponse」不同。
+   */
+  loginWithLdap(credentials: SsoLdapCredentials): Promise<void>;
+  /**
+   * SSO 登录：一次性 ticket 换会话（P4）。
+   *
+   * 租户来自响应里的 `user.tenantId`（回调的时候浏览器**没有** `x-tenant-id`）。
+   */
+  loginWithTicket(ticket: string): Promise<void>;
   /** 登出：清空登录态与持久化会话。 */
   logout(): Promise<void>;
 }
@@ -160,6 +179,46 @@ export function createAppApi(options: AppApiOptions = {}): AppApi {
     return current;
   }
 
+  /**
+   * 把 SSO 的 `LoginResponse` 落成会话（AC-S-107：与本地登录**同构**）。
+   *
+   * 顺序是硬要求：**先** `setTenant` 再 `setTokens` ——
+   * `SessionStore` 的持久化在「没有租户」时直接跳过（`session.ts`），
+   * 反过来写会得到「内存里有令牌、重载后没有会话」。
+   *
+   * @param fallbackTenantId 响应里没带 `user.tenantId` 时的兜底（LDAP 登录由用户填的租户提供）
+   */
+  const applySsoLogin = (
+    response: SsoLoginResponse | undefined,
+    fallbackTenantId?: string,
+  ): void => {
+    const accessToken = response?.accessToken;
+    if (typeof accessToken !== 'string' || accessToken === '') {
+      // 形状不对**不能**当成功：否则会出现「界面已登录、请求全 401」。
+      throw new ApiError({ code: CLIENT_INTERNAL_ERROR, status: 0 });
+    }
+    const tenantId = response?.user?.tenantId ?? fallbackTenantId;
+    if (tenantId === undefined || tenantId === '') {
+      throw new ApiError({ code: CLIENT_INTERNAL_ERROR, status: 0 });
+    }
+    const refreshToken =
+      typeof response?.refreshToken === 'string' && response.refreshToken !== ''
+        ? response.refreshToken
+        : undefined;
+    session.setTenant(tenantId);
+    client.setContext({ tenantId });
+    session.setTokens({ accessToken, refreshToken });
+    current = {
+      status: 'authenticated',
+      authenticated: true,
+      userId: response?.user?.id,
+      tenantId,
+      // 登录响应里的权限点与 `GET /api/rbac/me/permissions` 同源；
+      // 刷新响应才是空数组（这里不是刷新）。
+      permissions: normalizePermissions(response?.permissions),
+    };
+  };
+
   const auth: AppAuth = {
     get state(): AuthState {
       return current;
@@ -194,6 +253,45 @@ export function createAppApi(options: AppApiOptions = {}): AppApi {
     async logout(): Promise<void> {
       await store.logout();
       current = store.state;
+    },
+
+    async loginWithLdap(credentials): Promise<void> {
+      const tenantId = credentials.tenantId.trim();
+      if (tenantId === '') {
+        // 与本地登录一致：空租户**不发请求**（后端无法决定用哪套 LDAP 配置）。
+        throw new Error(TENANT_REQUIRED);
+      }
+      // 与 `login()` 完全一致：先绑「尝试用」的租户（请求要带 `x-tenant-id`），
+      // 失败则回滚 —— 已登录用户误在登录页试错时，不能把既有会话的租户改掉。
+      const previousTenant = session.state.tenantId;
+      session.setTenant(tenantId);
+      client.setContext({ tenantId });
+      try {
+        const response = await ldapLogin(client, {
+          tenantId,
+          username: credentials.username,
+          password: credentials.password,
+          ...(credentials.loginUrl === undefined ? {} : { loginUrl: credentials.loginUrl }),
+        });
+        applySsoLogin(response, tenantId);
+      } catch (error) {
+        if (previousTenant !== undefined) {
+          session.setTenant(previousTenant);
+          client.setContext({ tenantId: previousTenant });
+        }
+        throw error;
+      }
+    },
+
+    async loginWithTicket(ticket): Promise<void> {
+      const trimmed = ticket.trim();
+      if (trimmed === '') {
+        // 回调页先做 `readTicket`，走不到这里；真走到说明调用方漏了前置校验。
+        throw new ApiError({ code: CLIENT_INTERNAL_ERROR, status: 0 });
+      }
+      // 不回滚任何上下文：回调落点时没有既有会话，且 ticket 自己绑了租户。
+      const response = await exchangeTicket(client, trimmed);
+      applySsoLogin(response);
     },
   };
 

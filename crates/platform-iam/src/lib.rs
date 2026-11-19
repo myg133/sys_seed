@@ -7,5 +7,6 @@ pub mod http;
 pub mod jwt;
 pub mod password;
 pub mod service;
+pub mod sso;
 pub mod store;
 pub mod totp;

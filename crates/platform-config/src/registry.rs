@@ -311,9 +311,26 @@ impl ConfigRegistry {
         }
 
         // 登记为 boolean 的键 = flag（见模块文档）。
+        //
+        // ⚠️ **必须同时是合法的 flag 名**（`[a-z][a-z0-9]{0,63}`，见 `flag::is_valid_flag_name`）。
+        //
+        // 为什么：带点号的布尔键（如 REQ-013 的 `sso.enforce`）不是「功能开关」——
+        // 它是**普通租户配置**。若把它们也当 flag，会同时坏两件事：
+        //
+        // 1. 通用写路由把它们拦成 `FlagEndpointRequired`（写不进去）；
+        // 2. flag 写路由又因为名字里有点号被判 `FlagNameInvalid`（还是写不进去）
+        //    → **两条路都走不通**，配置永远停在 manifest 默认值；
+        // 3. 还会给它们派生出无意义的 `flags.sso.enforce.rolloutPercent`。
+        //
+        // 「boolean ⇒ flag」这条推导规则本来就是启发式（规格没给 flag 单独声明段，
+        // 见模块文档第 22~28 行）。加上名字约束后它才自洽：
+        // **dimension-free 的布尔键是开关，点号键只是布尔类型的配置。**
         let mut flags: BTreeSet<String> = keys
             .values()
-            .filter(|registered| registered.kind == ConfigType::Boolean)
+            .filter(|registered| {
+                registered.kind == ConfigType::Boolean
+                    && crate::flag::is_valid_flag_name(&registered.key)
+            })
             .map(|registered| registered.key.clone())
             .collect();
 
@@ -552,6 +569,57 @@ mod tests {
         assert_eq!(derived.scope, ConfigScope::Tenant);
         assert_eq!(derived.default, Value::from(100));
         assert!(derived.derived);
+    }
+
+    /// **P17（D128 / Q7）**：带点号的布尔键**不是** flag。
+    ///
+    /// 推导规则加了 `&& is_valid_flag_name(...)`（`boolean ⇒ flag` 的启发式约束）——
+    /// 不带这个约束时 REQ-013 的 4 个 SSO 布尔键会同时坏掉两条写路由：
+    /// 通用路由把它们拦成 `FlagEndpointRequired`、flag 路由又因点号判 `FlagNameInvalid`。
+    ///
+    /// 会红的情形：约束被删回 `registered.kind == ConfigType::Boolean` 一行 ——
+    /// 那时 `sso.enforce` 会出现在 `flags` 集合里，下面第一条断言变红。
+    #[test]
+    fn a_dotted_boolean_key_is_plain_config_and_not_a_flag() {
+        let registry = registry();
+        for key in [
+            "sso.enforce",
+            "sso.jitProvisioning",
+            "sso.oidc.enabled",
+            "sso.ldap.enabled",
+        ] {
+            assert!(
+                registry.get(key).is_some(),
+                "{key} 必须已登记（否则下面的断言没意义）"
+            );
+            assert_eq!(
+                registry.get(key).map(|registered| registered.kind),
+                Some(ConfigType::Boolean),
+                "{key} 登记类型应是 boolean"
+            );
+            assert!(!registry.is_flag(key), "{key} 带点号，不是 flag");
+            // 也不该被派生出无意义的灰度比例键。
+            assert!(
+                registry
+                    .get(&format!("flags.{key}.rolloutPercent"))
+                    .is_none(),
+                "{key} 不是 flag，不该有派生键"
+            );
+            // 但它**仍然**是普通租户配置：两条写路由的判据只该命中后者。
+            assert!(
+                !registry.is_flag_namespace(key),
+                "{key} 不得落在 flag 命名空间里（否则通用写路由会拒它）"
+            );
+        }
+
+        // 既有契约**不变**：dimension-free 的布尔键仍是 flag。
+        assert!(registry.is_flag("beta"));
+        assert!(registry.is_flag("newInvoice"));
+        assert!(
+            registry
+                .get("flags.beta.rolloutPercent")
+                .is_some_and(|registered| registered.kind == ConfigType::Number)
+        );
     }
 
     #[test]

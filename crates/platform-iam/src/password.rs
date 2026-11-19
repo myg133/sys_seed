@@ -14,12 +14,30 @@
 //! [`DummyHash`] 就是那个「固定假哈希」——它用**与真实密码相同的参数**生成，
 //! 因此耗时也相同。
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use argon2::password_hash::{PasswordHasher, PasswordVerifier, SaltString};
 use argon2::{Algorithm, Argon2, Params, Version};
 use rand::rngs::OsRng;
 
 use crate::config::Argon2Settings;
 use crate::error::IamError;
+
+/// 本进程内 Argon2 **校验**的调用次数。
+///
+/// 存在的理由是可观测性：AC-S-021 要求「强制 SSO 时 Argon2id 调用次数 == 0」。
+/// 「耗时同量级」没有区分力（三条路径都走同一段代码，即使真跑了 Argon2
+/// 也仍然同量级），所以必须有一个**计数**可读的观测面。
+///
+/// 只计**校验**：登录路径上唯一会跑 Argon2 的地方就是它
+/// （哈希只在注册 / 改密时发生，不在登录请求上）。因此这个计数从进程启动即为 0，
+/// 「== 0」是**绝对值**而不是差值。
+static ARGON2_INVOCATIONS: AtomicU64 = AtomicU64::new(0);
+
+/// 读累计调用次数（进程级，只增不减）。
+pub fn argon2_invocation_count() -> u64 {
+    ARGON2_INVOCATIONS.load(Ordering::Relaxed)
+}
 
 /// 本地常见口令词库（本期只做本地小词库；完整 HIBP k-anonymity 接入放后续需求）。
 ///
@@ -99,6 +117,7 @@ pub fn hash_password(password: &str, settings: &Argon2Settings) -> Result<String
 ///
 /// PHC 串本身非法时返回 `false`（不泄露「哈希格式错了」这种内部细节）。
 pub fn verify_password(password: &str, phc: &str) -> bool {
+    ARGON2_INVOCATIONS.fetch_add(1, Ordering::Relaxed);
     let Ok(parsed) = argon2::PasswordHash::new(phc) else {
         return false;
     };

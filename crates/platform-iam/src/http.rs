@@ -28,7 +28,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{FromRequestParts, Path, Request, State};
+use axum::extract::{FromRequestParts, Path, Query, Request, State};
 use axum::http::{HeaderMap, Method, StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -393,6 +393,186 @@ pub fn jwks_router<S2>(state: Arc<IamState>) -> Router<S2> {
     Router::new()
         .route("/.well-known/jwks.json", get(jwks))
         .with_state(state)
+}
+
+// ---------------------------------------------------------------------------
+// SSO 入站（REQ-013）：5 个端点
+// ---------------------------------------------------------------------------
+
+/// SSO 路由（由装配层与 `/api/iam` **同一层** nest）。
+///
+/// | 方法 | 路径（相对 `/api/iam`） | 认证 |
+/// |------|------------------------|------|
+/// | `GET`  | `/sso/providers` | **无**（登录页要在未登录时知道显示什么按钮） |
+/// | `GET`  | `/sso/oidc/authorize` | **无**（但要租户头） |
+/// | `GET`  | `/sso/oidc/callback` | **无**（浏览器顶层导航） |
+/// | `POST` | `/sso/ldap/login` | **无** |
+/// | `POST` | `/sso/exchange` | **无**（票据本身就是凭证） |
+///
+/// 这些是**登录入口**：用户此刻还没有令牌。
+pub fn sso_router<S2>(state: Arc<IamState>) -> Router<S2> {
+    Router::new()
+        .route("/sso/providers", get(sso_providers))
+        .route("/sso/oidc/authorize", get(sso_authorize))
+        .route("/sso/oidc/callback", get(sso_callback))
+        .route("/sso/ldap/login", post(sso_ldap_login))
+        .route("/sso/exchange", post(sso_exchange))
+        .layer(middleware::from_fn(tenant_context))
+        .with_state(state)
+}
+
+/// 当前租户可用的 SSO 入口。
+///
+/// 未配置 → `{"providers": []}` + **200**（「查了但没有」不是「没有这个接口」）。
+async fn sso_providers(
+    State(state): State<Arc<IamState>>,
+    TenantContext(ctx): TenantContext,
+    uri: Uri,
+) -> Response {
+    match state.service.sso_providers(&ctx).await {
+        Ok(providers) => Json(serde_json::json!({ "providers": providers })).into_response(),
+        Err(error) => problem_response(&error, &ctx, uri.path()),
+    }
+}
+
+/// 发起 OIDC 授权 → 302 到 IdP。
+///
+/// # 租户来源（P15 / rev 3.1）
+///
+/// `/authorize` 是**顶层浏览器导航**的起点 —— 浏览器**无法给整页导航设置请求头**，
+/// 而此刻还没有 `state` 可反查租户。所以：
+///
+/// ```text
+/// 租户 = ?tenant= 查询参数  >  x-tenant-id 请求头  >  401 TENANT_CONTEXT_MISSING
+/// ```
+///
+/// 复用既有的 `TENANT_CONTEXT_MISSING`（401），**不新增第 22 个错误码**。
+/// 租户 id 进 URL 是可接受的（登录页本来就要求手输租户，D98）；
+/// 但 URL 与响应里**不得**出现 `issuer` / `clientId` / LDAP `url` / `baseDn`。
+async fn sso_authorize(
+    State(state): State<Arc<IamState>>,
+    TenantContext(ctx): TenantContext,
+    uri: Uri,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let query_tenant = query
+        .get("tenant")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    // 查询参数**优先于**请求头（`tenant_context` 中间件在缺头时给的是空串 → None）。
+    let tenant = query_tenant
+        .map(str::to_string)
+        .or_else(|| ctx.tenant_id().map(str::to_string));
+    let Some(tenant) = tenant else {
+        return problem_response(&IamError::TenantContextMissing, &ctx, uri.path());
+    };
+    let ctx = ctx.with_tenant(tenant);
+
+    match state.service.begin_oidc_authorize(&ctx).await {
+        Ok(location) => redirect(&location),
+        Err(error) => problem_response(&error, &ctx, uri.path()),
+    }
+}
+
+/// OIDC 回调（浏览器顶层导航的落点）。
+///
+/// **不返回 JSON 令牌**：只 302 到 `{前端基址}/sso/callback?ticket=…`（P4 / §8）。
+async fn sso_callback(
+    State(state): State<Arc<IamState>>,
+    TenantContext(ctx): TenantContext,
+    headers: HeaderMap,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let code = query
+        .get("code")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let state_param = query
+        .get("state")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let (Some(code), Some(state_param)) = (code, state_param) else {
+        // 失败分支也是**顶层导航**：302 回前端（带错误码），否则用户只看到 JSON 错误页。
+        return callback_error_redirect(&state.service, &IamError::SsoOidcCallbackParamMissing);
+    };
+
+    let meta = request_meta(&headers);
+    // 回调的租户来源（P3）：请求头有就用（必须与 state 一致），没有就采纳 state 的。
+    let header_tenant = ctx.tenant_id();
+    match state
+        .service
+        .complete_oidc_callback(header_tenant, code, state_param, &meta)
+        .await
+    {
+        Ok(location) => redirect(&location),
+        // ⚠️ 失败**不返回 JSON**：回调是浏览器顶层导航的落点，
+        // 返回 JSON 会让用户停在错误页、连登录页都回不去（rev 3.1 / P4 失败分支）。
+        Err(error) => callback_error_redirect(&state.service, &error),
+    }
+}
+
+/// 回调失败的交接：`302 {前端基址}/sso/callback?error=<CODE>`。
+///
+/// `error` **只放错误码**：不放 `detail`、不放任何配置值、不放 token。
+fn callback_error_redirect(service: &crate::service::IamService, error: &IamError) -> Response {
+    redirect(&service.sso_callback_error_location(error.code()))
+}
+
+/// LDAP 登录。
+async fn sso_ldap_login(
+    State(state): State<Arc<IamState>>,
+    TenantContext(ctx): TenantContext,
+    uri: Uri,
+    headers: HeaderMap,
+    Json(request): Json<crate::service::LdapLoginRequest>,
+) -> Response {
+    let meta = request_meta(&headers);
+    match state.service.login_via_ldap(&ctx, &request, &meta).await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => problem_response(&error, &ctx, uri.path()),
+    }
+}
+
+/// 用一次性 ticket 换 `LoginResponse`（token **只在响应体里**）。
+async fn sso_exchange(
+    State(state): State<Arc<IamState>>,
+    TenantContext(ctx): TenantContext,
+    uri: Uri,
+    Json(request): Json<crate::service::ExchangeTicketRequest>,
+) -> Response {
+    let header_tenant = ctx.tenant_id();
+    match state
+        .service
+        .exchange_sso_ticket(header_tenant, request.ticket.trim())
+        .await
+    {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => problem_response(&error, &ctx, uri.path()),
+    }
+}
+
+/// 构造一个 302。
+fn redirect(location: &str) -> Response {
+    match Response::builder()
+        .status(StatusCode::FOUND)
+        .header(header::LOCATION, location)
+        .body(Body::empty())
+    {
+        Ok(response) => response,
+        Err(_) => {
+            let ctx = RequestContext::new();
+            problem_response(
+                &IamError::Internal {
+                    reason: "the redirect location is invalid".to_string(),
+                },
+                &ctx,
+                "",
+            )
+        }
+    }
 }
 
 /// 注册。
