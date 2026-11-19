@@ -94,7 +94,7 @@ pub fn problem_details(error: &IamError, ctx: &RequestContext, instance: &str) -
     let params = error.params();
     ProblemDetails {
         kind: format!("https://errors.base.example/{}", kebab_case(error.code())),
-        title: title_of(error),
+        title: title_of(error).to_string(),
         status: error.status().as_u16(),
         detail: error.detail(),
         instance: instance.to_string(),
@@ -127,30 +127,12 @@ fn kebab_case(code: &str) -> String {
     code.to_ascii_lowercase().replace('_', "-")
 }
 
-/// 错误码 → 简短标题。
+/// 错误码 → 简短标题（**唯一来源**：`platform_core::titles::TITLES`，D113）。
 ///
-/// 标题是**错误类别的名字**，不是面向用户的句子；
-/// 面向用户的中文文案由前端 i18n 按 `code` 渲染。
-fn title_of(error: &IamError) -> String {
-    match error {
-        IamError::InvalidCredentials => "凭证无效".to_string(),
-        IamError::MfaRequired => "需要多因子认证".to_string(),
-        IamError::MfaInvalid => "多因子认证失败".to_string(),
-        IamError::AccountLocked => "账号已锁定".to_string(),
-        IamError::AccountDisabled => "账号已禁用".to_string(),
-        IamError::TokenExpired => "令牌已过期".to_string(),
-        IamError::TokenRevoked => "令牌已撤销".to_string(),
-        IamError::TokenReuseDetected => "检测到令牌重放".to_string(),
-        IamError::PasswordPolicyViolation { .. } => "不满足密码策略".to_string(),
-        IamError::PasswordReused => "密码重复".to_string(),
-        IamError::LoginRateLimited { .. } => "登录过于频繁".to_string(),
-        IamError::TenantContextMissing => "缺少租户上下文".to_string(),
-        IamError::Unauthenticated => "未认证".to_string(),
-        IamError::NotFound { .. } => "资源不存在".to_string(),
-        IamError::Conflict { .. } => "状态冲突".to_string(),
-        IamError::NotImplemented { .. } => "尚未实现".to_string(),
-        IamError::Internal { .. } => "服务内部错误".to_string(),
-    }
+/// 标题是**错误类别的名字**，不是面向用户的句子；面向用户的中文文案由前端 i18n
+/// 按 `code` 渲染。这里**只剩转发** —— 本文件不再持有任何 title 文案。
+fn title_of(error: &IamError) -> &'static str {
+    platform_core::titles::title_of_code(error.code())
 }
 
 /// 租户上下文提取器。

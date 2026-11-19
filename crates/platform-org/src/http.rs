@@ -259,25 +259,11 @@ fn format_timestamp(moment: time::OffsetDateTime) -> String {
     )
 }
 
-/// 错误码 → 简短标题（**类别的名字**，不是面向用户的句子）。
+/// 错误码 → 简短标题（**唯一来源**：`platform_core::titles::TITLES`，D113）。
+///
+/// **只剩转发** —— 本文件不再持有任何 title 文案；面向用户的中文文案由前端按 `code` 渲染。
 fn title_of(error: &OrgError) -> &'static str {
-    match error {
-        OrgError::TenantContextMissing => "缺少租户上下文",
-        OrgError::Unauthenticated => "未认证",
-        OrgError::NotFound { .. } => "资源不存在",
-        OrgError::OrgCycle { .. } => "组织结构冲突",
-        OrgError::OrgNodeNotEmpty { .. } => "节点仍有下级",
-        OrgError::OrgNodeHasMembers { .. } => "节点仍有成员",
-        OrgError::OrgCodeDuplicated { .. } => "节点编码重复",
-        OrgError::OrgNodeTypeInvalid { .. } => "节点类型非法",
-        OrgError::InvalidArgument { .. } => "参数不合法",
-        OrgError::Conflict { .. } => "状态冲突",
-        OrgError::SyncConflictPending { .. } => "同步冲突待裁决",
-        OrgError::SyncConflictStrategy { .. } => "同步策略不允许",
-        OrgError::SyncPushFailed { .. } => "同步推送失败",
-        OrgError::NotImplemented { .. } => "尚未实现",
-        OrgError::Internal { .. } => "服务内部错误",
-    }
+    platform_core::titles::title_of_code(error.code())
 }
 
 /// 用**令牌里的租户**构造请求上下文（契约 C3：请求头缺失时由令牌推断）。

@@ -43,3 +43,10 @@ path = "src/lib.rs"
 [[bin]]
 name = "base"
 path = "src/main.rs"
+
+[dev-dependencies]
+# 路由层的行为测试要驱动 axum 路由（`ServiceExt::oneshot`），不连网络、不起端口。
+# 两者都已在工作区锁文件里（`platform-config` / `platform-iam` 的测试用同一套），
+# dev-only → 不改变生产依赖树。
+tower.workspace = true
+http-body-util.workspace = true

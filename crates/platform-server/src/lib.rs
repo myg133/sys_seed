@@ -9,6 +9,7 @@
 pub mod config;
 pub mod db;
 pub mod health;
+pub mod i18n;
 pub mod isolation;
 pub mod migrate;
 pub mod policies;

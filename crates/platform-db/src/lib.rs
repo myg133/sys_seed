@@ -53,7 +53,8 @@
 //! 这是刻意的 —— 串租户这类 bug 极难复现（取决于连接池的调度顺序），
 //! 宁可多一次事务往返。
 
-mod error;
+pub mod error;
+pub mod fx;
 mod query;
 mod quota;
 mod rls;
@@ -61,6 +62,7 @@ mod scopes;
 mod tenant;
 
 pub use error::{DbError, DbResult};
+pub use fx::{FX_RATE_TABLE, FxRateRow, FxRateStore, NewFxRate};
 pub use query::{BindValue, TENANT_TOKEN, TenantQuery};
 pub use quota::{QUOTA_TABLE, QuotaUsage};
 pub use rls::{

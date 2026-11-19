@@ -207,7 +207,7 @@ async fn authenticate(
     if let Err(reason) = state.permissions.ensure_fresh(&ctx).await {
         return problem_response(&ProblemDetails::from_context(
             CODE_INTERNAL_ERROR,
-            "服务内部错误",
+            platform_core::titles::title_of_code(CODE_INTERNAL_ERROR),
             500,
             format!("the permission cache could not be refreshed: {reason}"),
             &ctx,

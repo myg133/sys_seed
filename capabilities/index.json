@@ -47,7 +47,7 @@
       "exports": 18
     },
     "sdk/i18n.json": {
-      "exports": 3
+      "exports": 16
     },
     "sdk/schema.json": {
       "exports": 25
@@ -84,5 +84,5 @@
     ],
     "version": "0.1.0"
   },
-  "source_fingerprint": "fnv1a64:d2f4d28a346f2e56"
+  "source_fingerprint": "fnv1a64:bc4e9717da737c4b"
 }

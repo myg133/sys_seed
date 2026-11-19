@@ -29,12 +29,12 @@ use platform_core::extension::expr::CompiledCondition;
 use platform_core::extension::permission::{
     DataScope, PermissionChecker, PermissionProvider, PermissionRefresher, ScopeFilter,
 };
-use platform_schema::{SchemaState, SchemaRegistry};
 use platform_core::log_filter;
 use platform_iam::config::IamConfig;
 use platform_iam::http::IamState;
 use platform_iam::service::IamService;
 use platform_iam::store::IamStore;
+use platform_schema::{SchemaRegistry, SchemaState};
 use platform_server::config::{ConfigError, DeployConfig, Environment};
 use platform_server::{db, health, isolation, migrate, policies, probe, static_files};
 use serde::Serialize;
@@ -295,7 +295,8 @@ async fn serve() -> Result<(), Failure> {
     let mut config_tokens: Arc<dyn platform_config::http::TokenVerifier> =
         Arc::new(RejectAllTokens);
     // 元数据接口的令牌校验：与配置接口同一个 IAM 实现（没配 IAM → 一律拒绝）。
-    let mut schema_tokens: Arc<dyn platform_schema::TokenVerifier> = Arc::new(RejectAllSchemaTokens);
+    let mut schema_tokens: Arc<dyn platform_schema::TokenVerifier> =
+        Arc::new(RejectAllSchemaTokens);
     // 业务模块路由的认证层需要 IAM（未配置 → 模块路由一律 401，fail closed）。
     let mut module_iam: Option<Arc<platform_iam::service::IamService>> = None;
     let mut config_checker: Arc<dyn PermissionChecker> = Arc::new(DenyAllPermissions);
@@ -407,9 +408,7 @@ async fn serve() -> Result<(), Failure> {
                 app = app.nest("/api/sandbox", router);
                 tracing::info!("业务模块已挂载：/api/sandbox/*（sandbox）");
                 if module_iam.is_none() {
-                    tracing::warn!(
-                        "未配置 IAM：/api/sandbox/* 的请求一律 401（fail closed）"
-                    );
+                    tracing::warn!("未配置 IAM：/api/sandbox/* 的请求一律 401（fail closed）");
                 }
             }
             // `org` 是**平台子系统**：它的路由由 `build_org_state` + `/api/org` 单独装配，
@@ -430,14 +429,41 @@ async fn serve() -> Result<(), Failure> {
     // 配置、品牌与 Feature Flag（REQ-010）：`/api/config/*` + `/api/feature-flags/*`。
     //
     // 品牌接口公开（登录页在认证前就要显示 logo）；其余接口需要令牌 + 权限点。
+    let config_service = build_config_service(&config).await?;
     let config_state = Arc::new(platform_config::http::ConfigState {
-        service: build_config_service(&config).await?,
-        tokens: config_tokens,
+        service: config_service.clone(),
+        tokens: config_tokens.clone(),
         checker: config_checker,
         permissions: config_permissions,
     });
     let app = app.merge(platform_config::http::router(config_state));
     tracing::info!("配置与品牌已启用：/api/config/*、/api/feature-flags/*");
+
+    // 国际化与本地化（REQ-021）：`/api/i18n/context` + `/api/i18n/fx/convert`。
+    //
+    // **不新增权限点**（design §5.3.1 / D115）→ 不碰权限点三件套，没有
+    // 「manifest 少一项 → 进程起不来」的风险。两个接口都只要**已认证**。
+    //
+    // 「已注册语言」的唯一来源是 `packages/i18n/src/locales/*.json` 的文件名
+    // （裁定 #16），随配置注册表一起扫出来；目录缺失时回退 `zh-CN` 并告警。
+    let i18n_locales = config_service.registry().locales().clone();
+    if i18n_locales.len() == 1 && i18n_locales.contains("zh-CN") {
+        tracing::warn!(
+            "已注册语言只有 zh-CN：协商结果只会是基准语言（前端翻译包目录 packages/i18n/src/locales 可能还没生成）"
+        );
+    }
+    let fx_db =
+        platform_db::TenantDb::connect(&config.database_url, platform_db::DbOptions::default())
+            .await
+            .map_err(|err| Failure::Runtime(format!("数据库连接串非法：{err}")))?;
+    let i18n_state = Arc::new(platform_server::i18n::I18nState {
+        settings: config_service,
+        rates: Arc::new(platform_db::fx::FxRateStore::new(fx_db)),
+        tokens: config_tokens,
+        locales: Arc::new(i18n_locales),
+    });
+    let app = app.merge(platform_server::i18n::router(i18n_state));
+    tracing::info!("国际化已启用：/api/i18n/context、/api/i18n/fx/convert");
 
     let addr = config.socket_addr();
     let listener = tokio::net::TcpListener::bind(addr)
@@ -605,13 +631,19 @@ async fn authenticate_module(
         .unwrap_or_else(RequestContext::new);
 
     let Some(iam) = &auth.iam else {
-        return platform_core::problem::problem_response(&platform_core::problem::ProblemDetails::unauthenticated(&ctx, &instance));
+        return platform_core::problem::problem_response(
+            &platform_core::problem::ProblemDetails::unauthenticated(&ctx, &instance),
+        );
     };
     let Some(token) = bearer_token(request.headers()) else {
-        return platform_core::problem::problem_response(&platform_core::problem::ProblemDetails::unauthenticated(&ctx, &instance));
+        return platform_core::problem::problem_response(
+            &platform_core::problem::ProblemDetails::unauthenticated(&ctx, &instance),
+        );
     };
     let Ok(claims) = iam.verify_access_token(&token) else {
-        return platform_core::problem::problem_response(&platform_core::problem::ProblemDetails::unauthenticated(&ctx, &instance));
+        return platform_core::problem::problem_response(
+            &platform_core::problem::ProblemDetails::unauthenticated(&ctx, &instance),
+        );
     };
 
     // 请求头租户优先；与令牌租户不一致 → 404（不泄露资源存在性，契约 C3）。
@@ -620,7 +652,9 @@ async fn authenticate_module(
     }
     match ctx.tenant_id() {
         Some(tenant) if tenant != claims.tenant_id => {
-            return platform_core::problem::problem_response(&platform_core::problem::ProblemDetails::not_found(&ctx, &instance, "resource"));
+            return platform_core::problem::problem_response(
+                &platform_core::problem::ProblemDetails::not_found(&ctx, &instance, "resource"),
+            );
         }
         Some(_) => {}
         None => ctx = ctx.with_tenant(claims.tenant_id.clone()),
@@ -628,15 +662,17 @@ async fn authenticate_module(
     ctx = ctx.with_user(claims.subject.clone());
 
     if auth.permissions.ensure_fresh(&ctx).await.is_err() {
-        return platform_core::problem::problem_response(&platform_core::problem::ProblemDetails::from_context(
-            platform_core::problem::CODE_INTERNAL_ERROR,
-            "服务内部错误",
-            StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
-            "the permission cache could not be refreshed",
-            &ctx,
-            &instance,
-            None,
-        ));
+        return platform_core::problem::problem_response(
+            &platform_core::problem::ProblemDetails::from_context(
+                platform_core::problem::CODE_INTERNAL_ERROR,
+                platform_core::titles::title_of_code(platform_core::problem::CODE_INTERNAL_ERROR),
+                StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+                "the permission cache could not be refreshed",
+                &ctx,
+                &instance,
+                None,
+            ),
+        );
     }
 
     request.extensions_mut().insert(ctx);
@@ -736,7 +772,10 @@ impl ConfigIamTokenVerifier {
 struct RejectAllSchemaTokens;
 
 impl platform_schema::TokenVerifier for RejectAllSchemaTokens {
-    fn verify(&self, _token: &str) -> Result<platform_schema::VerifiedToken, platform_schema::AuthError> {
+    fn verify(
+        &self,
+        _token: &str,
+    ) -> Result<platform_schema::VerifiedToken, platform_schema::AuthError> {
         Err(platform_schema::AuthError)
     }
 }
@@ -900,7 +939,8 @@ async fn ready(State(state): State<Arc<AppState>>) -> Response {
     );
     let problem = ProblemDetails {
         kind: "https://errors.base.example/service-not-ready".to_string(),
-        title: "服务未就绪".to_string(),
+        // `title` 的唯一来源是 `TITLES`（D113）—— 响应体不得出现中文。
+        title: platform_core::titles::title_of_code(code).to_string(),
         status: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
         detail,
         instance: "/health/ready".to_string(),

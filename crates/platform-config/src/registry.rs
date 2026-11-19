@@ -31,11 +31,155 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use platform_core::config::{ConfigKey, ConfigScope};
-use platform_core::extension::manifest::{ConfigType, Manifest};
+use platform_core::extension::manifest::{ConfigFormat, ConfigType, Manifest};
 use serde_json::Value;
 
 use crate::error::ConfigError;
 use crate::flag::{DEFAULT_ROLLOUT_PERCENT, rollout_key};
+
+/// 已注册语言的后备清单（`packages/i18n/src/locales/` 不存在时用）。
+///
+/// 基准语言是 `zh-CN`（design §6.5）；翻译包目录还不存在时只承认它 ——
+/// 这样「目录没建好」不会让服务起不来，也不会让协商返回一个加载不到翻译包的 locale。
+pub const FALLBACK_LOCALES: &[&str] = &["zh-CN"];
+
+/// 前端翻译包目录（相对仓库根）。**文件名 = 已注册语言清单**（裁定 #16）。
+///
+/// ⚠️ **耦合声明**：这个路径指向 `packages/i18n/src/locales/*.json`，
+/// 由前端（REQ-021 的前端 Dev）创建；后端**只读**，不写、不生成。
+/// 目录不存在 → 回退到 [`FALLBACK_LOCALES`] 并 `tracing::warn`
+/// （回退而不是失败：全新检出时前端产物可能还没生成）。
+pub const LOCALES_DIR: &str = "packages/i18n/src/locales";
+
+/// 扫描翻译包目录，得到**已注册语言**集合。
+///
+/// `root` 是仓库根（与其它 manifest 扫描同一口径）。文件名必须是
+/// `zh-CN.json` 这样的语言标签；其它文件（`index.ts` / `README.md`）忽略。
+pub fn registered_locales(root: &Path) -> BTreeSet<String> {
+    let dir = root.join(LOCALES_DIR);
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        tracing::warn!(
+            dir = %dir.display(),
+            "未找到翻译包目录：已注册语言回退为 zh-CN（前端产物缺失时协商只会返回基准语言）"
+        );
+        return FALLBACK_LOCALES.iter().map(|v| (*v).to_string()).collect();
+    };
+
+    let mut locales = BTreeSet::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+            continue;
+        };
+        if is_locale_tag(stem) {
+            locales.insert(stem.to_string());
+        } else {
+            tracing::warn!(file = %path.display(), "翻译包文件名不是语言标签，忽略");
+        }
+    }
+    if locales.is_empty() {
+        tracing::warn!(
+            dir = %dir.display(),
+            "翻译包目录里没有语言标签文件：已注册语言回退为 zh-CN"
+        );
+        return FALLBACK_LOCALES.iter().map(|v| (*v).to_string()).collect();
+    }
+    locales
+}
+
+/// 语言标签的形状：`zh` / `zh-CN` / `zh-Hant` / `zh-Hant-TW`（BCP 47 的常用子集）。
+///
+/// - 第一段：2~3 个 ASCII 字母（主语言）；
+/// - 后续段：2~8 个 ASCII 字母或数字（地区 / 书写系统 / 变体）。
+///
+/// **只判形状**：`xx-YY` 形状合法但通常未注册 —— 是否放行由
+/// 「已注册语言集合」决定（`is_registered_locale`）。
+pub fn is_locale_tag(value: &str) -> bool {
+    let mut segments = value.split('-');
+    let Some(primary) = segments.next() else {
+        return false;
+    };
+    if !(primary.len() >= 2
+        && primary.len() <= 3
+        && primary.bytes().all(|b| b.is_ascii_alphabetic()))
+    {
+        return false;
+    }
+    segments.all(|segment| {
+        (2..=8).contains(&segment.len()) && segment.bytes().all(|b| b.is_ascii_alphanumeric())
+    })
+}
+
+/// 该值是否是**已注册**语言（形状合法且在翻译包清单里）。
+pub fn is_registered_locale(value: &str, registered: &BTreeSet<String>) -> bool {
+    is_locale_tag(value) && registered.contains(value)
+}
+
+/// IANA 时区的**已知区域**（`Area/Location` 的第一段）。
+///
+/// 取自 IANA tzdata 的顶层目录（2024 版）。
+const IANA_AREAS: &[&str] = &[
+    "Africa",
+    "America",
+    "Antarctica",
+    "Arctic",
+    "Asia",
+    "Atlantic",
+    "Australia",
+    "Brazil",
+    "Canada",
+    "Chile",
+    "Etc",
+    "Europe",
+    "Indian",
+    "Mexico",
+    "Pacific",
+    "US",
+];
+
+/// 是否是可接受的 IANA 时区名。
+///
+/// # 后端没有 tzdb（D114 / 裁定 #9）
+///
+/// `time` crate 只启用 `formatting`，加 tzdb（`time-tz` / `chrono-tz`）会违反
+/// 「零新依赖」。所以这里做**结构 + 区域白名单**校验，判据写死为：
+///
+/// 1. `UTC` 单独放行（`Etc/UTC` 也放行 —— 它走正常规则）；
+/// 2. 必须含 `/`（`Asia/Shanghai`），可含多段（`America/Argentina/Buenos_Aires`）；
+/// 3. 第一段必须在 [`IANA_AREAS`] 里（**大小写敏感**：`asia/shanghai` 不是合法名）；
+/// 4. 每一段的字符集是 ASCII 字母 / 数字 / `_` / `-` / `+`（`Etc/GMT+8`），
+///    且不得为空、不得以 `/` 开头或结尾。
+///
+/// # 能拒什么 / 拒不了什么（**局限，如实记录**）
+///
+/// 能拒：`Not/AZone`（区域不在白名单）、`Asia`（没有 `/`）、`Asia/`（空段）、
+/// `asia/shanghai`（区域大小写错）、`Mars/Olympus`、`Europe/Berlin/Extra` 之外的
+/// 空段与非法字符、`+08:00` 这类**偏移量**（我们要的是 IANA 名，不是偏移）。
+///
+/// **拒不了**：区域正确但城市拼错的（`Asia/Shanghia`）、
+/// 已废弃但历史上真实存在的别名（`Asia/Calcutta` 若不在当前 tzdata 里）。
+/// 要精确判定必须内嵌 tzdb —— 本轮明确不做（D114），所以**错拼的城市名会被放行**。
+pub fn is_iana_timezone(value: &str) -> bool {
+    if value == "UTC" {
+        return true;
+    }
+    let segments: Vec<&str> = value.split('/').collect();
+    if segments.len() < 2 {
+        return false;
+    }
+    if !IANA_AREAS.contains(&segments[0]) {
+        return false;
+    }
+    segments.iter().all(|segment| {
+        !segment.is_empty()
+            && segment
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-' || b == b'+')
+    })
+}
 
 /// 一个已登记的配置键。
 #[derive(Debug, Clone, PartialEq)]
@@ -50,6 +194,8 @@ pub struct RegisteredKey {
     pub scope: ConfigScope,
     /// 是否由 flag 推导出来的派生键。
     pub derived: bool,
+    /// 值的格式约束（D111）；`None` = 不校验格式。
+    pub format: Option<ConfigFormat>,
     /// 来源 manifest（`crates/platform-config/manifest.json`）。
     pub source: String,
 }
@@ -58,6 +204,11 @@ impl RegisteredKey {
     /// 登记类型名（错误参数 `expected` 用）。
     pub fn type_name(&self) -> &'static str {
         config_type_name(self.kind)
+    }
+
+    /// 登记格式名（错误参数 `format` 用）；没登记格式时返回 `None`。
+    pub fn format_name(&self) -> Option<&'static str> {
+        self.format.map(ConfigFormat::as_str)
     }
 }
 
@@ -77,6 +228,8 @@ pub fn config_type_name(kind: ConfigType) -> &'static str {
 pub struct ConfigRegistry {
     keys: BTreeMap<String, RegisteredKey>,
     flags: BTreeSet<String>,
+    /// 已注册语言（`packages/i18n/src/locales/*.json` 的文件名）。
+    locales: BTreeSet<String>,
 }
 
 impl ConfigRegistry {
@@ -85,6 +238,8 @@ impl ConfigRegistry {
     /// 扫 `modules/*/manifest.json` 与 `crates/*/manifest.json`。
     pub fn from_manifest_root(root: &Path) -> Result<Self, ConfigError> {
         let mut keys: BTreeMap<String, RegisteredKey> = BTreeMap::new();
+        // 「已注册语言」的唯一来源（裁定 #16）：翻译包目录的文件名。
+        let locales = registered_locales(root);
 
         for (dir_name, manifest_root) in [
             ("modules", root.join("modules")),
@@ -141,6 +296,7 @@ impl ConfigRegistry {
                         default: spec.default.clone(),
                         scope: spec.scope,
                         derived: false,
+                        format: spec.format,
                         source: source.clone(),
                     };
                     if keys.insert(key.clone(), registered).is_some() {
@@ -170,6 +326,7 @@ impl ConfigRegistry {
                 default: Value::from(DEFAULT_ROLLOUT_PERCENT),
                 scope: ConfigScope::Tenant,
                 derived: true,
+                format: None,
                 source: format!("derived from flag `{flag}`"),
             })
             .collect();
@@ -188,7 +345,37 @@ impl ConfigRegistry {
         // 派生键不改变 flag 集合。
         flags.retain(|flag| keys.contains_key(flag));
 
-        Ok(Self { keys, flags })
+        // 格式校验器自检：manifest 的**默认值**必须是合法值。
+        // 默认值是「谁都没配」时的取值 —— 它错了会让每个未配置的租户都拿到
+        // 一个渲染层加载不到的值，而写入路径永远拦不到它（没人写过）。
+        for registered in keys.values() {
+            let Some(format) = registered.format else {
+                continue;
+            };
+            let Some(default) = registered.default.as_str() else {
+                continue;
+            };
+            if let Err(reason) = check_format_value(format, default, &locales) {
+                return Err(ConfigError::Internal {
+                    reason: format!(
+                        "the manifest default of `{}` is not a valid `{}` value: {reason}",
+                        registered.key,
+                        format.as_str()
+                    ),
+                });
+            }
+        }
+
+        Ok(Self {
+            keys,
+            flags,
+            locales,
+        })
+    }
+
+    /// 已注册语言（与 `packages/i18n/src/locales/*.json` 同一份）。
+    pub fn locales(&self) -> &BTreeSet<String> {
+        &self.locales
     }
 
     /// 查一个已登记的键。
@@ -226,6 +413,55 @@ impl ConfigRegistry {
     /// 是否为空。
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
+    }
+}
+
+/// 按格式校验一个字符串值；通过返回 `Ok(())`，不通过返回英文原因。
+///
+/// 这是**唯一**的格式校验入口：写入路径（[`crate::service`]）与启动自检
+/// （manifest 默认值）都调它 —— 测试与生产走同一段代码（D85）。
+pub fn check_format_value(
+    format: ConfigFormat,
+    value: &str,
+    registered_locales: &BTreeSet<String>,
+) -> Result<(), String> {
+    match format {
+        ConfigFormat::Locale => {
+            if !is_locale_tag(value) {
+                return Err(
+                    "the value is not a BCP 47 language tag (expected e.g. `zh-CN`)".to_string(),
+                );
+            }
+            if !is_registered_locale(value, registered_locales) {
+                let mut known: Vec<&str> = registered_locales.iter().map(String::as_str).collect();
+                known.sort_unstable();
+                return Err(format!(
+                    "the locale is not registered (no translation package); registered: {}",
+                    known.join(", ")
+                ));
+            }
+            Ok(())
+        }
+        ConfigFormat::IanaTimezone => {
+            if is_iana_timezone(value) {
+                Ok(())
+            } else {
+                Err(
+                    "the value is not a known IANA time zone name (expected `Area/Location`, e.g. `Asia/Shanghai`)"
+                        .to_string(),
+                )
+            }
+        }
+        ConfigFormat::Iso4217 => {
+            if platform_core::money::is_iso4217(value) {
+                Ok(())
+            } else {
+                Err(
+                    "the value is not a current ISO 4217 currency code (expected e.g. `CNY`)"
+                        .to_string(),
+                )
+            }
+        }
     }
 }
 
@@ -326,6 +562,144 @@ mod tests {
         assert!(registry.is_flag_namespace("flags.anything.at.all"));
         assert!(!registry.is_flag_namespace("logo"));
         assert!(!registry.is_flag_namespace("pageSize"));
+    }
+
+    // -- REQ-021：i18n 三键 + 格式校验器 ------------------------------------
+
+    /// 三个 i18n 键都登记为 `tenant` 且带 `format`（AC-S-093 步骤 1/2）。
+    #[test]
+    fn the_i18n_keys_are_registered_as_tenant_with_a_format() {
+        let registry = registry();
+        for (key, format) in [
+            ("locale", ConfigFormat::Locale),
+            ("timezone", ConfigFormat::IanaTimezone),
+            ("currency", ConfigFormat::Iso4217),
+        ] {
+            let registered = registry.get(key).unwrap_or_else(|| panic!("未登记：{key}"));
+            assert_eq!(registered.scope, ConfigScope::Tenant, "{key} 必须是 tenant");
+            assert_eq!(registered.format, Some(format), "{key} 的 format 不对");
+            assert_eq!(registered.kind, ConfigType::String);
+            assert_eq!(registered.format_name(), Some(format.as_str()));
+        }
+        // 默认值来源是 manifest 的 `default`（裁定 #17）。
+        assert_eq!(
+            registry.get("locale").map(|key| key.default.clone()),
+            Some(Value::from("zh-CN"))
+        );
+        assert_eq!(
+            registry.get("timezone").map(|key| key.default.clone()),
+            Some(Value::from("Asia/Shanghai"))
+        );
+        assert_eq!(
+            registry.get("currency").map(|key| key.default.clone()),
+            Some(Value::from("CNY"))
+        );
+    }
+
+    /// 语言标签的**形状**规则。
+    #[test]
+    fn locale_tag_shape_is_strict_but_accepts_region_and_script() {
+        for good in ["zh", "zh-CN", "en-US", "zh-Hant", "zh-Hant-TW"] {
+            assert!(is_locale_tag(good), "`{good}` 形状合法");
+        }
+        for bad in [
+            "", "z", "zh_CN", "zh-", "-CN", "zh-CN-", "zh-CN-x", "中文", "zh--CN",
+        ] {
+            assert!(!is_locale_tag(bad), "`{bad}` 形状非法");
+        }
+    }
+
+    /// 语言必须**已注册**：形状合法但目录里没有 → 拒（裁定 #16）。
+    #[test]
+    fn locales_must_be_registered_not_just_well_formed() {
+        let registered: std::collections::BTreeSet<String> =
+            ["zh-CN".to_string()].into_iter().collect();
+        assert!(is_registered_locale("zh-CN", &registered));
+        assert!(!is_registered_locale("en-US", &registered));
+        assert!(!is_registered_locale("ja-JP", &registered));
+        assert!(!is_registered_locale("not a tag", &registered));
+    }
+
+    /// 翻译包目录不存在时回退到 `zh-CN`（不 panic、不起不来）。
+    #[test]
+    fn missing_locale_directory_falls_back_to_the_base_locale() {
+        let empty = std::env::temp_dir().join("req021-no-such-repo");
+        let locales = registered_locales(&empty);
+        assert_eq!(locales.len(), 1);
+        assert!(locales.contains("zh-CN"));
+    }
+
+    /// IANA 时区：能拒的与拒不了的都钉死（D114 的局限）。
+    #[test]
+    fn iana_timezone_validation_is_structural() {
+        for good in [
+            "Asia/Shanghai",
+            "America/New_York",
+            "Europe/London",
+            "America/Argentina/Buenos_Aires",
+            "Etc/GMT+8",
+            "UTC",
+        ] {
+            assert!(is_iana_timezone(good), "`{good}` 应被放行");
+        }
+        for bad in [
+            "Not/AZone",
+            "Asia",
+            "Asia/",
+            "/Shanghai",
+            "asia/shanghai",
+            "Mars/Olympus",
+            "+08:00",
+            "Asia/Shang hai",
+            "",
+        ] {
+            assert!(!is_iana_timezone(bad), "`{bad}` 应被拒");
+        }
+        // **局限**：没有 tzdb，拼错的城市名会被放行 —— 这是 D114 的已知代价。
+        assert!(
+            is_iana_timezone("Asia/Shanghia"),
+            "无 tzdb 时无法识别拼错的城市名（局限，如实断言）"
+        );
+    }
+
+    /// 格式校验器按枚举分派，且**同一个函数**同时服务于写入与启动自检。
+    #[test]
+    fn format_checker_dispatches_by_format() {
+        let registered: std::collections::BTreeSet<String> =
+            ["zh-CN".to_string()].into_iter().collect();
+        assert!(check_format_value(ConfigFormat::Locale, "zh-CN", &registered).is_ok());
+        assert!(check_format_value(ConfigFormat::Locale, "en-US", &registered).is_err());
+        assert!(
+            check_format_value(ConfigFormat::IanaTimezone, "Asia/Shanghai", &registered).is_ok()
+        );
+        assert!(check_format_value(ConfigFormat::IanaTimezone, "Not/AZone", &registered).is_err());
+        assert!(check_format_value(ConfigFormat::Iso4217, "CNY", &registered).is_ok());
+        // `XXXX` 必须被拒（`^[A-Z]{3}$` 会放行它 —— 这就是不用正则的理由）。
+        assert!(check_format_value(ConfigFormat::Iso4217, "XXXX", &registered).is_err());
+        assert!(check_format_value(ConfigFormat::Iso4217, "XXX", &registered).is_err());
+    }
+
+    /// 非字符串键不允许配 `format`（manifest 写错要在启动时暴露）。
+    #[test]
+    fn format_is_only_allowed_on_string_config_keys() {
+        let raw = r#"{
+          "id": "sandbox",
+          "name": "Sandbox",
+          "version": "0.1.0",
+          "permissions": [],
+          "menus": [],
+          "dependencies": [],
+          "config": {
+            "pageSize": { "type": "number", "default": 20, "scope": "tenant", "format": "locale" }
+          }
+        }"#;
+        let issues = Manifest::parse_checked(raw).expect_err("number + format 应被拒");
+        assert!(
+            issues
+                .iter()
+                .any(|issue| issue.field() == "config.pageSize.format"),
+            "issues = {issues:?}"
+        );
     }
 
     #[test]

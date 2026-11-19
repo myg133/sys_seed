@@ -134,17 +134,26 @@ impl OrgEventKind {
         }
     }
 
-    /// 通知标题（**面向开发者**，中文文案由前端 i18n 按 code 渲染）。
+    /// 通知标题（**唯一来源**：`platform_core::titles::TITLES`，D113）。
+    ///
+    /// 键是**事件码**（`org.member-added` 等，不是 HTTP 错误码）；
+    /// 面向用户的中文文案由前端按事件码渲染。
     pub fn title(&self) -> &'static str {
-        match self {
-            OrgEventKind::MemberAdded => "organization membership added",
-            OrgEventKind::MemberRemoved => "organization membership removed",
-            OrgEventKind::NodeMoved => "organization node moved",
-            OrgEventKind::NodeRenamed => "organization node renamed",
-            OrgEventKind::NodeDeleted => "organization node deleted",
-            OrgEventKind::UserDeparted => "user departed",
-        }
+        platform_core::titles::title_of_code(self.code())
     }
+
+    /// 本枚举登记进 `TITLES` 的全部事件码（完备性测试用）。
+    ///
+    /// `code()` 是 `match` 里的 `&'static str`，运行时无法自动枚举 ——
+    /// 这份清单让「表漏一项」变成机械可判。
+    pub const ALL_CODES: &'static [&'static str] = &[
+        "org.member-added",
+        "org.member-removed",
+        "org.node-moved",
+        "org.node-renamed",
+        "org.node-deleted",
+        "org.user-departed",
+    ];
 }
 
 /// 组织变更事件的消息（收件人 + 载荷）。
@@ -262,8 +271,11 @@ mod tests {
         );
     }
 
+    /// `ALL_CODES` 必须覆盖**每一个事件变体**（清单漏项 = 完备性测试假绿）。
     #[test]
     fn every_event_kind_has_a_stable_code() {
+        use std::collections::BTreeSet;
+
         let kinds = [
             OrgEventKind::MemberAdded,
             OrgEventKind::MemberRemoved,
@@ -272,6 +284,7 @@ mod tests {
             OrgEventKind::NodeDeleted,
             OrgEventKind::UserDeparted,
         ];
+        let mut seen = BTreeSet::new();
         for kind in kinds {
             assert!(kind.code().starts_with("org."));
             assert!(
@@ -279,6 +292,20 @@ mod tests {
                     .chars()
                     .all(|c| c.is_ascii_lowercase() || c == '.' || c == '-')
             );
+            assert!(
+                OrgEventKind::ALL_CODES.contains(&kind.code()),
+                "ALL_CODES 缺少事件码 {}",
+                kind.code()
+            );
+            // 标题来自 `TITLES`（唯一来源）：是 ASCII、且不是事件码本身。
+            assert!(kind.title().is_ascii());
+            assert_ne!(kind.title(), kind.code());
+            seen.insert(kind.code());
         }
+        assert_eq!(
+            seen.len(),
+            OrgEventKind::ALL_CODES.len(),
+            "清单与 match 不一致"
+        );
     }
 }
