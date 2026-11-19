@@ -27,6 +27,12 @@
  * - 通配段的值进 `RouteResolution.params`；
  * - `permission` 仍按**静态声明**判定（通配路由不能按参数拼权限点 ——
  *   那会让「权限点」变成运行时字符串拼接，后端对账无法覆盖）。
+ *
+ * # 查询串必须原样保留（REQ-013 / P4）
+ *
+ * 判定只看 `pathname`，写回地址时**同路径**要带上原来的 `search` / `hash`。
+ * 少这一步，`/sso/callback?ticket=…` 在 `start()` 里会被改写成 `/sso/callback`，
+ * 回调页再也读不到 ticket（浏览器实测发现，单测里只传 pathname 是看不到的）。
  */
 
 import { guard, isAuthenticated, type AuthState, type GuardOptions } from '@base/auth';
@@ -53,7 +59,18 @@ export interface RouteDefinition {
 
 /** 路由环境（浏览器用 `window`，单测用假件）。 */
 export interface RouterEnvironment {
-  readonly location: { readonly pathname: string };
+  /**
+   * 地址栏。
+   *
+   * `search` / `hash` 是**可选**的（REQ-013 新增）：路由只按 `pathname` 匹配，
+   * 但写回地址时必须原样保留查询串 —— 否则 `history.replaceState(null, '', '/sso/callback')`
+   * 会把 `?ticket=` 抹掉（P4 的一次性凭据就丢在跳转前）。
+   */
+  readonly location: {
+    readonly pathname: string;
+    readonly search?: string;
+    readonly hash?: string;
+  };
   readonly history: {
     pushState(state: unknown, title: string, url: string): void;
     replaceState(state: unknown, title: string, url: string): void;
@@ -210,10 +227,16 @@ export function createRouter(options: RouterOptions): Router {
   };
 
   const write = (path: string, replace: boolean): void => {
+    // 路径没变（深链 / 首次 `start()`）→ 保留查询串与 hash：
+    // 写回一个不含 `?query` 的地址等于**丢掉**页面正在用的参数（如 `/sso/callback?ticket=`）。
+    const keepsQuery = path === environment.location.pathname;
+    const suffix = keepsQuery
+      ? `${environment.location.search ?? ''}${environment.location.hash ?? ''}`
+      : '';
     if (replace) {
-      environment.history.replaceState(null, '', path);
+      environment.history.replaceState(null, '', `${path}${suffix}`);
     } else {
-      environment.history.pushState(null, '', path);
+      environment.history.pushState(null, '', `${path}${suffix}`);
     }
     currentPath = path;
   };

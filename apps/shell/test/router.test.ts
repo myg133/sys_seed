@@ -30,7 +30,10 @@ const ANONYMOUS: AuthState = {
 };
 
 /** 假环境：可换地址、可触发 popstate。 */
-function fakeEnvironment(pathname: string): {
+function fakeEnvironment(
+  pathname: string,
+  search = '',
+): {
   environment: RouterEnvironment;
   written: string[];
   goTo: (path: string) => void;
@@ -43,6 +46,9 @@ function fakeEnvironment(pathname: string): {
     location: {
       get pathname(): string {
         return current;
+      },
+      get search(): string {
+        return search;
       },
     },
     history: {
@@ -200,6 +206,26 @@ describe('shell 的路由守卫（AC-S-068）', () => {
     router.start();
 
     expect(intended).toBe('/admin/roles');
+  });
+
+  it('同路径写回地址时保留查询串（REQ-013 / P4：/sso/callback?ticket= 不能被抹掉）', () => {
+    const routes: RouteDefinition[] = [
+      { path: '/', title: '工作台' },
+      { path: '/sso/callback', title: '企业登录' },
+    ];
+    const { environment, written } = fakeEnvironment('/sso/callback', '?ticket=abc');
+    const router = createRouter({
+      routes,
+      environment,
+      getState: () => ANONYMOUS,
+      onResolve: () => undefined,
+    });
+
+    router.start();
+
+    // 路由只认 pathname，但写回时查询串必须原样带回（否则一次性 ticket 丢了）。
+    expect(written.at(-1)).toBe('/sso/callback?ticket=abc');
+    expect(router.path).toBe('/sso/callback');
   });
 
   it('公开路由不需要权限点', () => {

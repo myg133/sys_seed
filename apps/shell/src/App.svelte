@@ -24,6 +24,7 @@
   import { i18nRuntime } from './lib/i18n';
   import { createRouter, initialResolution } from './lib/router';
   import { createRoutes, SCHEMA_ROUTE_PATH, toRoles } from './lib/routes';
+  import { SSO_CALLBACK_ROUTE_PATH } from './lib/sso-api';
 
   import LanguageSwitcher from './components/LanguageSwitcher.svelte';
   import LocaleInfo from './components/LocaleInfo.svelte';
@@ -33,6 +34,7 @@
   import Login from './pages/Login.svelte';
   import ProtectedRoles from './pages/ProtectedRoles.svelte';
   import SchemaPage from './pages/SchemaPage.svelte';
+  import SsoCallback from './pages/SsoCallback.svelte';
 
   // 同源：页面由 platform-server 的静态目录托管（本仓没有 CORS 层）。
   // 租户在登录时由用户填（D98），这里不传死值。
@@ -113,6 +115,23 @@
   }
 
   /**
+   * SSO 回调成功后的落点。
+   *
+   * `replace: true` 是安全要求（安全约束 §8）：地址栏里的 `?ticket=` 是一次性凭据，
+   * 用 push 会在历史记录里留一条带 ticket 的地址。
+   */
+  function handleSsoLoggedIn() {
+    authState = auth.state;
+    router.navigate('/', { replace: true });
+    void loadI18nContext();
+  }
+
+  /** 回调页的「返回登录页」（缺 ticket / ticket 已失效）。 */
+  function handleBackToLogin() {
+    router.navigate('/login', { replace: true });
+  }
+
+  /**
    * 启动顺序：**先恢复会话，再过守卫**。
    *
    * 反过来的话，深链会因「内存里没有令牌」被判成未登录 → 改写到登录页，
@@ -151,7 +170,10 @@
   <!-- 会话恢复完成前**不渲染任何页面**：否则深链会先闪一下目标页 / 首页。 -->
   <p class="base-booting">{$i18n.t('common.booting')}</p>
 {:else if resolution.path === '/login'}
-  <Login {auth} onLoggedIn={handleLoggedIn} />
+  <Login {auth} {client} onLoggedIn={handleLoggedIn} />
+{:else if resolution.path === SSO_CALLBACK_ROUTE_PATH}
+  <!-- P4：回调交接页（公开路由）。ticket 只在这里被消费一次。 -->
+  <SsoCallback {auth} onLoggedIn={handleSsoLoggedIn} onBackToLogin={handleBackToLogin} />
 {:else if resolution.path === '/403'}
   <Forbidden onback={() => router.navigate('/')} />
 {:else if resolution.path === '/admin/roles' && resolution.allowed}

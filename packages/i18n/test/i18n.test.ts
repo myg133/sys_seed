@@ -156,6 +156,28 @@ describe('语言包与键体系（AC-S-091）', () => {
       // 本需求规格钉死、后端 Dev 同期新增的两个码
       'MONEY_OVERFLOW',
       'FX_RATE_NOT_FOUND',
+      // REQ-013（SSO 入站 + 强制 SSO）新增的 21 个码，见 acceptance.md「错误码总表」
+      'SSO_REQUIRED',
+      'SSO_PROVIDER_NOT_CONFIGURED',
+      'SSO_CONFIG_INVALID',
+      'SSO_OIDC_DISCOVERY_FAILED',
+      'SSO_OIDC_DISCOVERY_INVALID',
+      'SSO_OIDC_STATE_INVALID',
+      'SSO_OIDC_STATE_EXPIRED',
+      'SSO_OIDC_CALLBACK_PARAM_MISSING',
+      'SSO_OIDC_TOKEN_EXCHANGE_FAILED',
+      'SSO_OIDC_TOKEN_ENDPOINT_UNAVAILABLE',
+      'SSO_OIDC_TOKEN_INVALID',
+      'SSO_OIDC_TOKEN_EXPIRED',
+      'SSO_OIDC_ALG_NOT_ALLOWED',
+      'SSO_OIDC_NONCE_MISMATCH',
+      'SSO_OIDC_PKCE_MISMATCH',
+      'SSO_LDAP_UNREACHABLE',
+      'SSO_LDAP_BIND_FAILED',
+      'SSO_LDAP_EMPTY_PASSWORD',
+      'SSO_IDENTITY_LINK_CONFLICT',
+      'SSO_ACCOUNT_NOT_LINKED',
+      'SSO_TICKET_INVALID',
     ];
     for (const code of codes) {
       expect(catalog[`error.${code}`], `缺少键 error.${code}`).toBeTypeOf('string');

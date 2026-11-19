@@ -19,6 +19,7 @@
 import type { ApiClient } from '@base/sdk';
 
 import type { RouteDefinition } from './router';
+import { SSO_CALLBACK_ROUTE_PATH } from './sso-api';
 
 /** 数据页面的通配路由（D104）。 */
 export const SCHEMA_ROUTE_PATH = '/schema/:moduleId/:entityKey';
@@ -58,6 +59,12 @@ export function createRoutes(
   return [
     { path: '/', title: 'nav.workbench' },
     { path: '/login', title: 'common.login' },
+    {
+      // P4：OIDC 回调的浏览器交接页。**公开路由** ——
+      // 用户此刻刚被 IdP 302 回来、还没有令牌；要求登录态会让守卫先把 ticket 丢掉。
+      path: SSO_CALLBACK_ROUTE_PATH,
+      title: 'common.ssoCallback',
+    },
     { path: '/403', title: 'nav.forbidden' },
     {
       // 一条通配路由服务**所有**实体（D104）：新增实体不改这里。
