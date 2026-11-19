@@ -62,6 +62,50 @@ pub mod code {
     pub const NOT_IMPLEMENTED: &str = "NOT_IMPLEMENTED";
     /// 服务内部错误。
     pub const INTERNAL_ERROR: &str = "INTERNAL_ERROR";
+
+    // -- SSO 入站（REQ-013）：21 个码 ------------------------------------
+    /// 强制 SSO：本地密码登录被拒（**在密码校验之前**）。
+    pub const SSO_REQUIRED: &str = "SSO_REQUIRED";
+    /// 租户未配置**或已禁用**该协议（合并，不暴露内部状态）。
+    pub const SSO_PROVIDER_NOT_CONFIGURED: &str = "SSO_PROVIDER_NOT_CONFIGURED";
+    /// 配置值非法（`ldaps://` / 相对 redirectUri / filter 缺占位符 / 空 issuer）。
+    pub const SSO_CONFIG_INVALID: &str = "SSO_CONFIG_INVALID";
+    /// 拿不到 `.well-known` 发现文档。
+    pub const SSO_OIDC_DISCOVERY_FAILED: &str = "SSO_OIDC_DISCOVERY_FAILED";
+    /// 拿到了发现文档但非法 / 缺端点。
+    pub const SSO_OIDC_DISCOVERY_INVALID: &str = "SSO_OIDC_DISCOVERY_INVALID";
+    /// `state` 不存在 / 已消费 / 租户或 provider 不匹配。
+    pub const SSO_OIDC_STATE_INVALID: &str = "SSO_OIDC_STATE_INVALID";
+    /// `state` 超过 TTL。
+    pub const SSO_OIDC_STATE_EXPIRED: &str = "SSO_OIDC_STATE_EXPIRED";
+    /// 回调缺 `code` 或 `state`。
+    pub const SSO_OIDC_CALLBACK_PARAM_MISSING: &str = "SSO_OIDC_CALLBACK_PARAM_MISSING";
+    /// 换 token 失败（code 伪造 / 已用 / PKCE 不符）。
+    pub const SSO_OIDC_TOKEN_EXCHANGE_FAILED: &str = "SSO_OIDC_TOKEN_EXCHANGE_FAILED";
+    /// IdP 的 token 端点挂 / 超时（**远端基础设施问题**，与上一个码区分）。
+    pub const SSO_OIDC_TOKEN_ENDPOINT_UNAVAILABLE: &str = "SSO_OIDC_TOKEN_ENDPOINT_UNAVAILABLE";
+    /// `id_token` 签名 / iss / aud / iat 不匹配。
+    pub const SSO_OIDC_TOKEN_INVALID: &str = "SSO_OIDC_TOKEN_INVALID";
+    /// `id_token` 的 `exp` 已过。
+    pub const SSO_OIDC_TOKEN_EXPIRED: &str = "SSO_OIDC_TOKEN_EXPIRED";
+    /// `id_token` 算法不在白名单内（`none` / `HS*` / 白名单外）。
+    pub const SSO_OIDC_ALG_NOT_ALLOWED: &str = "SSO_OIDC_ALG_NOT_ALLOWED";
+    /// `id_token` 的 `nonce` 与本次授权不符。
+    pub const SSO_OIDC_NONCE_MISMATCH: &str = "SSO_OIDC_NONCE_MISMATCH";
+    /// PKCE 的 `code_verifier` 与 challenge 不符。
+    pub const SSO_OIDC_PKCE_MISMATCH: &str = "SSO_OIDC_PKCE_MISMATCH";
+    /// LDAP 服务连不上。
+    pub const SSO_LDAP_UNREACHABLE: &str = "SSO_LDAP_UNREACHABLE";
+    /// LDAP 认证失败（密码错**或**用户不存在 —— **同一个码**）。
+    pub const SSO_LDAP_BIND_FAILED: &str = "SSO_LDAP_BIND_FAILED";
+    /// 空 / 纯空白密码（请求不合法，不是凭据错误）。
+    pub const SSO_LDAP_EMPTY_PASSWORD: &str = "SSO_LDAP_EMPTY_PASSWORD";
+    /// 绑定改指 / `mail` 撞他人绑定 / JIT 撞既有 username。
+    pub const SSO_IDENTITY_LINK_CONFLICT: &str = "SSO_IDENTITY_LINK_CONFLICT";
+    /// 未绑定且 JIT 关闭。
+    pub const SSO_ACCOUNT_NOT_LINKED: &str = "SSO_ACCOUNT_NOT_LINKED";
+    /// 登录 ticket 不存在 / 已用 / 过期。
+    pub const SSO_TICKET_INVALID: &str = "SSO_TICKET_INVALID";
 }
 
 /// 本 crate 的全部错误码（**完备性测试的输入**，D113）。
@@ -86,6 +130,28 @@ pub const ALL_CODES: &[&str] = &[
     code::CONFLICT,
     code::NOT_IMPLEMENTED,
     code::INTERNAL_ERROR,
+    // SSO 入站（REQ-013）
+    code::SSO_REQUIRED,
+    code::SSO_PROVIDER_NOT_CONFIGURED,
+    code::SSO_CONFIG_INVALID,
+    code::SSO_OIDC_DISCOVERY_FAILED,
+    code::SSO_OIDC_DISCOVERY_INVALID,
+    code::SSO_OIDC_STATE_INVALID,
+    code::SSO_OIDC_STATE_EXPIRED,
+    code::SSO_OIDC_CALLBACK_PARAM_MISSING,
+    code::SSO_OIDC_TOKEN_EXCHANGE_FAILED,
+    code::SSO_OIDC_TOKEN_ENDPOINT_UNAVAILABLE,
+    code::SSO_OIDC_TOKEN_INVALID,
+    code::SSO_OIDC_TOKEN_EXPIRED,
+    code::SSO_OIDC_ALG_NOT_ALLOWED,
+    code::SSO_OIDC_NONCE_MISMATCH,
+    code::SSO_OIDC_PKCE_MISMATCH,
+    code::SSO_LDAP_UNREACHABLE,
+    code::SSO_LDAP_BIND_FAILED,
+    code::SSO_LDAP_EMPTY_PASSWORD,
+    code::SSO_IDENTITY_LINK_CONFLICT,
+    code::SSO_ACCOUNT_NOT_LINKED,
+    code::SSO_TICKET_INVALID,
 ];
 
 /// 一条被违反的密码策略规则。
@@ -164,6 +230,59 @@ pub enum IamError {
         /// 面向开发者的英文原因。
         reason: String,
     },
+
+    // -- SSO 入站（REQ-013）------------------------------------------------
+    /// 强制 SSO：本地密码登录被拒。
+    ///
+    /// `providers` 是**可用的** SSO 入口列表（写死在 `params.ssoProviders`），
+    /// 让前端能直接引导用户。它**不含**任何配置值（AC-S-106 / S41）。
+    SsoRequired {
+        /// 当前租户可用的 SSO 入口。
+        providers: Vec<crate::sso::SsoProviderView>,
+    },
+    /// 租户未配置**或已禁用**该协议（合并 —— 对未认证调用者不暴露内部状态）。
+    SsoProviderNotConfigured,
+    /// 配置值非法。`reason` 是**固定的 ASCII 短语**，不得包含配置值本身。
+    SsoConfigInvalid {
+        /// 面向开发者的英文原因（**不含配置值**）。
+        reason: &'static str,
+    },
+    /// 拿不到 OIDC 发现文档（远端不可达 / 非 2xx）。
+    SsoOidcDiscoveryFailed,
+    /// 拿到了发现文档但不合法（非法 JSON / 缺端点）。
+    SsoOidcDiscoveryInvalid,
+    /// `state` 不存在 / 已消费 / 租户或 provider 不匹配。
+    SsoOidcStateInvalid,
+    /// `state` 超过 TTL。
+    SsoOidcStateExpired,
+    /// 回调缺 `code` 或 `state`。
+    SsoOidcCallbackParamMissing,
+    /// 换 token 失败（code 伪造 / 已用）。
+    SsoOidcTokenExchangeFailed,
+    /// IdP 的 token 端点不可用（挂 / 超时）。
+    SsoOidcTokenEndpointUnavailable,
+    /// `id_token` 无效（签名 / iss / aud / iat / 结构）。
+    SsoOidcTokenInvalid,
+    /// `id_token` 已过期。
+    SsoOidcTokenExpired,
+    /// `id_token` 的算法不在白名单内。
+    SsoOidcAlgNotAllowed,
+    /// `id_token` 的 `nonce` 不符。
+    SsoOidcNonceMismatch,
+    /// PKCE 校验失败。
+    SsoOidcPkceMismatch,
+    /// LDAP 服务不可达。
+    SsoLdapUnreachable,
+    /// LDAP 认证失败（**密码错与用户不存在同一个码**，防账号枚举）。
+    SsoLdapBindFailed,
+    /// 空 / 纯空白密码。
+    SsoLdapEmptyPassword,
+    /// 绑定冲突（改指 / mail 撞他人绑定 / JIT 撞既有 username）。
+    SsoIdentityLinkConflict,
+    /// 未绑定且 JIT 关闭。
+    SsoAccountNotLinked,
+    /// 登录 ticket 无效（不存在 / 已用 / 过期 / 租户不匹配）。
+    SsoTicketInvalid,
 }
 
 impl IamError {
@@ -187,6 +306,27 @@ impl IamError {
             Self::Conflict { .. } => code::CONFLICT,
             Self::NotImplemented { .. } => code::NOT_IMPLEMENTED,
             Self::Internal { .. } => code::INTERNAL_ERROR,
+            Self::SsoRequired { .. } => code::SSO_REQUIRED,
+            Self::SsoProviderNotConfigured => code::SSO_PROVIDER_NOT_CONFIGURED,
+            Self::SsoConfigInvalid { .. } => code::SSO_CONFIG_INVALID,
+            Self::SsoOidcDiscoveryFailed => code::SSO_OIDC_DISCOVERY_FAILED,
+            Self::SsoOidcDiscoveryInvalid => code::SSO_OIDC_DISCOVERY_INVALID,
+            Self::SsoOidcStateInvalid => code::SSO_OIDC_STATE_INVALID,
+            Self::SsoOidcStateExpired => code::SSO_OIDC_STATE_EXPIRED,
+            Self::SsoOidcCallbackParamMissing => code::SSO_OIDC_CALLBACK_PARAM_MISSING,
+            Self::SsoOidcTokenExchangeFailed => code::SSO_OIDC_TOKEN_EXCHANGE_FAILED,
+            Self::SsoOidcTokenEndpointUnavailable => code::SSO_OIDC_TOKEN_ENDPOINT_UNAVAILABLE,
+            Self::SsoOidcTokenInvalid => code::SSO_OIDC_TOKEN_INVALID,
+            Self::SsoOidcTokenExpired => code::SSO_OIDC_TOKEN_EXPIRED,
+            Self::SsoOidcAlgNotAllowed => code::SSO_OIDC_ALG_NOT_ALLOWED,
+            Self::SsoOidcNonceMismatch => code::SSO_OIDC_NONCE_MISMATCH,
+            Self::SsoOidcPkceMismatch => code::SSO_OIDC_PKCE_MISMATCH,
+            Self::SsoLdapUnreachable => code::SSO_LDAP_UNREACHABLE,
+            Self::SsoLdapBindFailed => code::SSO_LDAP_BIND_FAILED,
+            Self::SsoLdapEmptyPassword => code::SSO_LDAP_EMPTY_PASSWORD,
+            Self::SsoIdentityLinkConflict => code::SSO_IDENTITY_LINK_CONFLICT,
+            Self::SsoAccountNotLinked => code::SSO_ACCOUNT_NOT_LINKED,
+            Self::SsoTicketInvalid => code::SSO_TICKET_INVALID,
         }
     }
 
@@ -210,6 +350,30 @@ impl IamError {
             Self::Conflict { .. } => StatusCode::CONFLICT,
             Self::NotImplemented { .. } => StatusCode::NOT_IMPLEMENTED,
             Self::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+
+            // -- SSO 入站（REQ-013）：状态码按 AC 的错误码总表逐条钉死 ------
+            Self::SsoRequired { .. } | Self::SsoAccountNotLinked => StatusCode::FORBIDDEN,
+            Self::SsoProviderNotConfigured
+            | Self::SsoConfigInvalid { .. }
+            | Self::SsoOidcStateInvalid
+            | Self::SsoOidcStateExpired
+            | Self::SsoOidcCallbackParamMissing
+            | Self::SsoOidcTokenExchangeFailed
+            | Self::SsoOidcPkceMismatch
+            | Self::SsoLdapEmptyPassword => StatusCode::BAD_REQUEST,
+            Self::SsoOidcTokenInvalid
+            | Self::SsoOidcTokenExpired
+            | Self::SsoOidcAlgNotAllowed
+            | Self::SsoOidcNonceMismatch
+            | Self::SsoLdapBindFailed
+            | Self::SsoTicketInvalid => StatusCode::UNAUTHORIZED,
+            Self::SsoOidcDiscoveryInvalid | Self::SsoOidcTokenEndpointUnavailable => {
+                StatusCode::BAD_GATEWAY
+            }
+            Self::SsoOidcDiscoveryFailed | Self::SsoLdapUnreachable => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+            Self::SsoIdentityLinkConflict => StatusCode::CONFLICT,
         }
     }
 
@@ -246,6 +410,51 @@ impl IamError {
             Self::Conflict { reason } => (*reason).to_string(),
             Self::NotImplemented { feature } => format!("{feature} is not implemented"),
             Self::Internal { reason } => format!("an internal error occurred: {reason}"),
+
+            // -- SSO 入站（REQ-013）：**只描述类别，不复述任何配置值** ------
+            Self::SsoRequired { .. } => {
+                "local password login is disabled for this tenant; use single sign-on".to_string()
+            }
+            Self::SsoProviderNotConfigured => {
+                "the single sign-on provider is not configured for this tenant".to_string()
+            }
+            Self::SsoConfigInvalid { reason } => {
+                format!("the single sign-on configuration is invalid: {reason}")
+            }
+            Self::SsoOidcDiscoveryFailed => {
+                "the openid connect discovery document is unreachable".to_string()
+            }
+            Self::SsoOidcDiscoveryInvalid => {
+                "the openid connect discovery document is invalid".to_string()
+            }
+            Self::SsoOidcStateInvalid => "the single sign-on state is invalid".to_string(),
+            Self::SsoOidcStateExpired => "the single sign-on state has expired".to_string(),
+            Self::SsoOidcCallbackParamMissing => {
+                "the single sign-on callback is missing a required parameter".to_string()
+            }
+            Self::SsoOidcTokenExchangeFailed => "the single sign-on code exchange failed".to_string(),
+            Self::SsoOidcTokenEndpointUnavailable => {
+                "the single sign-on token endpoint is unavailable".to_string()
+            }
+            Self::SsoOidcTokenInvalid => "the single sign-on id token is invalid".to_string(),
+            Self::SsoOidcTokenExpired => "the single sign-on id token has expired".to_string(),
+            Self::SsoOidcAlgNotAllowed => {
+                "the single sign-on id token algorithm is not allowed".to_string()
+            }
+            Self::SsoOidcNonceMismatch => "the single sign-on nonce does not match".to_string(),
+            Self::SsoOidcPkceMismatch => {
+                "the single sign-on pkce verification failed".to_string()
+            }
+            Self::SsoLdapUnreachable => "the ldap server is unreachable".to_string(),
+            Self::SsoLdapBindFailed => "ldap authentication failed".to_string(),
+            Self::SsoLdapEmptyPassword => "the ldap password must not be empty".to_string(),
+            Self::SsoIdentityLinkConflict => {
+                "the single sign-on identity conflicts with an existing account".to_string()
+            }
+            Self::SsoAccountNotLinked => {
+                "the single sign-on account is not linked to a local account".to_string()
+            }
+            Self::SsoTicketInvalid => "the single sign-on login ticket is invalid".to_string(),
         }
     }
 
@@ -285,6 +494,17 @@ impl IamError {
             }
             Self::NotImplemented { feature } => {
                 params.insert("feature".to_string(), serde_json::Value::from(*feature));
+            }
+            // 强制 SSO：**可用入口列表写死在 params**（AC-S-021 预期 1）。
+            // 只含 type / id / label / 端点路径 —— 不含 issuer / clientId / url / baseDn。
+            Self::SsoRequired { providers } => {
+                params.insert(
+                    "ssoProviders".to_string(),
+                    serde_json::to_value(providers).unwrap_or(serde_json::Value::Array(Vec::new())),
+                );
+            }
+            Self::SsoConfigInvalid { reason } => {
+                params.insert("reason".to_string(), serde_json::Value::from(*reason));
             }
             _ => {}
         }
@@ -344,6 +564,32 @@ mod tests {
             IamError::Internal {
                 reason: "boom".to_string(),
             },
+            // -- SSO 入站（REQ-013）：21 个码 --------------------------------
+            IamError::SsoRequired {
+                providers: Vec::new(),
+            },
+            IamError::SsoProviderNotConfigured,
+            IamError::SsoConfigInvalid {
+                reason: "the issuer is not an absolute url",
+            },
+            IamError::SsoOidcDiscoveryFailed,
+            IamError::SsoOidcDiscoveryInvalid,
+            IamError::SsoOidcStateInvalid,
+            IamError::SsoOidcStateExpired,
+            IamError::SsoOidcCallbackParamMissing,
+            IamError::SsoOidcTokenExchangeFailed,
+            IamError::SsoOidcTokenEndpointUnavailable,
+            IamError::SsoOidcTokenInvalid,
+            IamError::SsoOidcTokenExpired,
+            IamError::SsoOidcAlgNotAllowed,
+            IamError::SsoOidcNonceMismatch,
+            IamError::SsoOidcPkceMismatch,
+            IamError::SsoLdapUnreachable,
+            IamError::SsoLdapBindFailed,
+            IamError::SsoLdapEmptyPassword,
+            IamError::SsoIdentityLinkConflict,
+            IamError::SsoAccountNotLinked,
+            IamError::SsoTicketInvalid,
         ];
         for error in &errors {
             let code = error.code();
@@ -392,6 +638,32 @@ mod tests {
             IamError::Internal {
                 reason: "boom".to_string(),
             },
+            // -- SSO 入站（REQ-013）：21 个码 --------------------------------
+            IamError::SsoRequired {
+                providers: Vec::new(),
+            },
+            IamError::SsoProviderNotConfigured,
+            IamError::SsoConfigInvalid {
+                reason: "the issuer is not an absolute url",
+            },
+            IamError::SsoOidcDiscoveryFailed,
+            IamError::SsoOidcDiscoveryInvalid,
+            IamError::SsoOidcStateInvalid,
+            IamError::SsoOidcStateExpired,
+            IamError::SsoOidcCallbackParamMissing,
+            IamError::SsoOidcTokenExchangeFailed,
+            IamError::SsoOidcTokenEndpointUnavailable,
+            IamError::SsoOidcTokenInvalid,
+            IamError::SsoOidcTokenExpired,
+            IamError::SsoOidcAlgNotAllowed,
+            IamError::SsoOidcNonceMismatch,
+            IamError::SsoOidcPkceMismatch,
+            IamError::SsoLdapUnreachable,
+            IamError::SsoLdapBindFailed,
+            IamError::SsoLdapEmptyPassword,
+            IamError::SsoIdentityLinkConflict,
+            IamError::SsoAccountNotLinked,
+            IamError::SsoTicketInvalid,
         ];
         let mut seen = BTreeSet::new();
         for error in &variants {
@@ -441,6 +713,32 @@ mod tests {
             IamError::Internal {
                 reason: "boom".to_string(),
             },
+            // -- SSO 入站（REQ-013）：21 个码 --------------------------------
+            IamError::SsoRequired {
+                providers: Vec::new(),
+            },
+            IamError::SsoProviderNotConfigured,
+            IamError::SsoConfigInvalid {
+                reason: "the issuer is not an absolute url",
+            },
+            IamError::SsoOidcDiscoveryFailed,
+            IamError::SsoOidcDiscoveryInvalid,
+            IamError::SsoOidcStateInvalid,
+            IamError::SsoOidcStateExpired,
+            IamError::SsoOidcCallbackParamMissing,
+            IamError::SsoOidcTokenExchangeFailed,
+            IamError::SsoOidcTokenEndpointUnavailable,
+            IamError::SsoOidcTokenInvalid,
+            IamError::SsoOidcTokenExpired,
+            IamError::SsoOidcAlgNotAllowed,
+            IamError::SsoOidcNonceMismatch,
+            IamError::SsoOidcPkceMismatch,
+            IamError::SsoLdapUnreachable,
+            IamError::SsoLdapBindFailed,
+            IamError::SsoLdapEmptyPassword,
+            IamError::SsoIdentityLinkConflict,
+            IamError::SsoAccountNotLinked,
+            IamError::SsoTicketInvalid,
         ];
         for error in &errors {
             let detail = error.detail();

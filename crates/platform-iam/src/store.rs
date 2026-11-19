@@ -37,6 +37,28 @@ pub const LOGIN_ATTEMPT_TABLE: &str = "platform_iam_login_attempt";
 pub const LOGIN_RATE_TABLE: &str = "platform_iam_login_rate";
 /// 幂等键表。
 pub const IDEMPOTENCY_TABLE: &str = "platform_iam_idempotency";
+/// OIDC 授权请求的一次性凭证（REQ-013）。
+pub const OIDC_STATE_TABLE: &str = "platform_iam_oidc_state";
+/// SSO 登录票据（REQ-013）。
+pub const SSO_TICKET_TABLE: &str = "platform_iam_sso_ticket";
+/// 外部身份映射（REQ-008 建表；SSO 认证路径**只读 + DO NOTHING 写**）。
+pub const EXTERNAL_IDENTITY_TABLE: &str = "external_identity";
+
+/// 无租户过滤查询用的**占位租户**。
+///
+/// `platform_iam_oidc_state` / `platform_iam_sso_ticket` **不启用 RLS**
+/// （回调 / 换票时还没有权威租户来源），查询语句里用 `{tenant} IS NOT NULL`
+/// 满足 `TenantQuery` 的「必须有一个租户占位符」约束。
+///
+/// ⚠️ 这个值**只用于把事务开起来**，不参与任何行过滤 ——
+/// 真正的租户校验在应用层：`state.tenant_id` / `ticket.tenant_id` 必须与请求租户一致
+/// （无请求头时才采纳它）。**绝不要**拿这个 ctx 去碰带 RLS 的表。
+const LOOKUP_TENANT: &str = "__sso_lookup__";
+
+/// 无租户过滤查询的上下文（见 [`LOOKUP_TENANT`]）。
+fn lookup_context() -> RequestContext {
+    RequestContext::new().with_tenant(LOOKUP_TENANT)
+}
 
 /// 账号状态：正常。
 pub const STATUS_ACTIVE: &str = "active";
@@ -127,6 +149,11 @@ pub struct SessionRecord {
     pub user_agent: String,
     /// 该会话的 refresh token 家族。
     pub family_id: String,
+    /// 登录来源（`local` / `oidc` / `ldap`）。
+    ///
+    /// ⚠️ 加了 struct 字段就**必须**同时把它加进两条 SELECT ——
+    /// `tenant_row!` 按列名 `try_get`，漏了是**运行期**报列不存在（不是编译错）。
+    pub auth_provider: String,
     /// 创建时间。
     pub created_at: OffsetDateTime,
     /// 最近活跃时间。
@@ -143,6 +170,7 @@ platform_db::tenant_row!(SessionRecord {
     ip: "ip",
     user_agent: "user_agent",
     family_id: "family_id",
+    auth_provider: "auth_provider",
     created_at: "created_at",
     last_used_at: "last_used_at",
     revoked_at: "revoked_at",
@@ -564,8 +592,8 @@ impl IamStore {
     ) -> DbResult<()> {
         let query = TenantQuery::new(format!(
             "INSERT INTO {table} \
-             (tenant_id, id, user_id, device_label, ip, user_agent, family_id) \
-             VALUES ({{tenant}}, ?, ?, ?, ?, ?, ?)",
+             (tenant_id, id, user_id, device_label, ip, user_agent, family_id, auth_provider) \
+             VALUES ({{tenant}}, ?, ?, ?, ?, ?, ?, ?)",
             table = self.table(SESSION_TABLE)
         ))
         .bind(session.id.clone())
@@ -573,7 +601,8 @@ impl IamStore {
         .bind(session.device_label.clone())
         .bind(session.ip.clone())
         .bind(session.user_agent.clone())
-        .bind(session.family_id.clone());
+        .bind(session.family_id.clone())
+        .bind(session.auth_provider.clone());
         self.db.execute(ctx, &query).await?;
         Ok(())
     }
@@ -586,7 +615,7 @@ impl IamStore {
     ) -> DbResult<Vec<SessionRecord>> {
         let query = TenantQuery::new(format!(
             "SELECT id, tenant_id, user_id, device_label, ip, user_agent, family_id, \
-             created_at, last_used_at, revoked_at FROM {table} \
+             auth_provider, created_at, last_used_at, revoked_at FROM {table} \
              WHERE tenant_id = {{tenant}} AND user_id = ? AND revoked_at IS NULL \
              ORDER BY last_used_at DESC",
             table = self.table(SESSION_TABLE)
@@ -603,7 +632,7 @@ impl IamStore {
     ) -> DbResult<Option<SessionRecord>> {
         let query = TenantQuery::new(format!(
             "SELECT id, tenant_id, user_id, device_label, ip, user_agent, family_id, \
-             created_at, last_used_at, revoked_at FROM {table} \
+             auth_provider, created_at, last_used_at, revoked_at FROM {table} \
              WHERE tenant_id = {{tenant}} AND id = ?",
             table = self.table(SESSION_TABLE)
         ))
@@ -1236,8 +1265,8 @@ impl IamStore {
     ) -> DbResult<()> {
         let query = TenantQuery::new(format!(
             "INSERT INTO {table} \
-             (tenant_id, id, user_id, device_label, ip, user_agent, family_id) \
-             VALUES ({{tenant}}, ?, ?, ?, ?, ?, ?)",
+             (tenant_id, id, user_id, device_label, ip, user_agent, family_id, auth_provider) \
+             VALUES ({{tenant}}, ?, ?, ?, ?, ?, ?, ?)",
             table = self.table(SESSION_TABLE)
         ))
         .bind(session.id.clone())
@@ -1245,7 +1274,8 @@ impl IamStore {
         .bind(session.device_label.clone())
         .bind(session.ip.clone())
         .bind(session.user_agent.clone())
-        .bind(session.family_id.clone());
+        .bind(session.family_id.clone())
+        .bind(session.auth_provider.clone());
         tx.execute(&query).await?;
         Ok(())
     }
@@ -1271,7 +1301,283 @@ impl IamStore {
         tx.execute(&query).await?;
         Ok(())
     }
+
+    // -----------------------------------------------------------------------
+    // SSO（REQ-013）：oidc_state / ticket / external_identity
+    // -----------------------------------------------------------------------
+
+    /// 写入一条 `oidc_state`（授权时，**有租户上下文**）。
+    pub async fn insert_oidc_state(
+        &self,
+        ctx: &RequestContext,
+        record: &OidcStateRecord,
+    ) -> DbResult<()> {
+        let query = TenantQuery::new(format!(
+            "INSERT INTO {table} \
+             (tenant_id, state, provider, nonce, code_verifier, code_challenge, redirect_uri, expires_at) \
+             VALUES ({{tenant}}, ?, ?, ?, ?, ?, ?, ?)",
+            table = self.table(OIDC_STATE_TABLE)
+        ))
+        .bind(record.state.clone())
+        .bind(record.provider.clone())
+        .bind(record.nonce.clone())
+        .bind(record.code_verifier.clone())
+        .bind(record.code_challenge.clone())
+        .bind(record.redirect_uri.clone())
+        .bind(record.expires_at);
+        self.db.execute(ctx, &query).await?;
+        Ok(())
+    }
+
+    /// 按 `state` 读一条记录（**不带租户过滤**，见 [`LOOKUP_TENANT`]）。
+    ///
+    /// 安全性由 `state` 是 256 位不可猜串保证；租户校验在应用层做。
+    pub async fn find_oidc_state(&self, state: &str) -> DbResult<Option<OidcStateRecord>> {
+        let query = TenantQuery::new(format!(
+            "SELECT state, tenant_id, provider, nonce, code_verifier, code_challenge, \
+             redirect_uri, created_at, expires_at, consumed_at FROM {table} \
+             WHERE state = ? AND {{tenant}} IS NOT NULL",
+            table = self.table(OIDC_STATE_TABLE)
+        ))
+        .bind(state);
+        self.db.fetch_optional(&lookup_context(), &query).await
+    }
+
+    /// 原子消费一条 `oidc_state`（**租户作用域**：跨租户连消费都做不到）。
+    ///
+    /// 返回 `0` = 已被并发回调消费（或不存在）。
+    pub async fn consume_oidc_state(&self, tenant_id: &str, state: &str) -> DbResult<u64> {
+        let ctx = RequestContext::new().with_tenant(tenant_id.to_string());
+        let query = TenantQuery::new(format!(
+            "UPDATE {table} SET consumed_at = now() \
+             WHERE tenant_id = {{tenant}} AND state = ? AND consumed_at IS NULL",
+            table = self.table(OIDC_STATE_TABLE)
+        ))
+        .bind(state);
+        self.db.execute(&ctx, &query).await
+    }
+
+    /// 写入一条 ticket（回调建会话之后）。
+    pub async fn insert_sso_ticket(
+        &self,
+        ctx: &RequestContext,
+        record: &SsoTicketRecord,
+    ) -> DbResult<()> {
+        let query = TenantQuery::new(format!(
+            "INSERT INTO {table} (tenant_id, ticket, user_id, session_id, expires_at) \
+             VALUES ({{tenant}}, ?, ?, ?, ?)",
+            table = self.table(SSO_TICKET_TABLE)
+        ))
+        .bind(record.ticket.clone())
+        .bind(record.user_id.clone())
+        .bind(record.session_id.clone())
+        .bind(record.expires_at);
+        self.db.execute(ctx, &query).await?;
+        Ok(())
+    }
+
+    /// 按 ticket 读一条记录（**不带租户过滤**，见 [`LOOKUP_TENANT`]）。
+    pub async fn find_sso_ticket(&self, ticket: &str) -> DbResult<Option<SsoTicketRecord>> {
+        let query = TenantQuery::new(format!(
+            "SELECT ticket, tenant_id, user_id, session_id, created_at, expires_at, consumed_at \
+             FROM {table} WHERE ticket = ? AND {{tenant}} IS NOT NULL",
+            table = self.table(SSO_TICKET_TABLE)
+        ))
+        .bind(ticket);
+        self.db.fetch_optional(&lookup_context(), &query).await
+    }
+
+    /// 原子消费一条 ticket（**租户作用域**）。
+    pub async fn consume_sso_ticket(&self, tenant_id: &str, ticket: &str) -> DbResult<u64> {
+        let ctx = RequestContext::new().with_tenant(tenant_id.to_string());
+        let query = TenantQuery::new(format!(
+            "UPDATE {table} SET consumed_at = now() \
+             WHERE tenant_id = {{tenant}} AND ticket = ? AND consumed_at IS NULL",
+            table = self.table(SSO_TICKET_TABLE)
+        ))
+        .bind(ticket);
+        self.db.execute(&ctx, &query).await
+    }
+
+    /// 按 `(provider, external_id)` 读绑定。
+    pub async fn find_external_identity(
+        &self,
+        ctx: &RequestContext,
+        provider: &str,
+        external_id: &str,
+    ) -> DbResult<Option<ExternalIdentityRecord>> {
+        let query = TenantQuery::new(format!(
+            "SELECT id, tenant_id, provider, external_id, user_id FROM {table} \
+             WHERE tenant_id = {{tenant}} AND provider = ? AND external_id = ?",
+            table = self.table(EXTERNAL_IDENTITY_TABLE)
+        ))
+        .bind(provider)
+        .bind(external_id);
+        self.db.fetch_optional(ctx, &query).await
+    }
+
+    /// **认证路径**的绑定写入：`ON CONFLICT DO NOTHING`（**绝不**改指）。
+    ///
+    /// 与 `platform-org` 的 `upsert_external_identity`（`DO UPDATE SET user_id`）
+    /// **语义相反**，是**有意的**：组织同步场景「改映射」合理，
+    /// 认证路径上「把绑定静默改到另一个本地用户」= 账号接管（P7 / S19）。
+    ///
+    /// 返回 `1` = 新建；`0` = 已存在（调用方**必须**读回比对 `user_id`）。
+    pub async fn insert_external_identity_do_nothing(
+        &self,
+        ctx: &RequestContext,
+        id: &str,
+        provider: &str,
+        external_id: &str,
+        user_id: &str,
+    ) -> DbResult<u64> {
+        let query = TenantQuery::new(format!(
+            "INSERT INTO {table} (tenant_id, id, provider, external_id, user_id) \
+             VALUES ({{tenant}}, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+            table = self.table(EXTERNAL_IDENTITY_TABLE)
+        ))
+        .bind(id)
+        .bind(provider)
+        .bind(external_id)
+        .bind(user_id);
+        self.db.execute(ctx, &query).await
+    }
+
+    /// 某个本地账号在**同一 provider** 下的绑定（用于「mail 撞他人绑定」判定）。
+    pub async fn find_binding_for_user(
+        &self,
+        ctx: &RequestContext,
+        user_id: &str,
+        provider: &str,
+    ) -> DbResult<Vec<ExternalIdentityRecord>> {
+        let query = TenantQuery::new(format!(
+            "SELECT id, tenant_id, provider, external_id, user_id FROM {table} \
+             WHERE tenant_id = {{tenant}} AND user_id = ? AND provider = ?",
+            table = self.table(EXTERNAL_IDENTITY_TABLE)
+        ))
+        .bind(user_id)
+        .bind(provider);
+        self.db.fetch_all(ctx, &query).await
+    }
+
+    /// JIT 建号：`ON CONFLICT DO NOTHING`（**任意唯一约束冲突都不报错**）。
+    ///
+    /// 返回 `1` = 新建；`0` = 已存在（`username` 或 `email` 撞了）——
+    /// 调用方重查后自己判断是「并发同一邮箱」还是「username 被占」（→ 409）。
+    /// 这样并发下**不会**产生 `5xx`（AC-S-103 步骤 6 的判据）。
+    pub async fn insert_user_on_conflict_do_nothing(
+        &self,
+        ctx: &RequestContext,
+        user: &UserRecord,
+    ) -> DbResult<u64> {
+        let query = TenantQuery::new(format!(
+            "INSERT INTO {table} \
+             (tenant_id, id, username, email, password_hash, status, mfa_enabled, \
+              must_change_password, password_changed_at) \
+             VALUES ({{tenant}}, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+            table = self.table(USER_TABLE)
+        ))
+        .bind(user.id.clone())
+        .bind(user.username.clone())
+        .bind(user.email.clone())
+        .bind(user.password_hash.clone())
+        .bind(user.status.clone())
+        .bind(user.mfa_enabled)
+        .bind(user.must_change_password)
+        .bind(user.password_changed_at);
+        self.db.execute(ctx, &query).await
+    }
 }
+
+/// 一条 `oidc_state`（**一次性凭证**）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OidcStateRecord {
+    /// base64url(32B) 一次性串（主键）。
+    pub state: String,
+    /// 归属租户。
+    pub tenant_id: String,
+    /// 协议名（`oidc`）。
+    pub provider: String,
+    /// 重放防护。
+    pub nonce: String,
+    /// PKCE 的明文 verifier。
+    pub code_verifier: String,
+    /// PKCE 的 challenge（S256）。
+    pub code_challenge: String,
+    /// 回调时必须逐字一致的 redirect URI。
+    pub redirect_uri: String,
+    /// 创建时间。
+    pub created_at: OffsetDateTime,
+    /// 过期时间。
+    pub expires_at: OffsetDateTime,
+    /// 消费时间（非空 = 一次性已用）。
+    pub consumed_at: Option<OffsetDateTime>,
+}
+
+platform_db::tenant_row!(OidcStateRecord {
+    state: "state",
+    tenant_id: "tenant_id",
+    provider: "provider",
+    nonce: "nonce",
+    code_verifier: "code_verifier",
+    code_challenge: "code_challenge",
+    redirect_uri: "redirect_uri",
+    created_at: "created_at",
+    expires_at: "expires_at",
+    consumed_at: "consumed_at",
+});
+
+/// 一条 SSO 登录票据（**只存 `session_id`，不存 token**）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SsoTicketRecord {
+    /// base64url(32B) 一次性串（主键）。
+    pub ticket: String,
+    /// 归属租户。
+    pub tenant_id: String,
+    /// 账号 ID。
+    pub user_id: String,
+    /// 已建好的会话。
+    pub session_id: String,
+    /// 创建时间。
+    pub created_at: OffsetDateTime,
+    /// 过期时间（30 秒）。
+    pub expires_at: OffsetDateTime,
+    /// 消费时间（非空 = 已换过）。
+    pub consumed_at: Option<OffsetDateTime>,
+}
+
+platform_db::tenant_row!(SsoTicketRecord {
+    ticket: "ticket",
+    tenant_id: "tenant_id",
+    user_id: "user_id",
+    session_id: "session_id",
+    created_at: "created_at",
+    expires_at: "expires_at",
+    consumed_at: "consumed_at",
+});
+
+/// 一条外部身份绑定。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalIdentityRecord {
+    /// 记录 ID。
+    pub id: String,
+    /// 归属租户。
+    pub tenant_id: String,
+    /// 协议（`oidc` / `ldap` / 组织同步的 source 名）。
+    pub provider: String,
+    /// 外部标识（OIDC 的 `sub` / LDAP 的 DN）。
+    pub external_id: String,
+    /// 本地账号 ID。
+    pub user_id: String,
+}
+
+platform_db::tenant_row!(ExternalIdentityRecord {
+    id: "id",
+    tenant_id: "tenant_id",
+    provider: "provider",
+    external_id: "external_id",
+    user_id: "user_id",
+});
 
 /// 密码历史的一行（只取哈希）。
 struct HashRow {

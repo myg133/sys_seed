@@ -122,6 +122,78 @@
       "default": false,
       "scope": "tenant",
       "label": "Beta 功能开关（配合派生键做灰度）"
+    },
+    "sso.enforce": {
+      "type": "boolean",
+      "default": false,
+      "scope": "tenant",
+      "label": "强制 SSO（开启后禁用本地密码登录）"
+    },
+    "sso.jitProvisioning": {
+      "type": "boolean",
+      "default": false,
+      "scope": "tenant",
+      "label": "首次 SSO 登录时自动建号"
+    },
+    "sso.oidc.enabled": {
+      "type": "boolean",
+      "default": false,
+      "scope": "tenant",
+      "label": "启用 OIDC 单点登录"
+    },
+    "sso.oidc.issuer": {
+      "type": "string",
+      "default": "",
+      "scope": "tenant",
+      "label": "OIDC IdP 的 issuer（用于发现文档）"
+    },
+    "sso.oidc.clientId": {
+      "type": "string",
+      "default": "",
+      "scope": "tenant",
+      "label": "OIDC client_id（非敏感）"
+    },
+    "sso.oidc.scopes": {
+      "type": "string",
+      "default": "openid email profile",
+      "scope": "tenant",
+      "label": "OIDC scope（空格分隔）"
+    },
+    "sso.oidc.redirectUri": {
+      "type": "string",
+      "default": "",
+      "scope": "tenant",
+      "label": "OIDC 回调地址（绝对 URL，须与 IdP 登记逐字一致）"
+    },
+    "sso.ldap.enabled": {
+      "type": "boolean",
+      "default": false,
+      "scope": "tenant",
+      "label": "启用 LDAP 登录"
+    },
+    "sso.ldap.url": {
+      "type": "string",
+      "default": "",
+      "scope": "tenant",
+      "label": "LDAP 地址（本轮只支持 ldap://）"
+    },
+    "sso.ldap.baseDn": {
+      "type": "string",
+      "default": "",
+      "scope": "tenant",
+      "label": "LDAP 检索根（Base DN）"
+    },
+    "sso.ldap.userSearchFilter": {
+      "type": "string",
+      "default": "(uid={username})",
+      "scope": "tenant",
+      "label": "LDAP 用户检索过滤器（必须含 {username} 占位符）"
+    },
+    "sso.ldap.mailAttribute": {
+      "type": "string",
+      "default": "mail",
+      "scope": "tenant",
+      "label": "映射到本地账号的属性名"
     }
   }
 }

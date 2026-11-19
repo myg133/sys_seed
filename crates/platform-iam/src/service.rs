@@ -45,6 +45,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use platform_core::RequestContext;
+use platform_core::extension::auditable::{AuditEventSpec, Auditable};
 use platform_core::extension::permission::PermissionProvider;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -55,6 +56,17 @@ use crate::crypto;
 use crate::error::IamError;
 use crate::jwt::{AccessClaims, JwtKeySet};
 use crate::password::{self, DummyHash};
+use crate::sso::audit::{
+    self as sso_audit, NoopSsoAuditRecorder, SsoAuditEvent, SsoAuditPayload, SsoAuditRecorder,
+};
+use crate::sso::binding::{self, LDAP_PROVIDER};
+use crate::sso::config::{
+    SsoConfig, SsoConfigOutcome, SsoConfigSource, OIDC_CLIENT_SECRET_ENV,
+};
+use crate::sso::ldap::{self, SsoLdapClient};
+use crate::sso::oidc::{self, OidcRuntime, PROVIDER as OIDC_PROVIDER};
+use crate::sso::ticket;
+use crate::sso::{AuthProvider, SsoProviderView};
 use crate::store::{self, IamStore, RefreshRecord, STATUS_ACTIVE, SessionRecord, UserRecord};
 use crate::totp;
 
@@ -93,6 +105,24 @@ pub struct LoginRequest {
     /// MFA 验证码（账号已绑定 MFA 时必填）。
     #[serde(default)]
     pub mfa_code: Option<String>,
+}
+
+/// LDAP 登录请求。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LdapLoginRequest {
+    /// 目录里的用户名（会按 RFC 4515 转义后代入 filter）。
+    pub username: String,
+    /// 明文密码（**只在内存里**；LDAP 用户的密码永不落库）。
+    pub password: String,
+}
+
+/// 票据交换请求（P4）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExchangeTicketRequest {
+    /// 一次性 login ticket。
+    pub ticket: String,
 }
 
 /// 刷新请求。
@@ -157,6 +187,10 @@ pub struct SessionView {
     pub created_at: String,
     /// 最近活跃时间（RFC 3339，UTC）。
     pub last_used_at: String,
+    /// 登录来源：`local` / `oidc` / `ldap`（AC-S-107）。
+    ///
+    /// **两条会话唯一允许取值不同**的字段 —— 其余键必须完全一致（同一视图类型）。
+    pub auth_provider: String,
 }
 
 /// 登录 / 刷新响应。
@@ -229,6 +263,72 @@ impl std::fmt::Debug for PermissionProviderSlot {
     }
 }
 
+/// SSO 的**后设槽**集合（与 [`PermissionProviderSlot`] 同一套模式）。
+///
+/// # 为什么都是「后设」而不是构造参数
+///
+/// 加进 `IamService::new` 会破 4 处既有调用点（含 `platform-rbac` 的 2 处测试，
+/// 属已合并需求产物 —— D109 / S35）。后设槽既不改签名，也让「未装配」成为可表达状态。
+///
+/// # 未装配时的行为（**逐项不同，都是有意的**）
+///
+/// | 槽 | 未装配时 |
+/// |----|---------|
+/// | 配置源 | `sso.enforce` 视为 `false`（**本部署没装配 SSO**，不是「读了但失败」） |
+/// | 审计 recorder | [`NoopSsoAuditRecorder`]：**每次 warn**（「以为在审计其实没有」比没有更危险） |
+/// | LDAP 客户端 | 现造一个 [`crate::sso::ldap::Ldap3SsoClient`]（生产默认） |
+/// | OIDC 出站客户端 | 懒建生产客户端（webpki 根） |
+/// | 前端基址 | `""` → 302 用相对路径 `/sso/callback?ticket=…` |
+/// | `client_secret` | 读环境变量 `BASE_SSO_OIDC_CLIENT_SECRET` |
+/// | LDAP 服务账号 | 无（匿名 bind，**仍是一次 bind**） |
+#[derive(Clone, Default)]
+struct SsoState {
+    config_source: OnceLock<Arc<dyn SsoConfigSource>>,
+    audit_recorder: OnceLock<Arc<dyn SsoAuditRecorder>>,
+    ldap_client: OnceLock<Arc<dyn SsoLdapClient>>,
+    oidc: OidcRuntime,
+    frontend_base_url: OnceLock<String>,
+    oidc_client_secret: OnceLock<String>,
+    ldap_service_bind: OnceLock<(String, String)>,
+}
+
+impl std::fmt::Debug for SsoState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SsoState")
+            .field("config_source", &self.config_source.get().is_some())
+            .field("audit_recorder", &self.audit_recorder.get().is_some())
+            .field("ldap_client", &self.ldap_client.get().is_some())
+            .finish()
+    }
+}
+
+impl SsoState {
+    /// 审计 recorder（未注入 → noop，但**会 warn**）。
+    fn recorder(&self) -> Arc<dyn SsoAuditRecorder> {
+        self.audit_recorder
+            .get()
+            .cloned()
+            .unwrap_or_else(|| Arc::new(NoopSsoAuditRecorder))
+    }
+
+    /// `client_secret`：注入优先，其次环境变量（**唯一来源** —— AC-S-106）。
+    fn client_secret(&self) -> String {
+        self.oidc_client_secret
+            .get()
+            .cloned()
+            .or_else(|| std::env::var(OIDC_CLIENT_SECRET_ENV).ok())
+            .unwrap_or_default()
+    }
+
+    /// 前端基址（302 的目标前缀）。
+    fn frontend_base_url(&self) -> String {
+        self.frontend_base_url
+            .get()
+            .cloned()
+            .unwrap_or_default()
+    }
+}
+
 /// 认证与账号体系的服务。
 #[derive(Debug, Clone)]
 pub struct IamService {
@@ -238,7 +338,11 @@ pub struct IamService {
     dummy_hash: DummyHash,
     /// 权限点提供者（**可选** —— 未注入时登录响应的 `permissions` 是空数组）。
     permission_provider: PermissionProviderSlot,
+    /// SSO 入站（REQ-013）的后设槽。
+    sso: SsoState,
 }
+
+
 
 impl IamService {
     /// 构造服务（构建密钥集与假哈希）。
@@ -251,7 +355,108 @@ impl IamService {
             keys,
             dummy_hash,
             permission_provider: PermissionProviderSlot::default(),
+            sso: SsoState::default(),
         })
+    }
+
+    // -----------------------------------------------------------------------
+    // SSO 后设槽（REQ-013）
+    // -----------------------------------------------------------------------
+
+    /// 注入 SSO 配置源（由装配层用 `ConfigService::read_entries` 实现）。
+    ///
+    /// 返回 `false` = 已注入过（不覆盖）。
+    pub fn set_sso_config_source(&self, source: Arc<dyn SsoConfigSource>) -> bool {
+        self.sso.config_source.set(source).is_ok()
+    }
+
+    /// 注入审计 recorder（**后设槽**，不改 `new` 签名 —— S35）。
+    ///
+    /// 返回 `false` = 已注入过（不覆盖）。
+    pub fn with_sso_audit_recorder(&self, recorder: Arc<dyn SsoAuditRecorder>) -> bool {
+        self.sso.audit_recorder.set(recorder).is_ok()
+    }
+
+    /// 注入 LDAP 客户端（生产用默认 [`crate::sso::ldap::Ldap3SsoClient`]；测试注入可计数实现）。
+    pub fn set_sso_ldap_client(&self, client: Arc<dyn SsoLdapClient>) -> bool {
+        self.sso.ldap_client.set(client).is_ok()
+    }
+
+    /// 注入 OIDC 出站 HTTP 客户端（测试注入带测试根的客户端 —— P10 / S13）。
+    ///
+    /// 返回 `false` = 已注入过（不覆盖）。
+    pub fn set_sso_http_client(&self, client: Arc<oidc::OidcHttpClient>) -> bool {
+        self.sso.oidc.install_http(client)
+    }
+
+    /// 设置前端基址（回调 302 的目标前缀，P4）。
+    pub fn set_sso_frontend_base_url(&self, base_url: impl Into<String>) -> bool {
+        self.sso.frontend_base_url.set(base_url.into()).is_ok()
+    }
+
+    /// 设置 OIDC `client_secret`（**只存在内存里** —— 不进配置 / 不进日志）。
+    pub fn set_sso_oidc_client_secret(&self, secret: impl Into<String>) -> bool {
+        self.sso.oidc_client_secret.set(secret.into()).is_ok()
+    }
+
+    /// 设置 LDAP 服务账号凭据（用于 search；不设则匿名 bind）。
+    pub fn set_sso_ldap_service_bind(
+        &self,
+        dn: impl Into<String>,
+        password: impl Into<String>,
+    ) -> bool {
+        self.sso
+            .ldap_service_bind
+            .set((dn.into(), password.into()))
+            .is_ok()
+    }
+
+    /// 前端回调页的地址（P4）：`{前端基址}/sso/callback?<query>`。
+    pub fn sso_frontend_callback_location(&self, query: &str) -> String {
+        format!(
+            "{}/sso/callback?{query}",
+            self.sso.frontend_base_url().trim_end_matches('/')
+        )
+    }
+
+    /// **失败**交接的地址：`{前端基址}/sso/callback?error=<CODE>`。
+    ///
+    /// `error` **只放错误码** —— 不放 `detail`、不放任何配置值（rev 3.1）。
+    pub fn sso_callback_error_location(&self, code: &str) -> String {
+        self.sso_frontend_callback_location(&format!(
+            "error={}",
+            oidc::percent_encode(code)
+        ))
+    }
+
+    /// **成功**交接的地址：`{前端基址}/sso/callback?ticket=<ticket>`。
+    pub fn sso_callback_ticket_location(&self, ticket: &str) -> String {
+        self.sso_frontend_callback_location(&format!(
+            "ticket={}",
+            oidc::percent_encode(ticket)
+        ))
+    }
+
+    /// 读一次 SSO 配置（区分「未装配 / 读到 / 读失败」）。
+    async fn sso_config(&self, ctx: &RequestContext) -> SsoConfigOutcome {
+        let Some(source) = self.sso.config_source.get() else {
+            return SsoConfigOutcome::NotInstalled;
+        };
+        match source.read(ctx).await {
+            Ok(config) => SsoConfigOutcome::Loaded(config),
+            Err(_) => SsoConfigOutcome::Unreadable,
+        }
+    }
+
+    /// 读配置并要求「已装配且可读」，否则 `SSO_PROVIDER_NOT_CONFIGURED`。
+    async fn require_sso_config(&self, ctx: &RequestContext) -> Result<SsoConfig, IamError> {
+        match self.sso_config(ctx).await {
+            SsoConfigOutcome::Loaded(config) => Ok(config),
+            // 未装配 / 读失败 —— 对未认证调用者都表现为「这个租户没有 SSO」。
+            SsoConfigOutcome::NotInstalled | SsoConfigOutcome::Unreadable => {
+                Err(IamError::SsoProviderNotConfigured)
+            }
+        }
     }
 
     /// 注入权限点提供者（**启动期一次**）。
@@ -380,6 +585,13 @@ impl IamService {
         meta: &RequestMeta,
     ) -> Result<LoginResponse, IamError> {
         let tenant = ctx.tenant_id().ok_or(IamError::TenantContextMissing)?;
+
+        // 0) **强制 SSO 判定**（AC-S-021 / demand §2）。
+        //
+        // 必须在**加载用户 / 校验密码之前**：
+        // - 先查用户再拒 → 不存在用户会走「查无此人」分支 → 403 vs 401 就是枚举预言机；
+        // - 也避免在强制 SSO 期间白跑一次 Argon2id（低配机上是真实 CPU 成本）。
+        self.enforce_sso(ctx).await?;
 
         // 1) 按 IP 的滑动窗口限流（瞬时打爆）：**只算失败尝试**，且**跨租户共享**。
         self.check_ip_rate_limit(ctx, &meta.ip).await?;
@@ -560,6 +772,476 @@ impl IamService {
     }
 
     // -----------------------------------------------------------------------
+    // SSO（REQ-013）
+    // -----------------------------------------------------------------------
+
+    /// 强制 SSO 判定（**密码校验之前**）。
+    ///
+    /// 三种状态的处理（AC-S-021 / demand §2）：
+    ///
+    /// | 状态 | 行为 |
+    /// |------|------|
+    /// | 未装配配置源 | 放行（本部署没装配 SSO） |
+    /// | 读到且 `enforce = false` | 放行 |
+    /// | 读到且 `enforce = true` | `403 SSO_REQUIRED` + `params.ssoProviders` |
+    /// | 注入过但**读失败** | `403 SSO_REQUIRED`（**fail closed**）+ warn |
+    async fn enforce_sso(&self, ctx: &RequestContext) -> Result<(), IamError> {
+        let outcome = self.sso_config(ctx).await;
+        if !outcome.enforcement() {
+            return Ok(());
+        }
+        let providers = match &outcome {
+            SsoConfigOutcome::Loaded(config) => config.providers(),
+            // 读失败时拿不到「可用 provider」，但不能因此放行 —— 空列表 + 403。
+            SsoConfigOutcome::Unreadable | SsoConfigOutcome::NotInstalled => Vec::new(),
+        };
+        if matches!(outcome, SsoConfigOutcome::Unreadable) {
+            // 静默把 enforce 当 false = 强制 SSO 悄悄失效（S16）。
+            tracing::warn!(
+                tenant = ctx.tenant_id().unwrap_or_default(),
+                "the sso configuration could not be read; local password login is rejected (fail closed)"
+            );
+        }
+        Err(IamError::SsoRequired { providers })
+    }
+
+    /// 当前租户可用的 SSO provider 列表（登录页用；**不需要认证**）。
+    pub async fn sso_providers(
+        &self,
+        ctx: &RequestContext,
+    ) -> Result<Vec<SsoProviderView>, IamError> {
+        match self.sso_config(ctx).await {
+            SsoConfigOutcome::Loaded(config) => Ok(config.providers()),
+            // 未装配 / 读失败 → 空列表（200）。
+            // 「查了但没有」不是「没有这个接口」，也不是 500。
+            SsoConfigOutcome::NotInstalled => Ok(Vec::new()),
+            SsoConfigOutcome::Unreadable => {
+                tracing::warn!(
+                    tenant = ctx.tenant_id().unwrap_or_default(),
+                    "the sso configuration could not be read; the provider list is reported as empty"
+                );
+                Ok(Vec::new())
+            }
+        }
+    }
+
+    /// 发起 OIDC 授权：落一条 `oidc_state`，返回 302 的 `Location`。
+    pub async fn begin_oidc_authorize(&self, ctx: &RequestContext) -> Result<String, IamError> {
+        let config = self.require_sso_config(ctx).await?;
+        config.validate().map_err(|reason| IamError::SsoConfigInvalid {
+            reason,
+        })?;
+        if !config.oidc.enabled {
+            return Err(IamError::SsoProviderNotConfigured);
+        }
+
+        let discovery = self
+            .sso
+            .oidc
+            .discovery(&config.oidc.issuer, false)
+            .await?;
+
+        let state = oidc::random_token();
+        let nonce = oidc::random_token();
+        let verifier = oidc::new_code_verifier();
+        let challenge = oidc::code_challenge(&verifier);
+
+        let record = store::OidcStateRecord {
+            state: state.clone(),
+            tenant_id: ctx
+                .tenant_id()
+                .ok_or(IamError::TenantContextMissing)?
+                .to_string(),
+            provider: OIDC_PROVIDER.to_string(),
+            nonce: nonce.clone(),
+            code_verifier: verifier,
+            code_challenge: challenge.clone(),
+            redirect_uri: config.oidc.redirect_uri.clone(),
+            created_at: OffsetDateTime::now_utc(),
+            expires_at: OffsetDateTime::now_utc() + oidc::OIDC_STATE_TTL,
+            consumed_at: None,
+        };
+        self.store
+            .insert_oidc_state(ctx, &record)
+            .await
+            .map_err(internal)?;
+
+        Ok(oidc::authorization_url(
+            &discovery.authorization_endpoint,
+            &config.oidc,
+            &state,
+            &nonce,
+            &challenge,
+        ))
+    }
+
+    /// 完成 OIDC 回调：校验 → 换 token → 验签 → 绑定 → 建会话 → 落 ticket。
+    ///
+    /// 返回 `302` 的目标（`{前端基址}/sso/callback?ticket=…`）。
+    pub async fn complete_oidc_callback(
+        &self,
+        header_tenant: Option<&str>,
+        code: &str,
+        state: &str,
+        meta: &RequestMeta,
+    ) -> Result<String, IamError> {
+        let outcome = self
+            .do_oidc_callback(header_tenant, code, state, meta)
+            .await;
+        match &outcome {
+            Ok((tenant, user, sub, _session_id)) => {
+                self.record_sso_success("oidc", sub, &user.id, meta);
+                let _ = tenant;
+            }
+            Err(error) => self.record_sso_failure("oidc", error.code(), meta),
+        }
+        outcome.map(|(_, _, _, location)| location)
+    }
+
+    #[allow(clippy::type_complexity)]
+    async fn do_oidc_callback(
+        &self,
+        header_tenant: Option<&str>,
+        code: &str,
+        state: &str,
+        meta: &RequestMeta,
+    ) -> Result<(String, UserRecord, String, String), IamError> {
+        // 1) 读 state（**不带租户过滤**：回调时还没有权威租户来源）。
+        let record = self
+            .store
+            .find_oidc_state(state)
+            .await
+            .map_err(internal)?
+            .ok_or(IamError::SsoOidcStateInvalid)?;
+        if record.consumed_at.is_some() {
+            return Err(IamError::SsoOidcStateInvalid);
+        }
+        if record.expires_at <= OffsetDateTime::now_utc() {
+            return Err(IamError::SsoOidcStateExpired);
+        }
+        if record.provider != OIDC_PROVIDER {
+            return Err(IamError::SsoOidcStateInvalid);
+        }
+
+        // 2) 租户归属（P3）：有头必须相等，无头**采纳 state 租户**。
+        let tenant = oidc::resolve_callback_tenant(header_tenant, &record.tenant_id)?;
+        let ctx = RequestContext::new().with_tenant(tenant.clone());
+
+        // 3) 配置（此时租户已确定）。
+        let config = self.require_sso_config(&ctx).await?;
+        config
+            .validate()
+            .map_err(|reason| IamError::SsoConfigInvalid { reason })?;
+        if !config.oidc.enabled {
+            return Err(IamError::SsoProviderNotConfigured);
+        }
+
+        // 4) 原子消费（**租户作用域**：跨租户连「消费掉」都做不到）。
+        let consumed = self
+            .store
+            .consume_oidc_state(&tenant, state)
+            .await
+            .map_err(internal)?;
+        if consumed == 0 {
+            return Err(IamError::SsoOidcStateInvalid);
+        }
+
+        // 5) PKCE：**先本地重算** challenge 比对（AC-S-101 步骤 6 的观测面）。
+        if oidc::code_challenge(&record.code_verifier) != record.code_challenge {
+            return Err(IamError::SsoOidcPkceMismatch);
+        }
+
+        // 6) 发现文档 → 换 token。
+        let discovery = self
+            .sso
+            .oidc
+            .discovery(&config.oidc.issuer, false)
+            .await?;
+        let client_secret = self.sso.client_secret();
+        let http = self.sso.oidc.http()?;
+        let token = oidc::exchange_code(
+            &http,
+            &discovery.token_endpoint,
+            &config.oidc,
+            &client_secret,
+            code,
+            &record.code_verifier,
+            &record.redirect_uri,
+        )
+        .await?;
+
+        // 7) 验签（未知 kid → **强制刷新一次** JWKS 再试，AC-S-102 步骤 7）。
+        let mut keys = self
+            .sso
+            .oidc
+            .signing_keys(&config.oidc.issuer, &discovery.jwks_uri, false)
+            .await?;
+        let claims = match oidc::verify_id_token_with(
+            &token.id_token,
+            &keys,
+            &config.oidc.issuer,
+            &config.oidc.client_id,
+            Some(&record.nonce),
+        ) {
+            Ok(claims) => claims,
+            Err(IamError::SsoOidcTokenInvalid) => {
+                keys = self
+                    .sso
+                    .oidc
+                    .signing_keys(&config.oidc.issuer, &discovery.jwks_uri, true)
+                    .await?;
+                oidc::verify_id_token_with(
+                    &token.id_token,
+                    &keys,
+                    &config.oidc.issuer,
+                    &config.oidc.client_id,
+                    Some(&record.nonce),
+                )?
+            }
+            Err(other) => return Err(other),
+        };
+
+        // 8) 绑定 / JIT。
+        let display_name = claims
+            .name
+            .clone()
+            .or_else(|| claims.preferred_username.clone());
+        let email = claims
+            .email
+            .clone()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let binding = binding::resolve(
+            &self.store,
+            &ctx,
+            &config,
+            OIDC_PROVIDER,
+            &claims.sub,
+            email.as_deref(),
+            display_name.as_deref(),
+        )
+        .await?;
+
+        if binding.user.status != STATUS_ACTIVE {
+            return Err(IamError::AccountDisabled);
+        }
+
+        // 9) 会话（`auth_provider = oidc`）+ 一次性 ticket。
+        let session = self
+            .create_session(&ctx, &tenant, &binding.user, meta, AuthProvider::Oidc)
+            .await?;
+        let ticket = ticket::new_ticket();
+        ticket::issue(&self.store, &ctx, &ticket, &binding.user.id, &session.id).await?;
+
+        if binding.created_user || binding.created_link {
+            self.sso
+                .recorder()
+                .record(&SsoAuditEvent::new(
+                    sso_audit::EVENT_LINK_CREATED,
+                    SsoAuditPayload::link_created(OIDC_PROVIDER, &claims.sub, &binding.user.id),
+                ));
+        }
+
+        let location = self.sso_callback_ticket_location(&ticket);
+        Ok((tenant, binding.user, claims.sub, location))
+    }
+
+    /// 用一次性 ticket 换会话（P4）。
+    ///
+    /// `header_tenant` 有值时必须是票据的租户（否则 `401 SSO_TICKET_INVALID`）。
+    pub async fn exchange_sso_ticket(
+        &self,
+        header_tenant: Option<&str>,
+        ticket: &str,
+    ) -> Result<LoginResponse, IamError> {
+        let record = ticket::consume(&self.store, ticket, header_tenant).await?;
+        let ctx = RequestContext::new().with_tenant(record.tenant_id.clone());
+
+        let session = self
+            .store
+            .find_session(&ctx, &record.session_id)
+            .await
+            .map_err(internal)?
+            .ok_or(IamError::SsoTicketInvalid)?;
+        let user = self
+            .store
+            .find_user_by_id(&ctx, &record.user_id)
+            .await
+            .map_err(internal)?
+            .ok_or(IamError::SsoTicketInvalid)?;
+        if user.status != STATUS_ACTIVE {
+            return Err(IamError::AccountDisabled);
+        }
+
+        self.issue_tokens_for_session(&ctx, &record.tenant_id, &user, &session)
+            .await
+    }
+
+    /// LDAP 登录（bind 认证）。
+    pub async fn login_via_ldap(
+        &self,
+        ctx: &RequestContext,
+        req: &LdapLoginRequest,
+        meta: &RequestMeta,
+    ) -> Result<LoginResponse, IamError> {
+        let outcome = self.do_ldap_login(ctx, req, meta).await;
+        match &outcome {
+            Ok((sub, user_id, _response)) => {
+                self.record_sso_success(LDAP_PROVIDER, sub, user_id, meta)
+            }
+            Err(error) => self.record_sso_failure(LDAP_PROVIDER, error.code(), meta),
+        }
+        outcome.map(|(_, _, response)| response)
+    }
+
+    async fn do_ldap_login(
+        &self,
+        ctx: &RequestContext,
+        req: &LdapLoginRequest,
+        meta: &RequestMeta,
+    ) -> Result<(String, String, LoginResponse), IamError> {
+        let tenant = ctx.tenant_id().ok_or(IamError::TenantContextMissing)?;
+        let config = self.require_sso_config(ctx).await?;
+        config
+            .validate()
+            .map_err(|reason| IamError::SsoConfigInvalid { reason })?;
+        if !config.ldap.enabled {
+            return Err(IamError::SsoProviderNotConfigured);
+        }
+
+        // 限流：与本地登录共用同一套按 IP 的预算。
+        self.check_ip_rate_limit(ctx, &meta.ip).await?;
+
+        // **空密码在连接之前拦截**（AC-S-104 步骤 4/5/8：connect == 0、bind == 0）。
+        if ldap::is_empty_password(&req.password) {
+            return Err(IamError::SsoLdapEmptyPassword);
+        }
+
+        let client = self.ldap_client(&config.ldap.url);
+        let service_bind = self
+            .sso
+            .ldap_service_bind
+            .get()
+            .map(|(dn, password)| (dn.as_str(), password.as_str()));
+
+        let identity = match ldap::authenticate(
+            client.as_ref(),
+            &config.ldap,
+            service_bind,
+            req.username.trim(),
+            &req.password,
+        )
+        .await
+        {
+            Ok(identity) => identity,
+            Err(ldap::SsoLdapError::Bind) => {
+                // 失败也要计入限流（AC-S-104 步骤 7）。
+                self.record_sso_failure_rate(ctx, meta, &req.username)
+                    .await?;
+                return Err(IamError::SsoLdapBindFailed);
+            }
+            Err(ldap::SsoLdapError::Connection)
+            | Err(ldap::SsoLdapError::Search)
+            | Err(ldap::SsoLdapError::Config) => {
+                return Err(IamError::SsoLdapUnreachable)
+            }
+        };
+
+        let binding = binding::resolve(
+            &self.store,
+            ctx,
+            &config,
+            LDAP_PROVIDER,
+            &identity.dn,
+            identity.email.as_deref(),
+            None,
+        )
+        .await?;
+
+        if binding.user.status != STATUS_ACTIVE {
+            return Err(IamError::AccountDisabled);
+        }
+
+        self.store
+            .reset_login_failures(ctx, &binding.user.id)
+            .await
+            .map_err(internal)?;
+        self.record_attempt(ctx, meta, &req.username, true).await?;
+
+        let session = self
+            .create_session(ctx, tenant, &binding.user, meta, AuthProvider::Ldap)
+            .await?;
+        if binding.created_user || binding.created_link {
+            self.sso
+                .recorder()
+                .record(&SsoAuditEvent::new(
+                    sso_audit::EVENT_LINK_CREATED,
+                    SsoAuditPayload::link_created(LDAP_PROVIDER, &identity.dn, &binding.user.id),
+                ));
+        }
+        let response = self
+            .issue_tokens_for_session(ctx, tenant, &binding.user, &session)
+            .await?;
+        Ok((identity.dn, binding.user.id, response))
+    }
+
+    /// LDAP 客户端：注入优先；否则按配置现造一个 `ldap3` 实现（每次登录新建连接）。
+    fn ldap_client(&self, url: &str) -> Arc<dyn SsoLdapClient> {
+        self.sso
+            .ldap_client
+            .get()
+            .cloned()
+            .unwrap_or_else(|| Arc::new(ldap::Ldap3SsoClient::new(url)))
+    }
+
+    /// 发一条「成功」审计事件。
+    fn record_sso_success(
+        &self,
+        provider: &str,
+        external_id: &str,
+        user_id: &str,
+        meta: &RequestMeta,
+    ) {
+        self.sso.recorder().record(&SsoAuditEvent::new(
+            sso_audit::EVENT_LOGIN_SUCCEEDED,
+            SsoAuditPayload::succeeded(provider, external_id, user_id, &meta.ip, &meta.user_agent),
+        ));
+    }
+
+    /// 发一条「失败」审计事件（**只带 provider / code / ip**）。
+    fn record_sso_failure(&self, provider: &str, code: &str, meta: &RequestMeta) {
+        self.sso.recorder().record(&SsoAuditEvent::new(
+            sso_audit::EVENT_LOGIN_FAILED,
+            SsoAuditPayload::failed(provider, code, &meta.ip),
+        ));
+    }
+
+    /// 记一次 SSO 失败（只进限流桶与尝试流水，不动账号锁定 —— 目录里的账号不在本地）。
+    async fn record_sso_failure_rate(
+        &self,
+        ctx: &RequestContext,
+        meta: &RequestMeta,
+        username: &str,
+    ) -> Result<(), IamError> {
+        let mut tx = self.store.begin(ctx).await.map_err(internal)?;
+        self.store
+            .record_login_attempt_in(
+                &mut tx,
+                &Uuid::new_v4().to_string(),
+                &meta.ip,
+                username,
+                false,
+            )
+            .await
+            .map_err(internal)?;
+        self.store
+            .record_login_rate_in(&mut tx, &Uuid::new_v4().to_string(), &ip_hash(&meta.ip))
+            .await
+            .map_err(internal)?;
+        tx.commit().await.map_err(internal)
+    }
+
+    // -----------------------------------------------------------------------
     // 令牌
     // -----------------------------------------------------------------------
 
@@ -571,33 +1253,29 @@ impl IamService {
         user: &UserRecord,
         meta: &RequestMeta,
     ) -> Result<LoginResponse, IamError> {
-        let session_id = Uuid::new_v4().to_string();
-        let family_id = Uuid::new_v4().to_string();
-        let refresh_token = crypto::new_refresh_token();
-        let refresh_hash = crypto::digest_base64url(refresh_token.as_bytes());
-        let expires_at = OffsetDateTime::now_utc() + self.config.tokens.refresh_ttl;
-
         let session = SessionRecord {
-            id: session_id.clone(),
+            id: Uuid::new_v4().to_string(),
             tenant_id: tenant.to_string(),
             user_id: user.id.clone(),
             device_label: device_label(meta),
             ip: meta.ip.clone(),
             user_agent: meta.user_agent.clone(),
-            family_id: family_id.clone(),
+            family_id: Uuid::new_v4().to_string(),
+            auth_provider: AuthProvider::Local.as_str().to_string(),
             created_at: OffsetDateTime::now_utc(),
             last_used_at: OffsetDateTime::now_utc(),
             revoked_at: None,
         };
+        let refresh_token = crypto::new_refresh_token();
         let refresh = RefreshRecord {
             id: Uuid::new_v4().to_string(),
             tenant_id: tenant.to_string(),
             user_id: user.id.clone(),
-            session_id: session_id.clone(),
-            family_id,
-            token_hash: refresh_hash,
+            session_id: session.id.clone(),
+            family_id: session.family_id.clone(),
+            token_hash: crypto::digest_base64url(refresh_token.as_bytes()),
             issued_at: OffsetDateTime::now_utc(),
-            expires_at,
+            expires_at: OffsetDateTime::now_utc() + self.config.tokens.refresh_ttl,
             used_at: None,
             revoked_at: None,
             replaced_by: None,
@@ -615,7 +1293,83 @@ impl IamService {
             .map_err(internal)?;
         tx.commit().await.map_err(internal)?;
 
-        let access_token = self.issue_access_token(&user.id, tenant, &session_id)?;
+        self.finish_login_response(ctx, tenant, user, &session.id, refresh_token)
+            .await
+    }
+
+    /// 建一条会话（**不签 refresh token**）。
+    ///
+    /// 拆成两步是为了 ticket 交接（P4）：回调只建会话 + 落 ticket，
+    /// token 在 `POST /sso/exchange` 的响应体里才出现。
+    async fn create_session(
+        &self,
+        ctx: &RequestContext,
+        tenant: &str,
+        user: &UserRecord,
+        meta: &RequestMeta,
+        provider: AuthProvider,
+    ) -> Result<SessionRecord, IamError> {
+        let session = SessionRecord {
+            id: Uuid::new_v4().to_string(),
+            tenant_id: tenant.to_string(),
+            user_id: user.id.clone(),
+            device_label: device_label(meta),
+            ip: meta.ip.clone(),
+            user_agent: meta.user_agent.clone(),
+            family_id: Uuid::new_v4().to_string(),
+            auth_provider: provider.as_str().to_string(),
+            created_at: OffsetDateTime::now_utc(),
+            last_used_at: OffsetDateTime::now_utc(),
+            revoked_at: None,
+        };
+        self.store
+            .insert_session(ctx, &session)
+            .await
+            .map_err(internal)?;
+        Ok(session)
+    }
+
+    /// 给一条**已存在**的会话签发 refresh token，并组装 `LoginResponse`。
+    async fn issue_tokens_for_session(
+        &self,
+        ctx: &RequestContext,
+        tenant: &str,
+        user: &UserRecord,
+        session: &SessionRecord,
+    ) -> Result<LoginResponse, IamError> {
+        let refresh_token = crypto::new_refresh_token();
+        let refresh = RefreshRecord {
+            id: Uuid::new_v4().to_string(),
+            tenant_id: tenant.to_string(),
+            user_id: user.id.clone(),
+            session_id: session.id.clone(),
+            family_id: session.family_id.clone(),
+            token_hash: crypto::digest_base64url(refresh_token.as_bytes()),
+            issued_at: OffsetDateTime::now_utc(),
+            expires_at: OffsetDateTime::now_utc() + self.config.tokens.refresh_ttl,
+            used_at: None,
+            revoked_at: None,
+            replaced_by: None,
+        };
+        self.store
+            .insert_refresh_token(ctx, &refresh)
+            .await
+            .map_err(internal)?;
+
+        self.finish_login_response(ctx, tenant, user, &session.id, refresh_token)
+            .await
+    }
+
+    /// 组装登录响应（access token + 权限点集合 + 账号视图）。
+    async fn finish_login_response(
+        &self,
+        ctx: &RequestContext,
+        tenant: &str,
+        user: &UserRecord,
+        session_id: &str,
+        refresh_token: String,
+    ) -> Result<LoginResponse, IamError> {
+        let access_token = self.issue_access_token(&user.id, tenant, session_id)?;
         // 权限点集合：与 `GET /api/rbac/me/permissions` **同一份**数据
         // （两个入口不得给出不同答案 —— 否则前端 `can()` 与后端 403 会打架）。
         let permissions = self.effective_permissions(ctx, &user.id).await;
@@ -1145,6 +1899,16 @@ impl IamService {
     }
 }
 
+/// 平台契约要求的**声明面**（与 payload 接缝是两件不同的事 —— P14）。
+///
+/// `platform_core` 只有 [`Auditable`] + [`AuditEventSpec`]（**没有 payload 字段**），
+/// 所以「声明」走这里，「发出」走 [`SsoAuditRecorder`]。
+impl Auditable for IamService {
+    fn audit_events(&self) -> &[AuditEventSpec] {
+        sso_audit::audit_events()
+    }
+}
+
 /// 账号是否处于锁定期（`now` 由调用方传入 → 判定与状态更新用**同一个时刻**）。
 fn is_locked(user: &UserRecord, now: OffsetDateTime) -> bool {
     user.locked_until.is_some_and(|until| until > now)
@@ -1210,6 +1974,7 @@ fn session_view(session: &SessionRecord) -> SessionView {
         user_agent: session.user_agent.clone(),
         created_at: rfc3339(session.created_at),
         last_used_at: rfc3339(session.last_used_at),
+        auth_provider: session.auth_provider.clone(),
     }
 }
 

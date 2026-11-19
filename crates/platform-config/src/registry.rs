@@ -311,9 +311,26 @@ impl ConfigRegistry {
         }
 
         // 登记为 boolean 的键 = flag（见模块文档）。
+        //
+        // ⚠️ **必须同时是合法的 flag 名**（`[a-z][a-z0-9]{0,63}`，见 `flag::is_valid_flag_name`）。
+        //
+        // 为什么：带点号的布尔键（如 REQ-013 的 `sso.enforce`）不是「功能开关」——
+        // 它是**普通租户配置**。若把它们也当 flag，会同时坏两件事：
+        //
+        // 1. 通用写路由把它们拦成 `FlagEndpointRequired`（写不进去）；
+        // 2. flag 写路由又因为名字里有点号被判 `FlagNameInvalid`（还是写不进去）
+        //    → **两条路都走不通**，配置永远停在 manifest 默认值；
+        // 3. 还会给它们派生出无意义的 `flags.sso.enforce.rolloutPercent`。
+        //
+        // 「boolean ⇒ flag」这条推导规则本来就是启发式（规格没给 flag 单独声明段，
+        // 见模块文档第 22~28 行）。加上名字约束后它才自洽：
+        // **dimension-free 的布尔键是开关，点号键只是布尔类型的配置。**
         let mut flags: BTreeSet<String> = keys
             .values()
-            .filter(|registered| registered.kind == ConfigType::Boolean)
+            .filter(|registered| {
+                registered.kind == ConfigType::Boolean
+                    && crate::flag::is_valid_flag_name(&registered.key)
+            })
             .map(|registered| registered.key.clone())
             .collect();
 

@@ -299,6 +299,9 @@ async fn serve() -> Result<(), Failure> {
         Arc::new(RejectAllSchemaTokens);
     // 业务模块路由的认证层需要 IAM（未配置 → 模块路由一律 401，fail closed）。
     let mut module_iam: Option<Arc<platform_iam::service::IamService>> = None;
+    // SSO 入站（REQ-013）的配置源要用 `ConfigService` 实现 —— 而配置服务在本函数
+    // 较后才构造（它依赖注册表）。所以先留一个句柄，等配置服务就绪再注入。
+    let mut sso_iam: Option<Arc<platform_iam::service::IamService>> = None;
     let mut config_checker: Arc<dyn PermissionChecker> = Arc::new(DenyAllPermissions);
     let mut config_permissions: Arc<dyn PermissionRefresher> = Arc::new(DenyAllPermissions);
 
@@ -311,7 +314,10 @@ async fn serve() -> Result<(), Failure> {
         let iam_state = build_iam_state(&config).await?;
         app = app
             .nest("/api/iam", platform_iam::http::router(iam_state.clone()))
-            .merge(platform_iam::http::jwks_router(iam_state.clone()));
+            .merge(platform_iam::http::jwks_router(iam_state.clone()))
+            // SSO 入站（REQ-013）：`/api/iam/sso/*`（与 `/api/iam` 同一层 nest）。
+            .nest("/api/iam", platform_iam::http::sso_router(iam_state.clone()));
+        sso_iam = Some(iam_state.service.clone());
 
         // 用户与组织架构（REQ-008）：`/api/org/*`。
         //
@@ -439,6 +445,34 @@ async fn serve() -> Result<(), Failure> {
     let app = app.merge(platform_config::http::router(config_state));
     tracing::info!("配置与品牌已启用：/api/config/*、/api/feature-flags/*");
 
+    // SSO 入站（REQ-013）：把「配置源」等后设槽接到 IAM 服务上。
+    //
+    // 配置源用 `ConfigService::read_entries` 实现 —— 与 `GET /api/config/entries`
+    // **同一套解析**（三层覆盖 + manifest 默认值），不另开读路径。
+    if let Some(service) = sso_iam {
+        let source = Arc::new(ConfigServiceSsoSource {
+            config: config_service.clone(),
+        });
+        if !service.set_sso_config_source(source) {
+            tracing::warn!("SSO 配置源已经注入过：保留先装好的实现");
+        }
+        if let Ok(base) = std::env::var("BASE_SSO_FRONTEND_BASE_URL") {
+            service.set_sso_frontend_base_url(base);
+        }
+        // `client_secret` **只从环境变量来**，绝不进 config / 响应 / 日志（AC-S-106）。
+        if let Ok(secret) = std::env::var(platform_iam::sso::config::OIDC_CLIENT_SECRET_ENV) {
+            service.set_sso_oidc_client_secret(secret);
+        }
+        // LDAP 服务账号（可选；不配则匿名 bind）。
+        if let (Ok(dn), Ok(password)) = (
+            std::env::var(platform_iam::sso::config::LDAP_SERVICE_BIND_DN_ENV),
+            std::env::var(platform_iam::sso::config::LDAP_SERVICE_BIND_PASSWORD_ENV),
+        ) {
+            service.set_sso_ldap_service_bind(dn, password);
+        }
+        tracing::info!("SSO 入站已启用：/api/iam/sso/*");
+    }
+
     // 国际化与本地化（REQ-021）：`/api/i18n/context` + `/api/i18n/fx/convert`。
     //
     // **不新增权限点**（design §5.3.1 / D115）→ 不碰权限点三件套，没有
@@ -563,6 +597,89 @@ async fn build_rbac_state(
         checker,
         tokens: Arc::new(platform_rbac::http::IamTokenVerifier::new(iam)),
     }))
+}
+
+/// SSO 配置源：用平台配置服务读那 12 个键（REQ-013）。
+///
+/// 与 `GET /api/config/entries` **同一套解析**：三层覆盖 + manifest 默认值，
+/// 「按精确键名读」——**没有**「全量导出配置」这种能力（P1 / S1）。
+struct ConfigServiceSsoSource {
+    config: Arc<platform_config::ConfigService>,
+}
+
+impl platform_iam::sso::config::SsoConfigSource for ConfigServiceSsoSource {
+    fn read(
+        &self,
+        ctx: &platform_core::RequestContext,
+    ) -> platform_iam::sso::config::SsoBoxFuture<
+        '_,
+        Result<
+            platform_iam::sso::config::SsoConfig,
+            platform_iam::sso::config::SsoConfigError,
+        >,
+    > {
+        let config = self.config.clone();
+        let ctx = ctx.clone();
+        Box::pin(async move {
+            let keys: Vec<String> = platform_iam::sso::config::SSO_CONFIG_KEYS
+                .iter()
+                .map(|key| (*key).to_string())
+                .collect();
+            let entries = config
+                .read_entries(&ctx, &keys)
+                .await
+                .map_err(|_| platform_iam::sso::config::SsoConfigError)?;
+            Ok(sso_config_from_entries(&entries))
+        })
+    }
+}
+
+/// 把解析结果映射成 [`platform_iam::sso::config::SsoConfig`]。
+///
+/// 缺失的键用**代码里的默认值**（与 `manifest.json` 登记的默认值一致）——
+/// 但注意：迁移 / 注册表都在时它们必然齐全，缺失只可能是注册表被改坏了。
+fn sso_config_from_entries(
+    entries: &[platform_core::ResolvedConfig],
+) -> platform_iam::sso::config::SsoConfig {
+    use platform_iam::sso::config::{LdapSettings, OidcSettings, SsoConfig};
+
+    fn text(entries: &[platform_core::ResolvedConfig], key: &str) -> Option<String> {
+        entries
+            .iter()
+            .find(|entry| entry.key == key)
+            .and_then(|entry| entry.value.as_str())
+            .map(str::to_string)
+    }
+    fn flag(entries: &[platform_core::ResolvedConfig], key: &str) -> Option<bool> {
+        entries
+            .iter()
+            .find(|entry| entry.key == key)
+            .and_then(|entry| entry.value.as_bool())
+    }
+
+    let defaults = SsoConfig::default();
+    SsoConfig {
+        enforce: flag(entries, "sso.enforce").unwrap_or(defaults.enforce),
+        jit_provisioning: flag(entries, "sso.jitProvisioning")
+            .unwrap_or(defaults.jit_provisioning),
+        oidc: OidcSettings {
+            enabled: flag(entries, "sso.oidc.enabled").unwrap_or(defaults.oidc.enabled),
+            issuer: text(entries, "sso.oidc.issuer").unwrap_or(defaults.oidc.issuer),
+            client_id: text(entries, "sso.oidc.clientId").unwrap_or(defaults.oidc.client_id),
+            scopes: text(entries, "sso.oidc.scopes").unwrap_or(defaults.oidc.scopes),
+            redirect_uri: text(entries, "sso.oidc.redirectUri")
+                .unwrap_or(defaults.oidc.redirect_uri),
+        },
+        ldap: LdapSettings {
+            enabled: flag(entries, "sso.ldap.enabled").unwrap_or(defaults.ldap.enabled),
+            url: text(entries, "sso.ldap.url").unwrap_or(defaults.ldap.url),
+            base_dn: text(entries, "sso.ldap.baseDn").unwrap_or(defaults.ldap.base_dn),
+            user_search_filter: text(entries, "sso.ldap.userSearchFilter")
+                .unwrap_or(defaults.ldap.user_search_filter),
+            mail_attribute: text(entries, "sso.ldap.mailAttribute")
+                .unwrap_or(defaults.ldap.mail_attribute),
+        },
+    }
 }
 
 /// 构造配置服务（注册表来自 manifest 根目录，数据访问只走 `platform-db`）。

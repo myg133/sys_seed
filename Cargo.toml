@@ -109,6 +109,35 @@ http = "1"
 # http_body_util::Full 的载荷类型（已在锁文件里，不新增 crate）。
 bytes = "1"
 
+# ---------------------------------------------------------------------------
+# REQ-013：TLS 栈（**D123 —— 本项目唯一一次依赖预算破例**）
+# ---------------------------------------------------------------------------
+# 为什么必须加：真实企业 IdP（Azure AD / Okta / Keycloak）全是 `https://`，
+# 而 `hyper-util` 的 `build_http()` 不带 TLS —— 只支持 http 的 OIDC 在真实环境不可用。
+# 约束：**只换 connector，不换 HTTP 栈**，不得引入 `reqwest`。
+# ⚠️ 一律 `default-features = false` + 显式 `ring`：默认后端是 aws-lc-rs（要编 C/汇编）。
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+    "logging",
+] }
+hyper-rustls = { version = "0.27", default-features = false, features = [
+    "http1",
+    "ring",
+    "webpki-tokio",
+    "tls12",
+    "logging",
+] }
+# 仅测试用（mock IdP 的**服务端** TLS）—— 只进 [dev-dependencies]。
+tokio-rustls = { version = "0.26", default-features = false, features = [
+    "ring",
+    "tls12",
+    "logging",
+] }
+# 仅测试用：生成自签根证书与 leaf（P10 的 with_custom_root）。
+rcgen = "0.13"
+
 # 低配开发基线：见 docs/dev-environment.md 与 BA/plan/dev-guide-low-spec.md
 # 第三方依赖一律不优化、不带调试信息，省编译时间与磁盘。
 [profile.dev.package."*"]

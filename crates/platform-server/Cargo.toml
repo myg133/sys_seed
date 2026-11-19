@@ -50,3 +50,6 @@ path = "src/main.rs"
 # dev-only → 不改变生产依赖树。
 tower.workspace = true
 http-body-util.workspace = true
+# SSO 的真实库端到端（REQ-013）：跑迁移、准备应用角色、造唯一夹具。
+sqlx.workspace = true
+uuid.workspace = true
