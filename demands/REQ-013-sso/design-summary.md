@@ -159,7 +159,7 @@ ALTER TABLE platform_iam_session
 | 方法 | 路径 | 认证 | 说明 |
 |---|---|---|---|
 | `GET` | `/api/iam/sso/providers` | **无**（但要租户头） | 当前租户可用的 provider 列表。登录页要在**未登录**时就知道该显示什么按钮 |
-| `GET` | `/api/iam/sso/oidc/authorize` | **无**（但要租户头） | 302 到 IdP；落一条 `oidc_state` |
+| `GET` | `/api/iam/sso/oidc/authorize` | **无** | 302 到 IdP；落一条 `oidc_state`。**租户来源：`?tenant=` 查询参数优先，其次 `x-tenant-id` 头** —— 见 §3.3 |
 | `GET` | `/api/iam/sso/oidc/callback` | **无** | 收 `code` + `state`；换 token、验签、绑定、建会话 |
 | `POST` | `/api/iam/sso/ldap/login` | **无** | body：`{username, password}`；bind 校验后建会话 |
 | `POST` | `/api/iam/sso/exchange` | **无** | body：`{ticket}`；**rev 3 新增**（见 §3.2）：把一次性 ticket 换成 `LoginResponse` |
@@ -201,7 +201,33 @@ SSO **配置的写入**走 REQ-010 的通用配置接口（已有 `config:entry:
 > 前端 SsoCallback 页 → POST /api/iam/sso/exchange {ticket} → LoginResponse
 > ```
 > 前端因此需要新增 `SsoCallback.svelte` + `/sso/callback` 路由（见 §8）。
+>
+> **失败时也必须 302**（rev 3 补充）：`302 {前端基址}/sso/callback?error=<ERROR_CODE>` ——
+> 否则用户从 IdP 跳回来只看到一个 JSON 错误页，连登录页都回不去。
+> `error` **只放错误码**，不放 detail、不放配置值。
 > **不选 cookie 方案**：那会破坏 D99（会话存 `sessionStorage`），引入第二套会话机制。
+
+---
+
+### 3.3 authorize 的租户来源（rev 3 补充，前端 Dev 发现的跨端缺口）
+
+**问题**：`/authorize` 是**顶层浏览器导航**的起点，浏览器**无法给整页导航设置请求头**。
+而此刻**还没有 `state`** 可反查租户（§2.1 的办法在这里用不了）。
+rev 2 写「要租户头」→ **真实浏览器里 OIDC 入口物理不可用**，而 AC 用脚本客户端测**又恰好看不出来**。
+
+**规则**：
+
+```
+租户 = ?tenant= 查询参数  >  x-tenant-id 请求头  >  401 TENANT_CONTEXT_MISSING
+```
+
+- 前端在跳转前把当前租户拼进 URL（登录页本来就要求用户手输租户，D98，所以这个值现成）
+- **LDAP 不需要**：`POST /sso/ldap/login` 是 XHR，正常带头即可
+- **回调不需要**：它靠 `state.tenant_id` 反查（§2.1 / acceptance P3）
+- **不新增错误码**：复用 `TENANT_CONTEXT_MISSING`（401），避免为它改 8 处（G2）
+
+**租户 id 进 URL 是可接受的**：登录页本来就要求手输租户，它不是秘密；
+AC-S-109 步骤 8 已承认「存在性可枚举」。但**不得**因此在 URL 里带 `issuer` / `clientId` / LDAP 连接串。
 
 ---
 

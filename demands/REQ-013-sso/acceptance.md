@@ -99,6 +99,42 @@ POST /api/iam/sso/exchange   body {ticket}
 
 **ticket 一次性、短命、绑租户。不得把 token 放进 URL。**
 
+**失败分支（rev 3 补充，前端 Dev 指出）**：回调**失败**时也必须 302 到前端，并带上错误码：
+
+```
+callback 失败 → 302 {前端基址}/sso/callback?error=<ERROR_CODE>
+```
+
+否则用户从 IdP 跳回来只看到浏览器里的一个 JSON 错误页，**连登录页都回不去**。
+`error` 只放**错误码**（如 `SSO_OIDC_STATE_INVALID`），不放 `detail`、不放任何配置值。
+前端据此渲染本地化文案（AC-S-089 的错误码渲染模式）。
+
+### P15 authorize 的租户来源（rev 3 补充，前端 Dev 发现的跨端缺口）
+
+`GET /api/iam/sso/oidc/authorize` 是**顶层浏览器导航**的起点 ——
+与回调同一个问题：**浏览器无法给整页导航设置请求头**。
+而 authorize 此刻**还没有 `state`** 可反查租户（P3 的办法在这里用不了）。
+
+→ **规则**：
+
+| 来源 | 优先级 | 用法 |
+|---|---|---|
+| 查询参数 `?tenant=<id>` | **1** | **顶层导航唯一可用的通道** —— 前端在跳转前把当前租户拼进 URL |
+| 请求头 `x-tenant-id` | 2 | 脚本客户端 / 测试可用 |
+| 都没有 | — | `401 TENANT_CONTEXT_MISSING`（复用既有码，见下） |
+
+**为什么不新增错误码**：`TENANT_CONTEXT_MISSING` 的语义就是「租户上下文缺失」，
+现有 HTTP 码是 **401**。authorize 缺租户是同一个问题，**不为它专造第 22 个码**
+（每加一个码要改 8 处，见 G2）。
+
+**安全说明（与 AC-S-109 步骤 8 一致）**：租户 id 出现在 URL 里是**可接受的** ——
+① 登录页本来就要求用户**手输**租户（D98），它不是秘密；
+② AC-S-109 已承认「租户/provider 存在性对未认证调用者可见」（登录页需要）；
+③ **不得**因此让 URL 或响应携带 `issuer` / `clientId` / LDAP `url` / `baseDn`。
+
+**同样适用于 LDAP**：`POST /api/iam/sso/ldap/login` 是 XHR（不是整页导航），
+走 `x-tenant-id` 头即可，**不需要** `?tenant=`。
+
 ### P5 算法白名单是硬编码（修 S34）
 
 **删掉「可由配置收窄」**（§7 没有这个键）。白名单**硬编码** `{RS256, ES256}`。
@@ -222,7 +258,7 @@ POST /api/iam/sso/exchange   body {ticket}
 
 ### 测试步骤
 
-1. `GET /api/iam/sso/oidc/authorize`（带 `x-tenant-id: tenant-a`），**不跟随跳转**
+1. `GET /api/iam/sso/oidc/authorize?tenant=tenant-a`（**查询参数**，模拟顶层导航 —— 见 P15），**不跟随跳转**
 2. 解析 302 的 `Location` query
 3. 模拟 IdP 授权完成 → `GET /callback?code=<mock code>&state=<步骤1的state>`
    （**不带** `x-tenant-id` —— 见 P3）
@@ -247,6 +283,9 @@ POST /api/iam/sso/exchange   body {ticket}
 7. 步骤 7 → 列表含本次 SSO 会话（来源字段见 AC-S-107）
 8. 步骤 8 → `401 SSO_TICKET_INVALID`（**ticket 一次性**）
 9. 步骤 9 → **同样全部成功**（D123 的直接验证点）
+10. **不带 `?tenant=` 也不带 `x-tenant-id`** 打 authorize → `401 TENANT_CONTEXT_MISSING`（P15）
+11. 回调失败（如把 `state` 改成无效值）→ **`302` 到 `{前端基址}/sso/callback?error=SSO_OIDC_STATE_INVALID`**，
+    且 `error` 值**只含错误码**（P4 失败分支）
 
 > **rev 3 修订**：
 > - **S12**：回调租户来源矛盾 → P3
