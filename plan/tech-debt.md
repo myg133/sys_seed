@@ -301,3 +301,29 @@ Sprint 3 复盘的第 2 条教训：**修漏洞会制造新漏洞** —— 但�
   会把本需求的 diff 污染成「一大坨无关的格式化改动」，评审时难以分辨真改动
 - **什么时候修**: 单独一个「格式化专案」：一次 `cargo fmt --all` + 单独提交 + 单独验证。
   **不要**混在功能需求里 —— 那正是本条要避免的
+
+---
+
+## TD-018: `scripts/e2e-server.sh` 不注入认证密钥 → 干净环境里 E2E 根本起不来服务
+
+- **发现于**: REQ-021（BA 亲自跑 E2E 时撞上）
+- **证据**: `scripts/e2e-server.sh`（在 `develop` 基线 `88b7ca3` 上就是如此，**不是本轮引入**）
+  **完全没有**注入 `BASE_JWT_PRIVATE_KEY` / `BASE_JWT_KID` / `BASE_JWT_ISSUER` /
+  `BASE_JWT_AUDIENCE` / `BASE_IAM_SECRET_KEY`。
+  → 在**干净环境**里 `base serve` 在启动自检处失败：
+  ```
+  ✗ 认证与账号体系初始化失败：[INTERNAL_ERROR] ... the JWT signing key is not a
+    valid PKCS#8 EC key: InvalidKeyFormat
+  ```
+  → Playwright 的 webServer 拿不到服务 → 页面收到**空响应** →
+  SDK 报 `client.INTERNAL_ERROR`（"响应无法解析，请稍后重试"）→
+  **13 条 E2E 一起红**，看起来像「前端坏了」，其实是**服务没起来**
+- **为什么之前没发现**: REQ-011/012 的 E2E 之所以能过，是因为 BA **手工**起过带密钥的服务，
+  Playwright 的 `reuseExistingServer: true` **复用了它** —— 掩盖了这个缺口。
+  **CI 从未真跑过**（本仓无 remote）→ 没人发现
+- **本轮已修**: `scripts/e2e-server.sh` 现在会**现生成**临时密钥
+  （JWT = PKCS#8 EC；IAM = base64url），不落盘、不是生产密钥。
+  修后**干净环境**实测：`npx playwright test e2e/` → **20 passed / 0 failed / 0 skipped**
+- **仍然存在的风险**: 密钥是**每次运行现生成**的 —— 意味着
+  **每次 E2E 都会让已有的 token 失效**。若将来有「跨运行的会话持久化」类用例，
+  需要改成固定密钥或把密钥落进 `target/`（不入库）
