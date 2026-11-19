@@ -276,3 +276,28 @@ Sprint 3 复盘的第 2 条教训：**修漏洞会制造新漏洞** —— 但�
   是**跨需求的结构性改动**。本轮的真实上限是 **JSON 的 2^53**，不是 `i64` 的
 - **什么时候修**: 需要支持超 2^53 金额时 —— 契约改为「金额用字符串传输」
   （后端 `minorUnits` 输出十进制字符串，前端用 `BigInt` 解析）
+
+---
+
+## TD-017: `cargo fmt --all --check` 在 `develop` 基线上就是红的（8 个存量文件）
+
+- **发现于**: REQ-021（修复轮报告，BA 在基线 `develop` @ `88b7ca3` 上独立复现）
+- **证据**: 在**未改动的** `develop` worktree 上跑 `cargo fmt --all --check` → **11 个文件**不合规。
+  本轮改动后降到 **8 个**（修复轮顺手修好了本轮碰过的 2 个）：
+  ```
+  crates/platform-contracts/src/checks.rs
+  crates/platform-contracts/src/schema_scan.rs
+  crates/platform-contracts/tests/c6_schema_projection.rs
+  crates/platform-schema/src/registry.rs
+  crates/platform-schema/tests/metadata_api.rs
+  modules/sandbox/backend/src/demo_item_http.rs
+  modules/sandbox/backend/src/demo_item.rs
+  modules/sandbox/tests/demo_items.rs
+  ```
+  **本轮新增的文件全部合规**（0 处 i18n 相关 diff）
+- **影响**: CI 的 lint job 会红 —— 但**本仓 CI 从未真跑过**（无 remote），
+  所以这个红一直没人发现
+- **为什么本期不修**: 要改 8 个**与本需求无关**的文件（REQ-002/010/012 的产物），
+  会把本需求的 diff 污染成「一大坨无关的格式化改动」，评审时难以分辨真改动
+- **什么时候修**: 单独一个「格式化专案」：一次 `cargo fmt --all` + 单独提交 + 单独验证。
+  **不要**混在功能需求里 —— 那正是本条要避免的

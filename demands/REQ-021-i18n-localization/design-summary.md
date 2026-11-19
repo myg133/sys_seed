@@ -191,21 +191,45 @@ fn titles_are_ascii_and_unique() {
 
 ### 2.3.1 ★ 「要进表的码」的判据（第一轮实测出来的）
 
-**不是所有错误码都要进 `TITLES`** —— 只有**会出现在 HTTP 响应体的 `code` 字段**里的码才要。
+**不是所有错误码都要进 `TITLES`** —— 严格说只有**会作为 HTTP 响应体 `code` 字段的值出现**的码才要。
 
 | 码来源 | 进不进表 | 理由 |
 |---|---|---|
 | 各 crate 的 `error.rs` 的 `code()` | ✅ | 直接进 `ProblemDetails.code` |
-| `platform-db` 的 `DbError`（`DATABASE_ERROR` / `RECORD_NOT_FOUND` / `RLS_*`） | ✅ | 经 `From<DbError> for ConfigError` → `ConfigError::Database(code)` → **进响应体** |
+| `platform-db` 的 `DbError`（6 个：`DATABASE_ERROR` / `TENANT_CONTEXT_MISSING` / `INVALID_QUERY` / `RECORD_NOT_FOUND` / `RLS_POLICY_MISSING` / `RLS_BYPASSED_BY_ROLE`） | ⚠️ **进了，但它们其实是「死条目」** | 见下方说明 |
 | `platform-core/src/error.rs`（`INVALID_CONFIG_KEY` / `INVALID_IDENTIFIER` / `IO_ERROR`） | ❌ | 内部配置层，**不进 HTTP** |
 | `platform-server/src/config.rs`（`CONFIG_INVALID_VALUE` / `CONFIG_MISSING_REQUIRED` / `CONFIG_FORBIDDEN_COMBINATION`） | ❌ | 启动期 fail-fast → **stderr + 退出码 2**，不是响应体 |
 | `platform-iam/src/config.rs`（`IAM_CONFIG_*` 三个） | ❌ | 同上（`IamConfig::from_env()` 失败 → 退出码 2） |
 | `platform-core/src/extension/manifest.rs`（`MANIFEST_JSON_INVALID` / `MANIFEST_FIELD_INVALID`） | ❌ | 启动期校验；且 `ManifestIssue` 结构**根本没有 `code` 字段**（只有 `source`/`field`/`reason`） |
 | `platform-org/src/notify.rs` 的 `OrgEventKind`（`org.member-added` 等 6 个） | ❌ | 是**事件名**不是错误码（小写带点，不符合错误码格式） |
 
-> ⚠️ **第一轮 `platform-db` 没有 `ALL_CODES`** → 它的 4 个码没进 `TITLES` →
-> 那 4 个错误一旦发生，`title_of_code` 走 ASCII 兜底 `"Error"` → 违反 AC-S-088。
-> **已列为修复项。**
+#### ★ 关于 `platform-db` 那 6 个「死条目」（修复轮实测出来的，BA 最初判断错了）
+
+**BA 最初的判断**：「这 4 个码会进响应体 → 必须进 `TITLES`」——
+**这个判断是错的**，修复轮用独立追踪纠正了：
+
+| 路径 | db 的码去了哪 | 响应体 `code` 字段 |
+|---|---|---|
+| `platform-config` 的 `From<DbError>` | `ConfigError::Database(code)` → **进 `detail`**（`the config store is unavailable (DATABASE_ERROR)`） | `INTERNAL_ERROR` |
+| `platform-iam` 的 `internal(err)` | 折成 `IamError::Internal` → **进 `detail`** | `INTERNAL_ERROR` |
+| `platform-rbac` 的 `map_err` | 折成 `RbacError::Internal` → **进 `detail`** | `INTERNAL_ERROR` |
+
+**所以这 6 个码永远不会作为 `code` 字段的值出现** → 它们在 `TITLES` 里的条目**永不生效**。
+
+**但仍决定收录**，理由：
+
+- **保守方向**：多几个死条目 **不会**造成假绿；漏一个真条目 **会**造成假绿
+  （漏登记的码静默走 ASCII 兜底 `"Error"`，看起来「都通过了」）。
+- **反向测试**（`no_orphan_titles`：每个 `TITLES` 键都要被某个 `ALL_CODES` 认领）
+  要求 `platform-db` 也导出 `ALL_CODES`；若它导出了这 6 个码而 `TITLES` 没有，
+  就会产生「孤儿码」→ 测试红。
+- **判据统一**：`ALL_CODES` 与 `TITLES` 用**同一套口径**（该 crate 产出的全部码），
+  完备性测试才有意义 —— 否则测试会变成「漏登记死码」。
+
+> **QA Pre-merge 请知悉**：这 6 个条目**不会**被运行时验证覆盖
+> （它们不是响应体 `code` 字段的值）。这是**已知取舍，不是缺陷**。
+> 若将来 `platform-db` 的码被改为直接进 `code` 字段，它们会**立刻生效**——
+> 这正是提前收录的价值。
 
 ### 2.4 字段约定
 
