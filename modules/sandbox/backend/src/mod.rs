@@ -23,6 +23,8 @@
 
 pub mod demo_item;
 pub mod demo_item_http;
+pub mod demo_note;
+pub mod demo_note_http;
 pub mod entity;
 pub mod http;
 pub mod permission;

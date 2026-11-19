@@ -19,7 +19,12 @@
   "menus": [{ "label": "沙箱", "icon": "flask", "route": "/sandbox", "perm": "sandbox:demo:read" }],
   "dependencies": [],
   "tenantScoped": {
-    "tables": ["sandbox_tenant_item", "sandbox_scope_item", "sandbox_demo_item"],
+    "tables": [
+      "sandbox_tenant_item",
+      "sandbox_scope_item",
+      "sandbox_demo_item",
+      "sandbox_demo_note"
+    ],
     "column": "tenant_id"
   },
   "config": {
@@ -52,6 +57,22 @@
           "type": "text",
           "permission": "sandbox:demo:secret"
         }
+      ]
+    },
+    "demoNote": {
+      "label": "示例笔记",
+      "api": {
+        "list": "/api/sandbox/demo-notes",
+        "create": "/api/sandbox/demo-notes",
+        "update": "/api/sandbox/demo-notes/{id}",
+        "delete": "/api/sandbox/demo-notes/{id}"
+      },
+      "fields": [
+        { "key": "id", "label": "ID", "type": "text", "readonly": true },
+        { "key": "title", "label": "标题", "type": "text", "required": true, "maxLength": 120 },
+        { "key": "content", "label": "内容", "type": "text", "required": true, "maxLength": 2000 },
+        { "key": "pinned", "label": "置顶", "type": "boolean" },
+        { "key": "tags", "label": "标签", "type": "text" }
       ]
     }
   }

@@ -36,6 +36,7 @@ use platform_db::TenantDb;
 use serde::Serialize;
 
 use crate::demo_item_http;
+use crate::demo_note_http;
 use crate::permission::{
     PERMISSION_DEMO_READ, PERMISSION_DEMO_WRITE, PERMISSION_SCOPE_ITEM_APPROVE,
     PERMISSION_SCOPE_ITEM_EXPORT, PERMISSION_SCOPE_ITEM_READ,
@@ -44,6 +45,12 @@ use crate::scope_item::{PgScopeItemRepository, ScopeItem};
 
 /// `demoItem` 实体的键（元数据驱动渲染的样本实体）。
 pub const DEMO_ITEM_ENTITY: &str = "demoItem";
+
+/// `demoNote` 实体的键（**第二个**样本实体，D107：证明零前端代码）。
+///
+/// 它与 `demoItem` 的字段组合不同 —— 前端源码里**不得**出现这个键
+/// （AC-S-085 的核心断言）；这里出现是因为后端本来就是它的实现方。
+pub const DEMO_NOTE_ENTITY: &str = "demoNote";
 
 /// 模块自己的 `manifest.json`（**编译期**读入）。
 ///
@@ -69,6 +76,11 @@ pub struct SandboxState {
     /// 与 `GET /api/schema/sandbox/demoItem` 返回的是**同一份**声明 ——
     /// 元数据说可见、数据却剔掉（或反过来）这种分叉在代码层面就该不存在。
     pub demo_item_schema: Arc<EntitySchema>,
+    /// `demoNote` 的元数据（同一份 manifest 的另一个实体，D107）。
+    ///
+    /// 它没有字段级权限点，投影因此是恒等的 —— 仍然走 `SchemaProjector`：
+    /// 「有没有权限」不该决定「走不走唯一序列化入口」。
+    pub demo_note_schema: Arc<EntitySchema>,
 }
 
 impl SandboxState {
@@ -76,14 +88,17 @@ impl SandboxState {
     ///
     /// # Panics
     ///
-    /// manifest 里没有 `schema.demoItem` 时 panic：那是模块自身的编译期资产，
-    /// 缺了说明有人把契约改坏了（`tests/demo_items.rs` 会先红）。
+    /// manifest 里没有 `schema.demoItem` / `schema.demoNote` 时 panic：那是模块自身的
+    /// 编译期资产，缺了说明有人把契约改坏了（`tests/demo_items.rs` 会先红）。
     pub fn new(db: TenantDb) -> Self {
-        let schema = baked_demo_item_schema()
+        let demo_item = baked_entity_schema(DEMO_ITEM_ENTITY)
             .expect("modules/sandbox/manifest.json 必须声明 schema.demoItem");
+        let demo_note = baked_entity_schema(DEMO_NOTE_ENTITY)
+            .expect("modules/sandbox/manifest.json 必须声明 schema.demoNote");
         Self {
             db,
-            demo_item_schema: Arc::new(schema),
+            demo_item_schema: Arc::new(demo_item),
+            demo_note_schema: Arc::new(demo_note),
         }
     }
 
@@ -92,20 +107,20 @@ impl SandboxState {
         let path = manifest_root.join("modules/sandbox/manifest.json");
         let manifest = Manifest::from_path(&path)
             .with_context(|| format!("cannot read {}", path.display()))?;
-        let schema = manifest
+        let schemas = manifest
             .schema
             .as_ref()
-            .and_then(|schemas| schemas.get(DEMO_ITEM_ENTITY))
-            .cloned()
-            .with_context(|| {
-                format!(
-                    "{} declares no schema.{DEMO_ITEM_ENTITY} entity",
-                    path.display()
-                )
-            })?;
+            .with_context(|| format!("{} declares no schema section", path.display()))?;
+        let entity = |key: &str| -> Result<EntitySchema> {
+            schemas
+                .get(key)
+                .cloned()
+                .with_context(|| format!("{} declares no schema.{key} entity", path.display()))
+        };
         Ok(Self {
             db,
-            demo_item_schema: Arc::new(schema),
+            demo_item_schema: Arc::new(entity(DEMO_ITEM_ENTITY)?),
+            demo_note_schema: Arc::new(entity(DEMO_NOTE_ENTITY)?),
         })
     }
 
@@ -115,16 +130,16 @@ impl SandboxState {
     }
 }
 
-/// 从编译期读入的 manifest 取 `schema.demoItem`。
-fn baked_demo_item_schema() -> Result<EntitySchema> {
+/// 从编译期读入的 manifest 取 `schema.<entity>`。
+fn baked_entity_schema(entity: &str) -> Result<EntitySchema> {
     let manifest = Manifest::parse_str(BAKED_MANIFEST)
         .map_err(|error| anyhow::anyhow!("the baked manifest is invalid: {error}"))?;
     manifest
         .schema
         .as_ref()
-        .and_then(|schemas| schemas.get(DEMO_ITEM_ENTITY))
+        .and_then(|schemas| schemas.get(entity))
         .cloned()
-        .ok_or_else(|| anyhow::anyhow!("the baked manifest declares no schema.{DEMO_ITEM_ENTITY}"))
+        .ok_or_else(|| anyhow::anyhow!("the baked manifest declares no schema.{entity}"))
 }
 
 /// 带租户上下文的请求上下文提取器。
@@ -241,6 +256,15 @@ pub fn router<S2>(state: Arc<SandboxState>) -> Router<S2> {
         .route("/demo-items/{id}", put(demo_item_http::update))
         .route("/demo-items/{id}", delete(demo_item_http::delete));
 
+    // `sandbox:demo:read` —— **第二个**实体（D107）：同一套权限点、同一套语义。
+    let demo_note_read_routes = Router::new().route("/demo-notes", get(demo_note_http::list));
+
+    // `sandbox:demo:write` —— 第二个实体的写侧。
+    let demo_note_write_routes = Router::new()
+        .route("/demo-notes", post(demo_note_http::create))
+        .route("/demo-notes/{id}", put(demo_note_http::update))
+        .route("/demo-notes/{id}", delete(demo_note_http::delete));
+
     // `sandbox:scope-item:read`
     let scope_read_routes = Router::new()
         .route("/scope-item", get(list_scope_items))
@@ -254,13 +278,11 @@ pub fn router<S2>(state: Arc<SandboxState>) -> Router<S2> {
 
     Router::new()
         .merge(demo_read_routes.route_layer(require_permission("sandbox:demo:read")))
-        .merge(
-            demo_item_read_routes.route_layer(require_permission("sandbox:demo:read")),
-        )
+        .merge(demo_item_read_routes.route_layer(require_permission("sandbox:demo:read")))
+        .merge(demo_note_read_routes.route_layer(require_permission("sandbox:demo:read")))
         .merge(demo_write_routes.route_layer(require_permission("sandbox:demo:write")))
-        .merge(
-            demo_item_write_routes.route_layer(require_permission("sandbox:demo:write")),
-        )
+        .merge(demo_item_write_routes.route_layer(require_permission("sandbox:demo:write")))
+        .merge(demo_note_write_routes.route_layer(require_permission("sandbox:demo:write")))
         .merge(scope_read_routes.route_layer(require_permission("sandbox:scope-item:read")))
         .merge(approve_routes.route_layer(require_permission("sandbox:scope-item:approve")))
         .merge(export_routes.route_layer(require_permission("sandbox:scope-item:export")))
