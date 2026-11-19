@@ -221,19 +221,32 @@ SSO **配置的写入**走 REQ-010 的通用配置接口（已有 `config:entry:
    **只支持 `http://` / `https://`**，且 `https` 需要 TLS —— **注意**：现有 SCIM 网关是 `build_http()`
    （无 TLS）。本需求对 IdP 的调用**必须支持 https**（真实 IdP 都是 https）。
 
-   > ⚠️ **这是本轮最大的技术风险点**：`hyper-util` 的 `build_http()` 不带 TLS，
-   > 而树里**没有 TLS 客户端实现**（`Cargo.toml` 明确写了「不引 reqwest / 不开 TLS」）。
+   > ✅ **TLS 决策已定（D123，用户 2026-11-19 批准）**：**引入 TLS 依赖，支持 `https`。**
    >
-   > **两种解法，Dev 必须二选一并写进自验报告**：
-   > - **(A) 用 `hyper-rustls` 或 `tokio-rustls`** → **新增依赖**，违反依赖预算，需 BA 批准
-   > - **(B) 本轮只支持 `http://` IdP**（内网 IdP 常用，且 mock 测试也用 http），
-   >   `https` 显式拒绝并给 `SSO_OIDC_TLS_UNSUPPORTED` → **零新依赖，但真实云 IdP 接不了**
+   > 实测背景：`Cargo.lock` 里 `rustls` / `native-tls` / `openssl` / `ring` **全 0 命中**，
+   > `hyper-util` 的 `build_http()` 不带 TLS。真实企业 IdP 全是 `https://`
+   > → 只支持 http 的 OIDC **在真实环境基本不可用**。已上报用户并获批。
    >
-   > **BA 倾向 (B) + 登记技术债**：本轮的目标是「链路通 + 安全约束到位」，
-   > 真实 https IdP 的接入需要一次**明确的依赖预算决策**（用户此前多轮要求零新增依赖）。
-   > **Dev 若认为 (B) 不可接受，必须在开工前提出，不得自行加依赖。**
+   > **Dev 的实施约束（必须逐条做到并写进自验报告）**：
+   > 1. **只换 connector，不换 HTTP 栈**：继续用 `hyper` + `hyper-util`，
+   >    把 `Client::builder(..).build_http()` 换成 `.build(带 TLS 的 connector)`。
+   >    **不得引入 `reqwest`**。
+   > 2. **优先 `rustls` + `ring`**：自包含、不依赖系统 OpenSSL
+   >    （与项目「私有化机常常没有 OpenSSL 开发包」的既有判断一致）。
+   >    标准写法参考 `hyper_rustls::HttpsConnectorBuilder::new().with_webpki_roots().https_or_http().enable_http1().build()`。
+   >    **`https_or_http()` 是刻意的**：本轮的 mock IdP 用 `http://`，真实 IdP 用 `https://`，
+   >    两者都要能用（不是二选一）。
+   > 3. **必须实测并报告三个数**：① `Cargo.lock` 包数增量（基线 **296**）；
+   >    ② 首次 `cargo build` 耗时；③ 低配机（`jobs = 3`）能否编过。
+   > 4. **若 `ring` 的汇编编译不可接受**：备选 `native-tls`（系统 OpenSSL），
+   >    但要在报告里写明对私有化部署的影响，**并回报 BA**。
+   > 5. `SSO_OIDC_TLS_UNSUPPORTED` 这个错误码**不再需要** ——
+   >    但 `SSO_PROVIDER_NOT_CONFIGURED` 仍要覆盖「issuer 是 https 但本机编译时没启用 TLS」的极端情形
+   >    （理论上不会发生，但不要假设）。
    >
-   > → 已登记为本需求的**开工前必答项**（见 §9）。
+   > **这与既有的「避开 ring / aws-lc-rs」判断（`jsonwebtoken` 选 `rust_crypto`）不矛盾**：
+   > 那条是为 JWT 验签性能；TLS 没有成熟纯 Rust 等价物，`ring` 是当前最省的选择。
+   > **D123 是唯一破例点**，别处仍按零新增执行。
 
 ---
 
@@ -304,9 +317,9 @@ POST /api/iam/sso/ldap/login {username, password}
 | 15 | `SSO_LDAP_EMPTY_PASSWORD` | 401 | `LDAP password must not be empty` | **空/纯空白密码**（攻击识别用） |
 | 16 | `SSO_LDAP_IDENTITY_CONFLICT` | 409 | `LDAP identity conflicts with an existing account` | 映射字段撞了另一个已绑定账号 |
 | 17 | `SSO_ACCOUNT_NOT_LINKED` | 403 | `SSO account is not linked` | 未绑定且 JIT 关闭 |
-| 18 | `SSO_OIDC_TLS_UNSUPPORTED` | 501 | `HTTPS IdP endpoints are not supported yet` | 仅当选 §4.2 解法 (B) |
 
-> 表里实际 **18 个**码（acceptance 里说「13 个」是下限估计，**以本表为准**）。
+> 表里实际 **17 个**码（acceptance 里说「13 个」是下限估计，**以本表为准**）。
+> 原第 18 个 `SSO_OIDC_TLS_UNSUPPORTED` 已删除 —— **D123 决定支持 https，不再需要这个码**。
 > 若 Dev 认为某码可以合并，**必须在自验报告里说明并更新 acceptance**，不得静默减少。
 
 ---
@@ -400,7 +413,7 @@ URL 校验不是枚举，塞进去会污染那个机制的语义。
 
 | # | 问题 | 选项 | BA 倾向 |
 |---|---|---|---|
-| 1 | **IdP 的 https 支持** | (A) 加 TLS 依赖违反预算 / (B) 只支持 http + `SSO_OIDC_TLS_UNSUPPORTED` + 技术债 | **(B)**。真实 https IdP 需要一次明确的依赖预算决策，本轮先保证链路与安全约束到位 |
+| 1 | ~~**IdP 的 https 支持**~~ | ~~(A) 加 TLS 依赖 / (B) 只支持 http~~ | ✅ **已定（D123，用户批准）**：**加 TLS 依赖支持 https**。只换 connector 不引 `reqwest`；`https_or_http()` 两者都能用；包数增量 / 编译耗时 / 低配机可编性必须实测报告 |
 | 2 | **mock IdP 怎么起** | 用 axum 在测试进程内起 / 用外部容器 | **进程内 axum**（零外部依赖、更快、可在 CI 无网络环境跑） |
 | 3 | **LDAP 测试替身** | 真实 OpenLDAP 容器 / `Ldap3Source` 的内存替身 | **内存替身**（`platform-org` 已有 `InMemoryLdapSource` 先例）；但**空密码「0 请求」断言需要能观察请求**，替身要记录 bind 调用 |
 

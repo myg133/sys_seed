@@ -23,7 +23,7 @@
 
 | 能力 | 可行性依据 |
 |---|---|
-| OIDC / OAuth2 入站（授权码流程） | 树里已有 `hyper`（出站 HTTP，SCIM 已在用）、`jsonwebtoken`（RS256/ES256 验签，rust_crypto 后端）、`serde_json` → **零新增依赖** |
+| OIDC / OAuth2 入站（授权码流程） | 树里已有 `hyper`（出站 HTTP，SCIM 已在用）、`jsonwebtoken`（RS256/ES256 验签，rust_crypto 后端）、`serde_json`。**但 TLS 需新增依赖** —— 用户 2026-11-19 批准（**D123**，本项目唯一一次破例） |
 | LDAP / AD 入站认证 | 树里已有 `ldap3` 0.11.5（REQ-008 引入，现用于组织同步的 search）；`Ldap::simple_bind(bind_dn, bind_pw)` 可直接校验密码 → **零新增依赖** |
 | 强制 SSO 策略 | 走 REQ-010 已交付的 config 三层覆盖 |
 | SSO 会话 | 复用 REQ-007 已交付的 session / refresh family / access token / JWKS |
@@ -148,7 +148,8 @@ SSO 审计事件只记：provider、外部 subject、结果、错误码、IP、U
 |---|---|---|
 | `platform-iam` 新增错误码（约 9 个） | AC-S-020 要求可区分 | **否**，但**必须同步 `ALL_CODES` + `titles.rs` 的 `TITLES`**，否则 REQ-021 的完备性测试会红（`i18n_titles.rs::titles_cover_every_code`） |
 | `platform-iam` 新增 `sso` 模块 + 迁移（2 张表） | `oidc_state`（state/nonce/verifier 一次性凭证）、`sso_identity_link` 审计辅助（可选，若复用 `external_identity` 则只要 `oidc_state`） | 否（纯新增） |
-| `platform-iam` 依赖 `ldap3` | LDAP bind 认证 | 否（`ldap3` 已在 `Cargo.lock`，由 `platform-org` 引入）；**`Cargo.lock` 包数不变** |
+| `platform-iam` 依赖 `ldap3` | LDAP bind 认证 | 否（`ldap3` 已在 `Cargo.lock`，由 `platform-org` 引入） |
+| **新增 TLS 依赖（`rustls` + `ring` + `hyper-rustls`）** | **真实 IdP 全是 https，没有 TLS 的 OIDC 在真实环境不可用** | **依赖预算破例** —— 用户 2026-11-19 明确批准（**D123**）。`Cargo.lock` 包数会从 **296** 增加，**具体增量必须实测报告**。只换 connector，**不引 `reqwest`** |
 | `platform-config/manifest.json` 新增约 12 个键 | 非敏感 SSO 配置 | 否（纯新增登记） |
 | `packages/i18n` 新增 SSO 相关错误文案键 | AC-S-089 要求前端能渲染完整文案 | 否（纯新增键，中英键集合仍须相等） |
 | `apps/shell` 登录页增加「用企业账号登录」入口 | 用户可用性 | 否（纯新增组件） |
@@ -183,4 +184,5 @@ SSO 审计事件只记：provider、外部 subject、结果、错误码、IP、U
 - `id_token` 的 `alg=none` 与算法混淆攻击被拒
 - `client_secret` 在三处扫描（配置导出 / 错误体 / 日志）中 0 命中
 - 新增错误码全部进 `TITLES`，REQ-021 的完备性测试仍绿
-- 零新增第三方依赖（`Cargo.lock` 包数不变）
+- **依赖预算（D123 破例）**：新增 TLS 依赖是被用户批准的**唯一破例**；
+  `Cargo.lock` 包数增量必须实测报告（基线 **296**），且**不得引入 `reqwest`**

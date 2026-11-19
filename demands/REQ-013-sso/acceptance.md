@@ -27,7 +27,7 @@
 
 ## 全局断言约定（适用于本文件全部 12 条）
 
-1. **零新增第三方依赖**：`Cargo.lock` 包数与基线相同（296）。`ldap3` / `hyper` / `jsonwebtoken` 均已在树里。
+1. **依赖预算**：`ldap3` / `hyper` / `jsonwebtoken` 均已在树里（零新增）。**TLS 是唯一破例**（**D123**，用户 2026-11-19 批准 `rustls` + `ring` + `hyper-rustls`）—— `Cargo.lock` 包数**增量必须实测报告**（基线 296），且**不得引入 `reqwest`**。
 2. **新增错误码必须进 `TITLES`**：REQ-021 的 `i18n_titles.rs::titles_cover_every_code` 会机械校验 `TITLES ⊇ 各 crate 的 ALL_CODES`。漏一个 → 该测试红。
 3. **错误 `title` 必须是 ASCII**（D113）。中文文案只在前端语言包里。
 4. **时间一律 UTC 落库**，时区只在前端渲染（D114）。
@@ -105,6 +105,9 @@
   1. 步骤 1 → `302`，`Location` 指向发现文档里的 `authorization_endpoint`。
   2. 步骤 2 → query **必含** `response_type=code`、`client_id`、`redirect_uri`（与配置逐字相同）、`scope`（含 `openid`）、`state`（非空且高熵）、`nonce`（非空）、`code_challenge` + `code_challenge_method=S256`。
   3. 步骤 3 → `200`，响应体**与本地登录的 `LoginResponse` 字段集合完全一致**（`user` / `accessToken` / `refreshToken` / `permissions` / …）。
+  8. **把 mock IdP 换成 `https://`（自签证书 + 测试根证书）重跑步骤 1~3，必须同样成功** ——
+     证明 TLS 真的接上了，而不是只测了 `http://`（D123 的直接验证点）。
+     同时断言：`https` 与 `http` 两种 issuer 都可用（`https_or_http`），不是二选一。
   4. 步骤 4 → `200`，返回的是 `bob` 的真实权限点（与本地登录同一套展开逻辑，非空）。
   5. 步骤 5 → `200`，返回新 access token（refresh 链路可用）。
   6. 步骤 6 → 列表含本次 SSO 会话，且**能看出它来自 SSO**（见 AC-S-107 的字段要求）。

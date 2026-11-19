@@ -59,16 +59,25 @@ LDAP 覆盖 AD / OpenLDAP。**这两条覆盖绝大多数企业身份源**。
 **第 7 条是本轮最关键的「主体不存在」排查**：如果 AC 写成「SSO 登录产生审计记录」，
 验收时会发现**根本没有审计表** —— 那是 REQ-021 踩过的坑（AC 的前置物理不可达）。
 
-## 最大风险（已写进 design §4.2，开工前必答）
+## 依赖预算破例（D123 —— 本项目唯一一次）
 
-**`hyper-util` 的 `build_http()` 不带 TLS**，而树里没有 TLS 客户端实现。
-真实 IdP 都是 `https://`。
+**实测事实**：`Cargo.lock` 里 `rustls` / `native-tls` / `openssl` / `ring` **全 0 命中**，
+`hyper-util` 的 `build_http()` 不带 TLS。而**真实企业 IdP（Azure AD / Okta / Keycloak）全部是 `https://`**
+→ 只支持 `http` 的 OIDC **在真实环境基本不可用**。
 
-- 选 (A) 加 TLS 依赖 → **违反零新增依赖预算**（用户多轮明确要求）
-- 选 (B) 本轮只支持 `http://` IdP + `SSO_OIDC_TLS_UNSUPPORTED` → 链路与安全约束可验，但真实云 IdP 接不了
+**已上报用户，用户 2026-11-19 裁定「批准加 TLS 依赖，支持 https」。**
 
-**BA 倾向 (B) + 登记技术债**，因为本轮目标是把「链路通 + 6 条安全约束到位」做扎实。
-Dev 若不同意，**必须在开工前提出，不得自行加依赖**。
+| 项 | 结论 |
+|---|---|
+| 破例范围 | **仅 TLS 连接器**：`rustls` + `ring` + `hyper-rustls`（优先方案） |
+| 不得顺带引入 | `reqwest`（HTTP 栈继续用 `hyper` + `hyper-util`，只换 connector） |
+| 必须实测报告 | `Cargo.lock` 包数增量（基线 **296**）、首次编译耗时、低配机（`jobs = 3`）能否编过 |
+| https 与 http | **两者都要能用**（`https_or_http()`）：mock IdP 用 http，真实 IdP 用 https |
+| 验证点 | AC-S-100 步骤 8：把 mock IdP 换成 `https://` 自签证书，必须同样登录成功 |
+| 不要做 | 删掉 `SSO_OIDC_TLS_UNSUPPORTED` 这个错误码（已不需要） |
+
+**这与既有的「避开 ring / aws-lc-rs」（`jsonwebtoken` 选 `rust_crypto`）不矛盾**：
+那条是为 JWT 验签性能；TLS 没有成熟纯 Rust 等价物。**D123 是唯一破例点。**
 
 ## 阻塞项
 
