@@ -182,3 +182,56 @@ body {
 .base-forbidden h2 {
   color: var(--base-danger);
 }
+
+/* ── 元数据驱动页面（REQ-012；类名契约在组件里，颜色只用 CSS 变量 —— D95）── */
+
+.base-schema-toolbar {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+}
+
+.base-schema-empty,
+.base-schema-loading {
+  color: var(--base-text-secondary);
+}
+
+.base-schema-error {
+  color: var(--base-danger);
+}
+
+.base-schema-actions {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.base-schema-form,
+.base-schema-field {
+  display: flex;
+  flex-direction: column;
+}
+
+.base-schema-form {
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.base-schema-field {
+  gap: 0.25rem;
+}
+
+.base-schema-readonly {
+  color: var(--base-text-secondary);
+}
+
+.base-schema-required {
+  margin-left: 0.25rem;
+  color: var(--base-text-secondary);
+  font-size: 0.85em;
+}
+
+.base-schema-form-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
