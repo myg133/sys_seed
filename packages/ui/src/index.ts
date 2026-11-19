@@ -21,7 +21,36 @@
  *
  * 表格**不引用** `@base/hooks`：分页与表格状态由消费方用 `@base/hooks` 组合后
  * 以 props 传进来（rows / columns / page / pageSize / total / onPageChange）。
+ *
+ * # 视图层契约（组件 props 类型）也在这里
+ *
+ * `apps/shell` 的 `.svelte` 组件是**薄封装** —— 它们只是把本包的逻辑
+ * （`buttonClass` / `cellValue` / `pageInfo` …）套上视图。
+ * 组件的 **props 类型**同样在本包（`*ComponentProps`），
+ * 组件里只写 `const props: ButtonComponentProps = $props()` ——
+ * **不重复定义**一套 props 接口（否则契约就散在两处、迟早对不上）。
  */
+
+import type { Snippet } from 'svelte';
+
+/**
+ * 内容插槽（视图层）。
+ *
+ * 与 svelte 的 `Snippet` **同型** —— 组件用 `{@render}` 渲染它。
+ *
+ * 这里只引**类型**（`import type`）：`@base/ui` 依旧是零运行时依赖的逻辑包
+ * （rev 2 裁定 #7：组件库发逻辑，宿主应用发视图）。
+ */
+export type Slot = Snippet;
+
+/** 点击回调（按钮、遮罩）。 */
+export type ClickHandler = (event: MouseEvent) => void;
+
+/** 关闭回调（对话框）。 */
+export type CloseHandler = () => void;
+
+/** 输入值回调（输入框）—— 拿的是**字符串**值，不是原生事件。 */
+export type ValueHandler = (value: string) => void;
 
 /** 基础色调。 */
 export type Tone = 'default' | 'primary' | 'danger';
@@ -88,6 +117,18 @@ export function buttonClass(props: ButtonProps = {}): string {
   return names.join(' ');
 }
 
+/**
+ * 按钮组件的属性契约（视图层）。
+ *
+ * = `ButtonProps`（逻辑 / 样式契约）+ 插槽 + 点击回调。
+ */
+export interface ButtonComponentProps extends ButtonProps {
+  /** 点击回调。 */
+  readonly onclick?: ClickHandler;
+  /** 按钮内容（插槽）。 */
+  readonly children?: Slot;
+}
+
 /** 输入框类型。 */
 export type InputType = 'text' | 'password' | 'email' | 'number' | 'search';
 
@@ -128,6 +169,16 @@ export function inputClass(props: InputProps = {}): string {
   return names.join(' ');
 }
 
+/**
+ * 输入框组件的属性契约（视图层）。
+ *
+ * = `InputProps`（逻辑 / 样式契约）+ 输入值回调。
+ */
+export interface InputComponentProps extends InputProps {
+  /** 输入值回调（拿到的是**字符串**值，不是原生事件）。 */
+  readonly oninput?: ValueHandler;
+}
+
 /** 卡片属性契约。 */
 export interface CardProps {
   /** 卡片标题。 */
@@ -148,6 +199,21 @@ export function cardClass(props: CardProps = {}): string {
     names.push(props.class);
   }
   return names.join(' ');
+}
+
+/**
+ * 卡片组件的属性契约（视图层）。
+ *
+ * ⚠️ `footer` 在这里**不是布尔**：
+ * `CardProps.footer` 是「有没有页脚」的**逻辑开关**，
+ * 而组件的 `footer` 是**页脚内容**（给了就渲染页脚区域）——
+ * 所以这里 `Omit` 掉 `CardProps` 的 `footer`，换成插槽。
+ */
+export interface CardComponentProps extends Omit<CardProps, 'footer'> {
+  /** 页脚内容（给了就渲染页脚区域）。 */
+  readonly footer?: Slot;
+  /** 卡片主体内容（插槽）。 */
+  readonly children?: Slot;
 }
 
 /** 表格列定义。 */
@@ -255,6 +321,20 @@ export function dialogClass(props: DialogProps = {}): string {
     names.push(props.class);
   }
   return names.join(' ');
+}
+
+/**
+ * 对话框组件的属性契约（视图层）。
+ *
+ * = `DialogProps`（逻辑 / 样式契约）+ 关闭回调 + 插槽。
+ */
+export interface DialogComponentProps extends DialogProps {
+  /** 关闭回调（点遮罩 / 按 Esc / 点右上角 × 都走它）。 */
+  readonly onclose?: CloseHandler;
+  /** 主体内容（插槽）。 */
+  readonly children?: Slot;
+  /** 页脚内容（插槽）。 */
+  readonly footer?: Slot;
 }
 
 /** 取行的键（默认用行索引）。 */

@@ -2,9 +2,11 @@
   输入框（薄封装）—— 逻辑与样式契约在 `@base/ui`。
 -->
 <script lang="ts">
-  import { inputClass } from '@base/ui';
+  import { inputClass, type InputComponentProps } from '@base/ui';
 
-  const props = $props();
+  // props 整体取值：svelte-check 会把「解构出来的可选 props」当成必填，
+  // 消费方就得把每个可选值都传一遍 —— 契约反而没法用。
+  const props: InputComponentProps = $props();
 
   const fieldId = $derived(props.name ? `base-input-${props.name}` : undefined);
 </script>

@@ -3,16 +3,16 @@
 
   没有 `svelte-*` 组件库可用（零新依赖），所以用普通的 `div` + `role="dialog"`。
 
-  ⚠️ 脚本块是 **JS 语法**：仓库根的 eslint 配置没给 `.svelte` 配 TypeScript
-  解析器，写 TS 注解会让 `eslint .` 报解析错误；
   带参数的键盘处理器在 `src/lib/handlers.ts` 里造（那里有完整类型）。
 -->
 <script lang="ts">
-  import { dialogClass } from '@base/ui';
+  import { dialogClass, type DialogComponentProps } from '@base/ui';
 
   import { createEscapeHandler } from '../lib/handlers';
 
-  const props = $props();
+  // props 整体取值：svelte-check 会把「解构出来的可选 props」当成必填，
+  // 消费方就得把每个可选值都传一遍 —— 契约反而没法用。
+  const props: DialogComponentProps = $props();
 
   const open = $derived(props.open ?? false);
   const closable = $derived(props.closable ?? true);

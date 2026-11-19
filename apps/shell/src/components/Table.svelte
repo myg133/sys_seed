@@ -7,18 +7,19 @@
   以 props 传进来（`rows` / `columns` / `page` / `pageSize` / `total` / `onPageChange`）。
   这样 `@base/ui` 不需要依赖 `@base/hooks`（AC-S-075）。
 -->
-<script lang="ts">
-  import { cellValue, pageInfo, rowKeyOf, tableClass } from '@base/ui';
+<script lang="ts" generics="Row">
+  import { cellValue, pageInfo, rowKeyOf, tableClass, type TableProps } from '@base/ui';
 
-  const props = $props();
+  // props 整体取值：svelte-check 会把「解构出来的可选 props」当成必填，
+  // 消费方就得把每个可选值都传一遍 —— 契约反而没法用。
+  const props: TableProps<Row> = $props();
 
-  const info = $derived(
-    pageInfo(
-      props.page ?? 1,
-      props.pageSize ?? 10,
-      (props.total ?? 0) > 0 ? props.total : props.rows.length,
-    ),
+  // `total` 没给（或给了 0）就退回当前页的行数。
+  const total = $derived(
+    props.total !== undefined && props.total > 0 ? props.total : props.rows.length,
   );
+
+  const info = $derived(pageInfo(props.page ?? 1, props.pageSize ?? 10, total));
 </script>
 
 <table class={tableClass({ class: props.class })}>
