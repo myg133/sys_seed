@@ -198,12 +198,14 @@ bun run dev
 | `transaction_boundary` | TransactionalWrite + WriteBoundary 提供写边界声明，跨表写必须显式开平台事务（C-4 判定依据） |
 | `config` | ConfigScope/ConfigResolver（platform-capability，不是扩展点）/AppConfig + manifest 的 config 段提供三层配置与 Feature Flag（4 个权限点 config:entry:write / config:flag:write / config:platform:write / config:platform:read），勿自建配置读取 |
 | `error_code_i18n` | @base/i18n 的 translate()/hasMessage() 提供错误码到文案映射，勿在后端拼中文句子 |
-| `theme` | @base/theme 的 defaultTheme()/mergeTheme() 提供主题 token，勿另造主题变量 |
+| `theme` | @base/theme 的 applyTheme()/toggleTheme() 提供 CSS 变量令牌与暗色模式，勿另造主题变量或硬编码颜色 |
 | `ui_token` | @base/ui 的 toneClass()/TONES/defaultRadius() 提供色调与圆角 token，勿另造样式变量 |
+| `ui_table_component` | @base/ui 的 Table 契约与 apps/shell 的 Table.svelte 提供只读表格（只接受 props，分页状态由 @base/hooks 组合传入），勿自造表格渲染 |
 | `schema_field_meta` | @base/schema 的 FieldMeta/describeField()/findField() 提供字段元数据形状，勿另造元数据结构 |
-| `sdk_client` | @base/sdk 的 createApiClient() 提供 baseUrl 规范化与 URL 拼接，勿另造 HTTP 基类 |
+| `sdk_client` | @base/sdk 的 createApiClient() 提供类型安全请求、RFC 9457 错误码、token 自动刷新与幂等键注入，勿另造 HTTP 基类 |
 | `auth_state` | @base/auth 的 isAuthenticated()/tenantId() 提供登录态形状，勿另造登录态模型 |
-| `hooks_toggle` | @base/hooks 的 createToggle() 提供通用布尔开关状态容器，勿另造状态容器 |
+| `permission_can` | @base/auth 的 can()/guard() 提供权限点判定与路由守卫（权限点来自 GET /api/rbac/me/permissions），前端别自己写一套；服务端鉴权入口仍是 require_permission |
+| `hooks_toggle` | @base/hooks 的 createToggle()/createPagination()/createTableState() 提供通用状态容器，勿另造状态容器 |
 | `iam_auth` | platform-iam 提供 /api/iam/* 认证接口（本地账号 + JWT access / 不透明 refresh + Argon2id + TOTP）与 /.well-known/jwks.json；业务模块要鉴权请用这些接口，勿自造认证 |
 | `org_structure` | platform-org 提供 /api/org/* 组织架构接口（组织树用邻接表 + 递归 CTE、用户↔节点成员关系、岗位与汇报关系）、SCIM 2.0 出站与 LDAP/AD 入站、字段级同步冲突队列与人工裁决；数据范围的输入是它，勿自造组织树 |
 | `rbac_authorization` | platform-core 的 require_permission 是平台唯一鉴权入口，platform-rbac 提供 /api/rbac/* 角色授权接口、5 种数据范围与 DB epoch 主动失效；业务模块用 require_permission + TenantQuery::with_scope，勿自写鉴权或数据范围 |
@@ -215,8 +217,6 @@ key 与说明逐条相同）；行的顺序同样与索引不同（语义序 vs 
 
 | 能力 | 说明 |
 |---|---|
-| `ui_table_component` | @base/ui 尚无表格与分页组件，列表页要自己实现（REQ-012 补） |
-| `permission_can` | 前端 can() 尚未落地（REQ-011 补）；服务端鉴权中间件已在 REQ-009 提供（require_permission），前端别自己写一套 |
 | `http_api_layer` | HTTP 接口层尚未就绪（REQ-011/012 补），capabilities/api.json 目前为空 |
 | `crud_scaffolding` | 平台没有通用 CRUD/分页脚手架（模块的仓储要自己实现），但数据访问必须走 platform-db 的租户作用域入口 |
 | `audit_sink` | 审计只到事件声明面，落库与查询待 REQ-014 |

@@ -25,7 +25,13 @@
 
   // props 整体取值：svelte-check 会把「解构出来的可选 props」当成必填，
   // 消费方就得把每个可选值都传一遍 —— 契约反而没法用。
-  const props = $props();
+  interface CanProps {
+    permission: string;
+    state?: import('@base/auth').AuthState;
+    children?: import('svelte').Snippet;
+    fallback?: string;
+  }
+  const props: CanProps = $props();
 
   const context = useAuthContext();
   const current = $derived(props.state ?? context?.state);
