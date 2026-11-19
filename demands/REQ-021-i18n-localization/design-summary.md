@@ -239,6 +239,10 @@ source ∈ { user, accept-language, tenant, default }
 > 则 `source === "user"` 永远不可能出现，AC-S-090 步骤 8 **永远无法通过**。
 > **实现时选一种并写进代码注释**：推荐**查询参数 `?locale=` / `?timezone=`**（简单、可测、不持久化）。
 
+**已拍板（D116）**：后端**接受** `?locale=` / `?timezone=` 作为「用户偏好」这一级，
+**仅当该值已注册（`locale`）或格式合法（`timezone`）时生效**；
+**不持久化、不跨请求记忆**。否则该级视为「没设」，落到 `Accept-Language`。
+
 ---
 
 ## 4. 时区：只影响展示，且**只在前端渲染**（D114）
@@ -318,6 +322,28 @@ platform_fx_rate (
 - 换算结果带 `asOf` + `source`（**可追溯**，AC-S-097 步骤 4）
 - **不存在的币种对 → `FX_RATE_NOT_FOUND`，404**（裁定 #21 定 404，不是 400）—— **不是** 0、**不是**原值
 - 换算时**显式传 `asOf`**，不隐式取「最新」（R4：并发下不自觉）
+
+### 5.3.1 ★ 写入接口本轮**不做**（D115）
+
+**没有** `POST /api/i18n/fx/rates`。理由：
+
+> 「登记汇率」是管理端操作，而**本轮没有任何管理端需求**。
+> 硬做一个写接口就要连带做**权限点三件套**（manifest `permissions[]` + 种子迁移 + 启动对账，D27）——
+> 为一个**注定被管理端重做**的接口付三件套的成本，不划算。
+
+| 操作 | 本轮怎么走 |
+|---|---|
+| **写**汇率快照 | 只提供 store API（`insert_rate`）；**测试自己播种**（D101 独立幂等）；生产靠 SQL / 后续迁移 |
+| **读** | `GET /api/i18n/fx/convert?from=&to=&minor=&asOf=`（**只需认证，不需要新权限点**）→ AC-S-096/097 的 HTTP 码可验 |
+
+**HTTP 接口清单（本需求的全部）**：
+
+| 方法 | 路径 | 权限 |
+|---|---|---|
+| `GET` | `/api/i18n/context` | 需认证 |
+| `GET` | `/api/i18n/fx/convert` | 需认证 |
+
+> 两个都**不新增权限点** → **不触碰三件套** → 不给「进程起不来」留机会。
 
 ### 5.4 ★ 舍入规则（写死，裁定 #12）
 
@@ -509,4 +535,48 @@ export interface I18n {
 ## 10. 不做（与 demand.md 一致）
 
 通知/邮件的本地化渲染、导出文件的本地化、业务模块领域术语、第三方翻译服务、
-金额进业务表、复数规则、RTL 布局、用户 i18n 偏好跨设备同步（需建列 + 迁移）。
+金额进业务表、复数规则、RTL 布局、用户 i18n 偏好跨设备同步（需建列 + 迁移）、
+**汇率快照的写入接口**（D115）。
+
+---
+
+## 11. 代码落点（前端 / 后端并行时的文件边界）
+
+本需求**拆两个 Dev 并行**，边界按文件切死，**不允许跨边界改**（改则先报 BA）。
+
+### 11.1 后端（Dev A）
+
+| 能力 | 文件 | 说明 |
+|---|---|---|
+| `TITLES` 表 + `title_of_code` | `crates/platform-core/src/titles.rs`（**新建**） | `Cargo.toml` 无需加依赖 |
+| `Money` + 银行家舍入 + `major` 字符串解析 | `crates/platform-core/src/money.rs`（**新建**） | **纯逻辑，不碰 DB** |
+| FX 换算纯函数 + `FxSnapshot` | `crates/platform-core/src/money.rs` 内 | 入参 `minor` / `rate_micros` / `as_of` / `source` |
+| `platform_fx_rate` 表 + store | `crates/platform-db/src/fx.rs`（**新建**）+ `migrations/20261119000200_i18n_fx_rate.{up,down}.sql`（**新建**） | `platform-db` **有 sqlx**，`platform-core` **没有** |
+| `format` 字段 + 校验器 | `crates/platform-core/src/extension/manifest.rs`（`ConfigSpec` 加 `format`，注意 `deny_unknown_fields`）+ `crates/platform-config/src/registry.rs`（登记）+ `crates/platform-config/src/error.rs`（新错误码） | — |
+| 三个 config 键登记 | `crates/platform-config/manifest.json` | `locale` / `timezone` / `currency`，`scope: tenant`，带 `format` |
+| 各 crate 的 `title_of` 收敛 | `crates/platform-{iam,org,rbac,config}/src/{http,error,notify}.rs` | 删掉 55 条中文字面量，改转发；每 crate 加 `ALL_CODES` |
+| 观测通道 + 换算接口 | `crates/platform-server/src/i18n.rs`（**新建**）+ `main.rs` 挂载 | 见 §5.3.1 的两个接口 |
+
+### 11.2 前端（Dev B）
+
+| 能力 | 文件 | 说明 |
+|---|---|---|
+| `createI18n` / `t` / `setLocale` / `subscribe` / `missingKeys` / `onMissingKey` | `packages/i18n/src/*.ts` | `Intl` 是内建，零新依赖 |
+| `formatDate` / `formatMoney` | `packages/i18n/src/*.ts` | 小数位由货币 `exponent` 决定 |
+| 翻译资源 | `packages/i18n/src/locales/{zh-CN,en-US}.json`（**新建**） | **文件名 = 已注册语言清单**（§3.2） |
+| `ApiError.params` | `packages/sdk/src/index.ts` | **改 REQ-011 产物**（D109），提交信息必须写明 |
+| SDK fixture 的英文 title | `packages/sdk/test/*.ts` | 后端 title 改英文后需同步 |
+| 壳层语言切换 + 时区/金额渲染 | `apps/shell/src/**` | 组件**零硬编码文案**（AC-S-099 步骤 4） |
+| E2E | `e2e/**` | 语言切换后已渲染组件更新；两个租户时区不同 |
+
+### 11.3 共享文件（**只有一个 Dev 能碰**）
+
+| 文件 | 归属 | 理由 |
+|---|---|---|
+| `Cargo.toml`（workspace） | **Dev A** | 若需新增本地 crate |
+| `crates/platform-server/src/main.rs` | **Dev A** | 挂路由 |
+| `package.json`（root / workspace） | **Dev B** | 若需新增包 |
+| `AGENTS.md` / `capabilities/` | **谁都不改** | REQ-004 的索引，要改走单独一环 |
+
+> **提交方式**：两个 Dev **都不提交**（`git commit` 由 BA 在两端都完成后统一做），
+> 避免同一 worktree 的 HEAD 竞争。Dev 只**改文件 + 跑测试 + 报告**。
