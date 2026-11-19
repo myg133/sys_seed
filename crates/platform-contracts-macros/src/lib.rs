@@ -30,7 +30,7 @@
 
 use proc_macro::{Delimiter, Group, Ident, Literal, TokenStream, TokenTree};
 
-/// 生成的五个契约测试。
+/// 生成的六个契约测试。
 ///
 /// 用字符串写死再解析成 token 流：这段代码是固定的，字符串形式比手写 token 拼接
 /// 可读得多，且不引入 quote / syn。
@@ -84,6 +84,15 @@ const GENERATED_TESTS: &str = r#"
         let outcome = ::platform_contracts::checks::check_c5(&subject)
             .unwrap_or_else(|err| panic!("C-5 check could not run: {err}"));
         ::platform_contracts::checks::assert_compliant("C-5", &outcome);
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn contract_c6_schema_projection_is_used() {
+        let subject = contract_subject();
+        let outcome = ::platform_contracts::checks::check_c6(&subject)
+            .unwrap_or_else(|err| panic!("C-6 check could not run: {err}"));
+        ::platform_contracts::checks::assert_compliant("C-6", &outcome);
     }
 "#;
 

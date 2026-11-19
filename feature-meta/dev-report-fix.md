@@ -217,3 +217,143 @@ pnpm exec prettier --check apps/ e2e/   # exit 0
 | `apps/shell/test/session.test.ts` | 新增（8 条） |
 | `apps/shell/test/api.test.ts` | 新增（7 条） |
 | `e2e/shell-auth.spec.ts` | 新增（7 条 REQ-011 E2E，**入库**） |
+
+---
+
+# 修复报告（追加）—— REQ-012 Pre-merge FAIL：2 HIGH + 1 MED + 4 LOW
+
+- **需求**: REQ-012「schema 驱动的渲染闭环」
+- **分支**: `feature/REQ-012`
+- **裁定依据**: `BA/demands/REQ-012-schema-driven/qa-fail-ruling.md`（BA，2026-11-19 17:35）、
+  `feature-meta/qa-report.md`（QA Pre-merge **FAIL**）、
+  `BA/demands/REQ-001-platform-foundation/decisions.md`（**D106 / D108**）
+- **关键区分**: 12 条 AC 的**功能行为全部复现通过**；FAIL 来自**测试资产**（假绿 + 用例互相踩数据）
+- **日期**: 2026-11-19
+- **范围**: 只改测试资产 + 文档/能力索引 + 4 处 LOW 的实现细节；**没有改业务语义**
+
+---
+
+## 1. H-1 自带夹具不授 `sandbox:demo:*` → 6 条 E2E 全 skip、exit 0
+
+两条**都**修（缺一不可）。
+
+| # | 位置 | 改动 |
+|---|---|---|
+| ① | `scripts/seed-e2e.sh:167-173` | `e2e-role-read` + `sandbox:demo:read`；`e2e-role-write` + `sandbox:demo:read` + `sandbox:demo:write` + **`sandbox:demo:secret`**（只授给写用户：AC-S-084 要的就是两个用户字段不同） |
+| ② | `e2e/schema-driven.spec.ts:13-30`（规则注释）、`:133`（`requireMeta`）、`:171`（`expectListReadable`） | **403 从 skip 改成 fail** |
+
+D108 判定表已写进 spec 顶部注释，并机械落在两个 helper 上：
+
+- `requireMeta()`：**只有 404 才 `test.skip`**；其它状态一律 `expect(status).toBe(200)`；
+- `expectListReadable()`：`expect(status).toBe(200)`，失败信息点名「403 = 夹具缺 `sandbox:demo:*` 授权，先跑 `scripts/seed-e2e.sh`」；
+- 顺带把「元数据未声明 `api.create/update/delete`」「夹具用户之间没有字段级权限差异」这些**原本的 skip** 也改成 fail —— 它们同样是配置/实现缺陷，不是「系统没起」。
+
+## 2. H-2 空态用例 vs 零代码用例数据前置互斥
+
+原则：**每条用例自己管数据前置**，任意顺序 / 任意初始状态都独立通过。
+
+| 用例（行号） | 前置 | 收尾 |
+|---|---|---|
+| 表头顺序（`:250`） | 自己造 **3 条** `demoItem`（`hdr-<ts>-N`） | `finally` 删除自己造的 id |
+| 空态（`:273`） | `clearEntity()`（`:224`）**先把 `demoNote` 删空**，并断言删完确实为 0 | 无需恢复（该实体是测试示例数据） |
+| 字段级权限（`:295`） | 写用户自己造 1 条 `demoItem` | `finally` 用写用户登录后删除 |
+| 零代码（`:336`） | **两个实体各造 1 条**（空表不渲染 `thead`，不能靠残留） | `finally` 删除 |
+| CRUD（`:366`） | 用 UI 新建自己的记录（`e2e-<ts>`） | `finally` 按 marker 从列表兜底找回并删除 |
+| 游标分页（`:412`） | 自己播 **21 条**（一页 20），不再「看首页有没有 nextCursor 再决定」 | 删除 |
+
+## 3. M-1 `AGENTS.md` 缺「装配层例外」，与 `deps.rs` 矛盾
+
+`AGENTS.md:85-95`：把「一旦反向依赖业务模块即失败」改为
+「…即失败（**装配层 `platform-server` 除外**）」，并补一张表：
+
+| 谁 | 能否依赖业务模块 |
+|---|---|
+| `platform-core` / `platform-db` / `platform-iam` / `platform-org` / `platform-rbac` / `platform-schema`（及 `platform-config`、`platform-contracts*`） | ❌ 不能 |
+| `platform-server` | ✅ 可以（唯一例外，`crates/xtask/src/deps.rs:64` 的 `ASSEMBLY_CRATES` 白名单） |
+
+并写明「加进白名单等于放弃这条硬规则，只有可执行交付物有资格」。
+
+## 4. LOW
+
+| # | 位置 | 改动 |
+|---|---|---|
+| **L-1** | `crates/xtask/src/catalog.rs:99-101`（唯一来源）→ `AGENTS.md:215` → `capabilities/index.json:26` | `ui_table_component` 说明改为「`@base/ui` 的 Table 是页码分页（依赖 total）的只读表格；游标分页没有 total、且空态不能渲染表头空壳，请用 `apps/shell` 的 `SchemaTable`，勿自造表格渲染」。`cargo xtask capabilities` 重生成，`--check` 通过 |
+| **L-2** | `apps/shell/src/lib/schema-api.ts:88-130` | 新增模块级 `updateMethods: Map<路径模板, 'PATCH'\|'PUT'>`：首次 405 之后固定 PUT，不再每次编辑先吃一个必定 405 的 PATCH。`resetUpdateMethodCache()` 仅供测试；`test/schema-api.test.ts` 加 `beforeEach` + 2 条用例（405 后下次只发 PUT；PATCH 成功也记住） |
+| **L-4** | `apps/shell/src/components/SchemaTable.svelte:110-118` | `<thead><tr>` 里的 `<td class="base-schema-actions">` → `<th scope="col" class="base-schema-actions">`；`test/schema-table.test.ts` 的表头 helper 改为按 `th:not(.base-schema-actions)` 取值，并新增 1 条回归断言（thead 里不得出现 `<td`）。E2E 的 `headerTexts()` 同步用 `th:not(.base-schema-actions)` |
+| **L-5** | `apps/shell/src/lib/schema-submit.ts`（新增）+ `SchemaForm.svelte:131` + `apps/shell/test/schema-form-submit.test.ts`（新增 3 条） | 把「校验失败不发请求」的闸门从组件内联逻辑抽成纯函数 `gateSubmit()`（组件 `handleSubmit` 调它），测试用**假 fetch 计数**断言：必填留空 / number 越界 → `fetchCalls === 0`；合法 → 恰好 1 次且 body 只含声明的可写字段 |
+
+**L-3 / L-6** 按裁定不由本轮修：L-3 登记技术债（属 REQ-011 `<Can>` 范畴）；L-6 由 BA 修 AC（`acceptance.md` 已按 rev 3 改好）。
+
+---
+
+## 5. 验证（全部实际执行）
+
+| 命令 | 结果 |
+|---|---|
+| `./scripts/test-integration.sh` | exit 0（容器数量 2 → 2，未新建容器） |
+| `./scripts/seed-e2e.sh` | ✓ 夹具就绪，read=2 个权限点、write=**5** 个权限点 |
+| `pnpm -r check` | svelte-check **0 errors 0 warnings**；其余包 tsc 全通过 |
+| `pnpm -r build` | 全部成功（`apps/shell/dist` 已重建，E2E 用它） |
+| `pnpm -r test` | `apps/shell` **96 passed (12 files)**；其余包全绿 |
+| `pnpm exec eslint .` | 无输出（通过） |
+| `npx prettier --check .` | All matched files use Prettier code style |
+| `cargo clippy --workspace --all-targets -- -D warnings` | 通过（无警告） |
+| `cargo xtask capabilities --check` | 「能力索引校验通过：14 个文件与源码一致」 |
+| `cargo test -p xtask --all-targets` | **51 passed; 0 failed** |
+
+### E2E（本轮核心）
+
+服务：`SERVER_PORT=8091`、`BASE_STATIC_DIR=apps/shell/dist`、`DATABASE_URL=…base_test`（`base_app`）、
+PKCS#8 EC 私钥 + base64url secret；`/health/live` 返回 200。
+
+| 运行 | 结果 |
+|---|---|
+| 正序 `npx playwright test e2e/` | **17 passed，0 failed，0 skipped**（25.9s） |
+| 反序（`--shuffle` 在 Playwright 1.58 不存在 → 逐条按**反序**单独跑 6 条 schema 用例） | 6/6 全绿：`游标分页 → CRUD → 零代码 → 字段级权限 → 空态 → 表头`，每条 `1 passed`、0 skipped |
+
+> 「`skipped` 必须为 0」已满足：17 条用例一条没跳。
+
+---
+
+## 6. 变异验证（两条，均逐字节还原）
+
+| 变异 | 观察 | 还原 |
+|---|---|---|
+| 删掉 `seed-e2e.sh` 里 `e2e-role-write` 的 `sandbox:demo:read` 并重新播种 | E2E **5 failed / 1 passed / 0 skipped**，失败信息即「demoItem 列表返回 403：… 不是环境前置（D108）」；单独跑 `-g "CRUD"` **exit 1**（证明 CI 会红） | `cp` 回备份，`sha256 = 8f64dd6f…` 与变异前一致；重新播种后 write 恢复 5 个权限点 |
+| 让「零代码」用例依赖「表非空」（去掉它自己创建 `demoNote`） | 反序单独跑 → **1 failed / exit 1**（`thead` 等不到），复现了 QA 说的「用例互相踩数据」 | `cp` 回备份，`sha256 = 0f9d3b29…` 与变异前一致 |
+| （附）把 `validateForm` 变异成恒返回 `{}` | 新增的 `test/schema-form-submit.test.ts` **2 failed / 1 passed** —— 修复前同一变异下 `apps/shell` 是 10 条全绿（L-5 假绿已消除） | `sha256` 与备份一致 |
+
+---
+
+## 7. 变更文件清单
+
+| 文件 | 类型 |
+|---|---|
+| `e2e/schema-driven.spec.ts` | 改（D108 skip→fail 判定 + 每条用例自管数据前置 + 表头选择器排除操作列） |
+| `e2e/shell-auth.spec.ts` | 改（夹具权限注释与 `seed-e2e.sh` 对齐） |
+| `scripts/seed-e2e.sh` | 改（`sandbox:demo:read/write/secret` 授权 + 注释表） |
+| `AGENTS.md` | 改（装配层例外表 + `ui_table_component` 行） |
+| `crates/xtask/src/catalog.rs` | 改（`ui_table_component` 唯一来源） |
+| `capabilities/index.json` | 重生成 |
+| `apps/shell/src/lib/schema-api.ts` | 改（更新方法缓存，L-2） |
+| `apps/shell/src/lib/schema-submit.ts` | **新增**（提交闸门，L-5） |
+| `apps/shell/src/components/SchemaForm.svelte` | 改（`handleSubmit` 走 `gateSubmit`） |
+| `apps/shell/src/components/SchemaTable.svelte` | 改（表头操作列 `<th scope="col">`，L-4） |
+| `apps/shell/test/schema-api.test.ts` | 改（缓存用例 2 条 + `beforeEach` 重置） |
+| `apps/shell/test/schema-table.test.ts` | 改（表头 helper + 1 条 th/td 回归断言） |
+| `apps/shell/test/schema-form-submit.test.ts` | **新增**（3 条「校验失败不发请求」） |
+
+## 8. 假设与风险
+
+1. **`--shuffle` 不可用**：Playwright 1.58 的 CLI 没有这个开关（`--help` 实查）。反序用「逐条按反序单独执行」，
+   等价于证明「任意顺序 + 任意初始状态都能独立通过」，但**不是**一次进程内的乱序执行。
+   若要真正的乱序，需要升 Playwright 或写一个自定义 sequencer —— 不在本轮范围。
+2. **空态用例会删光 `demoNote` 的全部记录**（只限 `tenant-a` 的沙箱示例实体）。这是「自己管前置」的代价：
+   该实体上没有需要保留的数据。若将来有人往 `demoNote` 里放长期夹具，需要改成一个专用的空态实体。
+3. **`updateMethods` 是模块级缓存**：页面进程内有效；刷新页面后重新探测一次 PATCH（可接受）。
+   服务端若在某次部署中把方法从 PUT 改回 PATCH，前端要刷新页面才会重新发现 —— 元数据里没有声明方法，
+   这是「没有更好信息可用」下的取舍（已在文件注释里写明）。
+4. **`sandbox:demo:secret` 授给了 E2E 写用户**：这是为了让 AC-S-084 的「字段差异」可取证；
+   它是测试夹具，不影响生产租户。
+5. **`u-perm-read` 现在多了 `sandbox:demo:read`**：REQ-011 的 `/admin/roles` 403 断言只依赖
+   `rbac:role:write` 的缺失，已复跑通过（`shell-auth.spec.ts` 7 条全绿）。

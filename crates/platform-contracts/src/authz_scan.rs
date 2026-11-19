@@ -302,7 +302,7 @@ pub fn strip_comments(source: &str) -> String {
 }
 
 /// 递归收集目录下的 `.rs` 文件。
-fn rust_files(dir: &Path) -> Result<Vec<PathBuf>> {
+pub(crate) fn rust_files(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     if !dir.is_dir() {
         return Ok(files);
@@ -409,7 +409,7 @@ fn starts_char_literal(chars: &[char], index: usize) -> bool {
 /// 把**字符串字面量的内容**换成空格（长度不变）。
 ///
 /// 用于「只看代码」的扫描：字符串里的 `fn require_permission` 不是定义。
-fn blank_strings(source: &str) -> String {
+pub(crate) fn blank_strings(source: &str) -> String {
     let chars: Vec<char> = source.chars().collect();
     let mut out = String::with_capacity(source.len());
     let mut index = 0usize;

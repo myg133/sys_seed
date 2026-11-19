@@ -12,6 +12,17 @@
 //!
 //! 因此平台 crate 的依赖图里**不得出现任何业务模块**（`modules/...`）。
 //!
+//! # 唯一的例外：装配层
+//!
+//! [`ASSEMBLY_CRATES`]（当前只有 `platform-server`）**允许**依赖业务模块。
+//!
+//! REQ-012 的 D103 要把 `modules/sandbox` 挂进服务 —— 挂载只能发生在**装配层**：
+//! `platform-server` 是交付用的 `base` 二进制，不是被业务模块依赖的库；
+//! 它依赖业务模块正是它的职责（把编译期注册的模块接到 `/api/<module-id>` 下）。
+//!
+//! 例外**只有这一个**：`platform-core` / `platform-db` / `platform-contracts`
+//! 依赖业务模块 = 依赖方向真的反了。
+//!
 //! # 怎么查的
 //!
 //! 读 `cargo metadata --format-version 1 --no-deps` 的成员依赖图，
@@ -44,6 +55,12 @@ pub const PLATFORM_CRATES: [&str; 4] = [
     "platform-contracts-macros",
     "platform-db",
 ];
+
+/// **装配层**：允许依赖业务模块的平台 crate（例外，见模块文档）。
+///
+/// 加进这个清单等于放弃「依赖方向」这条硬规则对这个 crate 的约束 ——
+/// 只有「可执行交付物」才有资格进来。库 crate 一律不行。
+pub const ASSEMBLY_CRATES: [&str; 1] = ["platform-server"];
 
 /// `cargo metadata` 的最小结构（只取用得到的字段）。
 #[derive(Debug, Deserialize)]
@@ -118,7 +135,7 @@ impl DependencyGraph {
         }
     }
 
-    /// 需要检查的平台 crate：显式清单 ∪ `crates/` 下的工作区成员。
+    /// 需要检查的平台 crate：显式清单 ∪ `crates/` 下的工作区成员，**去掉装配层**。
     fn platform_crates(&self) -> Vec<String> {
         let mut seeds: BTreeSet<String> = PLATFORM_CRATES
             .iter()
@@ -129,7 +146,10 @@ impl DependencyGraph {
                 seeds.insert(name.clone());
             }
         }
-        seeds.into_iter().collect()
+        seeds
+            .into_iter()
+            .filter(|name| !ASSEMBLY_CRATES.contains(&name.as_str()))
+            .collect()
     }
 
     /// 路径是否指向业务模块（位于 `modules/` 下）。
@@ -310,6 +330,55 @@ mod tests {
         assert!(
             violations[0].contains("modules/sandbox"),
             "violations = {violations:?}"
+        );
+    }
+
+    /// 装配层可以依赖业务模块（D103），但**只有它**可以。
+    ///
+    /// 两条断言语义不同：
+    ///
+    /// 1. `platform-server → sandbox` **不**报违规（挂载只能在装配层发生）；
+    /// 2. `platform-core → sandbox` **报**违规（依赖方向真的反了）。
+    ///
+    /// 只断言第 1 条是不够的 —— 那样把整条规则删掉也能过。
+    #[test]
+    fn only_the_assembly_layer_may_depend_on_business_modules() {
+        let temp = TempDir::new("assembly");
+        write_workspace(
+            temp.path(),
+            &[
+                (
+                    "crates/platform-server",
+                    "platform-server",
+                    "sandbox = { path = \"../../modules/sandbox\" }\n",
+                ),
+                ("modules/sandbox", "sandbox", ""),
+            ],
+            "",
+        );
+        assert!(
+            violations_of(temp.path()).is_empty(),
+            "装配层依赖业务模块是它的职责：{:?}",
+            violations_of(temp.path())
+        );
+
+        let temp = TempDir::new("assembly-guard");
+        write_workspace(
+            temp.path(),
+            &[
+                (
+                    "crates/platform-core",
+                    "platform-core",
+                    "sandbox = { path = \"../../modules/sandbox\" }\n",
+                ),
+                ("modules/sandbox", "sandbox", ""),
+            ],
+            "",
+        );
+        assert_eq!(
+            violations_of(temp.path()).len(),
+            1,
+            "例外只给装配层，库 crate 仍受约束"
         );
     }
 

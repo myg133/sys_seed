@@ -17,18 +17,36 @@
  * 3. 放行 → 才调用目标页的 `load`。
  *
  * 环境（`location` / `history` / 事件监听）**可注入** → 单测不需要真实 DOM。
+ *
+ * # `:param` 通配（D104，REQ-012）
+ *
+ * 这是对 REQ-011 产物的**扩展**，不是破坏：
+ *
+ * - **精确路径仍精确匹配** —— 现有路由的语义与行为一字不改；
+ * - **精确优先于通配**：先找 `route.path === path`，再按声明顺序找含 `:param` 的；
+ * - 通配段的值进 `RouteResolution.params`；
+ * - `permission` 仍按**静态声明**判定（通配路由不能按参数拼权限点 ——
+ *   那会让「权限点」变成运行时字符串拼接，后端对账无法覆盖）。
  */
 
-import { guard, type AuthState, type GuardOptions } from '@base/auth';
+import { guard, isAuthenticated, type AuthState, type GuardOptions } from '@base/auth';
 
 /** 路由定义。 */
 export interface RouteDefinition {
-  /** 路径。 */
+  /** 路径（可以含 `:param` 段，如 `/schema/:moduleId/:entityKey`）。 */
   readonly path: string;
   /** 页面标题。 */
   readonly title: string;
   /** 访问该路由需要的权限点（没有 = 公开路由）。 */
   readonly permission?: string;
+  /**
+   * 只要求「已登录」，不要求具体权限点。
+   *
+   * 通配路由（`/schema/:moduleId/:entityKey`）用它：实体级权限点由后端按元数据 +
+   * 字段过滤裁决，前端没有一个**静态**权限点能表达「任意模块的任意实体」。
+   * 未登录 → 落登录页（与 `permission` 守卫一致）。
+   */
+  readonly requiresAuth?: boolean;
   /** 页面数据加载函数（**守卫放行后**才被调用）。 */
   readonly load?: () => void | Promise<void>;
 }
@@ -50,6 +68,8 @@ export interface RouteResolution {
   readonly path: string;
   /** 命中的路由（没命中时为 `undefined`）。 */
   readonly route?: RouteDefinition;
+  /** 从 `:param` 段提取的参数（精确匹配时为空对象）。 */
+  readonly params: Readonly<Record<string, string>>;
   /** 是否放行。 */
   readonly allowed: boolean;
   /** 拒绝时的落点（登录页 / 403 页）。 */
@@ -88,7 +108,30 @@ export interface Router {
 
 /** 初始的导航结果（还没过守卫；`start()` 之后才是最终结果）。 */
 export function initialResolution(path: string): RouteResolution {
-  return { path, allowed: true };
+  return { path, params: {}, allowed: true };
+}
+
+/** 一次路径匹配的结果。 */
+interface RouteMatch {
+  /** 命中的路由。 */
+  readonly route: RouteDefinition;
+  /** 通配段提取出的参数。 */
+  readonly params: Record<string, string>;
+}
+
+/** 把路径切成段（去掉首尾斜杠；`/` → 空数组）。 */
+function pathSegments(path: string): string[] {
+  const trimmed = path.replace(/^\/+|\/+$/g, '');
+  return trimmed === '' ? [] : trimmed.split('/');
+}
+
+/** 解码路径段（非法百分号编码时保留原文，**不抛错**）。 */
+function decodeSegment(segment: string): string {
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return segment;
+  }
 }
 
 /** 构造路由器。 */
@@ -97,19 +140,73 @@ export function createRouter(options: RouterOptions): Router {
   let currentPath = environment.location.pathname;
   let started = false;
 
-  const match = (path: string): RouteDefinition | undefined =>
-    routes.find((route) => route.path === path);
+  /**
+   * 匹配路由：**精确优先**，其次按声明顺序匹配 `:param` 路由（D104）。
+   *
+   * 精确匹配放在最前是硬要求：否则一条 `/schema/:a/:b` 会把同形精确路由抢走。
+   */
+  const match = (path: string): RouteMatch | undefined => {
+    const exact = routes.find((route) => route.path === path);
+    if (exact !== undefined) {
+      return { route: exact, params: {} };
+    }
+    const target = pathSegments(path);
+    for (const route of routes) {
+      if (!route.path.includes(':')) {
+        continue;
+      }
+      const pattern = pathSegments(route.path);
+      if (pattern.length !== target.length) {
+        continue;
+      }
+      const params: Record<string, string> = {};
+      let matched = true;
+      for (let index = 0; index < pattern.length; index += 1) {
+        const expected = pattern[index] ?? '';
+        const actual = target[index] ?? '';
+        if (expected.startsWith(':')) {
+          if (actual === '') {
+            matched = false;
+            break;
+          }
+          params[expected.slice(1)] = decodeSegment(actual);
+          continue;
+        }
+        if (expected !== actual) {
+          matched = false;
+          break;
+        }
+      }
+      if (matched) {
+        return { route, params };
+      }
+    }
+    return undefined;
+  };
 
   const resolve = (path: string): RouteResolution => {
-    const route = match(path);
-    if (route === undefined || route.permission === undefined) {
-      return { path, route, allowed: true };
+    const matched = match(path);
+    if (matched === undefined) {
+      return { path, params: {}, allowed: true };
     }
-    const result = guard(getState(), route.permission, options.guardOptions);
-    if (!result.allowed) {
-      return { path, route, allowed: false, redirectTo: result.redirectTo };
+    const { route, params } = matched;
+    if (route.permission !== undefined) {
+      const result = guard(getState(), route.permission, options.guardOptions);
+      if (!result.allowed) {
+        return { path, route, params, allowed: false, redirectTo: result.redirectTo };
+      }
+      return { path, route, params, allowed: true };
     }
-    return { path, route, allowed: true };
+    if (route.requiresAuth === true && !isAuthenticated(getState())) {
+      return {
+        path,
+        route,
+        params,
+        allowed: false,
+        redirectTo: options.guardOptions?.loginPath ?? '/login',
+      };
+    }
+    return { path, route, params, allowed: true };
   };
 
   const write = (path: string, replace: boolean): void => {

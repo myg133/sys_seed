@@ -22,12 +22,13 @@
   import { createAppApi } from './lib/api';
   import { AUTH_CONTEXT_KEY } from './lib/auth-context';
   import { createRouter, initialResolution } from './lib/router';
-  import { createRoutes, toRoles } from './lib/routes';
+  import { createRoutes, SCHEMA_ROUTE_PATH, toRoles } from './lib/routes';
 
   import Forbidden from './pages/Forbidden.svelte';
   import Home from './pages/Home.svelte';
   import Login from './pages/Login.svelte';
   import ProtectedRoles from './pages/ProtectedRoles.svelte';
+  import SchemaPage from './pages/SchemaPage.svelte';
 
   // 同源：页面由 platform-server 的静态目录托管（本仓没有 CORS 层）。
   // 租户在登录时由用户填（D98），这里不传死值。
@@ -119,6 +120,15 @@
   <Forbidden onback={() => router.navigate('/')} />
 {:else if resolution.path === '/admin/roles' && resolution.allowed}
   <ProtectedRoles {roles} />
+{:else if resolution.route?.path === SCHEMA_ROUTE_PATH && resolution.allowed}
+  <!-- 通配路由（D104）：模块 / 实体只来自 URL 参数，页面不认识任何具体实体。 -->
+  {#key resolution.path}
+    <SchemaPage
+      {client}
+      moduleId={resolution.params.moduleId ?? ''}
+      entityKey={resolution.params.entityKey ?? ''}
+    />
+  {/key}
 {:else}
   <Home {title} />
 {/if}

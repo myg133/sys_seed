@@ -116,9 +116,14 @@ E2E_PASSWORD_PHC='$argon2id$v=19$m=16384,t=2,p=1$ZTJlLWZpeHR1cmUtc2FsdC0wMDAx$uN
 #
 # | 用户 | 权限点 | 用途 |
 # |---|---|---|
-# | u-perm-read@example.com  | rbac:role:read                      | 只读 → 深链 403 |
-# | u-perm-write@example.com | rbac:role:read + rbac:role:write     | 写用户 → 深链可达 |
+# | u-perm-read@example.com  | rbac:role:read + sandbox:demo:read  | 只读 → 能读列表、不能写；看不到 `secret` 字段 |
+# | u-perm-write@example.com | rbac:role:read + rbac:role:write + sandbox:demo:read + sandbox:demo:write + sandbox:demo:secret | 写用户 → 深链可达、CRUD 可跑、能看到 `secret` 字段 |
 # | u-perm-none@example.com  | （无）                              | fail closed |
+#
+# `sandbox:demo:*` 是 REQ-012 的权限点（`sandbox` 模块的两个实体共用）。
+# **漏授就会让 `e2e/schema-driven.spec.ts` 的列表请求 403**，而按 D108，
+# 403 必须让用例 **fail**（不是 skip）—— 所以这份清单是 E2E 能否真跑的前提。
+# `sandbox:demo:secret` 只授给写用户：AC-S-084 要的就是「两个用户看到的字段不同」。
 #
 # id 用固定值（不是随机 uuid）：重复执行时能精确命中同一行，
 # 也让「用户数不翻倍」这件事一眼可查。**同名既有行除外** —— 冲突时沿用它的 id
@@ -159,9 +164,13 @@ DELETE FROM platform_role_permission
 
 INSERT INTO platform_role_permission (tenant_id, role_id, permission_code, data_scope)
 VALUES
-    ('tenant-a', 'e2e-role-read',  'rbac:role:read',  NULL),
-    ('tenant-a', 'e2e-role-write', 'rbac:role:read',  NULL),
-    ('tenant-a', 'e2e-role-write', 'rbac:role:write', NULL)
+    ('tenant-a', 'e2e-role-read',  'rbac:role:read',     NULL),
+    ('tenant-a', 'e2e-role-read',  'sandbox:demo:read',  NULL),
+    ('tenant-a', 'e2e-role-write', 'rbac:role:read',     NULL),
+    ('tenant-a', 'e2e-role-write', 'rbac:role:write',    NULL),
+    ('tenant-a', 'e2e-role-write', 'sandbox:demo:read',  NULL),
+    ('tenant-a', 'e2e-role-write', 'sandbox:demo:write', NULL),
+    ('tenant-a', 'e2e-role-write', 'sandbox:demo:secret', NULL)
 ON CONFLICT (tenant_id, role_id, permission_code) DO NOTHING;
 
 -- 4) 绑定：**用查出来的实际 id**（第 1 步的 upsert 只把同名既有行「修好登录字段」，
@@ -239,4 +248,25 @@ if [ "$bad" != '3 1 1 1 ' ]; then
   exit 1
 fi
 
+# 强断言 ②：**权限点数目**也要对（只数用户行数的话，授权漏了也 exit 0）。
+#
+# 为什么必须断言这一条：REQ-012 的 E2E 曾因为本脚本没授 `sandbox:demo:*` 而
+# **6 条全部 skip、exit 0**（假绿）。D108 让 E2E 侧变红了，但**播种脚本自己也该自证** ——
+# 否则「脚本成功」和「夹具可用」是两件事。
+#
+# 期望：read=2（rbac:role:read + sandbox:demo:read）
+#       write=5（rbac:role:read/write + sandbox:demo:read/write/secret）
+#       none=0
+grants="$(printf '%s\n' \
+  "SELECT count(*) FROM platform_role_permission p JOIN platform_user_role r ON r.tenant_id = p.tenant_id AND r.role_id = p.role_id JOIN platform_iam_user u ON u.tenant_id = r.tenant_id AND u.id = r.user_id WHERE u.tenant_id = 'tenant-a' AND u.username = 'u-perm-read@example.com';" \
+  "SELECT count(*) FROM platform_role_permission p JOIN platform_user_role r ON r.tenant_id = p.tenant_id AND r.role_id = p.role_id JOIN platform_iam_user u ON u.tenant_id = r.tenant_id AND u.id = r.user_id WHERE u.tenant_id = 'tenant-a' AND u.username = 'u-perm-write@example.com';" \
+  "SELECT count(*) FROM platform_role_permission p JOIN platform_user_role r ON r.tenant_id = p.tenant_id AND r.role_id = p.role_id JOIN platform_iam_user u ON u.tenant_id = r.tenant_id AND u.id = r.user_id WHERE u.tenant_id = 'tenant-a' AND u.username = 'u-perm-none@example.com';" \
+  | run_sql -tA | tr '\n' ' ')"
+if [ "$grants" != '2 5 0 ' ]; then
+  echo "✗ 夹具授权核对失败：期望 read=2 / write=5 / none=0，实际 '$grants'" >&2
+  echo "  （REQ-012 的 E2E 需要 sandbox:demo:read/write/secret；漏授会让用例 403。）" >&2
+  exit 1
+fi
+
 echo "✓ E2E 夹具就绪：u-perm-read / u-perm-write / u-perm-none（tenant-a，密码 Tr0ub4dor&3xKq）"
+echo "  授权：read=2 / write=5 / none=0 个权限点（含 sandbox:demo:*）"

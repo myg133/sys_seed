@@ -1,4 +1,4 @@
-//! C-1 ~ C-5 五项契约检查。
+//! C-1 ~ C-6 六项契约检查。
 //!
 //! | 检查 | 判定 |
 //! |------|------|
@@ -7,6 +7,7 @@
 //! | C-3 | 租户隔离生效：列不出别租户的数据，查不到别租户的记录 |
 //! | C-4 | 事务边界：单次写全有或全无；跨表写必须显式开平台事务 |
 //! | C-5 | 已登记权限点必须有**鉴权调用点**，且鉴权入口**全仓库唯一** |
+//! | C-6 | 声明了**字段级权限**的模块，源码里必须有 `SchemaProjector::project` 调用点 |
 
 use std::collections::BTreeSet;
 
@@ -16,6 +17,7 @@ use platform_core::context::RequestContext;
 use platform_core::extension::repository::{ListQuery, Repository};
 
 use crate::authz_scan::{self, PLATFORM_ENTRY_FILE};
+use crate::schema_scan;
 use crate::fixture::{ContractFixture, ContractSubject};
 use crate::manifest_scan::scan_permission_codes;
 use crate::suite::{ContractViolation, ContractWarning};
@@ -30,6 +32,8 @@ pub const C3: &str = "C-3";
 pub const C4: &str = "C-4";
 /// C-5 检查 ID。
 pub const C5: &str = "C-5";
+/// C-6 检查 ID。
+pub const C6: &str = "C-6";
 
 /// 一项检查的结果：违例（失败）与告警（不阻断）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -78,6 +82,30 @@ fn format_violations(violations: &[ContractViolation]) -> String {
         .join("\n")
 }
 
+/// 声明为**字段级**的权限点编码（`type: "field"`）。
+///
+/// # 为什么 C-2 / C-5 要排除它们
+///
+/// 字段级权限点的**消费方不是路由**：它由 manifest 的 `schema.<entity>.fields[].permission`
+/// 引用，在源码里是**动态**字符串（`checker.has(ctx, code)`），
+/// 所以既不会有 `require_permission("字面量")` 调用点，也不会以字面量出现在代码里。
+///
+/// 它自己的契约是 **C-6**：声明了字段级权限的模块必须有 `SchemaProjector::project` 调用点。
+/// 不排除的话，C-5 会对每个合法的字段级权限点报「没有鉴权调用点」——
+/// 那是**误报**，而误报会让检查被关掉（关掉之后比没有更坏）。
+fn field_permission_codes(
+    manifest: &platform_core::extension::manifest::Manifest,
+) -> BTreeSet<&str> {
+    manifest
+        .permissions
+        .iter()
+        .filter(|permission| {
+            permission.kind == platform_core::extension::manifest::PermissionType::Field
+        })
+        .map(|permission| permission.code.as_str())
+        .collect()
+}
+
 /// C-1：`manifest.json` 与实现一致。
 pub fn check_c1<F: ContractFixture>(subject: &ContractSubject<F>) -> Result<CheckOutcome> {
     let mut outcome = CheckOutcome::default();
@@ -118,6 +146,7 @@ pub fn check_c2<F: ContractFixture>(subject: &ContractSubject<F>) -> Result<Chec
 
     let used = scan_permission_codes(&subject.fixture.backend_dir(), &manifest.id)?;
     let declared: BTreeSet<&str> = manifest.permission_codes().into_iter().collect();
+    let field_level = field_permission_codes(&manifest);
 
     for code in used.iter().filter(|code| !declared.contains(code.as_str())) {
         outcome.violation(
@@ -129,6 +158,7 @@ pub fn check_c2<F: ContractFixture>(subject: &ContractSubject<F>) -> Result<Chec
     }
     for code in declared
         .iter()
+        .filter(|code| !field_level.contains(*code))
         .filter(|code| !used.iter().any(|used| used == *code))
     {
         outcome.warning(
@@ -488,11 +518,12 @@ pub fn check_c5_for(
         })?;
 
     let declared: BTreeSet<&str> = manifest.permission_codes().into_iter().collect();
+    let field_level = field_permission_codes(&manifest);
     let scan = authz_scan::scan_auth_calls(source_dir)?;
     let called: BTreeSet<&str> = scan.codes.iter().map(String::as_str).collect();
 
     let mut violations = Vec::new();
-    for code in &declared {
+    for code in declared.iter().filter(|code| !field_level.contains(*code)) {
         if !called.contains(code) {
             violations.push(ContractViolation::new(
                 C5,
@@ -548,6 +579,7 @@ pub fn check_c5<F: ContractFixture>(subject: &ContractSubject<F>) -> Result<Chec
     let mut outcome = CheckOutcome::default();
     let manifest = subject.manifest()?;
     let declared: BTreeSet<&str> = manifest.permission_codes().into_iter().collect();
+    let field_level = field_permission_codes(&manifest);
     let backend_dir = subject.fixture.backend_dir();
 
     // 1) 鉴权入口的**定义处**必须全仓库唯一，且必须是平台那一个。
@@ -589,7 +621,9 @@ pub fn check_c5<F: ContractFixture>(subject: &ContractSubject<F>) -> Result<Chec
     let called: BTreeSet<&str> = scan.codes.iter().map(String::as_str).collect();
 
     // 3) 已登记的权限点**必须**有调用点（登记了却不执行 = 假权限）。
-    for code in &declared {
+    //
+    //    字段级权限点例外：它们的调用点是 `SchemaProjector`（C-6 扫）。
+    for code in declared.iter().filter(|code| !field_level.contains(*code)) {
         if !called.contains(code) {
             outcome.violation(
                 C5,
@@ -633,5 +667,100 @@ pub fn check_c5<F: ContractFixture>(subject: &ContractSubject<F>) -> Result<Chec
         );
     }
 
+    Ok(outcome)
+}
+
+/// 从 manifest 收集「声明了字段级权限」的字段：`(实体, 字段下标, 字段键, 权限点)`。
+///
+/// 实体按 manifest 里的键序（`BTreeMap`）遍历 —— 错误输出因此是确定的。
+fn declared_permission_fields(
+    manifest: &platform_core::extension::manifest::Manifest,
+) -> Vec<(String, usize, String, String)> {
+    let Some(schemas) = &manifest.schema else {
+        return Vec::new();
+    };
+    schemas
+        .iter()
+        .flat_map(|(entity, spec)| {
+            spec.fields
+                .iter()
+                .enumerate()
+                .filter_map(|(index, field)| {
+                    field.permission().map(|code| {
+                        (entity.clone(), index, field.key.clone(), code.to_string())
+                    })
+                })
+        })
+        .collect()
+}
+
+/// C-6 的**不依赖 `ContractFixture`** 入口（照 C-5 的 `check_c5_for` 先例，D58）。
+///
+/// # 判据（design §4.4 已选定）
+///
+/// 若 `manifest` 声明了任何带 `permission` 的字段，则 `source_dir` 里**必须出现**
+/// `SchemaProjector::project` 的调用。
+///
+/// 这是「**至少一处**」判据：
+///
+/// | 情形 | 判定 |
+/// |------|------|
+/// | 没有声明字段级权限 | ✅ 通过（无声明即无约束） |
+/// | 声明了，且源码里有调用点 | ✅ 通过 |
+/// | 声明了，源码里**没有**调用点（含只有注释 / 字符串里出现） | ❌ 失败 |
+///
+/// ⚠️ **局限**：「3 个 handler 只有 1 个调用」**能过**。静态判定「哪个 handler 返回哪个实体」
+/// 需要类型推导，在源码扫描里不可靠 —— 会误报，进而被人关掉，
+/// **关掉之后比没有更坏**。主路径由 AC-S-080 的列表接口用例兜住。
+pub fn check_c6_for(
+    manifest_path: &std::path::Path,
+    source_dir: &std::path::Path,
+) -> Result<Vec<ContractViolation>> {
+    let raw = std::fs::read_to_string(manifest_path)
+        .with_context(|| format!("cannot read {}", manifest_path.display()))?;
+    let manifest =
+        platform_core::extension::manifest::Manifest::parse_checked(&raw).map_err(|issues| {
+            let detail = issues
+                .iter()
+                .map(|issue| format!("{}: {}", issue.field(), issue.reason()))
+                .collect::<Vec<_>>()
+                .join("; ");
+            anyhow::anyhow!("{} is invalid: {detail}", manifest_path.display())
+        })?;
+
+    let declared = declared_permission_fields(&manifest);
+    if declared.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let scan = schema_scan::scan_project_calls(source_dir)?;
+    if scan.has_call() {
+        return Ok(Vec::new());
+    }
+
+    Ok(declared
+        .into_iter()
+        .map(|(entity, index, field, code)| {
+            ContractViolation::new(
+                C6,
+                format!(
+                    "the module `{module}` declares the field-level permission `{code}` on entity `{entity}` field `{field}` (schema.{entity}.fields[{index}].permission), but there is no project call site (`SchemaProjector::project`) in the module source",
+                    module = manifest.id
+                ),
+            )
+        })
+        .collect())
+}
+
+/// C-6：声明了字段级权限就必须有**投影调用点**（判据 = 「至少一处」，见 [`check_c6_for`]）。
+pub fn check_c6<F: ContractFixture>(subject: &ContractSubject<F>) -> Result<CheckOutcome> {
+    let mut outcome = CheckOutcome::default();
+    // 先解析一次：manifest 坏了要让检查**失败**，不是静默通过。
+    subject.manifest()?;
+    let violations =
+        check_c6_for(&subject.fixture.manifest_path(), &subject.fixture.backend_dir())?;
+    for violation in violations {
+        outcome.violation(C6, violation.message);
+    }
     Ok(outcome)
 }

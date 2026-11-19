@@ -20,6 +20,10 @@ axum.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+# 主键与时间戳（两个都已在依赖树里：uuid 是 platform-core 的依赖，time 是 sqlx 的时间映射）。
+# 加它们**不增长**依赖树（Cargo.lock 仍是 295 包）。
+uuid.workspace = true
+time.workspace = true
 # 业务模块只依赖平台核心（扩展点 trait），不依赖平台内部模块
 platform-core.workspace = true
 # REQ-006：数据访问走 platform-db 的租户作用域入口（拿不到裸连接）

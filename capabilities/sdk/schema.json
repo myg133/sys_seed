@@ -3,15 +3,69 @@
   "exports": [
     {
       "declaration": "export type FieldType = 'text' | 'number' | 'boolean' | 'date' | 'reference'",
-      "description": "元数据 schema 占位包。",
+      "description": "元数据 schema 包 —— **纯逻辑**（不依赖 DOM / 框架 / 其它包）。",
       "kind": "type",
       "name": "FieldType"
+    },
+    {
+      "declaration": "export const FIELD_TYPES: readonly FieldType[] = ['text', 'number', 'boolean', 'date', 'reference']",
+      "description": "本期允许的字段类型（顺序即文档顺序）。",
+      "kind": "const",
+      "name": "FIELD_TYPES"
+    },
+    {
+      "declaration": "export interface ReferenceTarget {",
+      "description": "`reference` 指向的实体（本期只读展示 id，不做下拉 —— D105）。",
+      "kind": "interface",
+      "name": "ReferenceTarget"
     },
     {
       "declaration": "export interface FieldMeta {",
       "description": "字段元数据。",
       "kind": "interface",
       "name": "FieldMeta"
+    },
+    {
+      "declaration": "export interface ApiEndpoints {",
+      "description": "数据接口声明（D102）。",
+      "kind": "interface",
+      "name": "ApiEndpoints"
+    },
+    {
+      "declaration": "export interface EntityMeta {",
+      "description": "实体元数据（`GET /api/schema/<module>/<entity>` 的响应形状）。",
+      "kind": "interface",
+      "name": "EntityMeta"
+    },
+    {
+      "declaration": "export interface FormattedCell {",
+      "description": "单元格的格式化结果。",
+      "kind": "interface",
+      "name": "FormattedCell"
+    },
+    {
+      "declaration": "export interface ListPage {",
+      "description": "一页列表数据（游标分页；**没有** `total`）。",
+      "kind": "interface",
+      "name": "ListPage"
+    },
+    {
+      "declaration": "export interface SubmitPreparation {",
+      "description": "表单提交的准备结果。",
+      "kind": "interface",
+      "name": "SubmitPreparation"
+    },
+    {
+      "declaration": "export const DEFAULT_PAGE_SIZE = 20",
+      "description": "默认每页条数（与 sandbox `config.pageSize` 的默认值一致）。",
+      "kind": "const",
+      "name": "DEFAULT_PAGE_SIZE"
+    },
+    {
+      "declaration": "export const ID_PLACEHOLDER = '{id}'",
+      "description": "更新 / 删除路径里的 id 占位符。",
+      "kind": "const",
+      "name": "ID_PLACEHOLDER"
     },
     {
       "declaration": "export function describeField(field: FieldMeta): string {",
@@ -24,6 +78,78 @@
       "description": "按字段名查找元数据。",
       "kind": "function",
       "name": "findField"
+    },
+    {
+      "declaration": "export function isKnownFieldType(type: string): type is FieldType {",
+      "description": "类型是否属于本期允许集合。",
+      "kind": "function",
+      "name": "isKnownFieldType"
+    },
+    {
+      "declaration": "export function visibleFields(meta: EntityMeta): FieldMeta[] {",
+      "description": "过滤出当前元数据里**可见**的字段（后端已过滤，前端只是忠实渲染）。",
+      "kind": "function",
+      "name": "visibleFields"
+    },
+    {
+      "declaration": "export function formValues(",
+      "description": "初始化表单值：**只留元数据声明的字段**。",
+      "kind": "function",
+      "name": "formValues"
+    },
+    {
+      "declaration": "export function validateForm(",
+      "description": "表单校验：返回「字段 → 错误文案」；**空映射 = 通过**。",
+      "kind": "function",
+      "name": "validateForm"
+    },
+    {
+      "declaration": "export function prepareSubmit(",
+      "description": "校验 + 构造提交体。",
+      "kind": "function",
+      "name": "prepareSubmit"
+    },
+    {
+      "declaration": "export function formatCell(field: FieldMeta, value: unknown): FormattedCell {",
+      "description": "按类型格式化单元格（AC-S-082 步骤 3）。",
+      "kind": "function",
+      "name": "formatCell"
+    },
+    {
+      "declaration": "export function buildListQuery(cursor?: string | null, limit?: number): Record<string, string> {",
+      "description": "构造列表查询参数（游标分页）。",
+      "kind": "function",
+      "name": "buildListQuery"
+    },
+    {
+      "declaration": "export function recordId(record: Record<string, unknown>): string {",
+      "description": "记录 id 的提取（用于 update / delete 的 `{id}` 替换）。",
+      "kind": "function",
+      "name": "recordId"
+    },
+    {
+      "declaration": "export function resolveApiPath(template: string, id: string): string {",
+      "description": "把 `api.update` / `api.delete` 模板里的 `{id}` 替换为记录 id。",
+      "kind": "function",
+      "name": "resolveApiPath"
+    },
+    {
+      "declaration": "export function parseEntityMeta(raw: unknown): EntityMeta | undefined {",
+      "description": "解析元数据响应（容错）。",
+      "kind": "function",
+      "name": "parseEntityMeta"
+    },
+    {
+      "declaration": "export function parseListResponse(raw: unknown): ListPage {",
+      "description": "解析列表响应（容错）。",
+      "kind": "function",
+      "name": "parseListResponse"
+    },
+    {
+      "declaration": "export function unknownTypeWarning(field: FieldMeta): string {",
+      "description": "未知字段类型的告警文案（AC-S-087：一条**可发现**的告警）。",
+      "kind": "function",
+      "name": "unknownTypeWarning"
     }
   ],
   "generated_by": "cargo xtask capabilities",

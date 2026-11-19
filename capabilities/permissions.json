@@ -16,6 +16,11 @@
           "type": "button"
         },
         {
+          "code": "sandbox:demo:secret",
+          "name": "查看示例内部备注",
+          "type": "field"
+        },
+        {
           "code": "sandbox:scope-item:read",
           "name": "查看数据范围示例",
           "type": "button"
@@ -137,5 +142,5 @@
       ]
     }
   ],
-  "total": 22
+  "total": 23
 }

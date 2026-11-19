@@ -10,5 +10,11 @@ bun.lock
 # 能力索引是生成物：格式由 `cargo xtask capabilities` 决定，不参与 prettier 校验
 capabilities/
 
+# 工作区工具的产物：`feature-meta/manifest.json` 由 `aw.py claim` 写出，
+# 且**不带末尾换行** → 每次认领都会让 lint 红。
+# 它是**工具生成物**，不是人写的代码 —— 不该由 prettier 管，
+# 否则每个需求都要手动补一次换行（治标不治本）。
+feature-meta/manifest.json
+
 # Helm 模板是 Go 模板不是 YAML，prettier 的 YAML 解析器读不了
 deploy/helm/

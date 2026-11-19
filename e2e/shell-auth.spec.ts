@@ -8,9 +8,13 @@ import { expect, test, type Page } from '@playwright/test';
  *
  * 前置（`scripts/e2e-server.sh`）：`base_test` 里的夹具用户，密码统一为
  * `Tr0ub4dor&3xKq`，租户 `tenant-a`。三组权限：
- *   - `u-perm-read@example.com` → 只有 `rbac:role:read`
+ *   - `u-perm-read@example.com` → `rbac:role:read` + `sandbox:demo:read`
  *   - `u-perm-write@example.com` → `rbac:role:read` + `rbac:role:write`
+ *     + `sandbox:demo:read/write/secret`
  *   - `u-perm-none@example.com` → 无任何权限点
+ *
+ * `sandbox:demo:*` 由 REQ-012 引入；本 spec 只用到 `rbac:role:*` 的差异
+ * （`/admin/roles` 的 403），多出来的权限点不影响这些断言。
  *
  * ⚠️ **夹具必须由 `scripts/seed-e2e.sh` 显式播种**（D101）：
  * 跑过 `./scripts/test-integration.sh` 之后库会被重置，本 spec 依赖的用户

@@ -17,8 +17,9 @@ use std::pin::Pin;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use axum::extract::State;
-use axum::http::{StatusCode, Uri, header};
+use axum::extract::{Request, State};
+use axum::http::{HeaderMap, StatusCode, Uri, header};
+use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
@@ -28,6 +29,7 @@ use platform_core::extension::expr::CompiledCondition;
 use platform_core::extension::permission::{
     DataScope, PermissionChecker, PermissionProvider, PermissionRefresher, ScopeFilter,
 };
+use platform_schema::{SchemaState, SchemaRegistry};
 use platform_core::log_filter;
 use platform_iam::config::IamConfig;
 use platform_iam::http::IamState;
@@ -265,6 +267,17 @@ async fn serve() -> Result<(), Failure> {
         tracing::info!(role = %isolation.report.role, "租户隔离前提自检通过：连接角色不绕过 RLS");
     }
 
+    // 实体元数据注册表（REQ-012）。**必须在装配业务模块之前**建成：
+    //
+    // 1. 它是**阶段 2**（跨文件）校验的落点 —— 字段权限点是否已登记、
+    //    `reference` 指向的实体是否存在，**只有**在所有 manifest 都加载完后才能判；
+    // 2. 失败 → 进程**起不来**（退出码 1），逐条点名「谁的哪个引用指向了不存在的东西」。
+    //
+    // 顺序放在最前：`platform-config` / `platform-rbac` 也会各自 parse 一遍 manifest，
+    // 它们的外层标题是「配置键注册表」「权限点对账」—— 元数据的错不该披着那两张皮
+    // （QA #30）。
+    let schema_registry = load_schema_registry(&config.manifest_root)?;
+
     let state = Arc::new(AppState {
         pool,
         migrator,
@@ -281,6 +294,10 @@ async fn serve() -> Result<(), Failure> {
     // 是公开接口，仍要能渲染登录页（它不经过认证中间件）。
     let mut config_tokens: Arc<dyn platform_config::http::TokenVerifier> =
         Arc::new(RejectAllTokens);
+    // 元数据接口的令牌校验：与配置接口同一个 IAM 实现（没配 IAM → 一律拒绝）。
+    let mut schema_tokens: Arc<dyn platform_schema::TokenVerifier> = Arc::new(RejectAllSchemaTokens);
+    // 业务模块路由的认证层需要 IAM（未配置 → 模块路由一律 401，fail closed）。
+    let mut module_iam: Option<Arc<platform_iam::service::IamService>> = None;
     let mut config_checker: Arc<dyn PermissionChecker> = Arc::new(DenyAllPermissions);
     let mut config_permissions: Arc<dyn PermissionRefresher> = Arc::new(DenyAllPermissions);
 
@@ -335,12 +352,77 @@ async fn serve() -> Result<(), Failure> {
         // 令牌主体来自 IAM，权限点判定与缓存刷新来自 `RbacChecker`
         // （同一个 `Arc` 同时实现 `PermissionChecker` 与 `PermissionRefresher`）。
         config_tokens = Arc::new(ConfigIamTokenVerifier::new(iam_state.service.clone()));
+        schema_tokens = Arc::new(SchemaIamTokenVerifier::new(iam_state.service.clone()));
+        module_iam = Some(iam_state.service.clone());
         config_checker = rbac_state.checker.clone();
         config_permissions = rbac_state.checker.clone();
     } else {
         tracing::warn!(
             "未检测到 IAM 环境变量（BASE_JWT_* / BASE_IAM_*）：平台不提供 /api/iam/* 与 /api/org/* 接口"
         );
+    }
+
+    // 元数据读取（REQ-012）：`/api/schema/<module>/<entity>`。
+    //
+    // **不新增权限点**（design §3.1）：元数据是界面的描述，不是数据；要求额外权限点
+    // 会让前端「拿到元数据之前先知道该要什么权限」。无权字段在元数据里就被剔掉。
+    let schema_state = Arc::new(SchemaState {
+        registry: Arc::new(schema_registry),
+        tokens: schema_tokens,
+        checker: config_checker.clone(),
+        permissions: config_permissions.clone(),
+    });
+    let mut app = app.nest("/api/schema", platform_schema::http::router(schema_state));
+    tracing::info!("元数据读取已启用：/api/schema/<module>/<entity>");
+
+    // 业务模块装配（REQ-012 D103）：**编译期注册**的模块由 `discover_enabled()` 决定挂哪些，
+    // 路由由装配层接到 `/api/<module-id>` 下。
+    //
+    // ⚠️ `PlatformModule` trait **没有** router 方法（它的形状是「模块注册」，
+    // 不持有数据访问层），所以这里按模块 ID 接线 —— 未接线的已启用模块会**出声**，
+    // 不静默跳过（静默跳过 = 部署了却 404，最难查的一类问题）。
+    let enabled_modules: Vec<&'static str> = platform_core::extension::registry::discover_enabled()
+        .into_iter()
+        .map(|module| module.id())
+        .collect();
+    for module_id in &enabled_modules {
+        match *module_id {
+            "sandbox" => {
+                let router: Router<Arc<AppState>> =
+                    sandbox::mount(&config.database_url, Path::new(&config.manifest_root))
+                        .await
+                        .map_err(|error| {
+                            Failure::Runtime(format!("沙箱模块装配失败：{error:#}"))
+                        })?;
+                // 认证层由**装配层**加（模块不依赖 IAM / RBAC）：
+                // 验令牌 → 建上下文 → 注入判定器，之后模块的 `require_permission` 才拿得到用户。
+                let router = router.layer(axum::middleware::from_fn_with_state(
+                    ModuleAuthState {
+                        iam: module_iam.clone(),
+                        checker: config_checker.clone(),
+                        permissions: config_permissions.clone(),
+                    },
+                    authenticate_module,
+                ));
+                app = app.nest("/api/sandbox", router);
+                tracing::info!("业务模块已挂载：/api/sandbox/*（sandbox）");
+                if module_iam.is_none() {
+                    tracing::warn!(
+                        "未配置 IAM：/api/sandbox/* 的请求一律 401（fail closed）"
+                    );
+                }
+            }
+            // `org` 是**平台子系统**：它的路由由 `build_org_state` + `/api/org` 单独装配，
+            // 不经过「业务模块装配点」。这里静默跳过是**明确列出**的，
+            // 不是「反正不认识就不管」。
+            "org" => {}
+            other => {
+                tracing::warn!(
+                    module = other,
+                    "模块已启用但没有 HTTP 装配点：its routes are not served on this service"
+                );
+            }
+        }
     }
 
     let app = app.fallback(static_fallback).with_state(state);
@@ -483,6 +565,120 @@ async fn build_config_service(
     )))
 }
 
+/// 业务模块路由的**认证层**（装配层的职责）。
+///
+/// # 为什么必须在装配层
+///
+/// 业务模块**不依赖** `platform-iam` / `platform-rbac`（AGENTS.md 硬规则 2）——
+/// 它只认 `platform-core` 的 `PermissionChecker`，判定实现由**平台通过请求扩展注入**。
+/// 所以「验令牌 → 建上下文 → 注入判定器」只能在这里做。
+///
+/// # 这不是可选的
+///
+/// 漏了它，`require_permission` 拿不到用户 → **401**（fail closed），
+/// 而单测里是手动注入上下文的，**测不出来**（REQ-011 的教训：单测绿 ≠ 能用）。
+#[derive(Clone)]
+struct ModuleAuthState {
+    /// 令牌校验（未配置 IAM 时为 `None` → 一律 401）。
+    iam: Option<Arc<platform_iam::service::IamService>>,
+    /// 权限判定（字段级权限也用它）。
+    checker: Arc<dyn PermissionChecker>,
+    /// 判定缓存刷新（授权在下一个请求即生效）。
+    permissions: Arc<dyn PermissionRefresher>,
+}
+
+/// 业务模块路由的认证中间件：验令牌 → 建立租户/用户上下文 → 注入判定器。
+async fn authenticate_module(
+    State(auth): State<ModuleAuthState>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let instance = request
+        .extensions()
+        .get::<axum::extract::OriginalUri>()
+        .map(|uri| uri.0.path().to_string())
+        .unwrap_or_else(|| request.uri().path().to_string());
+    let mut ctx = request
+        .extensions()
+        .get::<RequestContext>()
+        .cloned()
+        .unwrap_or_else(RequestContext::new);
+
+    let Some(iam) = &auth.iam else {
+        return platform_core::problem::problem_response(&platform_core::problem::ProblemDetails::unauthenticated(&ctx, &instance));
+    };
+    let Some(token) = bearer_token(request.headers()) else {
+        return platform_core::problem::problem_response(&platform_core::problem::ProblemDetails::unauthenticated(&ctx, &instance));
+    };
+    let Ok(claims) = iam.verify_access_token(&token) else {
+        return platform_core::problem::problem_response(&platform_core::problem::ProblemDetails::unauthenticated(&ctx, &instance));
+    };
+
+    // 请求头租户优先；与令牌租户不一致 → 404（不泄露资源存在性，契约 C3）。
+    if let Some(tenant) = header_value(request.headers(), "x-tenant-id") {
+        ctx = ctx.with_tenant(tenant);
+    }
+    match ctx.tenant_id() {
+        Some(tenant) if tenant != claims.tenant_id => {
+            return platform_core::problem::problem_response(&platform_core::problem::ProblemDetails::not_found(&ctx, &instance, "resource"));
+        }
+        Some(_) => {}
+        None => ctx = ctx.with_tenant(claims.tenant_id.clone()),
+    }
+    ctx = ctx.with_user(claims.subject.clone());
+
+    if auth.permissions.ensure_fresh(&ctx).await.is_err() {
+        return platform_core::problem::problem_response(&platform_core::problem::ProblemDetails::from_context(
+            platform_core::problem::CODE_INTERNAL_ERROR,
+            "服务内部错误",
+            StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
+            "the permission cache could not be refreshed",
+            &ctx,
+            &instance,
+            None,
+        ));
+    }
+
+    request.extensions_mut().insert(ctx);
+    request.extensions_mut().insert(auth.checker.clone());
+    next.run(request).await
+}
+
+/// `Authorization: Bearer <token>`。
+fn bearer_token(headers: &HeaderMap) -> Option<String> {
+    let raw = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let trimmed = raw.trim();
+    let token = trimmed
+        .strip_prefix("Bearer ")
+        .or_else(|| trimmed.strip_prefix("bearer "))?
+        .trim();
+    (!token.is_empty()).then(|| token.to_string())
+}
+
+/// 读一个请求头（去空白；空值视为没有）。
+fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+/// 读入 **阶段 1 + 阶段 2** 都通过的实体元数据注册表。
+///
+/// 失败即 fail-fast：元数据错了前端会渲染出错的表单，而这在启动时就能知道
+/// （与 REQ-010 的 config 段同源 —— **告警就是静默放行的一种**）。
+fn load_schema_registry(manifest_root: &str) -> Result<SchemaRegistry, Failure> {
+    SchemaRegistry::from_manifest_root(Path::new(manifest_root)).map_err(|error| {
+        Failure::Runtime(format!(
+            "实体元数据注册表不成立，进程退出（fail-fast）：\n{error}\n  \
+             提示：阶段 1 的问题在 manifest 的 schema 段本身（类型 / 键名 / 重复 / api 路径）；\
+             阶段 2 的问题需要全局上下文（权限点是否已登记、reference 指向的实体是否存在）。"
+        ))
+    })
+}
+
 /// 没配 IAM 时的令牌校验：**一律拒绝**（fail closed）。
 struct RejectAllTokens;
 
@@ -533,6 +729,42 @@ struct ConfigIamTokenVerifier {
 impl ConfigIamTokenVerifier {
     fn new(inner: Arc<platform_iam::service::IamService>) -> Self {
         Self { inner }
+    }
+}
+
+/// 没配 IAM 时元数据接口的令牌校验：**一律拒绝**（fail closed）。
+struct RejectAllSchemaTokens;
+
+impl platform_schema::TokenVerifier for RejectAllSchemaTokens {
+    fn verify(&self, _token: &str) -> Result<platform_schema::VerifiedToken, platform_schema::AuthError> {
+        Err(platform_schema::AuthError)
+    }
+}
+
+/// IAM 的令牌校验适配器（元数据接口用；只转发验签，不重写语义）。
+struct SchemaIamTokenVerifier {
+    inner: Arc<platform_iam::service::IamService>,
+}
+
+impl SchemaIamTokenVerifier {
+    fn new(inner: Arc<platform_iam::service::IamService>) -> Self {
+        Self { inner }
+    }
+}
+
+impl platform_schema::TokenVerifier for SchemaIamTokenVerifier {
+    fn verify(
+        &self,
+        token: &str,
+    ) -> Result<platform_schema::VerifiedToken, platform_schema::AuthError> {
+        let claims = self
+            .inner
+            .verify_access_token(token)
+            .map_err(|_| platform_schema::AuthError)?;
+        Ok(platform_schema::VerifiedToken {
+            user_id: claims.subject,
+            tenant_id: claims.tenant_id,
+        })
     }
 }
 

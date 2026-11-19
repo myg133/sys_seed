@@ -82,7 +82,17 @@ docs/contracts/              契约正文快照（**勿手改**，正本在 BA �
    验收前先看输出里的「N passed」，**N 必须 > 0**。
 
 > 规则 1 与 2 由 CI 机械检查：`cargo xtask check-deps` 扫 `cargo metadata` 的依赖图，
-> 平台 crate 一旦反向依赖业务模块即失败。
+> 平台 crate 一旦反向依赖业务模块即失败（**装配层 `platform-server` 除外**）。
+>
+> **例外只有 `platform-server`**（`crates/xtask/src/deps.rs` 的 `ASSEMBLY_CRATES` 白名单）：
+> 它是**可执行交付物**，职责就是把各业务模块装起来（路由、启动、迁移），
+> 所以它**必须**能依赖业务模块 —— 否则「装配」无处可写。库 crate 一律不行。
+> 加进白名单等于放弃这条硬规则对该 crate 的约束，只有可执行交付物有资格。
+>
+> | 谁 | 能否依赖业务模块 |
+> |---|---|
+> | `platform-core` / `platform-db` / `platform-iam` / `platform-org` / `platform-rbac` / `platform-schema`（以及 `platform-config`、`platform-contracts*`） | ❌ **不能** |
+> | **`platform-server`** | ✅ **可以**（唯一例外，`ASSEMBLY_CRATES` 白名单） |
 
 ## 配置怎么读（REQ-010 起）
 
@@ -178,7 +188,7 @@ bun run dev
 ## 已有能力
 
 **先查 `capabilities/index.json`，别重写。** 下表与索引的 `already_provided` 段
-**内容完全一致**（19 条，key 与说明逐条相同）；**行的顺序不同** ——
+**内容完全一致**（27 条，key 与说明逐条相同）；**行的顺序不同** ——
 下表按「后端接缝 → 前端包」的语义序，索引按字典序输出。
 机器守卫 `cargo test -p xtask` 的 `agents_doc_matches_catalog` 比对的是下表与能力目录
 （同序），不覆盖索引的排序。
@@ -190,8 +200,10 @@ bun run dev
 | `tenant_scoped_db` | platform-db 的 TenantDb 提供带 RequestContext 的租户作用域数据访问（事务内 SET LOCAL app.tenant_id + RLS 兜底），公开 API 拿不到裸连接，勿自建连接池或直连数据库 |
 | `list_query` | ListQuery/SortSpec/FilterSpec 已定义游标分页（limit 默认 20、上限 200）与过滤算子白名单，勿自造分页参数 |
 | `module_registry` | register_platform_module! + discover()/discover_enabled() 做编译期模块注册，勿自建插件或动态加载 |
-| `manifest` | Manifest 解析与字段校验 + capabilities/schema/manifest.schema.json 已提供，勿手写 manifest 校验 |
-| `contract_suite` | #[platform_module_contract] 自动生成 C-1~C-5 五项契约测试（C-5：已登记权限点必须有鉴权调用点、鉴权入口全仓库唯一），勿自写重复的契约检查 |
+| `manifest` | Manifest 解析与字段校验（含 schema 实体元数据段：两阶段校验、字段类型只有 text/number/boolean/date/reference）+ capabilities/schema/manifest.schema.json 与 schema/entity.schema.json 已提供，勿手写 manifest 校验 |
+| `contract_suite` | #[platform_module_contract] 自动生成 C-1~C-6 六项契约测试（C-5：已登记权限点必须有鉴权调用点；C-6：声明了字段级权限的模块必须有 SchemaProjector::project 调用点），勿自写重复的契约检查 |
+| `schema_metadata` | platform-schema 提供 GET /api/schema/<module>/<entity> 元数据接口（已认证即可读；无权字段在元数据里就被剔除，不是 hidden 标记），前端据此渲染，勿自造元数据接口或另立形状 |
+| `schema_projector` | SchemaProjector::project 是字段级权限的唯一序列化入口（白名单语义：元数据未声明的字段默认不输出，列表要逐条投影、信封不动），返回实体的 handler 必须经它，勿直接 Json(entity) |
 | `audit_declaration` | Auditable + AuditEventSpec 提供审计事件声明面，平台据此自动埋点，勿自建审计表 |
 | `notification_sender` | NotificationSender + NotificationMessage/DeliveryResult 提供通知投递接缝，勿自建消息中心 |
 | `workflow_handler` | WorkflowHandler + TransitionEvent 提供工作流接入接缝，勿自建流程引擎 |
@@ -200,7 +212,7 @@ bun run dev
 | `error_code_i18n` | @base/i18n 的 translate()/hasMessage() 提供错误码到文案映射，勿在后端拼中文句子 |
 | `theme` | @base/theme 的 applyTheme()/toggleTheme() 提供 CSS 变量令牌与暗色模式，勿另造主题变量或硬编码颜色 |
 | `ui_token` | @base/ui 的 toneClass()/TONES/defaultRadius() 提供色调与圆角 token，勿另造样式变量 |
-| `ui_table_component` | @base/ui 的 Table 契约与 apps/shell 的 Table.svelte 提供只读表格（只接受 props，分页状态由 @base/hooks 组合传入），勿自造表格渲染 |
+| `ui_table_component` | @base/ui 的 Table 是页码分页（依赖 total）的只读表格；游标分页没有 total、且空态不能渲染表头空壳，请用 apps/shell 的 SchemaTable，勿自造表格渲染 |
 | `schema_field_meta` | @base/schema 的 FieldMeta/describeField()/findField() 提供字段元数据形状，勿另造元数据结构 |
 | `sdk_client` | @base/sdk 的 createApiClient() 提供类型安全请求、RFC 9457 错误码、token 自动刷新与幂等键注入，勿另造 HTTP 基类 |
 | `auth_state` | @base/auth 的 isAuthenticated()/tenantId() 提供登录态形状，勿另造登录态模型 |
@@ -212,7 +224,7 @@ bun run dev
 
 ## 尚未提供
 
-**别当成已有。** 下表与索引的 `not_yet_provided` 段**内容完全一致**（7 条，
+**别当成已有。** 下表与索引的 `not_yet_provided` 段**内容完全一致**（5 条，
 key 与说明逐条相同）；行的顺序同样与索引不同（语义序 vs 字典序）。
 
 | 能力 | 说明 |

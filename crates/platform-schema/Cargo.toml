@@ -1,0 +1,21 @@
+[package]
+name = "platform-schema"
+description = "元数据读取接口（REQ-012）：manifest 的 schema 段 → 全局注册表 → GET /api/schema/<module>/<entity>"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+platform-core.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+tower.workspace = true
+http-body-util.workspace = true

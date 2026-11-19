@@ -49,11 +49,19 @@ pub const ALREADY_PROVIDED: &[ProvidedCapability] = &[
     },
     ProvidedCapability {
         key: "manifest",
-        summary: "Manifest 解析与字段校验 + capabilities/schema/manifest.schema.json 已提供，勿手写 manifest 校验",
+        summary: "Manifest 解析与字段校验（含 schema 实体元数据段：两阶段校验、字段类型只有 text/number/boolean/date/reference）+ capabilities/schema/manifest.schema.json 与 schema/entity.schema.json 已提供，勿手写 manifest 校验",
     },
     ProvidedCapability {
         key: "contract_suite",
-        summary: "#[platform_module_contract] 自动生成 C-1~C-5 五项契约测试（C-5：已登记权限点必须有鉴权调用点、鉴权入口全仓库唯一），勿自写重复的契约检查",
+        summary: "#[platform_module_contract] 自动生成 C-1~C-6 六项契约测试（C-5：已登记权限点必须有鉴权调用点；C-6：声明了字段级权限的模块必须有 SchemaProjector::project 调用点），勿自写重复的契约检查",
+    },
+    ProvidedCapability {
+        key: "schema_metadata",
+        summary: "platform-schema 提供 GET /api/schema/<module>/<entity> 元数据接口（已认证即可读；无权字段在元数据里就被剔除，不是 hidden 标记），前端据此渲染，勿自造元数据接口或另立形状",
+    },
+    ProvidedCapability {
+        key: "schema_projector",
+        summary: "SchemaProjector::project 是字段级权限的唯一序列化入口（白名单语义：元数据未声明的字段默认不输出，列表要逐条投影、信封不动），返回实体的 handler 必须经它，勿直接 Json(entity)",
     },
     ProvidedCapability {
         key: "audit_declaration",
@@ -89,7 +97,7 @@ pub const ALREADY_PROVIDED: &[ProvidedCapability] = &[
     },
     ProvidedCapability {
         key: "ui_table_component",
-        summary: "@base/ui 的 Table 契约与 apps/shell 的 Table.svelte 提供只读表格（只接受 props，分页状态由 @base/hooks 组合传入），勿自造表格渲染",
+        summary: "@base/ui 的 Table 是页码分页（依赖 total）的只读表格；游标分页没有 total、且空态不能渲染表头空壳，请用 apps/shell 的 SchemaTable，勿自造表格渲染",
     },
     ProvidedCapability {
         key: "schema_field_meta",

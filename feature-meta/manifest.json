@@ -1,10 +1,10 @@
 {
-  "req": "REQ-011",
-  "branch": "feature/REQ-011",
+  "req": "REQ-012",
+  "branch": "feature/REQ-012",
   "agent_id": "myg133-ba-1",
   "session_id": "proc-83964",
   "owner": "myg133-ba-1",
   "base_branch": "develop",
-  "created_at": "2026-11-19T10:31:28+08:00",
-  "demand_dir": "BA/demands/REQ-011-frontend-sdk"
+  "created_at": "2026-11-19T14:50:18+08:00",
+  "demand_dir": "BA/demands/REQ-012-schema-driven"
 }
