@@ -1,38 +1,86 @@
 # 状态：REQ-011 前端 SDK 骨架
 
-- **状态**: 开发中
+- **状态**: 已完成
 - **更新者**: myg133-ba-1 (mcp:proc-83964)
-- **更新时间**: 2026-11-19 11:15
+- **更新时间**: 2026-11-19 15:05
+- **合并点**: `develop` @ `b38715f`
 
 ## 状态历史
 
 | 时间 | 从 | 到 | 操作者 | 备注 |
 |------|----|----|--------|------|
 | 2026-11-17 23:45 | — | 草稿 | myg133-ba-1 | 从 REQ-001 拆分创建 |
-| 2026-11-19 10:50 | 草稿 | 已就绪 | myg133-ba-1 | 规格写实：AC-S-064~075（12 条）+ 设计摘要。范围经用户拍板：新增 `/api/rbac/me/permissions` + 登录响应填权限点；核心三包 + 权限闭环（Storybook 与 OpenAPI 生成延后） |
-| 2026-11-19 11:05 | 已就绪 | 开发中 | myg133-ba-1 | QA 评审：48 条用例 + **挑刺 40 条**（高 11 / 中 21 / 低 8）→ **全部接受**，出 **acceptance rev 2**；新增决策 **D92~D95** |
+| 2026-11-19 10:50 | 草稿 | 已就绪 | myg133-ba-1 | 规格写实：AC-S-064~075（12 条）+ 设计摘要 |
+| 2026-11-19 11:05 | 已就绪 | 开发中 | myg133-ba-1 | QA 挑刺 **40 条**全部接受 → rev 2（D92~D95） |
+| 2026-11-19 12:40 | 开发中 | 修复中 | myg133-ba-1 | Pre-merge **FAIL**（1 HIGH 壳层登录 100% 失败 + AC-S-068 步骤 3）→ rev 3（D98/D99） |
+| 2026-11-19 13:30 | 修复中 | 修复中 | myg133-ba-1 | 独立复核 1 **PASS-WITH-RISK**（发现 2 个新 MEDIUM）→ rev 4（D100/D101） |
+| 2026-11-19 14:50 | 修复中 | **已完成** | myg133-ba-1 | 独立复核 2 **PASS**；修复轮 3 收尾 2 个遗留；合并 `develop` @ `b38715f` |
 
 ## 阻塞项
 
-无。前置需求 REQ-002 / REQ-007 / REQ-009 / REQ-010 均已合并。
+无。
 
-## 起草时发现的前置缺口（已在 acceptance.md 记录）
+## 交付内容
 
-1. 后端没有「当前用户拥有哪些权限点」的接口 → 本需求新增 `GET /api/rbac/me/permissions`
-2. `@base/auth` 没有 `can()` 实现 → 本需求补
-3. 主题令牌体系不存在 → 本需求补（承接 REQ-010 的 D52 收窄）
+| 层 | 内容 |
+|---|---|
+| 后端 | `PermissionProvider` trait（`platform-core`）+ `GET /api/rbac/me/permissions` + 登录响应填真实权限点 |
+| 前端 | `@base/sdk` / `@base/auth` / `@base/theme` / `@base/ui` / `@base/hooks`（从占位到实现） |
+| 壳 | 登录页（租户输入）+ 极简路由 + 受保护页 + 403 页 + `<Can>` + `sessionStorage` 会话 |
+| 测试 | 后端集成 10 条 + 前端单测 151 条 + E2E 11 条（入库） |
 
-## QA 评审结论（rev 1 → rev 2）
+## 验收结果
 
-- 用例集：`test-cases/`（**48 条**，覆盖 12/12 AC，46 条可自动化）
-- 挑刺：**40 条**（高 11 / 中 21 / 低 8），**BA 全部接受**
-- 其中 **3 条是 BA 自己写错的**（#4 错误码互斥 / #10 扫描范围与夹具矛盾 / #18 错误体示例写错）
-- 裁定记录：[acceptance-rev2-ruling.md](acceptance-rev2-ruling.md)
-- 新增决策：**D92**（重放不带幂等键）/ **D93**（幂等只覆盖 `/api/iam/*`）/
-  **D94**（错误码透传不合成）/ **D95**（颜色字面量允许范围）
+**12/12 条 AC 通过**（两轮独立复核，全部有真机/真浏览器证据）
 
-## 本轮新增决策（与 Sprint 3 教训呼应）
+## 验证链（7 棒，每棒都抓到东西）
 
-- Sprint 3 教训 1「让 QA 在 Dev 动手前挑毛病」→ 本轮挑出 40 条，**问题密度高于 REQ-009（22）与 REQ-010（36）**
-- 印证：BA 自己写的验收标准**仍是「看起来对」的产物** —— 该流程**必须保留**，且应写进迭代出口标准
+```
+BA 规格 → QA 挑刺 40 条（3 条是 BA 自己的错，全部接受）→ Dev 实现
+  → Pre-merge FAIL（HIGH：壳层登录 100% 失败，单测全绿）
+  → 修复轮 1（租户来源 + 会话持久化）
+  → 独立复核 1 PASS-WITH-RISK（2 个新 MEDIUM：错误码被覆盖 / E2E 夹具不可复现）
+  → 修复轮 2
+  → 独立复核 2 PASS（确认修好 + 未破坏已通过的 8 项）
+  → 修复轮 3（2 个遗留）→ 合并
+```
 
+## 关键数字
+
+| 项 | 值 |
+|---|---|
+| 后端回归 | **550 passed / 0 failed**（29 套件，连跑 2 轮 + post-merge） |
+| 前端单测 | **151 passed** |
+| E2E | **11 passed**（入库） |
+| 独立探针（QA 自建） | **61 条**（浏览器 29 + SDK 32） |
+| 依赖预算 | `Cargo.lock` **295 包**（diff = 0）；pnpm 零第三方新增 |
+| 决策 | **D92 ~ D101**（10 条） |
+
+## 文档
+
+- [demand.md](demand.md) / [acceptance.md](acceptance.md)（rev 4）/ [design-summary.md](design-summary.md)
+- [acceptance-rev2-ruling.md](acceptance-rev2-ruling.md) —— 40 条挑刺的逐条裁定
+- [test-cases/](test-cases/) —— 48 条用例
+- [qa-report.md](qa-report.md) —— Pre-merge（FAIL）
+- [qa-report-recheck.md](qa-report-recheck.md) —— 独立复核 1（PASS-WITH-RISK）
+- [qa-report-recheck2.md](qa-report-recheck2.md) —— 独立复核 2（PASS）
+- [dev-report-fix2.md](dev-report-fix2.md) —— 修复轮 2 自验
+- 复盘：[sprint-04-retro.md](../../sprint/sprint-04-retro.md)
+
+## 顺带修掉的既有缺陷（非本需求范围）
+
+1. **theme 包的无扩展名导入** → Node ESM 加载不了，违反「五个包可独立引入」
+2. **`prettier --check .` 在基线就红**（2 个 manifest.json）→ 会让 CI lint job 永远红
+3. **CI 的 test job 无 postgres service** → `cargo test --workspace` 必红（TD-004）
+4. **CI 的 test job 不 build** → `packaging.test.ts` 的 `skipIf(!built)` 让 AC-S-075 的
+   2 条产物用例永远 skip
+5. **★ 80 条 `#[ignore]` 用例在 CI 永远不跑**（含本需求的 10 条后端验收）
+   → 新增 `integration` job
+6. **`test-integration.sh` 在无 psql/无 podman 时静默跳过但 exit 0**
+   → 加 `cannot_reset()`：本地跳过，CI 拒绝静默跳过
+
+## 未解风险
+
+- **CI 仍从未真跑**（无 remote，TD-006）—— 上面 6 条修复都**只是配好了**，
+  没有一次真实执行验证
+- 分支保护需人工配置（TD-007）

@@ -164,3 +164,40 @@ Sprint 3 复盘的第 2 条教训：**修漏洞会制造新漏洞** —— 但�
 - **建议修法**: 别断**绝对耗时比**。改断「**两次哈希的成本量级相同**」
   （如 ratio 落在 `[0.25, 4]` 这种宽松区间），或在 CI 里给这条用例打 `#[ignore]`
   单独在无负载的 job 里跑
+
+---
+
+## TD-010: 80 条 `#[ignore]` 集成用例依赖 CI 上一个**从未真跑过**的新 job
+
+- **发现于**: REQ-011（合并后配 CI 时发现）
+- **证据**: `cargo test --workspace` **不跑 `#[ignore]` 用例**。全仓 80 条：
+  `platform-rbac/tests/rbac_real_db.rs` 22、`platform-iam/tests/iam_real_db.rs` 15、
+  `platform-org/tests/org_real_db.rs` 14、`platform-rbac/tests/me_permissions.rs` 10
+  （**REQ-011 的 AC-S-064/065 验收就这 10 条**）、其余 19
+- **现状**: REQ-011 已新增 `integration` job 跑 `./scripts/test-integration.sh`
+  来覆盖它们 —— 但该 job **从未真跑**（CI 无 remote，TD-006）
+- **额外风险**: 该 job 依赖脚本的「主机直连 psql」分支，而开发机**没有 psql**，
+  本地一直走 podman 分支 → **这个分支从未被执行过**
+- **为什么本期不修**: 需要能真跑 CI 才能验证（依赖 TD-006 的 remote）
+- **什么时候修**: 配好 remote 后**第一次跑 CI 时优先看这个 job**
+- **若它红了**：先看是不是 psql 分支的问题（脚本里 `HOST_HAS_PSQL` 的两条路径），
+  再核 `cannot_reset` 是否按预期在 CI 下报错
+
+---
+
+## TD-011: 前端单测的部分用例依赖 `dist` 是否存在（`skipIf(!built)`）
+
+- **发现于**: REQ-011（合并后 post-merge 回归时发现）
+- **证据**: `packages/sdk/test/packaging.test.ts:74` 的
+  `const built = PACKAGES.every((n) => existsSync(.../dist))`，
+  配合 `:118` 的 `describe.skipIf(!built)`
+- **现状**: 已在 CI 的 `test` job 里加了 `pnpm -r build`（`pnpm -r test` 之前）
+- **残留风险**: **本地**开发者若直接 `pnpm -r test` 而没先 build，
+  那 2 条会**静默跳过**（不报错、不提示）→ 本地看起来 149 passed，
+  实际 151 里少跑 2 条
+- **为什么本期不修**: 已用 CI 侧修法覆盖；本地行为是「有 dist 就跑、没有就跳过」，
+  属于有意的降级设计
+- **什么时候修**: 下次碰前端测试基建时
+- **建议修法**: 把 `skipIf` 改成「缺失时**显式告警**」而不是静默跳过
+  （例如在 `beforeAll` 里 `console.warn` 一句，或让 vitest 输出一个 skipped 的原因），
+  这样「少跑了」是**可见的**
