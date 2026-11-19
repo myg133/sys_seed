@@ -161,38 +161,60 @@ createApiClient({
    - **并发去重**：多个请求同时 401 时**只发一次** refresh
      （后端 refresh 是**轮换 + 重放检测**，多次 refresh 会**踢掉整个会话**）
    - **请求体必须可重放**：先缓冲成字符串再发（`ReadableStream` 重放时已失效）
-   - 刷新失败 → 抛 `UNAUTHENTICATED`，**不无限重试**
+   - 刷新失败 → 抛**后端返回的**码（`TOKEN_EXPIRED` / `TOKEN_REVOKED` /
+     `TOKEN_REUSE_DETECTED` 之一），**不无限重试**（D94：**透传**不合成）
+   - ★ **重放请求不带 `idempotency-key`**（D92）—— 401 意味着「请求没执行」，
+     沿用旧键会被后端判为「还在处理」→ **409 CONFLICT**
 3. **幂等键**：`POST`/`PUT`/`DELETE` 自动带 `idempotency-key`（UUID v4）；
-   `GET`/`HEAD` **不带**；**每次请求新键**（复用会被后端当重放 → 静默丢数据）
-4. **上下文头**：`x-tenant-id` / `x-space-id`；**未配置时不带头**（空串 ≠ 不带）
+   `GET`/`HEAD` **不带**；**每次请求新键**（复用会被后端当重放 → 静默丢数据）；
+   键**不得由路径派生**、**不得跨路径复用**（后端去重键不含 method/path）
+4. **上下文头**：`x-tenant-id` / `x-space-id`；**未配置时不带头**（空串 ≠ 不带）；
+   注入于**所有**请求（**含 login / refresh** —— 否则没配租户时根本登不进去）
+5. **合成码**：`client.NETWORK_ERROR` / `client.INTERNAL_ERROR`（带前缀，D94）
+
+**公开 API 已钉死** —— 见 design-summary **§3.2.1**（`ApiError` / `RequestOptions` /
+`ApiClient` 的完整签名）。**照抄，不要另设计一套**。
 
 ### 2.2 `@base/auth` —— 登录态与权限
 
 - `can(permission)`：权限点集合**为空** → 一律 `false`（fail closed）；
   集合里没有 → `false`；**未登记**权限点 → `false`
-- `<Can>` 组件：无权限时**不渲染 children**（不是 `display:none`），
-  可选 `fallback`
-- 路由守卫：无权限 → 跳 403 页；**直接敲 URL 也必须被拦**
+- **`guard(permission)`**（框架无关的纯判定，签名见 design §3.3.1）：
+  - 未登录 → `{ allowed: false, redirectTo: '/login' }`（**不是** 403）
+  - 已登录无权限 → `{ allowed: false, redirectTo: '/403' }`
+  - 有权限 → `{ allowed: true }`
 - **不依赖** `@base/ui`（AC-S-075）
+- ⚠️ **`<Can>` 组件不在本包** —— 落在 `apps/shell`（rev 2 裁定 #7，见 §2.4）
 
 ### 2.3 `@base/theme` —— 设计令牌
 
 - 令牌以 **CSS 变量**写到根元素（inline style，切换即时生效）
-- 暗色模式：切 `data-theme` + 换一组颜色变量；**可逆**
+- **令牌契约表**见 design **§3.4.1**（精确的变量名清单 + 亮/暗取值，**照抄**）
+- 暗色模式：切 `data-theme="dark"` + `color-scheme: dark` + 换一组颜色变量；**可逆**
 - 主色来自 `GET /api/config/branding`；**只接受合法十六进制**，
-  非法 → 保持中性兜底（`currentColor`）
+  非法 → **自己**把 `--base-primary` 写成 `currentColor`
+  （**不依赖宿主样式表** —— 否则读到的是空串，预期不成立）
 - **源码里不许有品牌颜色字面量**
+- ⚠️ **唯一允许颜色字面量的文件**：`packages/theme/src/tokens.ts`（D95）
 
 ### 2.4 `@base/ui` —— 基础组件
 
 Button / Input / Card / Table / Dialog + token 消费。
 
-**★ 落地形态约束**（design-summary §3.5.1）：
-- 组件用 **runes 模块形态**：`src/<Name>.svelte.ts`（**不是** `.svelte` 文件）
-- `tsconfig.json` 的 `include` 扩到 `["src/**/*.ts", "src/**/*.svelte.ts"]`
-- `svelte` 作为 **peerDependency** + devDependency
-- `import type` 必须显式写（`verbatimModuleSyntax: true`）
-- 组件**只消费 CSS 变量**，不硬编码颜色
+**★ 落地形态（rev 2 裁定 #7 —— 与 rev 1 不同）**：
+
+| 位置 | 内容 |
+|---|---|
+| `packages/ui/src/**` | **逻辑与样式契约**：变体名、类名、props 类型、行为函数 |
+| `apps/shell/src/components/*.svelte` | **Svelte 组件**（薄封装，调用包的逻辑） |
+| `apps/shell/src/components/Can.svelte` | `<Can>` 组件 |
+
+**为什么**：包的 build 是 `tsc -p tsconfig.json`（`include` 只有 `src/**/*.ts`）→
+`.svelte` 文件**进不了产物**；引 `svelte-package` = **新增依赖**（违反本期零新依赖约束）。
+而 `apps/shell` **已支持** `.svelte`（tsconfig 含 `src/**/*.svelte`，vite 插件已装）。
+**组件库发逻辑，宿主应用发视图** —— Svelte 生态的常规做法。
+
+**硬规则**：组件**只消费 CSS 变量**，不硬编码颜色字面量（AC-S-073 步骤 4 / D95）。
 
 ### 2.5 `@base/hooks` —— 通用 hooks
 
@@ -200,6 +222,22 @@ Button / Input / Card / Table / Dialog + token 消费。
 - 分页、表格状态：**纯状态容器**（不绑框架）
 - SSE/WebSocket：**重连退避** + **关闭时不重连**（组件卸载后重连会泄漏）
 - 剪贴板：不可用时**返回失败**（不静默吞掉）
+
+### 2.6 ★ `apps/shell` 的最小壳（AC-S-067 / AC-S-068 的应用侧）
+
+本期要做（**只做这些**，不做完整布局框架）：
+
+| 件 | 要求 |
+|---|---|
+| 登录页 | 输入用户名密码 → 调 SDK 登录 → 拿权限点 |
+| 极简路由 | **History API**，无新依赖；深链可达（服务端已有 SPA fallback） |
+| 受保护页 | 路由元数据接 `guard(permission)`；**守卫放行后才调用**数据加载函数 |
+| 403 页 | 守卫拒绝时的落点 |
+| `<Can>` 组件 | 见 §2.4 |
+| 品牌委托 | `apps/shell/src/lib/branding.ts`（REQ-010 已实现）**改为委托 `@base/theme`** —— 消除两份实现（否则 REQ-010 的既有 E2E 会因漂移而红） |
+
+**关键**：「403 页**不发起**目标接口的请求」→ 受保护页的数据加载函数
+**在守卫放行后才被调用** → 该接口请求计数为 **0**。
 
 ---
 
@@ -232,13 +270,29 @@ export XDG_RUNTIME_DIR=/run/user/$(id -u)
 cargo test --workspace -- --test-threads=2     # 注意：只有一个 --
 cargo clippy --workspace --all-targets -- -D warnings
 pnpm -r check && pnpm -r test && pnpm -r build
+cargo xtask capabilities --check               # 能力索引一致性（见下）
 ```
 
-**自验报告**写 `feature-meta/dev-report.md`，必须含：
+### 4.1 ★ 能力索引必须重生成
+
+`capabilities/sdk/*.json` 由 **`cargo xtask capabilities`** 从包源码**自动生成**
+（`generated_by: "cargo xtask capabilities"`）。本需求改动了 5 个包 → 索引会失配。
+
+```bash
+cargo xtask capabilities            # 重新生成
+cargo xtask capabilities --check     # 校验一致（CI 会跑）
+```
+
+**不重生成 → CI 的能力索引检查会红**。生成后**把变更一起提交**。
+
+### 4.2 自验报告
+
+写 `feature-meta/dev-report.md`，必须含：
 - 每条 AC 的**实现位置**（文件:行号）
 - **实际跑出的数字**（不是「应该通过」）
 - **自验发现的问题**（不要只报好消息）
 - **没做的部分 + 原因**
+- **依赖预算核对**：`Cargo.lock` 包数是否仍为 **295**（后端任务）
 
 > ⚠️ **「我修好了」不由你自证** —— Sprint 3 教训：修复轮后必须有
 > **没参与修复的人**独立复核。你自验通过 ≠ 验收通过。
