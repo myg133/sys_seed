@@ -248,4 +248,25 @@ if [ "$bad" != '3 1 1 1 ' ]; then
   exit 1
 fi
 
+# 强断言 ②：**权限点数目**也要对（只数用户行数的话，授权漏了也 exit 0）。
+#
+# 为什么必须断言这一条：REQ-012 的 E2E 曾因为本脚本没授 `sandbox:demo:*` 而
+# **6 条全部 skip、exit 0**（假绿）。D108 让 E2E 侧变红了，但**播种脚本自己也该自证** ——
+# 否则「脚本成功」和「夹具可用」是两件事。
+#
+# 期望：read=2（rbac:role:read + sandbox:demo:read）
+#       write=5（rbac:role:read/write + sandbox:demo:read/write/secret）
+#       none=0
+grants="$(printf '%s\n' \
+  "SELECT count(*) FROM platform_role_permission p JOIN platform_user_role r ON r.tenant_id = p.tenant_id AND r.role_id = p.role_id JOIN platform_iam_user u ON u.tenant_id = r.tenant_id AND u.id = r.user_id WHERE u.tenant_id = 'tenant-a' AND u.username = 'u-perm-read@example.com';" \
+  "SELECT count(*) FROM platform_role_permission p JOIN platform_user_role r ON r.tenant_id = p.tenant_id AND r.role_id = p.role_id JOIN platform_iam_user u ON u.tenant_id = r.tenant_id AND u.id = r.user_id WHERE u.tenant_id = 'tenant-a' AND u.username = 'u-perm-write@example.com';" \
+  "SELECT count(*) FROM platform_role_permission p JOIN platform_user_role r ON r.tenant_id = p.tenant_id AND r.role_id = p.role_id JOIN platform_iam_user u ON u.tenant_id = r.tenant_id AND u.id = r.user_id WHERE u.tenant_id = 'tenant-a' AND u.username = 'u-perm-none@example.com';" \
+  | run_sql -tA | tr '\n' ' ')"
+if [ "$grants" != '2 5 0 ' ]; then
+  echo "✗ 夹具授权核对失败：期望 read=2 / write=5 / none=0，实际 '$grants'" >&2
+  echo "  （REQ-012 的 E2E 需要 sandbox:demo:read/write/secret；漏授会让用例 403。）" >&2
+  exit 1
+fi
+
 echo "✓ E2E 夹具就绪：u-perm-read / u-perm-write / u-perm-none（tenant-a，密码 Tr0ub4dor&3xKq）"
+echo "  授权：read=2 / write=5 / none=0 个权限点（含 sandbox:demo:*）"

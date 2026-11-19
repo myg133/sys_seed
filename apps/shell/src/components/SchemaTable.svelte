@@ -103,7 +103,7 @@
         <thead>
           <tr>
             {#each fields as field (field.key)}
-              <th>{field.label}</th>
+              <th scope="col">{field.label}</th>
             {/each}
             {#if hasActions}
               <!--
