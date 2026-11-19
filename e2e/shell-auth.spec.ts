@@ -11,6 +11,11 @@ import { expect, test, type Page } from '@playwright/test';
  *   - `u-perm-read@example.com` → 只有 `rbac:role:read`
  *   - `u-perm-write@example.com` → `rbac:role:read` + `rbac:role:write`
  *   - `u-perm-none@example.com` → 无任何权限点
+ *
+ * ⚠️ **夹具必须由 `scripts/seed-e2e.sh` 显式播种**（D101）：
+ * 跑过 `./scripts/test-integration.sh` 之后库会被重置，本 spec 依赖的用户
+ * 既不存在也不可复用（旧版本靠后端测试的副作用建号 → 「跑过集成测试就不能跑 E2E」）。
+ * 顺序：`test-integration.sh` → `seed-e2e.sh` → 起服务 → 本 spec。
  */
 
 const TENANT = 'tenant-a';
@@ -71,6 +76,41 @@ test('登录页填租户 → 登录请求带 x-tenant-id，租户随会话持久
   await page.reload();
   await expect(page.getByText('已就绪')).toBeVisible();
   expect(pathOf(page)).toBe('/');
+});
+
+test('错误密码 → 错误码透传 INVALID_CREDENTIALS，且**不**触发 refresh（MED-NEW-1）', async ({
+  page,
+}) => {
+  const refreshCalls: string[] = [];
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname.endsWith('/api/iam/refresh')) {
+      refreshCalls.push(request.url());
+    }
+  });
+
+  await page.goto('/login');
+  await page.getByLabel('租户').fill(TENANT);
+  await page.getByLabel('用户名').fill('u-perm-read@example.com');
+  await page.getByLabel('密码').fill('definitely-the-wrong-password');
+
+  const loginResponse = page.waitForResponse((response) =>
+    new URL(response.url()).pathname.endsWith('/api/iam/login'),
+  );
+  await page.getByRole('button', { name: '登录' }).click();
+
+  const response = await loginResponse;
+  expect(response.status()).toBe(401);
+  const body = (await response.json()) as { code?: string };
+  // 判据 1：码必须是后端真正的 INVALID_CREDENTIALS —— 不是刷新失败的 TOKEN_REVOKED。
+  expect(body.code).toBe('INVALID_CREDENTIALS');
+
+  // 判据 3：页面文案按真正的码分派。
+  await expect(page.getByText('用户名或密码不正确')).toBeVisible();
+  await expect(page.locator('body')).not.toContainText('TOKEN_REVOKED');
+  expect(pathOf(page)).toBe('/login');
+
+  // 判据 2：刷新接口一次都没有被调用（刷新救不了密码错）。
+  expect(refreshCalls).toHaveLength(0);
 });
 
 test('租户为空 → 给出提示且不发登录请求', async ({ page }) => {

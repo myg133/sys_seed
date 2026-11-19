@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
+import { ApiError } from '@base/sdk';
+
 import {
   LOGIN_PATH,
   PERMISSIONS_PATH,
@@ -205,6 +207,37 @@ describe('会话恢复（D99 / AC-S-068 步骤 3）', () => {
 
     expect(state.authenticated).toBe(false);
     expect(map.has(SESSION_STORAGE_KEY)).toBe(true);
+  });
+});
+
+describe('错密码登录（MED-NEW-1 / D100）', () => {
+  it('错误码原样透传 INVALID_CREDENTIALS；不触发 refresh；不清已有会话', async () => {
+    const { api, requests, map } = build(
+      (request) => {
+        if (request.url === REFRESH_PATH) {
+          // MED-NEW-1 的现场：登录 401 后又打了一次 refresh，回 TOKEN_REVOKED。
+          return json({ code: 'TOKEN_REVOKED' }, 401);
+        }
+        return json({ code: 'INVALID_CREDENTIALS', status: 401 }, 401);
+      },
+      // 已登录用户误在登录页输错密码：旧会话仍然有效，不能被清掉。
+      { [SESSION_STORAGE_KEY]: JSON.stringify(STORED_SESSION) },
+    );
+
+    const error = await api.auth
+      .login({ tenantId: 'tenant-a', username: 'u-perm-read@example.com', password: 'wrong' })
+      .then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).code).toBe('INVALID_CREDENTIALS');
+    // 只发一次登录（没有那次注定失败的 refresh）。
+    expect(requests.map((request) => request.url)).toEqual([LOGIN_PATH]);
+    // 会话仍在（登录失败 ≠ 会话失效）。
+    expect(map.has(SESSION_STORAGE_KEY)).toBe(true);
+    expect(JSON.parse(map.get(SESSION_STORAGE_KEY) ?? '{}').accessToken).toBe('access-1');
   });
 });
 

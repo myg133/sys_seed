@@ -25,11 +25,20 @@ const READ_ONLY: AuthState = {
 function fakeClient(permissions: readonly string[]): {
   client: AuthApiClient;
   logins: number;
+  lastOptions: { skipAuthRetry?: boolean } | undefined;
 } {
-  const state = { logins: 0 };
+  const state: {
+    logins: number;
+    lastOptions: { skipAuthRetry?: boolean } | undefined;
+  } = { logins: 0, lastOptions: undefined };
   const client: AuthApiClient = {
-    async post<T>(_path: string, body?: unknown): Promise<T> {
+    async post<T>(
+      _path: string,
+      body?: unknown,
+      options?: { skipAuthRetry?: boolean },
+    ): Promise<T> {
       state.logins += 1;
+      state.lastOptions = options;
       return {
         accessToken: 'token-1',
         refreshToken: 'refresh-1',
@@ -46,6 +55,9 @@ function fakeClient(permissions: readonly string[]): {
     client,
     get logins() {
       return state.logins;
+    },
+    get lastOptions() {
+      return state.lastOptions;
     },
   };
 }
@@ -172,6 +184,18 @@ describe('@base/auth 的条件渲染判定（AC-S-067）', () => {
 });
 
 describe('@base/auth 的认证存储', () => {
+  it('登录请求带 skipAuthRetry（认证端点不参与自动刷新 / D100）', async () => {
+    // ⚠️ 不能解构 `lastOptions`（getter 会被立刻求值）—— 登录后再读。
+    const fake = fakeClient(['rbac:role:read']);
+    const auth = createAuthStore(fake.client);
+
+    await auth.login('alice', 'wrong-password');
+
+    // 这一条是 MED-NEW-1 的守卫：去掉 skipAuthRetry，错密码的错误码
+    // 会被 refresh 的 TOKEN_REVOKED 覆盖（真机立刻可见）。
+    expect(fake.lastOptions).toEqual({ skipAuthRetry: true });
+  });
+
   it('登录后拿到权限点集合', async () => {
     const { client } = fakeClient(['rbac:role:read']);
     const sessions: string[] = [];

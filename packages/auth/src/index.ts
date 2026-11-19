@@ -197,13 +197,23 @@ export interface AuthSession {
 }
 
 /**
+ * 认证请求的额外选项（与 `@base/sdk` 的 `RequestOptionsWithoutTarget` 结构兼容）。
+ *
+ * 只声明本包用到的字段：认证端点必须跳过「401 自动刷新」（D100）。
+ */
+export interface AuthRequestOptions {
+  /** 见 `@base/sdk` 的 `RequestOptions.skipAuthRetry`。 */
+  readonly skipAuthRetry?: boolean;
+}
+
+/**
  * 认证所需的最小客户端能力。
  *
  * 与 `@base/sdk` 的 `ApiClient` **结构兼容**（宿主把真客户端传进来即可）。
  */
 export interface AuthApiClient {
   /** POST 请求。 */
-  post<T = unknown>(path: string, body?: unknown): Promise<T>;
+  post<T = unknown>(path: string, body?: unknown, options?: AuthRequestOptions): Promise<T>;
   /** GET 请求。 */
   get<T = unknown>(path: string): Promise<T>;
 }
@@ -275,7 +285,14 @@ export function createAuthStore(client: AuthApiClient, options: AuthStoreOptions
     },
 
     async login(username: string, password: string): Promise<void> {
-      const response = await client.post<LoginResponse>(loginPath, { username, password });
+      // ⚠️ 登录是**认证端点**：401（密码错 / 租户错…）必须原样透传后端错误码，
+      //    不得触发自动刷新 —— 刷新救不了密码错，还会把 `INVALID_CREDENTIALS`
+      //    覆盖成 `TOKEN_REVOKED`（D100）。
+      const response = await client.post<LoginResponse>(
+        loginPath,
+        { username, password },
+        { skipAuthRetry: true },
+      );
       const accessToken = response?.accessToken;
       if (typeof accessToken !== 'string' || accessToken === '') {
         throw new Error('登录响应缺少访问令牌');

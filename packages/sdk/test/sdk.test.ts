@@ -357,6 +357,143 @@ describe('@base/sdk 的令牌刷新（AC-S-070）', () => {
   });
 });
 
+describe('@base/sdk 的认证端点（AC-S-070 补充 / D100）', () => {
+  /** 记录 401 → 刷新 这条链路的观测点。 */
+  function authEndpointClient(responses: { fetch: () => Response | Promise<Response> }): {
+    client: ReturnType<typeof createApiClient>;
+    calls: Request[];
+    refreshes: number;
+    unauthorized: number;
+  } {
+    const { fetch: fake, calls } = fakeFetch(responses.fetch);
+    const state = { refreshes: 0, unauthorized: 0 };
+    const client = createApiClient({
+      baseUrl: '',
+      fetch: fake,
+      getAccessToken: () => 'stale-token',
+      refreshToken: async () => {
+        state.refreshes += 1;
+        throw new ApiError({ code: 'TOKEN_REVOKED', status: 401 });
+      },
+      onUnauthorized: () => {
+        state.unauthorized += 1;
+      },
+    });
+    return {
+      client,
+      calls,
+      get refreshes() {
+        return state.refreshes;
+      },
+      get unauthorized() {
+        return state.unauthorized;
+      },
+    };
+  }
+
+  it('错密码登录：401 INVALID_CREDENTIALS 原样透传，不刷新、不上报会话失效', async () => {
+    const harness = authEndpointClient({
+      fetch: () => jsonResponse({ code: 'INVALID_CREDENTIALS', status: 401 }, 401),
+    });
+
+    const error = await harness.client
+      .post('/api/iam/login', { username: 'alice', password: 'wrong' }, { skipAuthRetry: true })
+      .then(
+        () => undefined,
+        (reason: unknown) => reason,
+      );
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).code).toBe('INVALID_CREDENTIALS');
+    // 刷新回调**一次都不能**被调用（刷新救不了密码错）。
+    expect(harness.refreshes).toBe(0);
+    // 登录失败 ≠ 会话失效：不得清会话。
+    expect(harness.unauthorized).toBe(0);
+    // 也不得重放登录请求。
+    expect(harness.calls).toHaveLength(1);
+  });
+
+  it('没有 skipAuthRetry 的同一路径仍会刷新（说明开关才是判据，不是路径）', async () => {
+    let accessToken = 'stale-token';
+    const { fetch: fake, calls } = fakeFetch(async (request) => {
+      if (pathOf(request) === '/api/iam/refresh') {
+        return jsonResponse({ accessToken: 'fresh-token' }, 200);
+      }
+      if (request.headers.get('authorization') === 'Bearer stale-token') {
+        return jsonResponse({ code: 'INVALID_CREDENTIALS', status: 401 }, 401);
+      }
+      return jsonResponse({ ok: true }, 200);
+    });
+    const client = createApiClient({
+      baseUrl: '',
+      fetch: fake,
+      getAccessToken: () => accessToken,
+      refreshToken: async () => {
+        const refreshed = await client.refresh<{ accessToken: string }>('/api/iam/refresh', {});
+        accessToken = refreshed.accessToken;
+        return accessToken;
+      },
+    });
+
+    const result = await client.post('/api/iam/login', { username: 'alice', password: 'wrong' });
+
+    expect(result).toEqual({ ok: true });
+    expect(calls.filter((item) => pathOf(item) === '/api/iam/refresh')).toHaveLength(1);
+    expect(calls.filter((item) => pathOf(item) === '/api/iam/login')).toHaveLength(2);
+  });
+
+  it('业务端点的 401 仍然刷新 + 重放（AC-S-070 不被破坏）', async () => {
+    let accessToken = 'expired-token';
+    const { fetch: fake, calls } = fakeFetch(async (request) => {
+      if (pathOf(request) === '/api/iam/refresh') {
+        return jsonResponse({ accessToken: 'new-token' }, 200);
+      }
+      if (request.headers.get('authorization') === 'Bearer expired-token') {
+        return jsonResponse({ code: 'TOKEN_EXPIRED', status: 401 }, 401);
+      }
+      return jsonResponse({ permissions: ['rbac:role:read'] }, 200);
+    });
+    const client = createApiClient({
+      baseUrl: '',
+      fetch: fake,
+      getAccessToken: () => accessToken,
+      refreshToken: async () => {
+        const refreshed = await client.refresh<{ accessToken: string }>('/api/iam/refresh', {});
+        accessToken = refreshed.accessToken;
+        return accessToken;
+      },
+    });
+
+    const result = await client.get('/api/rbac/me/permissions');
+
+    expect(result).toEqual({ permissions: ['rbac:role:read'] });
+    expect(calls.filter((item) => pathOf(item) === '/api/iam/refresh')).toHaveLength(1);
+    expect(calls.filter((item) => pathOf(item) === '/api/rbac/me/permissions')).toHaveLength(2);
+  });
+
+  it('刷新端点自身不递归刷新（scoped 语义仍在）', async () => {
+    const { fetch: fake, calls } = fakeFetch(() =>
+      jsonResponse({ code: 'TOKEN_REVOKED', status: 401 }, 401),
+    );
+    const client = createApiClient({
+      baseUrl: '',
+      fetch: fake,
+      getAccessToken: () => 'stale-token',
+      refreshToken: async () => {
+        throw new Error('不该被调用');
+      },
+    });
+
+    const error = await client.refresh('/api/iam/refresh', { refreshToken: 'dead' }).then(
+      () => undefined,
+      (reason: unknown) => reason,
+    );
+
+    expect((error as ApiError).code).toBe('TOKEN_REVOKED');
+    expect(calls).toHaveLength(1);
+  });
+});
+
 describe('@base/sdk 的幂等键（AC-S-071）', () => {
   it('TC-011-031：写方法自动注入 idempotency-key（UUID v4）', async () => {
     const { fetch: fake, calls } = fakeFetch(() => jsonResponse({ ok: true }, 200));

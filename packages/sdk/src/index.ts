@@ -7,6 +7,7 @@
  * |---|---|
  * | 错误模型 | RFC 9457 → `ApiError { code, status, title, detail }`；`code` 优先；**原始响应体不进错误信息** |
  * | token 刷新 | 401 → 刷新 → 重放；**并发去重**（共享同一个 in-flight Promise）；请求体先缓冲成字符串 |
+ * | 认证端点 | 登录 / 刷新（`skipAuthRetry`）的 401 **不刷新、不上报会话失效**，错误码原样透传（D100） |
  * | 幂等键 | 写方法自动带 UUID v4；读方法不带；每次请求新键；**401 重放不带**（D92） |
  * | 上下文头 | `x-tenant-id` / `x-space-id`；未配置时**不带头**；注入于所有请求（含 login / refresh） |
  *
@@ -79,6 +80,21 @@ export interface RequestOptions {
   readonly headers?: Record<string, string>;
   /** 是否带幂等键（默认：写方法 true / 读方法 false）。 */
   readonly idempotent?: boolean;
+  /**
+   * 该请求是**认证端点**（登录 / 刷新）：401 时不触发自动刷新，也不上报会话失效。
+   *
+   * # 为什么必须有这个开关（D100）
+   *
+   * 「刷新救不了密码错」。若登录的 401 也去刷新：
+   * ① 此刻会话里还没有 refresh token → 刷新必然失败 → 抛 `TOKEN_REVOKED`，
+   *    **把真正的 `INVALID_CREDENTIALS` 覆盖掉**（用户看到错误的失败原因）；
+   * ② 每次登录失败多打一次 `/api/iam/refresh`；
+   * ③ 已登录用户误在登录页输错密码时，还会把**仍然有效**的会话清掉。
+   *
+   * 刷新请求自身还受「不递归刷新」的保护（`Client.refresh()` 的 scoped 语义），
+   * 两者是不同的问题：scoped 解决「刷新等自己 → 死锁」，本开关解决「认证 401 被误当会话失效」。
+   */
+  readonly skipAuthRetry?: boolean;
 }
 
 /** 请求选项（去掉 `path` / `method` 后的快捷方式入参）。 */
@@ -311,7 +327,13 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
       throw new ApiError({ code: CLIENT_NETWORK_ERROR, status: 0 });
     }
 
-    const canRefresh = attempt === 0 && options.refreshToken !== undefined && !scopedToRefresh;
+    // 认证端点（登录 / 刷新）的 401 不参与自动刷新（D100）：
+    // 密码错时刷新必然失败，会把真正的错误码覆盖成 `TOKEN_REVOKED`。
+    const canRefresh =
+      attempt === 0 &&
+      options.refreshToken !== undefined &&
+      !scopedToRefresh &&
+      requestOptions.skipAuthRetry !== true;
     if (response.status === 401 && canRefresh) {
       try {
         if (refreshInFlight === null) {
@@ -328,7 +350,9 @@ export function createApiClient(options: ApiClientOptions): ApiClient {
     }
 
     if (!response.ok) {
-      if (response.status === 401 && refreshInFlight === null) {
+      // 认证端点的 401 不是「会话已死」，而是「这次凭据不对」——
+      // 不能借它清掉可能仍然有效的会话（D100 ③）。
+      if (response.status === 401 && refreshInFlight === null && !requestOptions.skipAuthRetry) {
         options.onUnauthorized?.();
       }
       throw await toApiError(response);
