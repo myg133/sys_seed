@@ -206,6 +206,45 @@ ON CONFLICT (tenant_id) DO UPDATE SET
 --    让「刚播种完就登不进去」重现。只动夹具租户，不动别的租户。
 DELETE FROM platform_iam_login_attempt WHERE tenant_id = 'tenant-a';
 
+-- 7) SSO 入站（REQ-013）：12 个配置键（`scope: tenant`，已在
+--    `crates/platform-config/manifest.json` 登记 —— 未登记的键解析不出来）。
+--
+--    为什么必须播种：登录页要显示「企业单点登录」入口，而
+--    `GET /api/iam/sso/providers` 只列出**启用且配置合法**的 provider。
+--    漏了这 12 个键 → providers 恒为空 → `e2e/sso.spec.ts` 按 D108 **直接红**
+--    （403/404 不是可跳过条件）。
+--
+--    ⚠️ `sso.enforce` 必须是 **false**：为 true 时本地密码登录全被 403
+--    `SSO_REQUIRED` 拒掉，`e2e/shell-auth.spec.ts` 的三条登录用例会一起红。
+--    issuer / url 是**不会被访问**的占位地址（只做 URL 格式校验）。
+INSERT INTO platform_tenant_config (tenant_id, key, value) VALUES
+    ('tenant-a', 'sso.enforce',             'false'::jsonb),
+    ('tenant-a', 'sso.jitProvisioning',     'false'::jsonb),
+    ('tenant-a', 'sso.oidc.enabled',        'true'::jsonb),
+    ('tenant-a', 'sso.oidc.issuer',         '"http://127.0.0.1:9/oidc"'::jsonb),
+    ('tenant-a', 'sso.oidc.clientId',       '"e2e-client"'::jsonb),
+    ('tenant-a', 'sso.oidc.scopes',         '"openid email profile"'::jsonb),
+    ('tenant-a', 'sso.oidc.redirectUri',    '"http://127.0.0.1:8096/api/iam/sso/oidc/callback"'::jsonb),
+    ('tenant-a', 'sso.ldap.enabled',        'true'::jsonb),
+    ('tenant-a', 'sso.ldap.url',            '"ldap://127.0.0.1:389"'::jsonb),
+    ('tenant-a', 'sso.ldap.baseDn',         '"dc=example,dc=com"'::jsonb),
+    ('tenant-a', 'sso.ldap.userSearchFilter', '"(uid={username})"'::jsonb),
+    ('tenant-a', 'sso.ldap.mailAttribute',  '"mail"'::jsonb)
+ON CONFLICT (tenant_id, key) DO UPDATE SET
+    value      = EXCLUDED.value,
+    updated_at = now();
+
+-- 配置缓存版本：resolver **成对比较** `platform` 与 `tenant:<id>` 两行（D71）。
+-- 直接写表而不 bump epoch 的话，已启动的实例会继续用旧快照。
+INSERT INTO platform_config_epoch (scope_key, epoch) VALUES ('platform', 1)
+ON CONFLICT (scope_key) DO UPDATE SET
+    epoch      = platform_config_epoch.epoch + 1,
+    updated_at = now();
+INSERT INTO platform_config_epoch (scope_key, epoch) VALUES ('tenant:tenant-a', 1)
+ON CONFLICT (scope_key) DO UPDATE SET
+    epoch      = platform_config_epoch.epoch + 1,
+    updated_at = now();
+
 COMMIT;
 SQL
 
@@ -265,6 +304,16 @@ grants="$(printf '%s\n' \
 if [ "$grants" != '2 5 0 ' ]; then
   echo "✗ 夹具授权核对失败：期望 read=2 / write=5 / none=0，实际 '$grants'" >&2
   echo "  （REQ-012 的 E2E 需要 sandbox:demo:read/write/secret；漏授会让用例 403。）" >&2
+  exit 1
+fi
+
+# 强断言 ③：REQ-013 的 12 个 SSO 配置键**全部**已播种。
+# 「脚本成功」不等于「夹具可用」—— 缺键时 providers 恒为空，E2E 才红。
+sso_keys="$(printf '%s\n' \
+  "SELECT count(*) FROM platform_tenant_config WHERE tenant_id = 'tenant-a' AND key IN ('sso.enforce','sso.jitProvisioning','sso.oidc.enabled','sso.oidc.issuer','sso.oidc.clientId','sso.oidc.scopes','sso.oidc.redirectUri','sso.ldap.enabled','sso.ldap.url','sso.ldap.baseDn','sso.ldap.userSearchFilter','sso.ldap.mailAttribute');" \
+  | run_sql -tA | tr -d '[:space:]')"
+if [ "$sso_keys" != '12' ]; then
+  echo "✗ SSO 配置键核对失败：期望 12 个，实际 '$sso_keys'" >&2
   exit 1
 fi
 
