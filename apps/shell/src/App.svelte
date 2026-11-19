@@ -3,13 +3,16 @@
 
   # 关键不变量
 
+  - **会话跨整页重载存活**（`sessionStorage`，D99）：启动时**先恢复会话、再过守卫**
+    → 直接敲受保护 URL 落 **403 页**（不是登录页）；
   - **守卫放行后**才调用受保护页的数据加载函数 → 403 落点时目标接口请求计数为 **0**；
   - 未登录 → 落**登录页**（不是 403）；已登录无权限 → 落 **403 页**；
+  - 租户由用户在登录页填（D98），登录后整个会话沿用它；
   - 品牌主色由 `@base/theme` 统一处理（shell 不再自己判断颜色格式）。
 
-  ⚠️ 脚本块写成 **JS 语法**：本仓的 eslint 配置没有给 `**/*.svelte` 配
-  TypeScript 解析器，写 TS 会让 `eslint .` 报解析错误。
-  路由 / 鉴权 / API 装配的**逻辑与类型**都在 `src/lib/*.ts` 里（那里是全量类型检查的）。
+  ⚠️ 脚本块是 `<script lang="ts">`：根 `eslint.config.js` 已给 `**/*.svelte` 配了
+  TypeScript 解析器（D97）→ 这里**可以**写 TS 类型。带参数的事件处理器仍放
+  `src/lib/handlers.ts` —— 模板内联箭头函数没有上下文类型。
 -->
 <script lang="ts">
   import { setThemeMode } from '@base/theme';
@@ -27,9 +30,11 @@
   import ProtectedRoles from './pages/ProtectedRoles.svelte';
 
   // 同源：页面由 platform-server 的静态目录托管（本仓没有 CORS 层）。
-  const { client, auth } = createAppApi();
+  // 租户在登录时由用户填（D98），这里不传死值。
+  const { client, auth, restoreSession } = createAppApi();
 
   let title = $state('');
+  let booted = $state(false);
   let authState = $state(auth.state);
   let roles = $state(toRoles(undefined));
   let resolution = $state(initialResolution(window.location.pathname));
@@ -81,19 +86,34 @@
     router.navigate(resolution.intendedPath ?? '/');
   }
 
+  /**
+   * 启动顺序：**先恢复会话，再过守卫**。
+   *
+   * 反过来的话，深链会因「内存里没有令牌」被判成未登录 → 改写到登录页，
+   * AC-S-068 步骤 3（直接敲 URL 落 403）就达不成。
+   */
+  async function boot(): Promise<void> {
+    await restoreSession();
+    authState = auth.state;
+    booted = true;
+    router.start();
+  }
+
   onMount(() => {
     // 先落令牌，再落品牌 —— 品牌主色覆盖在令牌之上，顺序反了会被模式切换冲掉。
     setThemeMode('light');
     void loadBranding();
-    // 当前地址（可能是深链）也要过一遍守卫。
-    router.start();
+    void boot();
     return () => {
       router.stop();
     };
   });
 </script>
 
-{#if resolution.path === '/login'}
+{#if !booted}
+  <!-- 会话恢复完成前**不渲染任何页面**：否则深链会先闪一下目标页 / 首页。 -->
+  <p class="base-booting">正在恢复会话…</p>
+{:else if resolution.path === '/login'}
   <Login {auth} onLoggedIn={handleLoggedIn} />
 {:else if resolution.path === '/403'}
   <Forbidden onback={() => router.navigate('/')} />

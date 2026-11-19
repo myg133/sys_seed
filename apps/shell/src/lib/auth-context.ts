@@ -6,9 +6,9 @@
  *
  * # 为什么取值器放在 `.ts` 里
  *
- * `apps/shell` 的 `.svelte` 脚本块是 **JS 语法**（本仓的 eslint 配置没给
- * `.svelte` 文件配 TypeScript 解析器，写 TS 会让 `eslint .` 报解析错误），
- * 而 `.ts` 模块是**全量类型检查**的 —— 所以带类型的部分都放在这里。
+ * `.svelte` 的脚本块**可以**写 TS（根 `eslint.config.js` 已给 `.svelte` 配了
+ * TypeScript 解析器，见 D97）；这里放在 `.ts` 是为了让上下文**键与类型**集中在一处、
+ * 由 `<Can>` 与后续页面共用同一份契约（也便于单测直接 import）。
  */
 
 import { getContext } from 'svelte';
