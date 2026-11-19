@@ -23,6 +23,7 @@ Sprint 3 复盘的三条教训直接写进了本迭代的出口标准：
 | REQ-011 | 前端 SDK 骨架 | P0 | ✅ **已完成** | BA (myg133-ba-1) | 已回收 | `develop` @ `b38715f` |
 | REQ-012 | 元数据驱动渲染 | P0 | ✅ **已完成** | BA (myg133-ba-1) | 已回收 | `develop` @ `88b7ca3` |
 | REQ-021 | 国际化与本地化 | P1 | ✅ **已完成** | BA (myg133-ba-1) | 已回收 | `develop` @ `59486d0` |
+| REQ-013 | SSO 入站（OIDC + LDAP） | P1 | ✅ **已完成** | BA (myg133-ba-1) | feature-REQ-013 | `develop` @ `0683115` |
 
 **承接父 AC**：AC-016（SDK 按需引入）、AC-017（权限组件与路由守卫）、AC-019（API 类型同步）
 

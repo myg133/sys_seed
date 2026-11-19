@@ -417,3 +417,36 @@ Sprint 3 复盘的第 2 条教训：**修漏洞会制造新漏洞** —— 但�
      是**独立的 LDAP 侧工作量**，本轮不扩范围。
      ⚠️ **但真实 Active Directory 绝大多数要求 LDAPS** —— 所以这条会挡住真实 AD 接入。
 - **什么时候修**: 接第一个真实 AD 客户之前。
+
+---
+
+## TD-025: `platform-iam` 有 2 条 clippy 警告（设计取舍，非缺陷）
+
+- **发现于**: REQ-013 合并前补跑 clippy（修复轮自陈「未跑 clippy / fmt」）
+- **两条**:
+  1. `sso/config.rs:153` —— `large size difference between variants`（枚举变体大小差异大）
+  2. `sso/oidc.rs:237` —— `very complex type used. Consider factoring parts into type definitions`
+- **为什么本轮不修**: 两条都是**设计取舍**，不是本轮引入的样式疏漏。
+  ① 变体大小差异要求把大变体装箱（`Box`），那会引入一次堆分配 —— 为一个 lint 付运行时成本不值得；
+  ② 复杂类型是 `hyper` 的 connector builder 链式调用的返回类型，抽 `type` 别名会**降低**可读性。
+- **本轮已修掉的是 6 条真正的样式问题**（`.is_some()` → `contains_key`、`>= y + 1`、无效果的 `path statement`），
+  新增的 17 个文件已全部 `cargo fmt` 过。
+- **`cargo fmt --all --check` 仍红 11 个文件** —— 全是 **TD-017 的存量债**（基线 @ `59486d0` 实测 11 个），
+  本轮**没有增加**，且已把它们从格式化中排除（只格式化自己新增的文件）。
+
+---
+
+## TD-026: `Ldap3Conn::simple_bind` 的**网络层**仍无测试（客观边界）
+
+- **发现于**: REQ-013（修复轮2 自陈）
+- **已闭合的部分**: 决策点已从不可测的 async 包装层**下沉到 service 层**（D129），
+  所以「把 `bind_result` 判定改坏」现在会被**集成测试**直接抓到 —— 我用变异验证亲自确认
+  （`!bind_result(...)` → `.is_err()` 后 4 条集成用例红，而 lib 单测 76 条仍绿）。
+- **仍未覆盖的**: `self.ldap.simple_bind(..).await` 这行**真的发出 LDAP 报文**的行为。
+  `ldap3` **没有服务端实现**，要覆盖得起一个 mock LDAP server（属新依赖范畴）。
+- **为什么可以接受**: ① `rc → bool` 的映射已被 `bind_succeeded` / `bind_result` 逐值单测覆盖；
+  ② 「有没有调用它」已被 service 层集成测试覆盖；③ 剩下的只是「`ldap3` 库本身对不对」，
+  那不是本仓的代码。
+- **风险**: 若 `ldap3` 升级改了 `simple_bind` 的返回值语义，本仓不会红 —— 但 `bind_result` 的
+  单测里有一条 `bind_succeeded_agrees_with_ldap3_success_semantics` 直接对照该库的 `success()`，
+  能抓到语义漂移。
