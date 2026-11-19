@@ -8,7 +8,9 @@ pub mod context;
 pub mod error;
 pub mod extension;
 pub mod log;
+pub mod money;
 pub mod problem;
+pub mod titles;
 
 pub use config::{AppConfig, ConfigEntry, ConfigKey, ConfigScope, InMemoryConfigResolver};
 pub use context::RequestContext;
@@ -19,7 +21,9 @@ pub use extension::{
     Repository, ResolvedConfig, ScopeFilter, WorkflowHandler,
 };
 pub use log::{NOISY_TARGETS, log_filter, log_filter_ignoring_env};
+pub use money::{CurrencyCode, FxRate, Money, MoneyError, convert_minor_units, is_iso4217};
 pub use problem::ProblemDetails;
+pub use titles::{FALLBACK_TITLE, TITLES, title_of_code};
 
 /// 平台核心版本号，与 `Cargo.toml` 中的 `version` 保持一致。
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -28,6 +28,7 @@ use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 
 use crate::context::RequestContext;
+use crate::titles::title_of_code;
 
 /// 稳定的机器可读错误码：需要认证（缺令牌 / 令牌无效）。
 pub const CODE_UNAUTHENTICATED: &str = "UNAUTHENTICATED";
@@ -47,6 +48,20 @@ pub const CODE_SCHEMA_ENTITY_NOT_FOUND: &str = "SCHEMA_ENTITY_NOT_FOUND";
 
 /// 错误类型 URI 的前缀。
 pub const PROBLEM_TYPE_BASE: &str = "https://errors.base.example";
+
+/// 本模块登记进 [`crate::titles::TITLES`] 的错误码清单。
+///
+/// `code()` 是 `match` 里的 `&'static str`，运行时**无法自动枚举** ——
+/// 没有这份显式清单，「`TITLES` 漏了一项」永远不会被测出来（D113）。
+/// 完备性测试在 `platform-server/tests/i18n_titles.rs`。
+pub const ALL_CODES: &[&str] = &[
+    CODE_UNAUTHENTICATED,
+    CODE_INSUFFICIENT_PERMISSION,
+    CODE_NOT_FOUND,
+    CODE_INTERNAL_ERROR,
+    CODE_SCHEMA_MODULE_NOT_FOUND,
+    CODE_SCHEMA_ENTITY_NOT_FOUND,
+];
 
 /// 统一错误响应体（RFC 9457）。
 ///
@@ -122,7 +137,7 @@ impl ProblemDetails {
     pub fn unauthenticated(ctx: &RequestContext, instance: &str) -> Self {
         Self::from_context(
             CODE_UNAUTHENTICATED,
-            "未认证",
+            title_of_code(CODE_UNAUTHENTICATED),
             401,
             "authentication is required",
             ctx,
@@ -143,7 +158,7 @@ impl ProblemDetails {
         );
         Self::from_context(
             CODE_INSUFFICIENT_PERMISSION,
-            "权限不足",
+            title_of_code(CODE_INSUFFICIENT_PERMISSION),
             403,
             format!("the current role does not grant the permission `{permission}`"),
             ctx,
@@ -164,7 +179,7 @@ impl ProblemDetails {
         );
         Self::from_context(
             CODE_NOT_FOUND,
-            "资源不存在",
+            title_of_code(CODE_NOT_FOUND),
             404,
             format!("the {resource} was not found"),
             ctx,

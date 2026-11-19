@@ -1688,6 +1688,7 @@ dependencies = [
  "anyhow",
  "axum",
  "clap",
+ "http-body-util",
  "platform-config",
  "platform-core",
  "platform-db",
@@ -1701,6 +1702,7 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.21",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]

@@ -32,6 +32,8 @@ import {
 } from '@base/schema';
 import { ApiError, type ApiClient } from '@base/sdk';
 
+import { errorMessageKey, toMessageParams } from './i18n';
+
 /** 元数据接口路径。 */
 export function schemaMetaPath(moduleId: string, entityKey: string): string {
   return `/api/schema/${encodeURIComponent(moduleId)}/${encodeURIComponent(entityKey)}`;
@@ -51,7 +53,8 @@ export async function loadEntityMeta(
   const raw = await client.get<unknown>(schemaMetaPath(moduleId, entityKey));
   const meta = parseEntityMeta(raw);
   if (meta === undefined) {
-    throw new Error('元数据缺少 api 声明（list / create 必填）');
+    // dev-facing（ASCII）：用户可见文案由 `describeError` 按错误码渲染。
+    throw new Error('entity metadata is missing api.list / api.create');
   }
   return meta;
 }
@@ -109,7 +112,7 @@ export async function updateRecord(
   body: Record<string, unknown>,
 ): Promise<void> {
   if (api.update === undefined) {
-    throw new Error('该实体未声明更新接口（api.update）');
+    throw new Error('entity metadata does not declare api.update');
   }
   const path = resolveApiPath(api.update, id);
   const remembered = updateMethods.get(api.update);
@@ -138,18 +141,27 @@ export async function deleteRecord(
   record: Record<string, unknown>,
 ): Promise<void> {
   if (api.delete === undefined) {
-    throw new Error('该实体未声明删除接口（api.delete）');
+    throw new Error('entity metadata does not declare api.delete');
   }
   await client.delete(resolveApiPath(api.delete, recordId(record)));
 }
 
-/** 把异常转成可展示的文案（错误码要透出，不能只剩「出错了」）。 */
-export function describeError(error: unknown): string {
+/** 翻译函数（与 `@base/i18n` 的 `t` 同形）。 */
+export type Translate = (key: string, params?: Record<string, string | number>) => string;
+
+/**
+ * 把异常转成**当前语言**的可展示文案（错误码仍要透出，不能只剩「出错了」）。
+ *
+ * 文案不在这里硬编码：按稳定错误码取 `error.<CODE>`，并用后端 `params` 插值
+ * （`ApiError.params`，D109）。没有对应文案时退回 `"<code> (HTTP <status>)"` ——
+ * 那是技术信息，不是本地化文案，所以不带中文、也不显示 `"?"`。
+ */
+export function describeError(error: unknown, translate: Translate): string {
   if (error instanceof ApiError) {
-    return `${error.code}（HTTP ${error.status}）`;
+    const key = errorMessageKey(error.code);
+    const text = translate(key, toMessageParams(error.params));
+    const message = text === '?' ? error.code : text;
+    return `${message} (HTTP ${error.status})`;
   }
-  if (error instanceof Error && error.message !== '') {
-    return error.message;
-  }
-  return '请求失败';
+  return translate('common.unexpectedError');
 }

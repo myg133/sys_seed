@@ -27,6 +27,8 @@
     type EntityMeta,
   } from '@base/schema';
 
+  import { i18nRuntime } from '../lib/i18n';
+
   /** 组件 props（D97：必须有类型，且**整体取值**而不是解构）。 */
   interface SchemaTableProps {
     /** 实体元数据（后端已按权限过滤）。 */
@@ -56,6 +58,7 @@
   }
 
   const props: SchemaTableProps = $props();
+  const i18n = i18nRuntime();
 
   const fields = $derived(visibleFields(props.meta));
   const canCreate = $derived(props.onCreate !== undefined && props.meta.api.create !== '');
@@ -88,16 +91,16 @@
           class="base-button base-button--primary"
           onclick={() => props.onCreate?.()}
         >
-          新建
+          {$i18n.t('common.newRecord')}
         </button>
       </div>
     {/if}
 
     {#if props.loading}
-      <p class="base-schema-loading">加载中…</p>
+      <p class="base-schema-loading">{$i18n.t('common.loading')}</p>
     {:else if props.items.length === 0}
       <!-- 空态：**不渲染表头空壳**（AC-S-082 步骤 5）。 -->
-      <p class="base-schema-empty">{props.emptyText ?? '暂无数据'}</p>
+      <p class="base-schema-empty">{props.emptyText ?? $i18n.t('schema.emptyTable')}</p>
     {:else}
       <table class="base-table base-schema-grid">
         <thead>
@@ -129,7 +132,7 @@
                 <td class="base-schema-actions">
                   {#if canEdit}
                     <button type="button" class="base-button" onclick={() => props.onEdit?.(item)}>
-                      编辑
+                      {$i18n.t('common.edit')}
                     </button>
                   {/if}
                   {#if canDelete}
@@ -138,7 +141,7 @@
                       class="base-button base-button--danger"
                       onclick={() => props.onDelete?.(item)}
                     >
-                      删除
+                      {$i18n.t('common.delete')}
                     </button>
                   {/if}
                 </td>
@@ -155,7 +158,7 @@
           disabled={props.hasPrev !== true}
           onclick={() => props.onPrevPage?.()}
         >
-          上一页
+          {$i18n.t('common.previousPage')}
         </button>
         <button
           type="button"
@@ -163,7 +166,7 @@
           disabled={!canNext}
           onclick={() => props.onNextPage?.()}
         >
-          下一页
+          {$i18n.t('common.nextPage')}
         </button>
       </nav>
     {/if}

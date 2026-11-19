@@ -146,6 +146,43 @@ pub enum ConfigType {
     Object,
 }
 
+/// 配置值的**格式**（固定枚举，D111 / 裁定 #8）。
+///
+/// # 为什么不用任意正则
+///
+/// `^[A-Z]{3}$` 会放行 `XXX`（「无货币」）与任意大写三字母 —— 正则能写出
+/// **形状**却写不出**语义**。固定枚举让校验器可以按语义分派（白名单 / 组成规则），
+/// 判据是收敛的：新增格式只能加一个枚举值。
+///
+/// | 值 | 语义 | 校验方式 |
+/// |----|------|----------|
+/// | `locale` | BCP 47 语言标签（`zh-CN` / `en-US`） | 形状 + **已注册语言**（见 `platform-config`） |
+/// | `iana-timezone` | IANA 时区名（`Asia/Shanghai`） | 形状 + **已知区域白名单**（后端无 tzdb，见 D114） |
+/// | `iso4217` | ISO 4217 货币代码（`CNY`） | 现行货币清单（`platform_core::money::is_iso4217`） |
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ConfigFormat {
+    /// BCP 47 语言标签，且必须是**已注册**语言。
+    Locale,
+    /// IANA 时区名。
+    #[serde(rename = "iana-timezone")]
+    IanaTimezone,
+    /// ISO 4217 货币代码。
+    #[serde(rename = "iso4217")]
+    Iso4217,
+}
+
+impl ConfigFormat {
+    /// manifest / 错误参数里的名字。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Locale => "locale",
+            Self::IanaTimezone => "iana-timezone",
+            Self::Iso4217 => "iso4217",
+        }
+    }
+}
+
 /// 配置项声明。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -161,6 +198,12 @@ pub struct ConfigSpec {
     /// 界面展示名称。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// 值的格式约束（**可选**；REQ-021 的 D111）。
+    ///
+    /// 只对 `type: "string"` 有意义 —— `number` 上的 `format: "locale"` 是
+    /// manifest 写错了，会在 `validate()` 里被报出来。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<ConfigFormat>,
 }
 
 /// 租户作用域声明：哪些表按租户隔离。
@@ -328,6 +371,22 @@ impl Manifest {
                     "tenantScoped.column",
                     "must match ^[a-z][a-z0-9_]*$",
                 ));
+            }
+        }
+
+        // 配置项：`format` 只能配在字符串上（D111）。
+        //
+        // 值的**语义**校验（locale 是否已注册、时区是否存在、币种是否真实）
+        // 需要仓库目录与货币清单，由 `platform-config` 的注册表在启动时做 ——
+        // 这里只挡「单文件就能判」的字段组合错误。
+        if let Some(config) = &self.config {
+            for (key, spec) in config {
+                if spec.format.is_some() && spec.kind != ConfigType::String {
+                    issues.push(field_error(
+                        &format!("config.{key}.format"),
+                        "is only allowed on `type: string`",
+                    ));
+                }
             }
         }
 

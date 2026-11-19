@@ -49,7 +49,11 @@ test('shell 渲染并可过滤菜单', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByRole('heading')).toBeVisible();
 
+  // 本用例验证的是**中文界面下**的菜单过滤；首屏语言来自 `navigator.language`
+  // （REQ-021 / AC-S-099），这里显式切到 zh-CN，不依赖运行环境的浏览器 locale。
+  await page.locator('[data-testid="language-switcher"]').selectOption('zh-CN');
+
   await page.getByPlaceholder('关键字').fill('租户');
-  await expect(page.getByRole('link', { name: '租户' })).toBeVisible();
+  await expect(page.getByRole('link', { name: '租户管理' })).toBeVisible();
   await expect(page.getByRole('link', { name: '工作台' })).toBeHidden();
 });

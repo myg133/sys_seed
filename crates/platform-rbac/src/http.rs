@@ -290,20 +290,11 @@ pub fn rbac_problem_response(error: &RbacError, ctx: &RequestContext, instance: 
     problem_response(&details)
 }
 
-/// 错误码 → 简短标题（**不是**面向用户的句子）。
+/// 错误码 → 简短标题（**唯一来源**：`platform_core::titles::TITLES`，D113）。
+///
+/// **只剩转发** —— 本文件不再持有任何 title 文案；面向用户的中文文案由前端按 `code` 渲染。
 fn title_of(error: &RbacError) -> &'static str {
-    match error {
-        RbacError::Unauthenticated => "未认证",
-        RbacError::InsufficientPermission { .. } => "权限不足",
-        RbacError::NotFound { .. } => "资源不存在",
-        RbacError::Conflict { .. } => "状态冲突",
-        RbacError::InvalidArgument { .. } => "参数不合法",
-        RbacError::BuiltinRoleProtected { .. } => "内置角色受保护",
-        RbacError::WildcardForbidden { .. } => "通配不被允许",
-        RbacError::InheritanceCycle { .. } => "角色继承成环",
-        RbacError::RegistryMismatch { .. } => "权限点注册表不一致",
-        RbacError::Internal { .. } => "服务内部错误",
-    }
+    platform_core::titles::title_of_code(error.code())
 }
 
 // ---------------------------------------------------------------------------

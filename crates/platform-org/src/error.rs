@@ -51,6 +51,27 @@ pub mod code {
     pub const INTERNAL_ERROR: &str = "INTERNAL_ERROR";
 }
 
+/// 本 crate 的全部错误码（**完备性测试的输入**，D113）。
+///
+/// 组织事件码（`org.member-added` 等）在 [`crate::notify::OrgEventKind::ALL_CODES`]。
+pub const ALL_CODES: &[&str] = &[
+    code::TENANT_CONTEXT_MISSING,
+    code::UNAUTHENTICATED,
+    code::NOT_FOUND,
+    code::ORG_CYCLE,
+    code::ORG_NODE_NOT_EMPTY,
+    code::ORG_NODE_HAS_MEMBERS,
+    code::ORG_CODE_DUPLICATED,
+    code::ORG_NODE_TYPE_INVALID,
+    code::INVALID_ARGUMENT,
+    code::CONFLICT,
+    code::SYNC_CONFLICT_PENDING,
+    code::SYNC_CONFLICT_STRATEGY,
+    code::SYNC_PUSH_FAILED,
+    code::NOT_IMPLEMENTED,
+    code::INTERNAL_ERROR,
+];
+
 /// 组织架构的错误。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OrgError {
@@ -287,6 +308,23 @@ fn referenced_resource(constraint: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `ALL_CODES` 必须覆盖**每一个变体**（清单漏项 = 完备性测试假绿）。
+    #[test]
+    fn all_codes_lists_every_variant() {
+        use std::collections::BTreeSet;
+
+        let mut seen = BTreeSet::new();
+        for error in all_errors() {
+            assert!(
+                ALL_CODES.contains(&error.code()),
+                "ALL_CODES 缺少 {}",
+                error.code()
+            );
+            seen.insert(error.code());
+        }
+        assert_eq!(seen.len(), ALL_CODES.len(), "清单与 match 不一致");
+    }
 
     fn all_errors() -> Vec<OrgError> {
         vec![

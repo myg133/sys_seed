@@ -37,6 +37,7 @@
   } from '@base/schema';
 
   import { gateSubmit } from '../lib/schema-submit';
+  import { i18nRuntime } from '../lib/i18n';
 
   /** 组件 props（D97：必须有类型）。 */
   interface SchemaFormProps {
@@ -57,6 +58,7 @@
   }
 
   const props: SchemaFormProps = $props();
+  const i18n = i18nRuntime();
 
   /** 表单里真正出现的字段（`readonly` 仍展示，但不渲染控件）。 */
   const fields = $derived(visibleFields(props.meta));
@@ -143,7 +145,7 @@
           <span class="base-field-label">
             {field.label}
             {#if field.required === true}
-              <span class="base-schema-required">必填</span>
+              <span class="base-schema-required">{$i18n.t('common.required')}</span>
             {/if}
           </span>
 
@@ -211,10 +213,13 @@
       class="base-button base-button--primary"
       disabled={props.submitting === true}
     >
-      {props.submitLabel ?? (props.mode === 'edit' ? '保存' : '创建')}
+      {props.submitLabel ??
+        (props.mode === 'edit' ? $i18n.t('common.save') : $i18n.t('common.create'))}
     </button>
     {#if props.onCancel !== undefined}
-      <button type="button" class="base-button" onclick={() => props.onCancel?.()}>取消</button>
+      <button type="button" class="base-button" onclick={() => props.onCancel?.()}>
+        {$i18n.t('common.cancel')}
+      </button>
     {/if}
   </div>
 </form>

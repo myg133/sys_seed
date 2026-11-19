@@ -32,6 +32,7 @@ use platform_core::extension::manifest::Manifest;
 use platform_core::extension::permission::{PermissionChecker, ScopeFilter, require_permission};
 use platform_core::extension::schema::EntitySchema;
 use platform_core::problem::{ProblemDetails, problem_response};
+use platform_core::titles::title_of_code;
 use platform_db::TenantDb;
 use serde::Serialize;
 
@@ -191,7 +192,7 @@ impl<S: Send + Sync> FromRequestParts<S> for Checker {
             .ok_or_else(|| {
                 problem_response(&ProblemDetails::from_context(
                     platform_core::problem::CODE_INTERNAL_ERROR,
-                    "服务内部错误",
+                    title_of_code(platform_core::problem::CODE_INTERNAL_ERROR),
                     500,
                     "the permission checker is not installed on this service",
                     &ctx,
@@ -317,7 +318,7 @@ async fn list_scope_items(
             tracing::error!(error = %error, "the scope item list failed");
             problem_response(&ProblemDetails::from_context(
                 platform_core::problem::CODE_INTERNAL_ERROR,
-                "服务内部错误",
+                title_of_code(platform_core::problem::CODE_INTERNAL_ERROR),
                 500,
                 "the data access layer failed",
                 &ctx,
@@ -345,7 +346,7 @@ async fn get_scope_item(
             tracing::error!(error = %error, "the scope item lookup failed");
             problem_response(&ProblemDetails::from_context(
                 platform_core::problem::CODE_INTERNAL_ERROR,
-                "服务内部错误",
+                title_of_code(platform_core::problem::CODE_INTERNAL_ERROR),
                 500,
                 "the data access layer failed",
                 &ctx,
@@ -385,7 +386,7 @@ async fn approve_scope_item(
                 tracing::error!(error = %error, "the scope filter could not be rendered");
                 return problem_response(&ProblemDetails::from_context(
                     platform_core::problem::CODE_INTERNAL_ERROR,
-                    "服务内部错误",
+                    title_of_code(platform_core::problem::CODE_INTERNAL_ERROR),
                     500,
                     "the scope filter could not be rendered",
                     &ctx,
@@ -400,7 +401,7 @@ async fn approve_scope_item(
                 tracing::error!(error = %error, "the condition could not be rendered");
                 return problem_response(&ProblemDetails::from_context(
                     platform_core::problem::CODE_INTERNAL_ERROR,
-                    "服务内部错误",
+                    title_of_code(platform_core::problem::CODE_INTERNAL_ERROR),
                     500,
                     "the condition could not be rendered",
                     &ctx,
@@ -441,7 +442,7 @@ async fn export_scope_items(
             tracing::error!(error = %error, "the scope item export failed");
             problem_response(&ProblemDetails::from_context(
                 platform_core::problem::CODE_INTERNAL_ERROR,
-                "服务内部错误",
+                title_of_code(platform_core::problem::CODE_INTERNAL_ERROR),
                 500,
                 "the data access layer failed",
                 &ctx,

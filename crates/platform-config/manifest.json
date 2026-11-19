@@ -12,6 +12,27 @@
   "menus": [],
   "dependencies": [],
   "config": {
+    "locale": {
+      "type": "string",
+      "default": "zh-CN",
+      "scope": "tenant",
+      "label": "界面语言（已注册语言之一）",
+      "format": "locale"
+    },
+    "timezone": {
+      "type": "string",
+      "default": "Asia/Shanghai",
+      "scope": "tenant",
+      "label": "时区（IANA 名）",
+      "format": "iana-timezone"
+    },
+    "currency": {
+      "type": "string",
+      "default": "CNY",
+      "scope": "tenant",
+      "label": "币种（ISO 4217）",
+      "format": "iso4217"
+    },
     "logo": {
       "type": "string",
       "default": "/branding/default.svg",

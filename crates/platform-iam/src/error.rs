@@ -64,6 +64,30 @@ pub mod code {
     pub const INTERNAL_ERROR: &str = "INTERNAL_ERROR";
 }
 
+/// 本 crate 的全部错误码（**完备性测试的输入**，D113）。
+///
+/// `code()` 是 `match` 里的 `&'static str`，运行时无法自动枚举 ——
+/// 没有这份清单，「`TITLES` 漏了一项」永远不会被测出来。
+pub const ALL_CODES: &[&str] = &[
+    code::INVALID_CREDENTIALS,
+    code::MFA_REQUIRED,
+    code::MFA_INVALID,
+    code::ACCOUNT_LOCKED,
+    code::ACCOUNT_DISABLED,
+    code::TOKEN_EXPIRED,
+    code::TOKEN_REVOKED,
+    code::TOKEN_REUSE_DETECTED,
+    code::PASSWORD_POLICY_VIOLATION,
+    code::PASSWORD_REUSED,
+    code::LOGIN_RATE_LIMITED,
+    code::TENANT_CONTEXT_MISSING,
+    code::UNAUTHENTICATED,
+    code::NOT_FOUND,
+    code::CONFLICT,
+    code::NOT_IMPLEMENTED,
+    code::INTERNAL_ERROR,
+];
+
 /// 一条被违反的密码策略规则。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyViolation {
@@ -329,6 +353,61 @@ mod tests {
                 "错误码必须是大写 + 下划线：{code}"
             );
         }
+    }
+
+    /// `ALL_CODES` 必须覆盖**每一个变体**。
+    ///
+    /// 完备性测试只验「`TITLES` ⊇ `ALL_CODES`」；如果漏了清单本身，
+    /// 那一条会照样通过（那正是本轮要消灭的假绿）。所以这里把变体**全部列出来**，
+    /// 反查清单 —— 新增变体忘了登记清单，这里就红。
+    #[test]
+    fn all_codes_lists_every_variant() {
+        use std::collections::BTreeSet;
+
+        let variants = [
+            IamError::InvalidCredentials,
+            IamError::MfaRequired,
+            IamError::MfaInvalid,
+            IamError::AccountLocked,
+            IamError::AccountDisabled,
+            IamError::TokenExpired,
+            IamError::TokenRevoked,
+            IamError::TokenReuseDetected,
+            IamError::PasswordPolicyViolation {
+                violations: vec![PolicyViolation::new("min_length", "too short")],
+            },
+            IamError::PasswordReused,
+            IamError::LoginRateLimited {
+                retry_after_seconds: 60,
+            },
+            IamError::TenantContextMissing,
+            IamError::Unauthenticated,
+            IamError::NotFound {
+                resource: "session",
+            },
+            IamError::Conflict { reason: "busy" },
+            IamError::NotImplemented {
+                feature: "webauthn",
+            },
+            IamError::Internal {
+                reason: "boom".to_string(),
+            },
+        ];
+        let mut seen = BTreeSet::new();
+        for error in &variants {
+            assert!(
+                ALL_CODES.contains(&error.code()),
+                "ALL_CODES 缺少 {} 的码 {}",
+                std::any::type_name::<IamError>(),
+                error.code()
+            );
+            seen.insert(error.code());
+        }
+        assert_eq!(
+            seen.len(),
+            ALL_CODES.len(),
+            "ALL_CODES 里有变体从未产出过的码（清单与 match 不一致）"
+        );
     }
 
     /// 契约 C6：`detail` 必须是**英文 ASCII** —— 后端不得拼中文句子。

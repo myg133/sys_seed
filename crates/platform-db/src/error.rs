@@ -80,9 +80,28 @@ impl DbError {
 /// 平台数据访问层统一的返回类型。
 pub type DbResult<T> = Result<T, DbError>;
 
+/// 本 crate 的**全部**错误码（`TITLES` 完备性测试的输入，D113）。
+///
+/// `code()` 是 `match` 里的 `&'static str`，运行时**无法自动枚举** ——
+/// 没有这份显式清单，「`TITLES` 漏登记了一个码」永远不会被发现
+/// （漏登记的码会静默走 ASCII 兜底，看起来「都通过了」）。
+///
+/// 这份清单与 `code()` 的 `match` 必须**逐项一致**（见同文件的
+/// `all_codes_matches_the_variants` 测试）：清单多一项 = 有一个码永远
+/// 不会被产生，清单少一项 = 有一个码永远没有标题。
+pub const ALL_CODES: &[&str] = &[
+    "DATABASE_ERROR",
+    "TENANT_CONTEXT_MISSING",
+    "INVALID_QUERY",
+    "RECORD_NOT_FOUND",
+    "RLS_POLICY_MISSING",
+    "RLS_BYPASSED_BY_ROLE",
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
 
     #[test]
     fn error_codes_are_stable_and_upper_snake() {
@@ -115,6 +134,51 @@ mod tests {
         let source = sqlx::Error::RowNotFound;
         let error: DbError = source.into();
         assert_eq!(error.code(), "DATABASE_ERROR");
+    }
+
+    /// `ALL_CODES` 与 `code()` 的 `match` **逐项一致**。
+    ///
+    /// 两个方向都要查：
+    /// - 清单里有、`match` 产不出 → 清单里有一个**永远不会出现**的码
+    ///   （`TITLES` 里有它，但没有任何错误能触发它）；
+    /// - `match` 产得出、清单里没有 → 有一个码**永远没有标题**
+    ///   （`TITLES` 完备性测试抓不到它，因为它压根不在清单里）。
+    #[test]
+    fn all_codes_matches_the_variants() {
+        // 每个变体各造一个实例（`Database` 用 `sqlx::Error::RowNotFound` 代替）。
+        let errors = [
+            DbError::Database(sqlx::Error::RowNotFound),
+            DbError::MissingTenant,
+            DbError::InvalidQuery {
+                reason: "bad".to_string(),
+            },
+            DbError::RowNotFound,
+            DbError::MissingPolicy {
+                table: "t".to_string(),
+            },
+            DbError::RlsBypassed {
+                role: "base".to_string(),
+            },
+        ];
+
+        let produced: BTreeSet<&str> = errors.iter().map(|error| error.code()).collect();
+        let listed: BTreeSet<&str> = ALL_CODES.iter().copied().collect();
+
+        let missing: Vec<&str> = produced.difference(&listed).copied().collect();
+        assert!(
+            missing.is_empty(),
+            "ALL_CODES 漏了 {} 个码（它们永远没有标题）：{missing:?}",
+            missing.len()
+        );
+
+        let extra: Vec<&str> = listed.difference(&produced).copied().collect();
+        assert!(
+            extra.is_empty(),
+            "ALL_CODES 里有 {} 个码没有任何变体产出（永远不会被触发）：{extra:?}",
+            extra.len()
+        );
+
+        assert_eq!(produced.len(), ALL_CODES.len(), "ALL_CODES 有重复项");
     }
 
     /// 外键违约的替身（只为测「能不能认出它是外键违约」）。

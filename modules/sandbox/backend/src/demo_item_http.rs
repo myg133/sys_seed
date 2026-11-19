@@ -32,6 +32,7 @@ use axum::Json;
 use platform_core::RequestContext;
 use platform_core::extension::schema::SchemaProjector;
 use platform_core::problem::{ProblemDetails, problem_response};
+use platform_core::titles::title_of_code;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -127,7 +128,7 @@ pub async fn create(
         None => {
             return problem_response(&ProblemDetails::from_context(
                 platform_core::problem::CODE_INTERNAL_ERROR,
-                "服务内部错误",
+                title_of_code(platform_core::problem::CODE_INTERNAL_ERROR),
                 StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
                 "the tenant is not bound in the request context",
                 &ctx,
@@ -220,7 +221,7 @@ fn internal_error(ctx: &RequestContext, instance: &str, error: &anyhow::Error) -
     tracing::error!(error = %error, "the demo item request failed");
     problem_response(&ProblemDetails::from_context(
         platform_core::problem::CODE_INTERNAL_ERROR,
-        "服务内部错误",
+        title_of_code(platform_core::problem::CODE_INTERNAL_ERROR),
         StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
         "the data access layer failed",
         ctx,

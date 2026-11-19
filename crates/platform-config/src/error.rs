@@ -36,6 +36,12 @@ pub const CODE_FLAG_NAME_INVALID: &str = "FLAG_NAME_INVALID";
 pub const CODE_FLAG_USE_FLAG_ENDPOINT: &str = "CONFIG_FLAG_USE_FLAG_ENDPOINT";
 /// 真实租户 id 取了保留值 `"platform"`（D72）。
 pub const CODE_TENANT_RESERVED: &str = "CONFIG_TENANT_RESERVED";
+/// 值不符合 manifest 登记的 `format`（REQ-021 / D111）。
+///
+/// 例：`timezone=Not/AZone`、`currency=XXXX`、`locale=xx-YY`（未注册）。
+/// 这一条**必须**在写入时拒绝 —— 存进去之后才炸等于把错误留给渲染层
+/// （AC-S-093 步骤 4）。
+pub const CODE_VALUE_FORMAT_INVALID: &str = "CONFIG_VALUE_FORMAT_INVALID";
 
 /// 配置模块的错误。
 #[derive(Debug, Clone, PartialEq)]
@@ -92,6 +98,17 @@ pub enum ConfigError {
         /// 实际 JSON 类型。
         actual: String,
     },
+    /// 值不符合登记的 `format`（D111）。
+    ValueFormatInvalid {
+        /// 键名。
+        key: String,
+        /// 登记的格式名（`locale` / `iana-timezone` / `iso4217`）。
+        format: String,
+        /// 被拒的值（截断后回显）。
+        value: String,
+        /// 面向开发者的英文原因。
+        reason: String,
+    },
     /// 数值越界。
     ValueOutOfRange {
         /// 键名。
@@ -139,6 +156,7 @@ impl ConfigError {
             Self::PlatformKeyOnGenericRoute { .. } => CODE_INSUFFICIENT_PERMISSION,
             Self::TypeMismatch { .. } => CODE_TYPE_MISMATCH,
             Self::ValueOutOfRange { .. } => CODE_VALUE_OUT_OF_RANGE,
+            Self::ValueFormatInvalid { .. } => CODE_VALUE_FORMAT_INVALID,
             Self::FlagNameInvalid { .. } => CODE_FLAG_NAME_INVALID,
             Self::SpaceRequired { .. } => CODE_SCOPE_NOT_ALLOWED,
             Self::NotFound { .. } => CODE_NOT_FOUND,
@@ -159,22 +177,11 @@ impl ConfigError {
         }
     }
 
-    /// 简短标题（**不是**面向用户的句子）。
+    /// 简短标题（**唯一来源**：`platform_core::titles::TITLES`，D113）。
+    ///
+    /// **只剩转发** —— 本文件不再持有任何 title 文案。
     pub fn title(&self) -> &'static str {
-        match self {
-            Self::Unauthenticated => "未认证",
-            Self::ReservedTenant { .. } => "租户标识被保留",
-            Self::KeyInvalid { .. } => "配置键不合法",
-            Self::KeyNotRegistered { .. } | Self::UnknownKeys { .. } => "配置键未登记",
-            Self::ScopeNotAllowed { .. } | Self::SpaceRequired { .. } => "配置作用域不被允许",
-            Self::FlagEndpointRequired { .. } => "功能开关只能经开关接口修改",
-            Self::PlatformKeyOnGenericRoute { .. } => "权限不足",
-            Self::TypeMismatch { .. } => "配置值类型不符",
-            Self::ValueOutOfRange { .. } => "配置值超出范围",
-            Self::FlagNameInvalid { .. } => "功能开关名不合法",
-            Self::NotFound { .. } => "资源不存在",
-            Self::Database(_) | Self::Internal { .. } => "服务内部错误",
-        }
+        platform_core::titles::title_of_code(self.code())
     }
 
     /// 面向开发者的英文 ASCII 描述（契约 C6：**不得**拼中文句子）。
@@ -229,6 +236,16 @@ impl ConfigError {
                 actual,
             } => format!(
                 "the value of `{}` must be a JSON `{expected}` value, got `{actual}`",
+                truncate(key)
+            ),
+            Self::ValueFormatInvalid {
+                key,
+                format,
+                value,
+                reason,
+            } => format!(
+                "the value `{}` of `{}` is not a valid `{format}` value: {reason}",
+                truncate(value),
                 truncate(key)
             ),
             Self::ValueOutOfRange {
@@ -305,6 +322,17 @@ impl ConfigError {
                 params.insert("expected".to_string(), Value::from(expected.clone()));
                 params.insert("actual".to_string(), Value::from(actual.clone()));
             }
+            Self::ValueFormatInvalid {
+                key,
+                format,
+                value,
+                reason,
+            } => {
+                params.insert("key".to_string(), Value::from(truncate(key)));
+                params.insert("format".to_string(), Value::from(format.clone()));
+                params.insert("value".to_string(), Value::from(truncate(value)));
+                params.insert("reason".to_string(), Value::from(reason.clone()));
+            }
             Self::ValueOutOfRange {
                 key,
                 value,
@@ -344,6 +372,23 @@ impl std::fmt::Display for ConfigError {
 }
 
 impl std::error::Error for ConfigError {}
+
+/// 本 crate 的**自有**错误码（完备性测试的输入，D113）。
+///
+/// 复用 `platform-core` 的 4 个码（`UNAUTHENTICATED` / `NOT_FOUND` /
+/// `INTERNAL_ERROR` / `INSUFFICIENT_PERMISSION`）在
+/// [`platform_core::problem::ALL_CODES`] 里，不重复登记。
+pub const ALL_CODES: &[&str] = &[
+    CODE_KEY_INVALID,
+    CODE_KEY_NOT_REGISTERED,
+    CODE_SCOPE_NOT_ALLOWED,
+    CODE_TYPE_MISMATCH,
+    CODE_VALUE_OUT_OF_RANGE,
+    CODE_VALUE_FORMAT_INVALID,
+    CODE_FLAG_NAME_INVALID,
+    CODE_FLAG_USE_FLAG_ENDPOINT,
+    CODE_TENANT_RESERVED,
+];
 
 /// 把字符串截断到 64 个字符（日志 / 回显用，防止刷爆与伪造日志行）。
 ///
@@ -385,6 +430,88 @@ pub fn json_type_name(value: &Value) -> &'static str {
 mod tests {
     use super::*;
 
+    /// `ALL_CODES` 必须覆盖本 crate 的**每一个错误码**（清单漏项 = 完备性测试假绿）。
+    ///
+    /// 复用 `platform-core` 的 4 个码（`UNAUTHENTICATED` / `NOT_FOUND` /
+    /// `INTERNAL_ERROR` / `INSUFFICIENT_PERMISSION`）由 core 的清单认领，
+    /// 所以这里允许变体的 code 落在两边的并集里。
+    #[test]
+    fn all_codes_lists_every_variant() {
+        use std::collections::BTreeSet;
+
+        let variants = [
+            ConfigError::Unauthenticated,
+            ConfigError::ReservedTenant {
+                tenant: "platform".to_string(),
+            },
+            ConfigError::KeyInvalid {
+                key: "Theme".to_string(),
+            },
+            ConfigError::KeyNotRegistered {
+                key: "nope".to_string(),
+            },
+            ConfigError::UnknownKeys {
+                keys: vec!["nope".to_string()],
+            },
+            ConfigError::ScopeNotAllowed {
+                key: None,
+                allowed_scope: "tenant".to_string(),
+                attempted_scope: "platform".to_string(),
+                reason: "route".to_string(),
+            },
+            ConfigError::FlagEndpointRequired {
+                key: "beta".to_string(),
+            },
+            ConfigError::PlatformKeyOnGenericRoute {
+                keys: vec!["conflictStrategy".to_string()],
+            },
+            ConfigError::TypeMismatch {
+                key: "pageSize".to_string(),
+                expected: "number".to_string(),
+                actual: "string".to_string(),
+            },
+            ConfigError::ValueOutOfRange {
+                key: "flags.beta.rolloutPercent".to_string(),
+                value: Value::from(101),
+                allowed: "0..=100".to_string(),
+            },
+            ConfigError::ValueFormatInvalid {
+                key: "timezone".to_string(),
+                format: "iana-timezone".to_string(),
+                value: "Not/AZone".to_string(),
+                reason: "unknown region".to_string(),
+            },
+            ConfigError::FlagNameInvalid {
+                flag: "bad".to_string(),
+            },
+            ConfigError::SpaceRequired {
+                key: "logo".to_string(),
+            },
+            ConfigError::NotFound {
+                resource: "config".to_string(),
+            },
+            ConfigError::Database("DATABASE_ERROR".to_string()),
+            ConfigError::Internal {
+                reason: "boom".to_string(),
+            },
+        ];
+        let mut own = BTreeSet::new();
+        for error in &variants {
+            let code = error.code();
+            let claimed =
+                ALL_CODES.contains(&code) || platform_core::problem::ALL_CODES.contains(&code);
+            assert!(claimed, "没有任何清单认领 {code}（{error}）");
+            if ALL_CODES.contains(&code) {
+                own.insert(code);
+            }
+        }
+        assert_eq!(
+            own.len(),
+            ALL_CODES.len(),
+            "ALL_CODES 里有变体从未产出过的码（清单与 match 不一致）"
+        );
+    }
+
     #[test]
     fn every_detail_is_english_ascii() {
         let errors = [
@@ -421,6 +548,12 @@ mod tests {
             },
             ConfigError::ReservedTenant {
                 tenant: "platform".to_string(),
+            },
+            ConfigError::ValueFormatInvalid {
+                key: "timezone".to_string(),
+                format: "iana-timezone".to_string(),
+                value: "Not/AZone".to_string(),
+                reason: "unknown region".to_string(),
             },
         ];
         for error in &errors {

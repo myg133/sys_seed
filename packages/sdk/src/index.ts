@@ -5,7 +5,7 @@
  *
  * | 行为 | 约定 |
  * |---|---|
- * | 错误模型 | RFC 9457 → `ApiError { code, status, title, detail }`；`code` 优先；**原始响应体不进错误信息** |
+ * | 错误模型 | RFC 9457 → `ApiError { code, status, title, detail, params }`；`code` 优先；**原始响应体不进错误信息** |
  * | token 刷新 | 401 → 刷新 → 重放；**并发去重**（共享同一个 in-flight Promise）；请求体先缓冲成字符串 |
  * | 认证端点 | 登录 / 刷新（`skipAuthRetry`）的 401 **不刷新、不上报会话失效**，错误码原样透传（D100） |
  * | 幂等键 | 写方法自动带 UUID v4；读方法不带；每次请求新键；**401 重放不带**（D92） |
@@ -35,6 +35,11 @@ export interface ApiErrorParams {
   readonly title?: string;
   /** 问题详情的描述。 */
   readonly detail?: string;
+  /**
+   * RFC 9457 扩展：该错误渲染所需的参数（如 `INSUFFICIENT_PERMISSION` 的
+   * `{ required }`）。**REQ-021 / D109 新增**（修改的是 REQ-011 的交付物）。
+   */
+  readonly params?: Record<string, unknown>;
 }
 
 /**
@@ -52,14 +57,24 @@ export class ApiError extends Error {
   readonly title?: string;
   /** 问题详情的描述。 */
   readonly detail?: string;
+  /**
+   * 渲染该错误所需的参数（后端 `params` 原样透传）。
+   *
+   * **REQ-021 / D109**：`@base/i18n` 的 `t(key, params)` 直接消费它；
+   * 没有参数的错误为 `undefined`（不是空对象）。
+   */
+  readonly params?: Record<string, unknown>;
 
   constructor(params: ApiErrorParams) {
-    super(`API 请求失败（code=${params.code}）`);
+    // dev-facing：**不得**用于用户可见文案（用户文案一律走 i18n 按 `code` 渲染）。
+    // 因此这里刻意用 ASCII，避免「半截中文」被误当成 UI 文案。
+    super(`API request failed (code=${params.code})`);
     this.name = 'ApiError';
     this.code = params.code;
     this.status = params.status;
     this.title = params.title;
     this.detail = params.detail;
+    this.params = params.params;
   }
 }
 
@@ -225,6 +240,7 @@ function readProblemFields(payload: unknown): {
   code: string;
   title?: string;
   detail?: string;
+  params?: Record<string, unknown>;
 } {
   if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
     return { code: CLIENT_INTERNAL_ERROR };
@@ -236,10 +252,17 @@ function readProblemFields(payload: unknown): {
   }
   const title = record['title'];
   const detail = record['detail'];
+  const params = record['params'];
   return {
     code,
     title: typeof title === 'string' ? title : undefined,
     detail: typeof detail === 'string' ? detail : undefined,
+    // `params` 是**结构化参数**（RFC 9457 扩展），只接受扁平对象；
+    // 数组 / null / 标量一律视为「没有参数」，不把任意响应体透给 UI。
+    params:
+      typeof params === 'object' && params !== null && !Array.isArray(params)
+        ? (params as Record<string, unknown>)
+        : undefined,
   };
 }
 
@@ -465,5 +488,6 @@ async function toApiError(response: Response): Promise<ApiError> {
     status: response.status,
     title: fields.title,
     detail: fields.detail,
+    params: fields.params,
   });
 }

@@ -44,6 +44,20 @@ pub mod code {
     pub const INTERNAL_ERROR: &str = "INTERNAL_ERROR";
 }
 
+/// 本 crate 的全部错误码（**完备性测试的输入**，D113）。
+pub const ALL_CODES: &[&str] = &[
+    code::UNAUTHENTICATED,
+    code::INSUFFICIENT_PERMISSION,
+    code::NOT_FOUND,
+    code::CONFLICT,
+    code::INVALID_ARGUMENT,
+    code::BUILTIN_ROLE_PROTECTED,
+    code::WILDCARD_FORBIDDEN,
+    code::INHERITANCE_CYCLE,
+    code::REGISTRY_MISMATCH,
+    code::INTERNAL_ERROR,
+];
+
 /// 角色与权限体系的错误。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RbacError {
@@ -220,6 +234,54 @@ impl std::error::Error for RbacError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `ALL_CODES` 必须覆盖**每一个变体**（清单漏项 = 完备性测试假绿）。
+    #[test]
+    fn all_codes_lists_every_variant() {
+        use std::collections::BTreeSet;
+
+        let variants = [
+            RbacError::Unauthenticated,
+            RbacError::InsufficientPermission {
+                required: "rbac:role:write".to_string(),
+            },
+            RbacError::NotFound { resource: "role" },
+            RbacError::Conflict {
+                reason: "busy".to_string(),
+            },
+            RbacError::InvalidArgument {
+                field: "code".to_string(),
+                reason: "bad".to_string(),
+            },
+            RbacError::BuiltinRoleProtected {
+                operation: "delete",
+                role_code: "platform-admin".to_string(),
+            },
+            RbacError::WildcardForbidden {
+                code: "*:*".to_string(),
+                reason: "bad".to_string(),
+            },
+            RbacError::InheritanceCycle {
+                roles: vec!["a".to_string(), "b".to_string()],
+            },
+            RbacError::RegistryMismatch {
+                differences: vec!["x".to_string()],
+            },
+            RbacError::Internal {
+                reason: "boom".to_string(),
+            },
+        ];
+        let mut seen = BTreeSet::new();
+        for error in &variants {
+            assert!(
+                ALL_CODES.contains(&error.code()),
+                "ALL_CODES 缺少 {}",
+                error.code()
+            );
+            seen.insert(error.code());
+        }
+        assert_eq!(seen.len(), ALL_CODES.len(), "清单与 match 不一致");
+    }
 
     #[test]
     fn every_error_code_is_upper_snake_case() {

@@ -41,6 +41,43 @@ export BASE_STATIC_DIR="${BASE_STATIC_DIR:-apps/shell/dist}"
 export BASE_MANIFEST_ROOT="${BASE_MANIFEST_ROOT:-.}"
 export BASE_LOG_LEVEL="${BASE_LOG_LEVEL:-warn}"
 
+# ---------------------------------------------------------------------------
+# 认证密钥（**必须注入，否则服务起不来** —— 见下方说明）
+# ---------------------------------------------------------------------------
+#
+# ⚠️ **这个缺口是 REQ-021 才发现的**：脚本此前**完全没有**注入 JWT 私钥与
+# IAM 密钥 → 在**干净环境**里 `base serve` 会在启动自检处失败：
+#
+#   ✗ 认证与账号体系初始化失败：[INTERNAL_ERROR] ... the JWT signing key is
+#     not a valid PKCS#8 EC key: InvalidKeyFormat
+#
+# → Playwright 的 webServer 拿不到服务 → 页面收到**空响应** →
+#   SDK 报 `client.INTERNAL_ERROR`（"响应无法解析"）→
+#   **看起来像前端坏了，其实是服务没起来**。
+#
+# 之前 REQ-011/012 的 E2E 能过，是因为**手工**起过带密钥的服务，
+# Playwright 的 `reuseExistingServer: true` 复用了它 —— **掩盖了这个缺口**。
+#
+# 密钥是**每次运行现生成**的测试密钥（不落盘、不入库、不是生产密钥）：
+# - JWT 私钥必须是 **PKCS#8 EC**（不是 RSA、不是 SEC1）
+# - IAM 密钥必须是 **base64url**（含 `+/=` 会触发 `IAM_CONFIG_INVALID_VALUE`）
+
+if [ -z "${BASE_JWT_PRIVATE_KEY:-}" ]; then
+  echo "生成临时 JWT 私钥（PKCS#8 EC）…"
+  BASE_JWT_PRIVATE_KEY="$(openssl ecparam -name prime256v1 -genkey -noout 2>/dev/null \
+    | openssl pkcs8 -topk8 -nocrypt)"
+  export BASE_JWT_PRIVATE_KEY
+fi
+export BASE_JWT_KID="${BASE_JWT_KID:-e2e-kid}"
+export BASE_JWT_ISSUER="${BASE_JWT_ISSUER:-https://e2e.base}"
+export BASE_JWT_AUDIENCE="${BASE_JWT_AUDIENCE:-e2e-aud}"
+
+if [ -z "${BASE_IAM_SECRET_KEY:-}" ]; then
+  echo "生成临时 IAM 密钥（base64url）…"
+  BASE_IAM_SECRET_KEY="$(head -c 32 /dev/urandom | base64 | tr '+/' '-_' | tr -d '=')"
+  export BASE_IAM_SECRET_KEY
+fi
+
 echo "迁移（管理员连接）…"
 DATABASE_URL="$ADMIN_URL" cargo run -q -p platform-server --bin base -- migrate up
 

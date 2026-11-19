@@ -32,6 +32,7 @@ use platform_core::extension::permission::{PermissionChecker, PermissionRefreshe
 use platform_core::problem::{
     CODE_SCHEMA_ENTITY_NOT_FOUND, CODE_SCHEMA_MODULE_NOT_FOUND, ProblemDetails, problem_response,
 };
+use platform_core::titles::title_of_code;
 use serde::Serialize;
 
 use crate::registry::SchemaRegistry;
@@ -184,7 +185,7 @@ pub async fn authenticate(
         // 判定缓存读不出来 → **进不去**（fail closed），不是「当作没权限放行」。
         return problem_response(&ProblemDetails::from_context(
             platform_core::problem::CODE_INTERNAL_ERROR,
-            "服务内部错误",
+            title_of_code(platform_core::problem::CODE_INTERNAL_ERROR),
             StatusCode::INTERNAL_SERVER_ERROR.as_u16(),
             "the permission cache could not be refreshed",
             &ctx,
@@ -240,7 +241,8 @@ async fn entity_metadata(
 
 /// 404 的两种语义（模块 / 实体）。
 fn schema_not_found(ctx: &RequestContext, instance: &str, code: &str, detail: String) -> Response {
-    let details = ProblemDetails::from_context(code, "元数据不存在", 404, detail, ctx, instance, None);
+    let details =
+        ProblemDetails::from_context(code, title_of_code(code), 404, detail, ctx, instance, None);
     problem_response(&details)
 }
 

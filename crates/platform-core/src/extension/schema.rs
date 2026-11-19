@@ -237,10 +237,7 @@ impl EntitySchema {
             ));
         }
         if self.label.trim().is_empty() {
-            issues.push(field_error(
-                &format!("{path}.label"),
-                "must not be empty",
-            ));
+            issues.push(field_error(&format!("{path}.label"), "must not be empty"));
         }
         if self.fields.is_empty() {
             issues.push(field_error(
@@ -306,7 +303,9 @@ impl EntitySchema {
             if !value.starts_with("/api/") {
                 issues.push(field_error(
                     &format!("{path}.api.{key}"),
-                    &format!("must start with /api/ (declared external URLs are rejected), got `{value}`"),
+                    &format!(
+                        "must start with /api/ (declared external URLs are rejected), got `{value}`"
+                    ),
                 ));
             }
         }
@@ -428,9 +427,7 @@ impl SchemaProjector {
 pub fn is_entity_key(value: &str) -> bool {
     let mut chars = value.chars();
     match chars.next() {
-        Some(first) if first.is_ascii_lowercase() => {
-            chars.all(|ch| ch.is_ascii_alphanumeric())
-        }
+        Some(first) if first.is_ascii_lowercase() => chars.all(|ch| ch.is_ascii_alphanumeric()),
         _ => false,
     }
 }
@@ -517,15 +514,15 @@ mod tests {
         assert_eq!(entity.fields[1].max_length, Some(200));
         assert_eq!(entity.fields[1].required, Some(true));
         assert_eq!(entity.fields[0].required, None);
-        assert_eq!(
-            entity.fields[2].permission(),
-            Some("sandbox:demo:secret")
-        );
+        assert_eq!(entity.fields[2].permission(), Some("sandbox:demo:secret"));
     }
 
     #[test]
     fn an_unknown_type_is_reported_with_the_field_path_and_allowed_set() {
-        let raw = entity_json().replace("\"type\": \"text\", \"required\"", "\"type\": \"currency\", \"required\"");
+        let raw = entity_json().replace(
+            "\"type\": \"text\", \"required\"",
+            "\"type\": \"currency\", \"required\"",
+        );
         let issues = parse_entity(&raw).validate("demoItem");
         assert_eq!(issues.len(), 1, "issues = {issues:?}");
         assert_eq!(issues[0].field(), "schema.demoItem.fields[1].type");
@@ -563,8 +560,14 @@ mod tests {
         let issues = parse_entity(&raw).validate("demoItem");
         assert_eq!(issues.len(), 2, "issues = {issues:?}");
         let fields: Vec<&str> = issues.iter().map(|issue| issue.field()).collect();
-        assert!(fields.contains(&"schema.demoItem.fields[2].type"), "{fields:?}");
-        assert!(fields.contains(&"schema.demoItem.fields[3].key"), "{fields:?}");
+        assert!(
+            fields.contains(&"schema.demoItem.fields[2].type"),
+            "{fields:?}"
+        );
+        assert!(
+            fields.contains(&"schema.demoItem.fields[3].key"),
+            "{fields:?}"
+        );
     }
 
     #[test]
@@ -607,10 +610,7 @@ mod tests {
 
     #[test]
     fn a_missing_required_api_endpoint_is_reported() {
-        let raw = entity_json().replace(
-            "\"create\": \"/api/sandbox/demo-items\",",
-            "",
-        );
+        let raw = entity_json().replace("\"create\": \"/api/sandbox/demo-items\",", "");
         let issues = parse_entity(&raw).validate("demoItem");
         assert_eq!(issues.len(), 1, "issues = {issues:?}");
         assert_eq!(issues[0].field(), "schema.demoItem.api.create");

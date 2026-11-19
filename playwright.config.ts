@@ -20,6 +20,11 @@ export default defineConfig({
   use: {
     baseURL,
     trace: 'retain-on-failure',
+    // REQ-021：首屏语言来自 `navigator.language`（§7.2）。既有 E2E 断言的是
+    // **中文界面**（`登录` / `租户` / `关键字`），所以把浏览器 locale 钉在平台默认
+    // `zh-CN`，避免「浏览器 en-US → 首屏英文」把既有用例变成假红。
+    // 语言切换本身由 `e2e/i18n.spec.ts` 显式验。
+    locale: 'zh-CN',
   },
   projects: [
     {

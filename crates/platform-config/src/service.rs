@@ -8,8 +8,14 @@
 //! 3. 键名格式（→ 400 CONFIG_KEY_INVALID）
 //! 4. 注册表（写 → 400；读 → 404 CONFIG_KEY_NOT_REGISTERED）
 //! 5. 作用域（→ 400 CONFIG_SCOPE_NOT_ALLOWED）
-//! 6. 类型 / 范围（→ 400 CONFIG_TYPE_MISMATCH / CONFIG_VALUE_OUT_OF_RANGE）
+//! 6. 类型 → 格式 → 范围（→ 400 CONFIG_TYPE_MISMATCH /
+//!    CONFIG_VALUE_FORMAT_INVALID / CONFIG_VALUE_OUT_OF_RANGE）
 //! ```
+//!
+//! 第 6 步内部的**顺序**也是钉死的：类型先（`"20"` 不是 `20`）、再格式
+//! （`timezone=Not/AZone`）、最后范围（`rolloutPercent=101`）——
+//! 一个值不可能同时「类型不对」和「格式不对」，但把顺序写死才能让
+//! 「究竟是哪条规则拒绝的」可判定（D64 的同一理由）。
 //!
 //! 不写顺序时，「被拦住」可能来自任意一条规则，无法证明**具体规则**生效
 //! （例如越级写会把类型校验顶包 —— 类型校验根本没被验到）。
@@ -469,6 +475,23 @@ impl ConfigService {
                 actual: json_type_name(value).to_string(),
             });
         }
+        // 格式（D111）：只对登记了 `format` 的字符串键生效。
+        //
+        // 校验器与启动自检（`ConfigRegistry::from_manifest_root`）**同一个函数**
+        // —— 测试与生产不走两段代码（D85）。
+        if let Some(format) = spec.format
+            && let Some(text) = value.as_str()
+            && let Err(reason) =
+                crate::registry::check_format_value(format, text, self.registry.locales())
+        {
+            return Err(ConfigError::ValueFormatInvalid {
+                key: key.to_string(),
+                format: format.as_str().to_string(),
+                value: text.to_string(),
+                reason,
+            });
+        }
+
         // 范围只对派生键 `flags.<F>.rolloutPercent` 有定义。
         if spec.derived && key.ends_with(".rolloutPercent") {
             let Some(percent) = value.as_i64() else {

@@ -53,19 +53,21 @@ export function createRoutes(
   client: ApiClient,
   onRoles?: (roles: unknown) => void,
 ): readonly RouteDefinition[] {
+  // `title` 存**翻译键**而不是文案：路由表在模块加载时构造，
+  // 存文案会把它钉死在加载时的语言上（页面标题由渲染层用 `t()` 取）。
   return [
-    { path: '/', title: '工作台' },
-    { path: '/login', title: '登录' },
-    { path: '/403', title: '无权访问' },
+    { path: '/', title: 'nav.workbench' },
+    { path: '/login', title: 'common.login' },
+    { path: '/403', title: 'nav.forbidden' },
     {
       // 一条通配路由服务**所有**实体（D104）：新增实体不改这里。
       path: SCHEMA_ROUTE_PATH,
-      title: '数据页面',
+      title: 'nav.schemaPage',
       requiresAuth: true,
     },
     {
       path: '/admin/roles',
-      title: '角色管理',
+      title: 'nav.roles',
       permission: 'rbac:role:write',
       load: async () => {
         const roles = await client.get(PROTECTED_ROLES_PATH);

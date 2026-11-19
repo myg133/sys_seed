@@ -37,7 +37,7 @@ function pathOf(request: Request): string {
 /** 后端真实的 403 问题详情（`crates/platform-core/src/problem.rs` 的形状）。 */
 const PROBLEM_403 = {
   type: 'https://errors.base.example/insufficient-permission',
-  title: '权限不足',
+  title: 'Insufficient Permission',
   status: 403,
   detail: 'the current role does not grant the permission `rbac:role:write`',
   instance: '/api/rbac/roles',
@@ -78,7 +78,7 @@ describe('@base/sdk 的错误模型（AC-S-069）', () => {
     expect(apiError.code).toBe('INSUFFICIENT_PERMISSION');
     expect(apiError.status).toBe(403);
     expect(apiError.name).not.toBe('TypeError');
-    expect(apiError.code).not.toBe('权限不足');
+    expect(apiError.code).not.toBe('Insufficient Permission');
     expect(apiError.code).not.toBe(
       'the current role does not grant the permission `rbac:role:write`',
     );
@@ -671,5 +671,66 @@ describe('@base/sdk 的请求构造', () => {
     await client.get('/api/x');
 
     expect(calls[0]?.headers.get('authorization')).toBe('Bearer token-1');
+  });
+});
+
+/**
+ * REQ-021 / AC-S-089b（**D109 跨需求改动**）：`ApiError` 带 `params`。
+ *
+ * 没有 `params` 时前端渲染不出 `INSUFFICIENT_PERMISSION` 这类错误需要的 `{required}`，
+ * 只能显示一句含糊的「权限不足」。
+ */
+describe('@base/sdk 的错误参数（AC-S-089b / D109）', () => {
+  it('ApiErrorParams 有 params 字段，且从响应体透传', async () => {
+    const { fetch: fake } = fakeFetch(() => jsonResponse(PROBLEM_403, 403));
+    const client = createApiClient({ baseUrl: '', fetch: fake });
+
+    const error = (await client.request({ method: 'GET', path: '/api/rbac/roles' }).then(
+      () => undefined,
+      (reason: unknown) => reason,
+    )) as ApiError;
+
+    // 深度相等（不是「非空」）：AC-S-089b 步骤 2 的判据。
+    expect(error.params).toEqual({ required: 'rbac:role:write' });
+  });
+
+  it('没有 params 的错误 → params 是 undefined（不是空对象）', async () => {
+    const { fetch: fake } = fakeFetch(() =>
+      jsonResponse({ code: 'UNAUTHENTICATED', status: 401, title: 'Unauthenticated' }, 401),
+    );
+    const client = createApiClient({ baseUrl: '', fetch: fake });
+
+    const error = (await client.request({ method: 'GET', path: '/api/anything' }).then(
+      () => undefined,
+      (reason: unknown) => reason,
+    )) as ApiError;
+
+    expect(error.params).toBeUndefined();
+  });
+
+  it('params 非扁平对象（数组 / null）→ 视为没有参数，不把任意响应体透给 UI', async () => {
+    for (const params of [['a', 'b'], null, 'text', 42]) {
+      const { fetch: fake } = fakeFetch(() =>
+        jsonResponse({ code: 'INSUFFICIENT_PERMISSION', status: 403, params }, 403),
+      );
+      const client = createApiClient({ baseUrl: '', fetch: fake });
+      const error = (await client.request({ method: 'GET', path: '/api/x' }).then(
+        () => undefined,
+        (reason: unknown) => reason,
+      )) as ApiError;
+      expect(error.params, JSON.stringify(params)).toBeUndefined();
+    }
+  });
+
+  it('params 不进 message（message 是 dev-facing，且不得携带响应体）', async () => {
+    const { fetch: fake } = fakeFetch(() => jsonResponse(PROBLEM_403, 403));
+    const client = createApiClient({ baseUrl: '', fetch: fake });
+    const error = (await client.request({ method: 'GET', path: '/api/rbac/roles' }).then(
+      () => undefined,
+      (reason: unknown) => reason,
+    )) as ApiError;
+
+    expect(error.message).not.toContain('rbac:role:write');
+    expect(error.message).toBe('API request failed (code=INSUFFICIENT_PERMISSION)');
   });
 });

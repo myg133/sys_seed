@@ -20,6 +20,7 @@
   import SchemaForm from '../components/SchemaForm.svelte';
   import SchemaTable from '../components/SchemaTable.svelte';
 
+  import { i18nRuntime } from '../lib/i18n';
   import {
     createRecord,
     deleteRecord,
@@ -42,6 +43,11 @@
   }
 
   const props: SchemaPageProps = $props();
+  const i18n = i18nRuntime();
+
+  /** 错误文案用当前语言渲染（`describeError` 只负责取键与参数）。 */
+  const translate = (key: string, params?: Record<string, string | number>): string =>
+    i18n.t(key, params);
 
   const pageSize = $derived(props.pageSize ?? DEFAULT_PAGE_SIZE);
 
@@ -91,7 +97,7 @@
       meta = undefined;
       items = [];
       nextCursor = null;
-      loadError = describeError(error);
+      loadError = describeError(error, translate);
     } finally {
       loading = false;
     }
@@ -111,7 +117,7 @@
     } catch (error) {
       items = [];
       nextCursor = null;
-      loadError = describeError(error);
+      loadError = describeError(error, translate);
     } finally {
       loading = false;
     }
@@ -149,7 +155,7 @@
       closeForm();
       await refresh(cursors[pageIndex] ?? null);
     } catch (error) {
-      actionError = describeError(error);
+      actionError = describeError(error, translate);
     } finally {
       submitting = false;
     }
@@ -166,7 +172,7 @@
       await deleteRecord(props.client, meta.api, record);
       await refresh(cursors[pageIndex] ?? null);
     } catch (error) {
-      actionError = describeError(error);
+      actionError = describeError(error, translate);
     }
   }
 
@@ -226,7 +232,7 @@
       onNextPage={goNext}
     />
   {:else if loading}
-    <p class="base-schema-loading">加载中…</p>
+    <p class="base-schema-loading">{$i18n.t('common.loading')}</p>
   {:else if loadError !== ''}
     <p class="base-schema-error" role="alert">{loadError}</p>
   {/if}
@@ -234,12 +240,12 @@
 
 <Dialog
   open={pendingDelete !== undefined}
-  title="删除确认"
+  title={$i18n.t('common.deleteConfirmTitle')}
   onclose={() => {
     pendingDelete = undefined;
   }}
 >
-  <p>确定删除该记录？</p>
+  <p>{$i18n.t('common.deleteConfirmMessage')}</p>
   <div class="base-schema-form-actions">
     <button
       type="button"
@@ -248,14 +254,14 @@
         pendingDelete = undefined;
       }}
     >
-      取消
+      {$i18n.t('common.cancel')}
     </button>
     <button
       type="button"
       class="base-button base-button--danger"
       onclick={() => void confirmDelete()}
     >
-      确认
+      {$i18n.t('common.confirm')}
     </button>
   </div>
 </Dialog>

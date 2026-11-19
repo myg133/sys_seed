@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 
+import { createI18n } from '@base/i18n';
 import type { ApiEndpoints } from '@base/schema';
 import { ApiError, type ApiClient, type RequestOptions } from '@base/sdk';
 
@@ -207,15 +208,38 @@ describe('写请求（AC-S-086）', () => {
   });
 });
 
-describe('describeError —— 错误码要透出', () => {
-  it('ApiError → 码 + 状态', () => {
-    expect(describeError(new ApiError({ code: 'SCHEMA_ENTITY_NOT_FOUND', status: 404 }))).toBe(
-      'SCHEMA_ENTITY_NOT_FOUND（HTTP 404）',
+describe('describeError —— 错误码要透出，文案按当前语言渲染', () => {
+  /** 当前语言（zh-CN）的翻译函数。 */
+  const translate = (key: string, params?: Record<string, string | number>): string =>
+    createI18n().t(key, params);
+
+  it('ApiError → 本地化文案 + 状态码', () => {
+    expect(
+      describeError(new ApiError({ code: 'SCHEMA_ENTITY_NOT_FOUND', status: 404 }), translate),
+    ).toBe('实体元数据不存在 (HTTP 404)');
+  });
+
+  it('带 params 的错误 → 文案插值（不是 code 本身）', () => {
+    const error = new ApiError({
+      code: 'INSUFFICIENT_PERMISSION',
+      status: 403,
+      params: { required: 'rbac:role:write' },
+    });
+    const text = describeError(error, translate);
+    expect(text).toContain('rbac:role:write');
+    expect(text).not.toContain('{');
+  });
+
+  it('没有对应文案的 code → 透出 code（技术信息，不显示 "?"）', () => {
+    expect(describeError(new ApiError({ code: 'NO_SUCH_CODE', status: 500 }), translate)).toBe(
+      'NO_SUCH_CODE (HTTP 500)',
     );
   });
 
-  it('普通 Error → message；未知值 → 通用文案', () => {
-    expect(describeError(new Error('元数据缺少 api 声明'))).toBe('元数据缺少 api 声明');
-    expect(describeError(undefined)).toBe('请求失败');
+  it('普通 Error / 未知值 → 通用失败文案', () => {
+    expect(describeError(new Error('entity metadata is missing'), translate)).toBe(
+      '操作失败，请稍后重试',
+    );
+    expect(describeError(undefined, translate)).toBe('操作失败，请稍后重试');
   });
 });

@@ -56,8 +56,8 @@ pub use expr::{
     Op, Operand, ValueKind,
 };
 pub use manifest::{
-    ConfigSpec, ConfigType, Manifest, ManifestError, MenuSpec, PermissionSpec, PermissionType,
-    TenantScopedSpec, is_sql_identifier,
+    ConfigFormat, ConfigSpec, ConfigType, Manifest, ManifestError, MenuSpec, PermissionSpec,
+    PermissionType, TenantScopedSpec, is_sql_identifier,
 };
 pub use notification::{DeliveryResult, NotificationMessage, NotificationSender};
 pub use permission::{

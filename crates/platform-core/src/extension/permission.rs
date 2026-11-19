@@ -384,7 +384,7 @@ fn authorize(
     else {
         return Some(problem_response(&ProblemDetails::from_context(
             CODE_INTERNAL_ERROR,
-            "服务内部错误",
+            crate::titles::title_of_code(CODE_INTERNAL_ERROR),
             500,
             "the permission checker is not installed on this service",
             ctx,
