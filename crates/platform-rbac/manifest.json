@@ -22,6 +22,11 @@
     "column": "tenant_id"
   },
   "config": {
-    "cacheTtlSeconds": { "type": "number", "default": 60, "scope": "platform", "label": "权限缓存兜底 TTL（秒）" }
+    "cacheTtlSeconds": {
+      "type": "number",
+      "default": 60,
+      "scope": "platform",
+      "label": "权限缓存兜底 TTL（秒）"
+    }
   }
 }

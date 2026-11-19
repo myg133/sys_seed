@@ -364,4 +364,8 @@ Svelte 5 的 `{#if}` 块在 SSR 输出里会留下锚点标记（`<!--[-->` / `<
 5. **后端棒**：前端只依赖三个后端事实 —— 登录 `POST /api/iam/login`（响应带 `permissions`）、
    刷新 `POST /api/iam/refresh`（**`permissions` 恒为空数组**，前端因此**不用**刷新响应覆盖权限点）、
    `GET /api/rbac/me/permissions`（`{"permissions":[...]}`，对象不是裸数组）。
-   `GET /api/rbac/roles` 需要 `rbac:role:write`（`apps/shell/src/lib/routes.ts:15,51`）。
+   ~~`GET /api/rbac/roles` 需要 `rbac:role:write`~~ → **更正（2026-11-19 12:45，BA）**：
+   `GET /api/rbac/roles` 需要 **`rbac:role:read`**；`POST /api/rbac/roles` 才是 `rbac:role:write`
+   （`crates/platform-rbac/src/http.rs:460` / `:470` 两条 `route_layer`）。
+   本条原文写错，由 QA Pre-merge 报告 LOW 指出；真机复验：`u-perm-read` 用户
+   `GET /api/rbac/roles` → **200**。

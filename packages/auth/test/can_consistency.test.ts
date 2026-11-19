@@ -40,7 +40,7 @@ describe('AC-S-066 步骤 5：前后端判定一致（真机金标准）', () =>
       const backendAllowed = item.backendStatus === 200;
       expect(
         frontendAllowed,
-        `${item.user}: 前端 can()=${frontendAllowed}，后端 HTTP=${item.backendStatus}`
+        `${item.user}: 前端 can()=${frontendAllowed}，后端 HTTP=${item.backendStatus}`,
       ).toBe(backendAllowed);
     }
   });
