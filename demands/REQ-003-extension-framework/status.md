@@ -51,4 +51,4 @@
 | 1 | U+FEFF / U+0085 两个 Unicode 空白码位，schema 求值器与平台实现判定分歧 | REQ-004（能力索引生成器会复用 schema） |
 | 2 | C-2 无法验证「权限点真的被鉴权」 | REQ-009（RBAC 落地鉴权中间件后补检查） |
 | 3 | 过滤字段白名单外仍静默忽略（本期只改了排序） | REQ-009 / REQ-011 |
-| 4 | 扩展点 trait 非 dyn-compatible，异构汇聚会撞墙 | REQ-015 / REQ-017 决策 |
+| 4 | 扩展点 trait 非 dyn-compatible，异构汇聚会撞墙 | REQ-015 决策（REQ-017 已取消 —— D121） |

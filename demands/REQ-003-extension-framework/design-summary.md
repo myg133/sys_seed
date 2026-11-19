@@ -52,7 +52,7 @@ platform-contracts (依赖 platform-core)
 >   （`clippy -D warnings` 下失败）且无法保证 `Send`；而 `async-trait` 会引入第三方依赖。
 >   故改用 RPITIT 展开写法。**实现方仍写 `async fn`，调用点写法不变。**
 > - **代价**：`Box<dyn NotificationSender>` 不可用（实测 E0038: trait is not dyn compatible）。
->   异构汇聚（多渠道通知收集、多工作流处理器收集）**延后到 REQ-015 / REQ-017 决策**，
+>   异构汇聚（多渠道通知收集、多工作流处理器收集）**延后到 REQ-015 决策**（原同列的 REQ-017 已取消 —— D121），
 >   届时要么加对象安全包装，要么引入 `async-trait`。
 > - **给 Sprint 2 开发者的提醒**：不要按 `#[async_trait]` 的心智模型写代码
 >   （例如不要假设能 `Box<dyn Trait>`、不要假设 trait object 可用）。
@@ -129,7 +129,7 @@ pub trait WorkflowHandler: Send + Sync {
 }
 ```
 
-> 本期 REQ-003 只定义 trait 与骨架实现，通知与工作流的实际消费方在 REQ-015 / REQ-017。
+> 本期 REQ-003 只定义 trait 与骨架实现，通知的实际消费方在 REQ-015；工作流扩展点保留但引擎已取消（D121），无平台侧消费方。
 
 ---
 
@@ -357,7 +357,7 @@ REQ-002 已放骨架，REQ-003 补齐规则。校验项：
 **不做**（留给后续 Sprint）：
 
 - 通知通道的实际消费（REQ-015）
-- 工作流的实际消费（REQ-017）
+- ~~工作流的实际消费（REQ-017）~~ —— REQ-017 已取消（D121），`WorkflowHandler` 保留供业务方自接
 - 微前端容器（ADR A4 明确不实现）
 - `xtask create-module` 的完整实现（骨架放 REQ-002，功能完善放 REQ-004）
 

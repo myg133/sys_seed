@@ -51,5 +51,5 @@
 | Sprint 3 权限与界面 | REQ-009 RBAC、REQ-010 配置品牌、REQ-011 前端 SDK |
 | Sprint 4 平台能力 | REQ-012 元数据渲染、REQ-013 SSO、REQ-014 审计日志、REQ-021 国际化 |
 | Sprint 5 业务纵深 | REQ-015 通知、REQ-016 应用接入、REQ-018 文件与导入导出 |
-| Sprint 6 纵深补齐 | REQ-017 工作流、REQ-019 可观测性与 API 治理 |
+| Sprint 6 纵深补齐 | REQ-019 可观测性与 API 治理（~~REQ-017 工作流~~ 已取消，D121） |
 | Sprint 7 验证 | REQ-020 底座可用性验证 |
