@@ -21,7 +21,7 @@
 
 本需求最重的一块不是新功能，而是**修一个既有缺口**：
 
-> **错误体的 `title` 是中文**，且**不是 8 处，是 70 处**。
+> **错误体的 `title` 是中文**，且**不是 8 处，是 73 处**。
 >
 > 这**直接违反**「接口不返回面向用户的中文句子」——
 > 前端 i18n 做得再好，也有一半文案来自后端。**修它是本需求的立身之本。**
@@ -30,7 +30,7 @@
 
 | 能力 | 现状 |
 |---|---|
-| 错误体 `title` | **中文**，**70 处**（**55 处由函数产出 + 15 处构造点字面量**），跨 core/iam/rbac/org/config |
+| 错误体 `title` | **中文**，**73 处**（**54 处由函数产出 + 19 处构造点字面量**），跨 core/iam/rbac/org/config/schema/server/sandbox |
 | `detail` | 英文 ASCII（**已对**，契约 C6） |
 | `code` + `params` | **已有**（RFC 9457 扩展）；**四个 crate 都有 `pub fn code() -> &'static str`** |
 | 时间 | RFC 3339 UTC 字符串（**已对**，契约 C13） |
@@ -41,26 +41,47 @@
 | 后端 tzdb | **无**（`time` crate 只启用 `formatting`） |
 | 协商结果观测点 | **无**（全仓 `locale` 0 命中、无 `Content-Language`） |
 
-#### 1.1.1 ★ 70 处的统计方法与落点（rev 1 在这里错得最严重）
+#### 1.1.1 ★ 73 处的统计方法与落点（rev 1 在这里错得最严重）
 
-rev 1 写「**8 处 / 5 文件**」，实际 **70 处**（差近 9 倍）；
+rev 1 写「**8 处 / 5 文件**」，实际 **73 处**（差近 9 倍）；
 更致命的是 rev 1 的**验收方式**是「扫 `ProblemDetails` 构造点的字符串字面量」——
 
-> **55 处由 `title_of()` / `title()` 函数产出**，构造点拿到的是**函数调用**。
+> **54 处由 `title_of()` / `title()` 函数产出**，构造点拿到的是**函数调用**。
 > 照 rev 1 的写法**扫完 0 命中、全部通过**。这不是数错，是**必然漏报**。
 
-**rev 2 的统计口径**（排除 `//` 注释，追踪 `fn *title*` 函数体 + 构造点）：
+**rev 2 的统计口径**（排除注释，追踪 `fn *title*` 函数体 + 构造点；
+构造点必须**跨行**匹配 —— 它们全是跨行写的）：
 
 ```
 fn title      platform-config/src/error.rs     12
 fn title_of   platform-iam/src/http.rs         17
 fn title_of   platform-org/src/http.rs         15
 fn title_of   platform-rbac/src/http.rs        10
-fn title      platform-org/src/notify.rs        1
-                                    函数产出合计  55
-                             构造点直接字面量    15
-                                        总计    70
+                                    函数产出合计  54
+                             构造点直接字面量    19
+                                        总计    73
 ```
+
+**构造点的 19 处分落 8 个文件**：
+
+```
+crates/platform-config/src/http.rs                   1
+crates/platform-core/src/extension/permission.rs     1
+crates/platform-core/src/problem.rs                  3
+crates/platform-schema/src/http.rs                   2
+crates/platform-server/src/main.rs                   2
+modules/sandbox/backend/src/demo_item_http.rs       2
+modules/sandbox/backend/src/demo_note_http.rs       2
+modules/sandbox/backend/src/http.rs                  6
+```
+
+> ⚠️ **`modules/sandbox`（10 处）也在 AC-S-088 的射程内** ——
+> AC 写的是「**跨全部模块**」，**业务模块也在内**。
+> 第一轮 BA 把 `modules/**` 划成「绝对不要碰」→ 这 10 处漏改 → **是 BA 划错边界**。
+> **教训：边界要按「AC 的射程」划，不能按「哪个目录看着像别人的」划。**
+
+> ⚠️ `platform-org/src/notify.rs` 的 `title()` 返回的是**英文**（6 条 `org.member-added` 等），
+> **不计入中文统计**。我原先把它算进函数产出的 55 里，**多算 1**。
 
 **结论**：不能靠「扫构造点」，只能靠**收敛到一张表**（§2）。见 D113。
 
@@ -102,9 +123,47 @@ pub fn title_of_code(code: &str) -> &'static str;
 
 **5 个 `match` 里的 55 条中文字面量全部删除**，只剩转发。
 
+### 2.2.1 ★ 影响面**不止**这 5 个函数（第一轮的真实缺口）
+
+第一轮实现只改了 5 个 `title` 函数，**漏了 12 处 `ProblemDetails::from_context(code, "<中文>", …)`
+的构造点字面量**：
+
+```
+crates/platform-schema/src/http.rs:187          服务内部错误
+crates/platform-schema/src/http.rs:243          元数据不存在
+modules/sandbox/backend/src/demo_item_http.rs:130  服务内部错误
+modules/sandbox/backend/src/demo_item_http.rs:223  服务内部错误
+modules/sandbox/backend/src/demo_note_http.rs:100  服务内部错误
+modules/sandbox/backend/src/demo_note_http.rs:188  服务内部错误
+modules/sandbox/backend/src/http.rs:194         服务内部错误
+modules/sandbox/backend/src/http.rs:320         服务内部错误
+modules/sandbox/backend/src/http.rs:348         服务内部错误
+modules/sandbox/backend/src/http.rs:388         服务内部错误
+modules/sandbox/backend/src/http.rs:403         服务内部错误
+modules/sandbox/backend/src/http.rs:444         服务内部错误
+```
+
+> **★ 这不是 Dev 的错 —— 是 BA 划错了边界。**
+> 第一轮派活时我把 `modules/**` 划成「绝对不要碰」，
+> 但 AC-S-088 写的是「**跨全部模块**」——
+> **`modules/sandbox` 也在 AC 的射程内**。
+> 教训：**边界要按「AC 的射程」划，不能按「哪个目录看着像别人的」划。**
+
+**这 12 处必须同样走 `TITLES`** —— 就地写英文字面量会让 D113 的「唯一来源」破功，
+而「扫构造点字面量」正是 rev 1 那条**必然漏报**的验收方式。
+
+**因此新增一条静态扫描测试**（`crates/platform-server/tests/`）：
+
+- 扫描范围：**`crates/` 与 `modules/` 全部 `.rs`**（第一轮漏掉 `modules/` 正是缺口成因）
+- 匹配方式：`ProblemDetails::from_context(code, "…", …)` 的第 2 参数与 `title: "…"` 字段
+  —— **必须跨行匹配**（这 12 处全是跨行的，单行正则会漏）
+- 剥注释后再匹配（注释里全是中文）
+- **必须有阳性对照**：注入一段中文 → 断言能命中。
+  否则「扫描恒不命中」与「扫描生效」长得一模一样（假绿）
+
 ### 2.3 ★ 防「表漏项」的机械保障（这是 D113 的关键补充）
 
-只把 55 处搬到一张表里，**并不能保证一个不漏** —— 漏了就是未登记的 code 静默走 ASCII 兜底。
+只把 54 处搬到一张表里，**并不能保证一个不漏** —— 漏了就是未登记的 code 静默走 ASCII 兜底。
 所以要求每个 crate **导出自己的 code 清单**，并加一个**跨 crate 的完备性测试**：
 
 ```rust
@@ -130,6 +189,24 @@ fn titles_are_ascii_and_unique() {
 > 运行时无法自动枚举。没有显式清单，**「表漏一项」永远不会被测出来** ——
 > 那正是本轮要消灭的那类假绿。
 
+### 2.3.1 ★ 「要进表的码」的判据（第一轮实测出来的）
+
+**不是所有错误码都要进 `TITLES`** —— 只有**会出现在 HTTP 响应体的 `code` 字段**里的码才要。
+
+| 码来源 | 进不进表 | 理由 |
+|---|---|---|
+| 各 crate 的 `error.rs` 的 `code()` | ✅ | 直接进 `ProblemDetails.code` |
+| `platform-db` 的 `DbError`（`DATABASE_ERROR` / `RECORD_NOT_FOUND` / `RLS_*`） | ✅ | 经 `From<DbError> for ConfigError` → `ConfigError::Database(code)` → **进响应体** |
+| `platform-core/src/error.rs`（`INVALID_CONFIG_KEY` / `INVALID_IDENTIFIER` / `IO_ERROR`） | ❌ | 内部配置层，**不进 HTTP** |
+| `platform-server/src/config.rs`（`CONFIG_INVALID_VALUE` / `CONFIG_MISSING_REQUIRED` / `CONFIG_FORBIDDEN_COMBINATION`） | ❌ | 启动期 fail-fast → **stderr + 退出码 2**，不是响应体 |
+| `platform-iam/src/config.rs`（`IAM_CONFIG_*` 三个） | ❌ | 同上（`IamConfig::from_env()` 失败 → 退出码 2） |
+| `platform-core/src/extension/manifest.rs`（`MANIFEST_JSON_INVALID` / `MANIFEST_FIELD_INVALID`） | ❌ | 启动期校验；且 `ManifestIssue` 结构**根本没有 `code` 字段**（只有 `source`/`field`/`reason`） |
+| `platform-org/src/notify.rs` 的 `OrgEventKind`（`org.member-added` 等 6 个） | ❌ | 是**事件名**不是错误码（小写带点，不符合错误码格式） |
+
+> ⚠️ **第一轮 `platform-db` 没有 `ALL_CODES`** → 它的 4 个码没进 `TITLES` →
+> 那 4 个错误一旦发生，`title_of_code` 走 ASCII 兜底 `"Error"` → 违反 AC-S-088。
+> **已列为修复项。**
+
 ### 2.4 字段约定
 
 | 字段 | 约定 | 理由 |
@@ -154,10 +231,23 @@ rev 1 写「同时要改**现有 8 处断言**」—— **不存在**。既有�
 
 | 位置 | 允许中文 | 理由 |
 |---|---|---|
-| `tracing` 日志 | ✅ | 契约 C6：运维说明放日志 |
+| `tracing` 日志（后端） | ✅ | 契约 C6：运维说明放日志 |
+| **`console.warn` / `throw new Error`（前端）** | ✅ | **开发者诊断信息**，不是用户可见文案（与后端 `tracing` 同理） |
 | `params` 里的用户数据 | ✅ | 那是**数据**不是**文案** |
 | 代码注释与文档 | ✅ | — |
 | **响应体任何字段** | ❌ | 本轮核心 |
+| **用户可见的 UI 文案** | ❌ | 本轮核心 |
+
+> **前端的判定口径**（QA Pre-merge 按这个扫）：
+> 扫 `.svelte` 组件**剥注释后**的中文字面量 → 必须 **0 命中**。
+> `.ts` 里的 `console.warn` / `throw` 属上表「允许」，**不算违规**。
+>
+> **为什么不能只 grep 全文**：注释里全是中文（设计说明是中文写的），
+> 不剥注释就扫 → 125+ 命中 → **必然误报**。
+> 剥注释必须用**状态机**而不是正则 ——
+> 字符串里的 `//`（URL）与注释里的引号都会把正则带偏。
+> **且必须有阳性对照用例**（注入一段中文 → 断言能命中），
+> 否则「扫描恒不命中」和「扫描生效」长得一模一样（假绿）。
 
 ---
 
@@ -569,7 +659,7 @@ AC-S-095 用 `Europe/London` 当「用户偏好」，靠「三个时区两两不
 
 | # | 风险 | 缓解 |
 |---|---|---|
-| R1 | 改 70 处中文 title 会影响既有测试 | 按 §2.5 的实际影响面处理；`grep` 复核无残留；`ALL_CODES` 完备性测试保底 |
+| R1 | 改 73 处中文 title 会影响既有测试 | 按 §2.5 的实际影响面处理；`grep` 复核无残留；`ALL_CODES` 完备性测试保底 |
 | R2 | 改 `title` 可能破坏 REQ-011 的 E2E（若断言了中文） | 先 `grep` 找断言点 |
 | R3 | `Money` 用 `i64` 有上限（约 9.22×10^18 最小单位 ≈ 9.2×10^16 元） | 超限返回 `MONEY_OVERFLOW`；文档写明上限 |
 | R4 | 汇率快照的「用哪一条」在并发下可能不一致 | 换算时**显式传** `asOf`，不隐式取「最新」 |

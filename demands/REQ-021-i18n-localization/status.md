@@ -23,8 +23,8 @@
 
 | rev 1 我写的 | 实际 |
 |---|---|
-| 中文 title **8 处 / 5 文件** | **70 处 / 7~12 文件**（差近 **9 倍**） |
-| 验收方式：扫「`ProblemDetails` 构造点的字符串字面量」 | **55 处由 `title_of()` / `title()` 函数产出** → 照 rev 1 扫完 **0 命中、全部通过** |
+| 中文 title **8 处 / 5 文件** | **73 处 / 8 文件**（差近 **9 倍**） |
+| 验收方式：扫「`ProblemDetails` 构造点的字符串字面量」 | **54 处由 `title_of()` / `title()` 函数产出** → 照 rev 1 扫完 **0 命中、全部通过** |
 
 **这不是「数错了」，是「验收方式必然漏报」** —— 比前几轮的「不可判定」「必然误报」更危险，
 因为**漏报不会有人发现**。
@@ -37,17 +37,35 @@
 
 ## 起草时发现的前置缺口（rev 2 实测数字）
 
-1. **★ 错误体 `title` 是中文** —— 与「接口不返回中文句子」**直接冲突**，共 **70 处**：
+1. **★ 错误体 `title` 是中文** —— 与「接口不返回中文句子」**直接冲突**，共 **73 处**
+   （**数字在实现轮被后端 Dev 的独立统计纠正过一次**，见下方「计数修正」）：
    ```
    fn title      platform-config/src/error.rs     12
    fn title_of   platform-iam/src/http.rs         17
    fn title_of   platform-org/src/http.rs         15
    fn title_of   platform-rbac/src/http.rs        10
-   fn title      platform-org/src/notify.rs        1
-                                       函数产出合计  55
-                                构造点直接字面量    15
-                                           总计    70
+                                       函数产出合计  54
+                                构造点直接字面量    19
+                                           总计    73
    ```
+   构造点的 19 处分落 8 个文件：
+   ```
+   crates/platform-config/src/http.rs                   1
+   crates/platform-core/src/extension/permission.rs     1
+   crates/platform-core/src/problem.rs                  3
+   crates/platform-schema/src/http.rs                   2
+   crates/platform-server/src/main.rs                   2
+   modules/sandbox/backend/src/demo_item_http.rs       2
+   modules/sandbox/backend/src/demo_note_http.rs       2
+   modules/sandbox/backend/src/http.rs                  6
+   ```
+   > ⚠️ **`modules/sandbox` 也在 AC-S-088 的射程内** ——
+   > 「跨全部模块」包括业务模块。第一轮派活时 BA 把 `modules/**` 划成「绝对不要碰」，
+   > 导致这 12 处构造点漏改 —— **是 BA 划错边界，不是 Dev 漏活**。
+   > 教训：**边界要按「AC 的射程」划，不能按「哪个目录看着像别人的」划**。
+   >
+   > 另：`platform-org/src/notify.rs` 的 `title()` 返回的是**英文**（6 条），
+   > 不计入中文统计 —— 我原先把它算进 55 里，**多算 1**。
 2. **后端零 i18n 基础设施** —— 无 locale 协商、用户表无语言/时区/币种字段
 3. **底座没有任何金额字段** —— 无 `Money`、无汇率表
 4. `@base/i18n` 只有 2 个函数
