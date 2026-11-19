@@ -9,10 +9,12 @@
   import { dialogClass, type DialogComponentProps } from '@base/ui';
 
   import { createEscapeHandler } from '../lib/handlers';
+  import { i18nRuntime } from '../lib/i18n';
 
   // props 整体取值：svelte-check 会把「解构出来的可选 props」当成必填，
   // 消费方就得把每个可选值都传一遍 —— 契约反而没法用。
   const props: DialogComponentProps = $props();
+  const i18n = i18nRuntime();
 
   const open = $derived(props.open ?? false);
   const closable = $derived(props.closable ?? true);
@@ -32,7 +34,7 @@
   <button
     type="button"
     class="base-dialog-mask"
-    aria-label="关闭对话框"
+    aria-label={$i18n.t('common.closeDialog')}
     onclick={() => {
       if (closable) props.onclose?.();
     }}

@@ -13,6 +13,12 @@
   登录响应里带 `permissions`；刷新响应里的 `permissions` 恒为空数组，
   所以刷新**不碰**权限点（见 `src/lib/api.ts`）。
 
+  # 文案按**稳定错误码**渲染（AC-S-099 步骤 4）
+
+  失败文案不是字符串常量，而是「翻译键 + 后端 `params`」两个值：
+  语言切换后错误提示也跟着变，且 `INSUFFICIENT_PERMISSION` 这类错误
+  能带出 `{required}`（`ApiError.params`，D109）。
+
   ⚠️ 脚本块是 `<script lang="ts">`：根 `eslint.config.js` 已给 `.svelte` 配了
   TypeScript 解析器（D97）→ 这里可以写 TS；带参数的事件处理器仍放 `lib/handlers.ts`。
 -->
@@ -24,6 +30,7 @@
 
   import { TENANT_REQUIRED, type AppAuth } from '../lib/api';
   import { createValueSetter } from '../lib/handlers';
+  import { errorMessageKey, i18nRuntime, toMessageParams } from '../lib/i18n';
 
   /** 登录页的 props。 */
   interface LoginProps {
@@ -34,11 +41,15 @@
   }
 
   const props: LoginProps = $props();
+  const i18n = i18nRuntime();
 
   let tenantId = $state('');
   let username = $state('');
   let password = $state('');
-  let error = $state('');
+  /** 失败提示的翻译键（空串 = 不显示）。 */
+  let errorKey = $state('');
+  /** 失败提示的插值参数（后端 `params`）。 */
+  let errorParams = $state<Record<string, string | number>>({});
   let busy = $state(false);
 
   // 输入回调在 `.ts` 里造（那里有完整类型）。
@@ -52,53 +63,50 @@
     password = value;
   });
 
-  /**
-   * 失败文案按**稳定错误码**分派（D94 的精神：文案由前端按 `code` 渲染）。
-   *
-   * 不再把所有失败都说成「用户名或密码不正确」——
-   * 租户缺失 / 账号锁定 / 限流都与密码无关，统一文案会把排查带偏。
-   */
-  function messageFor(caught: unknown): string {
+  /** 失败 → 「翻译键 + 参数」。 */
+  function describeLoginError(caught: unknown): {
+    key: string;
+    params: Record<string, string | number>;
+  } {
     if (caught instanceof Error && caught.message === TENANT_REQUIRED) {
-      return '请填写租户标识';
+      return { key: 'common.tenantRequired', params: {} };
     }
     if (caught instanceof ApiError) {
-      switch (caught.code) {
-        case 'INVALID_CREDENTIALS':
-          return '登录失败：用户名或密码不正确';
-        case 'TENANT_CONTEXT_MISSING':
-          return '登录失败：缺少租户标识';
-        case 'ACCOUNT_LOCKED':
-          return '登录失败：账号已锁定';
-        case 'ACCOUNT_DISABLED':
-          return '登录失败：账号已停用';
-        case 'LOGIN_RATE_LIMITED':
-          return '登录失败：尝试过于频繁，请稍后再试';
-        default:
-          return `登录失败（${caught.code}）`;
+      const key = errorMessageKey(caught.code);
+      const params = toMessageParams(caught.params);
+      // 没有该错误码的文案时 `t()` 返回 "?" —— 不把问号显示给用户，
+      // 改用通用失败文案（原始 code 仍在 console / 网络面板里可查）。
+      if (i18n.t(key, params) === '?') {
+        return { key: 'common.unexpectedError', params: {} };
       }
+      return { key, params };
     }
-    return '登录失败：请稍后重试';
+    return { key: 'common.unexpectedError', params: {} };
+  }
+
+  function showError(next: { key: string; params: Record<string, string | number> }): void {
+    errorKey = next.key;
+    errorParams = next.params;
   }
 
   async function submit() {
     const tenant = tenantId.trim();
     if (tenant === '') {
       // 不发一个必然 401 的请求（后端缺租户头 → TENANT_CONTEXT_MISSING）。
-      error = '请填写租户标识';
+      showError({ key: 'common.tenantRequired', params: {} });
       return;
     }
     if (username === '' || password === '') {
-      error = '请填写用户名和密码';
+      showError({ key: 'common.credentialsRequired', params: {} });
       return;
     }
     busy = true;
-    error = '';
+    errorKey = '';
     try {
       await props.auth.login({ tenantId: tenant, username, password });
       props.onLoggedIn();
     } catch (caught) {
-      error = messageFor(caught);
+      showError(describeLoginError(caught));
     } finally {
       busy = false;
     }
@@ -112,18 +120,29 @@
     void submit();
   }}
 >
-  <h2>登录</h2>
+  <h2>{$i18n.t('common.login')}</h2>
   <Input
-    label="租户"
+    label={$i18n.t('common.tenant')}
     name="tenant"
-    placeholder="例如 tenant-a"
+    placeholder={$i18n.t('common.tenantPlaceholder')}
     value={tenantId}
     oninput={setTenantId}
   />
-  <Input label="用户名" name="username" value={username} oninput={setUsername} />
-  <Input label="密码" name="password" type="password" value={password} oninput={setPassword} />
-  {#if error !== ''}
-    <p class="base-login-error">{error}</p>
+  <Input
+    label={$i18n.t('common.username')}
+    name="username"
+    value={username}
+    oninput={setUsername}
+  />
+  <Input
+    label={$i18n.t('common.password')}
+    name="password"
+    type="password"
+    value={password}
+    oninput={setPassword}
+  />
+  {#if errorKey !== ''}
+    <p class="base-login-error">{$i18n.t(errorKey, errorParams)}</p>
   {/if}
-  <Button type="submit" disabled={busy}>登录</Button>
+  <Button type="submit" disabled={busy}>{$i18n.t('common.login')}</Button>
 </form>

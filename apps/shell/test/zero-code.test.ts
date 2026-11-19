@@ -50,10 +50,12 @@ describe('零前端代码：源码里没有任何实体特化（AC-S-085 / TC-01
     }
   });
 
-  it('对照自检：同一扫描能命中已知文案（证明检索不是恒不命中）', () => {
+  it('对照自检：同一扫描能命中已知结构（证明检索不是恒不命中）', () => {
+    // 文案已改走 i18n（`t('schema.emptyTable')`），所以对照锚点用翻译键而不是中文字面量。
     const hits = sourceFiles().filter(
       (file) =>
-        file.endsWith('SchemaTable.svelte') && readFileSync(file, 'utf8').includes('暂无数据'),
+        file.endsWith('SchemaTable.svelte') &&
+        readFileSync(file, 'utf8').includes('schema.emptyTable'),
     );
     expect(hits).toHaveLength(1);
   });

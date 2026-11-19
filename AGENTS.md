@@ -80,6 +80,27 @@ docs/contracts/              契约正文快照（**勿手改**，正本在 BA �
    - ✅ `cargo test -p <模块名> -- --test-threads=2 --nocapture`
    - ❌ `cargo test -p <模块名> -- --test-threads=2 -- --nocapture`
    验收前先看输出里的「N passed」，**N 必须 > 0**。
+   - ⚠️ `cargo test -p <crate>` **必须加 `--all-targets`** —— 不加则 **lib 里的测试一个都不跑**，
+     而**退出码仍是 0**（假绿）。
+10. **「错误响应不返回中文」要验「集中表」，不要验「构造点」**（REQ-021 / D113）
+    - 错误体的 `title` **必须**从 `platform_core::titles::TITLES` 取（唯一来源）；
+      就地写英文字面量等于破坏「单一来源」，新增错误码就没人知道要登记。
+    - `TITLES` 的完备性由 **`ALL_CODES`** 清单 + `platform-server/tests/i18n_titles.rs`
+      的 `titles_cover_every_code` 保证 —— **每个 crate 都要导出自己的 `ALL_CODES`**。
+    - ⚠️ **扫「构造点字面量」验零中文是必然漏报**：REQ-021 实测 **73 处**中文 title 里，
+      **54 处由 `title_of()` 函数产出**（构造点拿到的是函数调用），
+      只扫构造点会 **0 命中、看起来全通过**。
+    - ⚠️ 静态扫描必须：① **含 `modules/`**（业务模块也在射程内）② **跨行匹配**
+      （那 12 处构造点全是跨行的）③ **剥注释** ④ **有阳性对照**（注入中文 → 断言能命中）。
+      没有阳性对照，「扫描恒不命中」和「扫描生效」长得一模一样。
+11. **`cargo test --workspace` 在本仓必失败**（已知技术债）—— **逐 crate 跑**：
+    ```bash
+    for c in platform-core platform-config platform-iam platform-rbac platform-org \
+             platform-db platform-schema platform-server sandbox; do
+      cargo test -p $c --all-targets -- --test-threads=2
+    done
+    ```
+    本机是 8 线程 i7 + 7.7G 内存，`.cargo/config.toml` 固定 `jobs = 3`；**禁止 `cargo install`**。
 
 > 规则 1 与 2 由 CI 机械检查：`cargo xtask check-deps` 扫 `cargo metadata` 的依赖图，
 > 平台 crate 一旦反向依赖业务模块即失败（**装配层 `platform-server` 除外**）。
@@ -177,9 +198,15 @@ cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 
 # 测试
-cargo test --workspace -- --test-threads=2     # Rust 单测 + 契约测试
-pnpm -r test                                    # 前端单测
+cargo test -p <crate> --all-targets -- --test-threads=2   # Rust：逐 crate 跑（--workspace 必失败，见硬规则 11）
+pnpm -r test                                    # 前端单测（vitest，**不是 `bun test`**）
 bun run test:e2e                                # E2E（Playwright）
+
+# E2E 前置：数据库容器 + 管理员连接串（库名必须恰好 base_test）
+export DATABASE_URL_TEST="postgres://base:base@127.0.0.1:5432/base_test"
+bun run db:up
+# `scripts/e2e-server.sh` 会自动生成临时 JWT 私钥（PKCS#8 EC）与 IAM 密钥（base64url），
+# 干净环境也能起服务 —— **不要**依赖手工起服务（`reuseExistingServer` 会掩盖脚本缺口）。
 
 # 起全栈（数据库容器需已启动：bun run db:up）
 bun run dev

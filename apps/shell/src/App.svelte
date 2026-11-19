@@ -21,8 +21,12 @@
   import { applyBranding, fetchBranding } from './lib/branding';
   import { createAppApi } from './lib/api';
   import { AUTH_CONTEXT_KEY } from './lib/auth-context';
+  import { i18nRuntime } from './lib/i18n';
   import { createRouter, initialResolution } from './lib/router';
   import { createRoutes, SCHEMA_ROUTE_PATH, toRoles } from './lib/routes';
+
+  import LanguageSwitcher from './components/LanguageSwitcher.svelte';
+  import LocaleInfo from './components/LocaleInfo.svelte';
 
   import Forbidden from './pages/Forbidden.svelte';
   import Home from './pages/Home.svelte';
@@ -33,6 +37,7 @@
   // 同源：页面由 platform-server 的静态目录托管（本仓没有 CORS 层）。
   // 租户在登录时由用户填（D98），这里不传死值。
   const { client, auth, restoreSession } = createAppApi();
+  const i18n = i18nRuntime();
 
   let title = $state('');
   let booted = $state(false);
@@ -78,13 +83,33 @@
       // （由 `@base/theme` 写 `currentColor`，不依赖宿主样式表）。
       applyBranding({});
       // eslint-disable-next-line no-console -- 依赖不可用时必须留下可发现的告警（AC-S-055 派生用例）
-      console.warn('[branding] 读取品牌配置失败，使用中性兜底', error);
+      console.warn('[branding] failed to read branding config; using neutral fallback', error);
+    }
+  }
+
+  /**
+   * 读取租户级 i18n 上下文（D110 / D116）。
+   *
+   * 后端未就绪（404 / 网络失败）时**不阻塞启动**：本地偏好与平台默认值仍然可用。
+   * 用户偏好（`sessionStorage`）已经随请求带上去（`?locale=` / `?timezone=`）。
+   */
+  async function loadI18nContext(): Promise<void> {
+    try {
+      await i18n.refreshContext();
+    } catch (error) {
+      // eslint-disable-next-line no-console -- 接口不可用时必须可发现（否则「租户时区没生效」无从排查）
+      console.warn(
+        '[i18n] failed to load /api/i18n/context; using local preference and defaults',
+        error,
+      );
     }
   }
 
   function handleLoggedIn() {
     authState = auth.state;
     router.navigate(resolution.intendedPath ?? '/');
+    // 登录后才拿得到租户级配置（`/api/i18n/context` 需认证）。
+    void loadI18nContext();
   }
 
   /**
@@ -98,6 +123,8 @@
     authState = auth.state;
     booted = true;
     router.start();
+    // 会话恢复后再读租户配置：未登录时该接口是 401，拿不到租户级时区/币种。
+    void loadI18nContext();
   }
 
   onMount(() => {
@@ -111,9 +138,18 @@
   });
 </script>
 
+<!--
+  语言切换器常驻：语言 / 时区 / 金额格式都要能在任意页面切换与观察
+  （AC-S-099 步骤 5：切换后**同一节点**更新，不刷新页面）。
+-->
+<header class="base-shell-topbar">
+  <LanguageSwitcher />
+  <LocaleInfo />
+</header>
+
 {#if !booted}
   <!-- 会话恢复完成前**不渲染任何页面**：否则深链会先闪一下目标页 / 首页。 -->
-  <p class="base-booting">正在恢复会话…</p>
+  <p class="base-booting">{$i18n.t('common.booting')}</p>
 {:else if resolution.path === '/login'}
   <Login {auth} onLoggedIn={handleLoggedIn} />
 {:else if resolution.path === '/403'}

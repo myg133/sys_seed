@@ -235,3 +235,34 @@ body {
   gap: 0.5rem;
   margin-top: 0.5rem;
 }
+
+.base-shell-topbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem 2rem;
+  align-items: baseline;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid var(--base-border);
+}
+
+.base-language-switcher {
+  display: inline-flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.base-locale-info {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.75rem;
+  margin: 0;
+  font-size: 0.875rem;
+}
+
+.base-locale-info dt {
+  font-weight: 600;
+}
+
+.base-locale-info dd {
+  margin: 0 1rem 0 0;
+}

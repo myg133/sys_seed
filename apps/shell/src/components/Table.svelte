@@ -10,9 +10,12 @@
 <script lang="ts" generics="Row">
   import { cellValue, pageInfo, rowKeyOf, tableClass, type TableProps } from '@base/ui';
 
+  import { i18nRuntime } from '../lib/i18n';
+
   // props 整体取值：svelte-check 会把「解构出来的可选 props」当成必填，
   // 消费方就得把每个可选值都传一遍 —— 契约反而没法用。
   const props: TableProps<Row> = $props();
+  const i18n = i18nRuntime();
 
   // `total` 没给（或给了 0）就退回当前页的行数。
   const total = $derived(
@@ -43,7 +46,7 @@
       </tr>
     {:else}
       <tr>
-        <td colspan={props.columns.length}>{props.emptyText ?? '暂无数据'}</td>
+        <td colspan={props.columns.length}>{props.emptyText ?? $i18n.t('schema.emptyTable')}</td>
       </tr>
     {/each}
   </tbody>
@@ -56,7 +59,7 @@
       disabled={info.page <= 1}
       onclick={() => props.onPageChange?.(info.page - 1)}
     >
-      上一页
+      {$i18n.t('common.previousPage')}
     </button>
     <span class="base-table-pager-info">{info.page} / {info.pageCount}</span>
     <button
@@ -64,7 +67,7 @@
       disabled={info.page >= info.pageCount}
       onclick={() => props.onPageChange?.(info.page + 1)}
     >
-      下一页
+      {$i18n.t('common.nextPage')}
     </button>
   </nav>
 {/if}
