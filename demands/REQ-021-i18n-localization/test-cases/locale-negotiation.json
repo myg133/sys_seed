@@ -577,18 +577,18 @@
   {
     "id": "TC-021-097",
     "ac": "AC-S-090",
-    "title": "租户覆盖平台：平台 en-US、租户 ja-JP → 租户值生效（source=tenant）（rev 3 新增，D119）",
+    "title": "租户覆盖平台：平台 en-US、租户 zh-CN → 租户值生效（source=tenant）（rev 3 新增，D119）",
     "preconditions": [
       "平台级 platform_config 有 locale = \"en-US\"",
-      "租户 A 有自己的 locale = \"ja-JP\"",
-      "已注册语言含 en-US 与 ja-JP"
+      "租户 A 有自己的 locale = \"zh-CN\"",
+      "已注册语言含 en-US 与 zh-CN（**必须是已注册语言** —— 未注册的值会被协商层丢弃，见 D121）"
     ],
     "steps": [
       "以租户 A 身份 GET /api/i18n/context（不带 Accept-Language，不带 ?locale=）",
       "读响应里的 locale 与 source"
     ],
     "expected": [
-      "locale == \"ja-JP\"（租户**覆盖**平台）",
+      "locale == \"zh-CN\"（租户**覆盖**平台）",
       "source == \"tenant\"",
       "与 ConfigSource::rank 的优先级一致（space > tenant > platform > default）"
     ],
@@ -596,6 +596,6 @@
     "layer": "rust-integration",
     "automatable": true,
     "priority": "P1",
-    "notes": "★ **rev 3 新增（D119 的配套）**：TC-021-096 只验「没人覆盖时用平台层」；\n这条验「**有人覆盖时仍用覆盖者**」—— 加了平台层**不能**改变租户优先级。"
+    "notes": "★ **rev 3 新增（D119 的配套）**：TC-021-096 只验「没人覆盖时用平台层」；\n这条验「**有人覆盖时仍用覆盖者**」—— 加了平台层**不能**改变租户优先级。\n★ **rev 3 修订（复核的 F-4）**：原用 `ja-JP` —— 但本仓**只注册了 zh-CN 与 en-US**，\n`ja-JP` 会被协商层当「未注册」丢弃 → **该期望在生产不可达**。改用已注册的 `zh-CN`。"
   }
 ]

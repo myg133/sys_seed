@@ -328,15 +328,18 @@ rev 1 写「同时要改**现有 8 处断言**」—— **不存在**。既有�
 
 ```
 GET /api/i18n/context  →  { locale, timezone, currency, source }
-source ∈ { user, accept-language, tenant, default }
+source ∈ { user, accept-language, tenant, platform, default }
 ```
+
+> ⚠️ **rev 3 修订**：原为 **4 值**（缺 `platform`）——
+> 平台配置层被**静默丢弃**（D119 / QA 的 M1）。见 §3.1。
 
 > **为什么必须带 `source`**：rev 1 的 7 步全写「断言协商结果」，但
 > ① 全仓**没有观测点**（`locale` 0 命中、无 `Content-Language`）；
 > ② **光有 `locale` 值区分不出「哪一级生效」** —— 如果用户偏好与请求头恰好相同，
 > 值一样但优先级没被验证过。`source` 让「哪一级生效」机械可判。
 
-**时区的 `source`**：时区协商**不含请求头**（§3.4），故其 `source ∈ { user, tenant, default }`
+**时区的 `source`**：时区协商**不含请求头**（§3.4），故其 `source ∈ { user, tenant, platform, default }`
 （**永不出现 `accept-language`**）。
 
 ### 3.4 时区协商（**不含请求头**）
