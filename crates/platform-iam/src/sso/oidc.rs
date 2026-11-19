@@ -69,11 +69,9 @@ pub const PROVIDER: &str = "oidc";
 // 出站 HTTP：继续用 hyper + hyper-util，**只换 connector**（不引 reqwest）
 // ---------------------------------------------------------------------------
 
-type HttpsConnector = hyper_rustls::HttpsConnector<
-    hyper_util::client::legacy::connect::HttpConnector,
->;
-type HttpsClient =
-    hyper_util::client::legacy::Client<HttpsConnector, Full<Bytes>>;
+type HttpsConnector =
+    hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>;
+type HttpsClient = hyper_util::client::legacy::Client<HttpsConnector, Full<Bytes>>;
 
 /// 出站 HTTP 的传输层错误（**不含 URL 细节之外的任何内容**）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,8 +162,7 @@ impl OidcHttpClient {
             Ok(Err(_)) | Err(_) => return Err(TransportError::Unreachable),
         };
         let status = response.status().as_u16();
-        let bytes = match tokio::time::timeout(HTTP_TIMEOUT, response.into_body().collect()).await
-        {
+        let bytes = match tokio::time::timeout(HTTP_TIMEOUT, response.into_body().collect()).await {
             Ok(Ok(collected)) => collected.to_bytes(),
             Ok(Err(_)) | Err(_) => return Err(TransportError::Unreachable),
         };
@@ -316,10 +313,7 @@ impl OidcRuntime {
 /// 判据（AC-S-020 步骤 1/2）：
 /// - 传输失败 / 非 2xx → `SSO_OIDC_DISCOVERY_FAILED`（503）
 /// - JSON 非法 / 缺端点 → `SSO_OIDC_DISCOVERY_INVALID`（502）
-pub async fn fetch_discovery(
-    http: &OidcHttpClient,
-    issuer: &str,
-) -> Result<Discovery, IamError> {
+pub async fn fetch_discovery(http: &OidcHttpClient, issuer: &str) -> Result<Discovery, IamError> {
     let url = format!(
         "{}/.well-known/openid-configuration",
         issuer.trim_end_matches('/')
@@ -501,8 +495,16 @@ fn decode_segment(segment: &str) -> Option<Vec<u8>> {
     URL_SAFE_NO_PAD
         .decode(segment)
         .ok()
-        .or_else(|| base64::engine::general_purpose::URL_SAFE.decode(segment).ok())
-        .or_else(|| base64::engine::general_purpose::STANDARD.decode(segment).ok())
+        .or_else(|| {
+            base64::engine::general_purpose::URL_SAFE
+                .decode(segment)
+                .ok()
+        })
+        .or_else(|| {
+            base64::engine::general_purpose::STANDARD
+                .decode(segment)
+                .ok()
+        })
 }
 
 /// 读 JWT header 的 `alg` / `kid`。
@@ -745,8 +747,14 @@ mod tests {
     /// 白名单外（含 `none` / `HS256` / `RS512`）必须**先拒**。
     #[test]
     fn algorithm_whitelist_rejects_none_hs_and_rs512() {
-        assert_eq!(allowed_algorithm(Some("RS256")).expect("RS256 应允许"), Algorithm::RS256);
-        assert_eq!(allowed_algorithm(Some("ES256")).expect("ES256 应允许"), Algorithm::ES256);
+        assert_eq!(
+            allowed_algorithm(Some("RS256")).expect("RS256 应允许"),
+            Algorithm::RS256
+        );
+        assert_eq!(
+            allowed_algorithm(Some("ES256")).expect("ES256 应允许"),
+            Algorithm::ES256
+        );
         for rejected in [Some("none"), Some("HS256"), Some("RS512"), None] {
             assert_eq!(
                 allowed_algorithm(rejected),
@@ -844,4 +852,3 @@ mod tests {
         assert_eq!(percent_encode("openid"), "openid");
     }
 }
-

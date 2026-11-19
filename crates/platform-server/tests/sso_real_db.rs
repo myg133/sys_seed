@@ -27,88 +27,14 @@ use platform_iam::config::{
 };
 use platform_iam::http::IamState;
 use platform_iam::service::IamService;
-use platform_iam::sso::config::SsoBoxFuture;
 use platform_iam::store::IamStore;
+use platform_server::sso_source::ConfigServiceSsoSource;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
 mod support;
 
 use support::*;
-
-// ---------------------------------------------------------------------------
-// 装配：真实 `ConfigService` 作为 SSO 配置源
-// ---------------------------------------------------------------------------
-
-/// 与 `platform-server/src/main.rs` 的 `ConfigServiceSsoSource` 等价的实现。
-///
-/// 放在测试里（而不是复用私有类型）是为了让「按精确键名读」这件事在测试里
-/// **可读地**呈现：`read_entries(&ctx, &SSO_CONFIG_KEYS)`。
-struct RealConfigSource {
-    config: Arc<platform_config::ConfigService>,
-}
-
-impl platform_iam::sso::config::SsoConfigSource for RealConfigSource {
-    fn read(
-        &self,
-        ctx: &RequestContext,
-    ) -> SsoBoxFuture<
-        '_,
-        Result<platform_iam::sso::config::SsoConfig, platform_iam::sso::config::SsoConfigError>,
-    > {
-        let config = self.config.clone();
-        let ctx = ctx.clone();
-        Box::pin(async move {
-            let keys: Vec<String> = platform_iam::sso::config::SSO_CONFIG_KEYS
-                .iter()
-                .map(|key| (*key).to_string())
-                .collect();
-            let entries = config
-                .read_entries(&ctx, &keys)
-                .await
-                .map_err(|_| platform_iam::sso::config::SsoConfigError)?;
-            Ok(map_entries(&entries))
-        })
-    }
-}
-
-fn map_entries(entries: &[platform_core::ResolvedConfig]) -> platform_iam::sso::config::SsoConfig {
-    use platform_iam::sso::config::{LdapSettings, OidcSettings, SsoConfig};
-    let text = |key: &str| -> Option<String> {
-        entries
-            .iter()
-            .find(|entry| entry.key == key)
-            .and_then(|entry| entry.value.as_str())
-            .map(str::to_string)
-    };
-    let flag = |key: &str| -> Option<bool> {
-        entries
-            .iter()
-            .find(|entry| entry.key == key)
-            .and_then(|entry| entry.value.as_bool())
-    };
-    let defaults = SsoConfig::default();
-    SsoConfig {
-        enforce: flag("sso.enforce").unwrap_or(defaults.enforce),
-        jit_provisioning: flag("sso.jitProvisioning").unwrap_or(defaults.jit_provisioning),
-        oidc: OidcSettings {
-            enabled: flag("sso.oidc.enabled").unwrap_or(defaults.oidc.enabled),
-            issuer: text("sso.oidc.issuer").unwrap_or(defaults.oidc.issuer),
-            client_id: text("sso.oidc.clientId").unwrap_or(defaults.oidc.client_id),
-            scopes: text("sso.oidc.scopes").unwrap_or(defaults.oidc.scopes),
-            redirect_uri: text("sso.oidc.redirectUri").unwrap_or(defaults.oidc.redirect_uri),
-        },
-        ldap: LdapSettings {
-            enabled: flag("sso.ldap.enabled").unwrap_or(defaults.ldap.enabled),
-            url: text("sso.ldap.url").unwrap_or(defaults.ldap.url),
-            base_dn: text("sso.ldap.baseDn").unwrap_or(defaults.ldap.base_dn),
-            user_search_filter: text("sso.ldap.userSearchFilter")
-                .unwrap_or(defaults.ldap.user_search_filter),
-            mail_attribute: text("sso.ldap.mailAttribute")
-                .unwrap_or(defaults.ldap.mail_attribute),
-        },
-    }
-}
 
 fn test_config() -> IamConfig {
     let pem = platform_iam::jwt::generate_key_pair().expect("测试密钥");
@@ -153,7 +79,9 @@ fn test_config() -> IamConfig {
 }
 
 /// 用**真实注册表 + 真实 ConfigService** 建一套栈。
-async fn build_real_stack(app_url: &str) -> (Arc<IamService>, Arc<platform_config::ConfigService>, Router) {
+async fn build_real_stack(
+    app_url: &str,
+) -> (Arc<IamService>, Arc<platform_config::ConfigService>, Router) {
     let tenant_db = platform_db::TenantDb::connect(app_url, platform_db::DbOptions::default())
         .await
         .expect("应用角色连接串应可解析");
@@ -165,13 +93,14 @@ async fn build_real_stack(app_url: &str) -> (Arc<IamService>, Arc<platform_confi
         Arc::new(registry),
     ));
 
-    let service = Arc::new(
-        IamService::new(IamStore::new(tenant_db), test_config()).expect("服务应当能构造"),
-    );
+    let service =
+        Arc::new(IamService::new(IamStore::new(tenant_db), test_config()).expect("服务应当能构造"));
     assert!(
-        service.set_sso_config_source(Arc::new(RealConfigSource {
-            config: config_service.clone(),
-        })),
+        // **生产装配层的同一个类型**（`platform-server/src/sso_source.rs`）——
+        // 不是测试里的等价拷贝。它丢了 `ctx` 时，下面 `ac_s_021` 的租户用例会红（D129）。
+        service.set_sso_config_source(Arc::new(ConfigServiceSsoSource::new(
+            config_service.clone()
+        ))),
         "配置源应能注入"
     );
     service.set_sso_frontend_base_url("http://app.example.com");
@@ -367,7 +296,11 @@ async fn ac_s_021_enforcement_works_through_the_real_config_service() {
         .as_array()
         .expect("params.ssoProviders 必须是数组")
         .iter()
-        .map(|provider| provider["type"].as_str().expect("每个 provider 都要有 type"))
+        .map(|provider| {
+            provider["type"]
+                .as_str()
+                .expect("每个 provider 都要有 type")
+        })
         .collect();
     assert_eq!(
         kinds,
@@ -477,7 +410,10 @@ async fn ac_s_021_enforcement_is_tenant_scoped_through_the_real_config_service()
             let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
                 .await
                 .expect("响应体");
-            (status, serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null))
+            (
+                status,
+                serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null),
+            )
         }
     };
 

@@ -60,9 +60,7 @@ use crate::sso::audit::{
     self as sso_audit, NoopSsoAuditRecorder, SsoAuditEvent, SsoAuditPayload, SsoAuditRecorder,
 };
 use crate::sso::binding::{self, LDAP_PROVIDER};
-use crate::sso::config::{
-    SsoConfig, SsoConfigOutcome, SsoConfigSource, OIDC_CLIENT_SECRET_ENV,
-};
+use crate::sso::config::{OIDC_CLIENT_SECRET_ENV, SsoConfig, SsoConfigOutcome, SsoConfigSource};
 use crate::sso::ldap::{self, SsoLdapClient};
 use crate::sso::oidc::{self, OidcRuntime, PROVIDER as OIDC_PROVIDER};
 use crate::sso::ticket;
@@ -322,10 +320,7 @@ impl SsoState {
 
     /// 前端基址（302 的目标前缀）。
     fn frontend_base_url(&self) -> String {
-        self.frontend_base_url
-            .get()
-            .cloned()
-            .unwrap_or_default()
+        self.frontend_base_url.get().cloned().unwrap_or_default()
     }
 }
 
@@ -341,8 +336,6 @@ pub struct IamService {
     /// SSO 入站（REQ-013）的后设槽。
     sso: SsoState,
 }
-
-
 
 impl IamService {
     /// 构造服务（构建密钥集与假哈希）。
@@ -423,18 +416,12 @@ impl IamService {
     ///
     /// `error` **只放错误码** —— 不放 `detail`、不放任何配置值（rev 3.1）。
     pub fn sso_callback_error_location(&self, code: &str) -> String {
-        self.sso_frontend_callback_location(&format!(
-            "error={}",
-            oidc::percent_encode(code)
-        ))
+        self.sso_frontend_callback_location(&format!("error={}", oidc::percent_encode(code)))
     }
 
     /// **成功**交接的地址：`{前端基址}/sso/callback?ticket=<ticket>`。
     pub fn sso_callback_ticket_location(&self, ticket: &str) -> String {
-        self.sso_frontend_callback_location(&format!(
-            "ticket={}",
-            oidc::percent_encode(ticket)
-        ))
+        self.sso_frontend_callback_location(&format!("ticket={}", oidc::percent_encode(ticket)))
     }
 
     /// 读一次 SSO 配置（区分「未装配 / 读到 / 读失败」）。
@@ -828,18 +815,14 @@ impl IamService {
     /// 发起 OIDC 授权：落一条 `oidc_state`，返回 302 的 `Location`。
     pub async fn begin_oidc_authorize(&self, ctx: &RequestContext) -> Result<String, IamError> {
         let config = self.require_sso_config(ctx).await?;
-        config.validate().map_err(|reason| IamError::SsoConfigInvalid {
-            reason,
-        })?;
+        config
+            .validate()
+            .map_err(|reason| IamError::SsoConfigInvalid { reason })?;
         if !config.oidc.enabled {
             return Err(IamError::SsoProviderNotConfigured);
         }
 
-        let discovery = self
-            .sso
-            .oidc
-            .discovery(&config.oidc.issuer, false)
-            .await?;
+        let discovery = self.sso.oidc.discovery(&config.oidc.issuer, false).await?;
 
         let state = oidc::random_token();
         let nonce = oidc::random_token();
@@ -952,11 +935,7 @@ impl IamService {
         }
 
         // 6) 发现文档 → 换 token。
-        let discovery = self
-            .sso
-            .oidc
-            .discovery(&config.oidc.issuer, false)
-            .await?;
+        let discovery = self.sso.oidc.discovery(&config.oidc.issuer, false).await?;
         let client_secret = self.sso.client_secret();
         let http = self.sso.oidc.http()?;
         let token = oidc::exchange_code(
@@ -1034,12 +1013,10 @@ impl IamService {
         ticket::issue(&self.store, &ctx, &ticket, &binding.user.id, &session.id).await?;
 
         if binding.created_user || binding.created_link {
-            self.sso
-                .recorder()
-                .record(&SsoAuditEvent::new(
-                    sso_audit::EVENT_LINK_CREATED,
-                    SsoAuditPayload::link_created(OIDC_PROVIDER, &claims.sub, &binding.user.id),
-                ));
+            self.sso.recorder().record(&SsoAuditEvent::new(
+                sso_audit::EVENT_LINK_CREATED,
+                SsoAuditPayload::link_created(OIDC_PROVIDER, &claims.sub, &binding.user.id),
+            ));
         }
 
         let location = self.sso_callback_ticket_location(&ticket);
@@ -1142,9 +1119,7 @@ impl IamService {
             }
             Err(ldap::SsoLdapError::Connection)
             | Err(ldap::SsoLdapError::Search)
-            | Err(ldap::SsoLdapError::Config) => {
-                return Err(IamError::SsoLdapUnreachable)
-            }
+            | Err(ldap::SsoLdapError::Config) => return Err(IamError::SsoLdapUnreachable),
         };
 
         let binding = binding::resolve(
@@ -1172,12 +1147,10 @@ impl IamService {
             .create_session(ctx, tenant, &binding.user, meta, AuthProvider::Ldap)
             .await?;
         if binding.created_user || binding.created_link {
-            self.sso
-                .recorder()
-                .record(&SsoAuditEvent::new(
-                    sso_audit::EVENT_LINK_CREATED,
-                    SsoAuditPayload::link_created(LDAP_PROVIDER, &identity.dn, &binding.user.id),
-                ));
+            self.sso.recorder().record(&SsoAuditEvent::new(
+                sso_audit::EVENT_LINK_CREATED,
+                SsoAuditPayload::link_created(LDAP_PROVIDER, &identity.dn, &binding.user.id),
+            ));
         }
         let response = self
             .issue_tokens_for_session(ctx, tenant, &binding.user, &session)

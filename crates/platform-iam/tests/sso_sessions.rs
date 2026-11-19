@@ -92,13 +92,15 @@ impl Env {
             mail: Some("erin@example.com".to_string()),
         });
         assert!(stack.service.set_sso_ldap_client(ldap.clone()));
+        stack.service.set_sso_http_client(Arc::new(
+            platform_iam::sso::oidc::OidcHttpClient::new().expect("http 客户端"),
+        ));
         stack
             .service
-            .set_sso_http_client(Arc::new(
-                platform_iam::sso::oidc::OidcHttpClient::new().expect("http 客户端"),
-            ));
-        stack.service.set_sso_frontend_base_url("http://app.example.com");
-        stack.service.set_sso_oidc_client_secret("SECRET-CANARY-iso");
+            .set_sso_frontend_base_url("http://app.example.com");
+        stack
+            .service
+            .set_sso_oidc_client_secret("SECRET-CANARY-iso");
 
         let config = TenantScopedConfig::default();
         config.set_fallback(SsoConfig::default());
@@ -117,7 +119,11 @@ impl Env {
                 ..Default::default()
             },
         );
-        assert!(stack.service.set_sso_config_source(Arc::new(config.clone())));
+        assert!(
+            stack
+                .service
+                .set_sso_config_source(Arc::new(config.clone()))
+        );
 
         let admin = admin_pool().await;
         // 前置：bob 在 a 里绑定；erin 在 a 里绑定（LDAP）。
@@ -172,7 +178,12 @@ impl Env {
             query["state"]
         );
         let (status, headers, bytes) = http_get(&self.stack.router, &callback, None, None).await;
-        assert_eq!(status, StatusCode::FOUND, "{}", String::from_utf8_lossy(&bytes));
+        assert_eq!(
+            status,
+            StatusCode::FOUND,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
         let ticket = location_query(&headers)["ticket"].clone();
         let (status, _, bytes) = post_json(
             &self.stack.router,
@@ -182,7 +193,12 @@ impl Env {
             json!({ "ticket": ticket }),
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
         json_of(&bytes)
     }
 
@@ -198,7 +214,12 @@ impl Env {
                 .expect("请求应能构造"),
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
         json_of(&bytes)
     }
 }
@@ -230,7 +251,14 @@ async fn ac_s_107_sso_and_local_sessions_share_one_shape() {
     let env = Env::new().await;
 
     // 本地账号 grace 登录。
-    register(&env.stack.router, &env.tenant_a, "grace", PASSWORD, Some("grace@example.com")).await;
+    register(
+        &env.stack.router,
+        &env.tenant_a,
+        "grace",
+        PASSWORD,
+        Some("grace@example.com"),
+    )
+    .await;
     let (status, _, bytes) = post_json(
         &env.stack.router,
         "/api/iam/login",
@@ -246,10 +274,16 @@ async fn ac_s_107_sso_and_local_sessions_share_one_shape() {
     let sso = env.oidc_login(&env.tenant_a, &env.idp_a).await;
 
     let local_sessions = env
-        .sessions(&env.tenant_a, local["accessToken"].as_str().expect("accessToken"))
+        .sessions(
+            &env.tenant_a,
+            local["accessToken"].as_str().expect("accessToken"),
+        )
         .await;
     let sso_sessions = env
-        .sessions(&env.tenant_a, sso["accessToken"].as_str().expect("accessToken"))
+        .sessions(
+            &env.tenant_a,
+            sso["accessToken"].as_str().expect("accessToken"),
+        )
         .await;
 
     let local_row = local_sessions.as_array().expect("数组")[0].clone();
@@ -306,8 +340,14 @@ async fn ac_s_107_sso_and_local_sessions_share_one_shape() {
 async fn ac_s_107_deleting_a_session_revokes_the_family_and_logout_all_covers_sso() {
     let env = Env::new().await;
     let sso = env.oidc_login(&env.tenant_a, &env.idp_a).await;
-    let access = sso["accessToken"].as_str().expect("accessToken").to_string();
-    let refresh = sso["refreshToken"].as_str().expect("refreshToken").to_string();
+    let access = sso["accessToken"]
+        .as_str()
+        .expect("accessToken")
+        .to_string();
+    let refresh = sso["refreshToken"]
+        .as_str()
+        .expect("refreshToken")
+        .to_string();
 
     let sessions = env.sessions(&env.tenant_a, &access).await;
     let session_id = sessions.as_array().expect("数组")[0]["id"]
@@ -339,13 +379,24 @@ async fn ac_s_107_deleting_a_session_revokes_the_family_and_logout_all_covers_ss
         json!({ "refreshToken": refresh }),
     )
     .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "{}", String::from_utf8_lossy(&bytes));
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
     assert_eq!(json_of(&bytes)["code"], "TOKEN_REVOKED");
 
     // 再登一次，然后 logout-all：全部 family 作废（含 SSO 会话）。
     let sso2 = env.oidc_login(&env.tenant_a, &env.idp_a).await;
-    let access2 = sso2["accessToken"].as_str().expect("accessToken").to_string();
-    let refresh2 = sso2["refreshToken"].as_str().expect("refreshToken").to_string();
+    let access2 = sso2["accessToken"]
+        .as_str()
+        .expect("accessToken")
+        .to_string();
+    let refresh2 = sso2["refreshToken"]
+        .as_str()
+        .expect("refreshToken")
+        .to_string();
     let (status, _, bytes) = send(
         &env.stack.router,
         axum::http::Request::builder()
@@ -360,7 +411,12 @@ async fn ac_s_107_deleting_a_session_revokes_the_family_and_logout_all_covers_ss
     // AC-S-107 步骤 4（**rev 3.3 由 D128 裁定**）：`200 {"revokedSessions": n}`。
     // 原 AC 写 204，与 REQ-007 已合并的 `logout-all` 契约冲突；BA 裁定改规格而非改实现
     // —— 200 带作废回执，语义优于无法告知数量的 204。
-    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
     let body = json_of(&bytes);
     assert!(
         body["revokedSessions"].as_u64().is_some_and(|n| n >= 1),
@@ -374,7 +430,12 @@ async fn ac_s_107_deleting_a_session_revokes_the_family_and_logout_all_covers_ss
         json!({ "refreshToken": refresh2 }),
     )
     .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "{}", String::from_utf8_lossy(&bytes));
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -404,7 +465,11 @@ async fn ac_s_109_providers_are_per_tenant_and_never_leak_configuration() {
         );
         let body = json_of(&bytes);
         let providers = body["providers"].as_array().expect("providers 必须是数组");
-        assert_eq!(providers.len(), expected, "{tenant} 的 provider 数不对：{body}");
+        assert_eq!(
+            providers.len(),
+            expected,
+            "{tenant} 的 provider 数不对：{body}"
+        );
     }
 
     // 响应里只有 type / id / label / 端点路径。
@@ -416,7 +481,14 @@ async fn ac_s_109_providers_are_per_tenant_and_never_leak_configuration() {
     )
     .await;
     let raw = String::from_utf8_lossy(&bytes).to_string();
-    for forbidden in ["issuer", "clientId", "clientSecret", "ldapUrl", "baseDn", "127.0.0.1"] {
+    for forbidden in [
+        "issuer",
+        "clientId",
+        "clientSecret",
+        "ldapUrl",
+        "baseDn",
+        "127.0.0.1",
+    ] {
         assert!(
             !raw.contains(forbidden),
             "providers 响应不得包含配置值 {forbidden}：{raw}"
@@ -443,7 +515,12 @@ async fn ac_s_109_ldap_and_oidc_sessions_have_different_families() {
         json!({ "username": "erin", "password": ERIN_PASSWORD }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
 
     let oidc = env.oidc_login(&env.tenant_a, &env.idp_a).await;
     assert_eq!(oidc["tokenType"], "Bearer");
@@ -479,13 +556,8 @@ async fn ac_s_109_a_state_from_another_tenant_cannot_be_used() {
     let state = location_query(&headers)["state"].clone();
 
     let callback = format!("/api/iam/sso/oidc/callback?code=x&state={state}");
-    let (status, headers, _) = http_get(
-        &env.stack.router,
-        &callback,
-        Some(&env.tenant_a),
-        None,
-    )
-    .await;
+    let (status, headers, _) =
+        http_get(&env.stack.router, &callback, Some(&env.tenant_a), None).await;
     assert_eq!(status, StatusCode::FOUND);
     assert_eq!(
         location_query(&headers).get("error").map(String::as_str),
@@ -498,7 +570,12 @@ async fn ac_s_109_an_unconfigured_tenant_gets_the_same_code_for_both_protocols()
     let env = Env::new().await;
     let path = format!("/api/iam/sso/oidc/authorize?tenant={}", env.tenant_c);
     let (status, _, bytes) = http_get(&env.stack.router, &path, None, None).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{}", String::from_utf8_lossy(&bytes));
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
     let authorize_code = json_of(&bytes)["code"].clone();
     assert_eq!(authorize_code, "SSO_PROVIDER_NOT_CONFIGURED");
 
@@ -510,9 +587,15 @@ async fn ac_s_109_an_unconfigured_tenant_gets_the_same_code_for_both_protocols()
         json!({ "username": "erin", "password": ERIN_PASSWORD }),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "{}", String::from_utf8_lossy(&bytes));
     assert_eq!(
-        json_of(&bytes)["code"], authorize_code,
+        status,
+        StatusCode::BAD_REQUEST,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
+    assert_eq!(
+        json_of(&bytes)["code"],
+        authorize_code,
         "两种协议在「未配置」时必须是同一个码"
     );
 }
@@ -545,6 +628,11 @@ async fn ac_s_109_changing_one_tenant_issuer_does_not_affect_another() {
     // tenant-b 现在是 503（发现文档拿不到）。
     let path = format!("/api/iam/sso/oidc/authorize?tenant={}", env.tenant_b);
     let (status, _, bytes) = http_get(&env.stack.router, &path, None, None).await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{}", String::from_utf8_lossy(&bytes));
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
     assert_eq!(json_of(&bytes)["code"], "SSO_OIDC_DISCOVERY_FAILED");
 }

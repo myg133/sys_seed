@@ -94,16 +94,21 @@ impl Env {
                 ..Default::default()
             },
         );
-        stack
-            .service
-            .set_sso_http_client(Arc::new(
-                platform_iam::sso::oidc::OidcHttpClient::new().expect("http 客户端"),
-            ));
+        stack.service.set_sso_http_client(Arc::new(
+            platform_iam::sso::oidc::OidcHttpClient::new().expect("http 客户端"),
+        ));
         stack.service.set_sso_frontend_base_url(FRONTEND_BASE);
         // `client_secret` **只在内存里**（唯一来源是环境变量，见 design §7）。
         stack.service.set_sso_oidc_client_secret(CANARY);
 
-        let user = register(&stack.router, &tenant, "bob", PASSWORD, Some("bob@example.com")).await;
+        let user = register(
+            &stack.router,
+            &tenant,
+            "bob",
+            PASSWORD,
+            Some("bob@example.com"),
+        )
+        .await;
         let user_id = user["id"].as_str().expect("id").to_string();
         let admin = admin_pool().await;
         sqlx::query(
@@ -154,7 +159,12 @@ impl Env {
             json!({ "ticket": ticket }),
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
         json_of(&bytes)
     }
 }
@@ -214,9 +224,8 @@ async fn ac_s_106_the_client_secret_never_appears_anywhere_readable() {
             "{}.{}.",
             {
                 use base64::Engine as _;
-                base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
-                    serde_json::to_vec(&json!({"alg":"none"})).expect("json"),
-                )
+                base64::engine::general_purpose::URL_SAFE_NO_PAD
+                    .encode(serde_json::to_vec(&json!({"alg":"none"})).expect("json"))
             },
             {
                 use base64::Engine as _;
@@ -235,7 +244,10 @@ async fn ac_s_106_the_client_secret_never_appears_anywhere_readable() {
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_string();
-    assert!(!error_location.contains(CANARY), "错误交接的 URL 不得带 secret");
+    assert!(
+        !error_location.contains(CANARY),
+        "错误交接的 URL 不得带 secret"
+    );
 
     // 2) 一次成功登录（日志 + 会话列表）。
     env.idp.set_behavior(|behavior| {
@@ -302,7 +314,10 @@ async fn ac_s_106_the_client_secret_never_appears_anywhere_readable() {
     .await
     .expect("阳性对照写入应成功");
     let control_hits = scan_config_tables(&env.admin, CANARY).await;
-    assert_eq!(control_hits, 1, "扫描器必须能命中注入的 canary（否则 0 命中不可信）");
+    assert_eq!(
+        control_hits, 1,
+        "扫描器必须能命中注入的 canary（否则 0 命中不可信）"
+    );
     sqlx::query("DELETE FROM platform_config WHERE key = 'ldapBaseDn'")
         .execute(&env.admin)
         .await
@@ -323,9 +338,13 @@ fn ac_s_106_the_twelve_keys_are_registered_as_tenant_scoped() {
     let manifest = repo_root().join("crates/platform-config/manifest.json");
     let raw = std::fs::read_to_string(&manifest).expect("manifest 应可读");
     let value: serde_json::Value = serde_json::from_str(&raw).expect("manifest 应是 JSON");
-    let config = value["config"].as_object().expect("manifest 应有 config 段");
+    let config = value["config"]
+        .as_object()
+        .expect("manifest 应有 config 段");
     for key in platform_iam::sso::config::SSO_CONFIG_KEYS {
-        let entry = config.get(key).unwrap_or_else(|| panic!("manifest 缺少 {key}"));
+        let entry = config
+            .get(key)
+            .unwrap_or_else(|| panic!("manifest 缺少 {key}"));
         assert_eq!(entry["scope"], "tenant", "{key} 的 scope 必须是 tenant");
     }
     // `client_secret` **不在**这 12 个键里（AC-S-106 / §3）。
@@ -358,10 +377,24 @@ fn provider_kinds(body: &serde_json::Value) -> Vec<String> {
 async fn ac_s_021_enforced_sso_rejects_local_login_without_touching_argon2() {
     let env = Env::new().await;
     // 前置：tenant-a 有本地账号 alice。
-    register(&env.stack.router, &env.tenant, "alice", PASSWORD, Some("alice@example.com")).await;
+    register(
+        &env.stack.router,
+        &env.tenant,
+        "alice",
+        PASSWORD,
+        Some("alice@example.com"),
+    )
+    .await;
     // 另一个租户（未开强制 SSO），有自己的 alice。
     let tenant_b = unique_tenant("cfg-b");
-    register(&env.stack.router, &tenant_b, "alice", PASSWORD, Some("alice@example.com")).await;
+    register(
+        &env.stack.router,
+        &tenant_b,
+        "alice",
+        PASSWORD,
+        Some("alice@example.com"),
+    )
+    .await;
 
     let mut config = env.config.snapshot();
     config.enforce = true;
@@ -400,7 +433,12 @@ async fn ac_s_021_enforced_sso_rejects_local_login_without_touching_argon2() {
         (status_wrong, &bytes_wrong),
         (status_nobody, &bytes_nobody),
     ] {
-        assert_eq!(status, StatusCode::FORBIDDEN, "{}", String::from_utf8_lossy(bytes));
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "{}",
+            String::from_utf8_lossy(bytes)
+        );
         let body = json_of(bytes);
         assert_eq!(body["code"], "SSO_REQUIRED");
         // `params.ssoProviders` 必须是**可用 provider 列表**（AC-S-021 预期 1 / rev 3.3 Q5）。
@@ -426,11 +464,9 @@ async fn ac_s_021_enforced_sso_rejects_local_login_without_touching_argon2() {
 
     // 3) **Argon2id 调用次数 == 0**（密码校验之前就返回）。
     assert_eq!(
-        after,
-        before,
+        after, before,
         "强制 SSO 时不得跑任何 Argon2 校验（实测 {} → {}）",
-        before,
-        after
+        before, after
     );
 
     // 4) 另一个租户不受影响（enforce 是租户级）—— 这里用同一份配置快照，
@@ -447,7 +483,12 @@ async fn ac_s_021_enforced_sso_rejects_local_login_without_touching_argon2() {
         json!({ "username": "alice", "password": PASSWORD }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
     assert!(
         platform_iam::password::argon2_invocation_count() > before,
         "对照组：enforce=false 时必须真的跑 Argon2（否则计数没有区分力）"
@@ -462,7 +503,12 @@ async fn ac_s_021_enforced_sso_rejects_local_login_without_touching_argon2() {
         json!({ "username": "alice", "password": PASSWORD }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
 }
 
 /// 配置读取失败 → **fail closed**（403）+ warn 级可观测行（AC-S-021 步骤 8 / S16）。
@@ -472,13 +518,20 @@ async fn ac_s_021_an_unreadable_config_fails_closed() {
     let app_url = setup_database().await;
     let stack = build_stack(&app_url).await;
     let tenant = unique_tenant("cfg-fail");
-    register(&stack.router, &tenant, "alice", PASSWORD, Some("alice@example.com")).await;
+    register(
+        &stack.router,
+        &tenant,
+        "alice",
+        PASSWORD,
+        Some("alice@example.com"),
+    )
+    .await;
 
     // 注入一个**永远读失败**的配置源。
     assert!(
-        stack.service.set_sso_config_source(Arc::new(
-            platform_iam::sso::config::FailingSsoConfigSource
-        )),
+        stack
+            .service
+            .set_sso_config_source(Arc::new(platform_iam::sso::config::FailingSsoConfigSource)),
         "配置源应能注入"
     );
 
@@ -538,7 +591,14 @@ async fn ac_s_104_ldap_passwords_and_dns_never_reach_the_logs() {
     });
     assert!(stack.service.set_sso_ldap_client(ldap));
 
-    let user = register(&stack.router, &tenant, "logan", PASSWORD, Some("logan@example.com")).await;
+    let user = register(
+        &stack.router,
+        &tenant,
+        "logan",
+        PASSWORD,
+        Some("logan@example.com"),
+    )
+    .await;
     let user_id = user["id"].as_str().expect("id").to_string();
     let admin = admin_pool().await;
     sqlx::query(
@@ -566,10 +626,7 @@ async fn ac_s_104_ldap_passwords_and_dns_never_reach_the_logs() {
     }
 
     let text = logs.text();
-    assert!(
-        !text.contains(LDAP_PASSWORD),
-        "LDAP 密码不得进日志"
-    );
+    assert!(!text.contains(LDAP_PASSWORD), "LDAP 密码不得进日志");
     assert!(
         !text.contains(DN),
         "用户 DN 不得进日志（AC-S-020 步骤 6：不泄露 DN）"

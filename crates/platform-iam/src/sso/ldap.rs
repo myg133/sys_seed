@@ -13,8 +13,11 @@
 //! **密码错误时外层仍是 `Ok`** —— `rc = 49`（`invalidCredentials`）装在 `LdapResult` 里。
 //! 直接 `simple_bind(..).await?` 当成功 → **任意密码都能登录**。
 //!
-//! 所以生产实现**必须**再 `.success()` 判 `rc == 0`
-//! （正确用法先例：`platform-org/src/ldap.rs:481-495`）。
+//! 所以**判定点不在包装层**（D129）：[`SsoLdapConn::simple_bind`] 原样返回
+//! `LdapResult`，由 [`authenticate`] 用 [`bind_result`] 读 `rc == 0` 做判定。
+//! 包装层只透传，判定在 service 层 —— 那一层能被 `Ok(LdapResult { rc: 49, .. })`
+//! 的测试替身直接驱动，于是「把判定删掉」会被用例抓住，而不是靠人眼看源码。
+//! （正确用法先例：`platform-org/src/ldap.rs:481-495`。）
 //!
 //! # 为什么要有 trait（P12）
 //!
@@ -104,12 +107,19 @@ pub trait SsoLdapConn: Send + Sync {
         attrs: &[&str],
     ) -> SsoBoxFuture<'_, Result<Vec<LdapEntry>, SsoLdapError>>;
 
-    /// 用 `dn` + `pw` 做 simple bind。
+    /// 用 `dn` + `pw` 做 simple bind，**原样**返回协议结果。
     ///
-    /// 返回 `Ok(true)` = **`rc == 0`**（认证成功）；`Ok(false)` = `rc != 0`（凭据错）。
-    /// 实现**必须**显式检查结果码 —— 见模块文档的 S18。
-    fn simple_bind(&mut self, dn: &str, pw: &str)
-    -> SsoBoxFuture<'_, Result<bool, SsoLdapError>>;
+    /// **本方法不做「成功 / 失败」的判定**（D129）—— 外层 `Ok` 只代表
+    /// 「请求发出并收到响应」，`rc != 0`（如 `49`）仍在 `LdapResult` 里（S18）。
+    ///
+    /// 判定统一由调用方用 [`bind_result`] 做（见 [`authenticate`]）。
+    /// 这样「把判定改坏」会被 service 层的用例直接抓到：测试替身返回
+    /// `Ok(LdapResult { rc: 49, .. })` 时会**流到**那一行判据上。
+    fn simple_bind(
+        &mut self,
+        dn: &str,
+        pw: &str,
+    ) -> SsoBoxFuture<'_, Result<ldap3::LdapResult, SsoLdapError>>;
 }
 
 /// LDAP 客户端（每次登录新建连接，见 design §5.2：不做连接池）。
@@ -127,16 +137,19 @@ pub fn is_empty_password(password: &str) -> bool {
 
 /// `simple_bind` 的结果码 → 认证是否成功。
 ///
-/// # 为什么单独抽成纯函数（P16，D128 / Q4）
+/// # 为什么单独抽成纯函数（P16，D128 / Q4 / D129）
 ///
 /// 「`rc != 0` → 失败」这一行是**「任意密码都能登录」的唯一防线**。
-/// 在生产包装层里它无法被机械验证 —— 要驱动 [`Ldap3Conn::simple_bind`] 必须有一条
-/// 真实的 LDAP 连接（`ldap3` 没有服务端/内存实现），而所有测试走的都是
-/// 可计数的 [`SsoLdapConn`] 替身，**直接返回 `Ok(false)`**，正好跳过这一行。
+/// 它一旦被写死在 [`Ldap3Conn::simple_bind`] 里就无法被机械验证 ——
+/// 要驱动那一层必须有一条真实的 LDAP 连接（`ldap3` 没有服务端/内存实现）。
 ///
-/// 抽成纯函数后，`rc = 0 / 49 / 32` 的映射可以被直接断言；
-/// 并且有一条断言把本函数与 `ldap3::LdapResult::success()` 的语义**逐值对齐** ——
-/// 这样「实现改回 `simple_bind(..).await?` 当成功」这类回归会立刻变红。
+/// D129 之后判定点已经上移到 service 层（[`authenticate`] 里的
+/// `bind_result(&conn.simple_bind(..).await?)`）：包装层只透传 `LdapResult`，
+/// 于是测试替身可以返回 `Ok(LdapResult { rc: 49, .. })` **流到**判定那一行，
+/// 「把判定改坏」会让 service 层的用例直接变红。
+///
+/// 本函数则继续守住 `rc → bool` 的映射本身（含与 `ldap3::LdapResult::success()`
+/// 的逐值对齐），这样判据与「有没有调用它」各有各的观测面。
 pub fn bind_succeeded(rc: u32) -> bool {
     rc == 0
 }
@@ -144,8 +157,10 @@ pub fn bind_succeeded(rc: u32) -> bool {
 /// 从一个**真实的** `ldap3::LdapResult` 判定认证是否成功。
 ///
 /// 这一层存在的理由：让「`rc` 被真的读出来」这件事有一个**可被直接驱动的类型**。
-/// 生产包装层只写 `Ok(bind_result(&result))` —— 于是 `rc → bool` 的映射
-/// 既被 [`bind_succeeded`] 的纯函数单测覆盖，又被本函数的真实 `LdapResult` 用例覆盖。
+/// 它是 [`authenticate`] 两处 bind 调用的判据（D129 把判定点放在 service 层），
+/// 于是 `rc → bool` 的映射既被 [`bind_succeeded`] 的纯函数单测覆盖，
+/// 又被本函数的真实 `LdapResult` 用例覆盖，还被 service 层那些
+/// 注入 `Ok(LdapResult { rc: 49, .. })` 的用例覆盖「有没有真的调用它」。
 ///
 /// 它**不接受** `Result`：外层 `Ok` 只代表「请求发出并收到响应」，
 /// 与认证成败无关（S18）—— 把这一区分做进签名，误用就写不出来。
@@ -219,7 +234,7 @@ pub async fn authenticate(
 
     // 1) 服务账号 bind（用于 search）。未配置凭据 → 匿名 bind（**仍是一次 bind**）。
     let (service_dn, service_password) = service_bind.unwrap_or(("", ""));
-    if !conn.simple_bind(service_dn, service_password).await? {
+    if !bind_result(&conn.simple_bind(service_dn, service_password).await?) {
         return Err(SsoLdapError::Bind);
     }
 
@@ -227,11 +242,7 @@ pub async fn authenticate(
     let filter = build_user_filter(settings, username);
     let mail_attribute = settings.mail_attribute.to_ascii_lowercase();
     let entries = conn
-        .search(
-            &settings.base_dn,
-            &filter,
-            &[mail_attribute.as_str()],
-        )
+        .search(&settings.base_dn, &filter, &[mail_attribute.as_str()])
         .await?;
 
     // 0 条 = 用户不存在；多条 = 有歧义。两者都当作「认证失败」（不暴露细节）。
@@ -242,7 +253,11 @@ pub async fn authenticate(
     };
 
     // 3) 用用户凭据 bind —— **必须**判 `rc == 0`（S18）。
-    if !conn.simple_bind(&entry.dn, password).await? {
+    //
+    //    判定在这里，不在包装层：包装层只透传 `LdapResult`（D129），
+    //    所以这一行是「任意密码都能登录」的**唯一防线**，且它在 service 层，
+    //    能被注入 `Ok(LdapResult { rc: 49, .. })` 的替身直接驱动。
+    if !bind_result(&conn.simple_bind(&entry.dn, password).await?) {
         return Err(SsoLdapError::Bind);
     }
 
@@ -331,21 +346,18 @@ impl SsoLdapConn for Ldap3Conn {
         &mut self,
         dn: &str,
         pw: &str,
-    ) -> SsoBoxFuture<'_, Result<bool, SsoLdapError>> {
+    ) -> SsoBoxFuture<'_, Result<ldap3::LdapResult, SsoLdapError>> {
         let dn = dn.to_string();
         let pw = pw.to_string();
         Box::pin(async move {
-            // ⚠️ 外层 `Ok` 只代表「请求发出并收到响应」；`rc != 0`（如 rc=49）才是密码错。
-            //
-            // 判定**必须**经过 [`bind_result`] / [`bind_succeeded`]（P16）——
-            // 那一行是「任意密码都能登录」的唯一防线，抽成纯函数后才能被单测机械验证
-            // （见本文件 `mod tests`）。
-            let result = self
-                .ldap
+            // 本层**不做判定**，只把协议结果原样透传（D129）：
+            // 「外层 `Ok` 即成功」是 S18 的坑，把判定留在这里就无法被测试驱动
+            // （`ldap3` 没有服务端/内存实现）。判定在 [`authenticate`] 里，
+            // 用 [`bind_result`] 读 `rc`。
+            self.ldap
                 .simple_bind(&dn, &pw)
                 .await
-                .map_err(|_| SsoLdapError::Bind)?;
-            Ok(bind_result(&result))
+                .map_err(|_| SsoLdapError::Bind)
         })
     }
 }
@@ -462,11 +474,11 @@ mod tests {
     /// **P16 选项 (B)**：用构造的 `ldap3::LdapResult { rc: 49, .. }` 驱动生产用的判定函数，
     /// 断言 `false`；`rc = 0` 断言 `true`。
     ///
-    /// 这条是生产包装层 `Ldap3Conn::simple_bind` 里那一行的**来源**：
-    /// 包装层现在只写 `Ok(bind_result(&result))`，所以这里断言的行为就是生产的判定行为。
+    /// 这条守的是判据的**函数体**；「生产有没有调用它」由 `tests/sso_ldap.rs` 守 ——
+    /// 那里注入的 `RecordingLdap` 返回 `Ok(LdapResult { rc: 49, .. })`，
+    /// 流到 [`authenticate`] 的判定行上，把该行改成恒成功就会红（D129）。
     ///
-    /// 会红的情形：`bind_result` 改成 `true` / 改成 `result.success().is_ok() || true` /
-    /// 包装层改回「外层 `Ok` 即成功」（那时 `Ok(result)` 里根本读不到 rc）。
+    /// 会红的情形：`bind_result` 改成 `true` / 改成 `result.success().is_ok() || true`。
     #[test]
     fn a_real_ldap_result_with_rc_49_is_a_failed_bind() {
         let result = |rc: u32| ldap3::LdapResult {

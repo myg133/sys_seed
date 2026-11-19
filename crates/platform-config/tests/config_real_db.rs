@@ -1716,7 +1716,10 @@ async fn a_dotted_boolean_key_is_writable_as_config_and_rejected_as_a_flag() {
     let ctx = ctx(TENANT_A);
 
     // 1) Scoped 写路由：**成功**，且值真的落到**本租户**那一行。
-    for (key, value) in [("sso.enforce", json!(true)), ("sso.jitProvisioning", json!(false))] {
+    for (key, value) in [
+        ("sso.enforce", json!(true)),
+        ("sso.jitProvisioning", json!(false)),
+    ] {
         let written = write_tenant(&fx, &ctx, key, value.clone())
             .await
             .unwrap_or_else(|error| {

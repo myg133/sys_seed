@@ -33,15 +33,22 @@ impl Env {
                 ..Default::default()
             },
         );
+        stack.service.set_sso_http_client(std::sync::Arc::new(
+            platform_iam::sso::oidc::OidcHttpClient::new().expect("http 客户端"),
+        ));
+        stack.service.set_sso_frontend_base_url(FRONTEND_BASE);
         stack
             .service
-            .set_sso_http_client(std::sync::Arc::new(
-                platform_iam::sso::oidc::OidcHttpClient::new().expect("http 客户端"),
-            ));
-        stack.service.set_sso_frontend_base_url(FRONTEND_BASE);
-        stack.service.set_sso_oidc_client_secret("SECRET-CANARY-oidc");
+            .set_sso_oidc_client_secret("SECRET-CANARY-oidc");
 
-        let user = register(&stack.router, &tenant, "bob", PASSWORD, Some("bob@example.com")).await;
+        let user = register(
+            &stack.router,
+            &tenant,
+            "bob",
+            PASSWORD,
+            Some("bob@example.com"),
+        )
+        .await;
         let user_id = user["id"].as_str().expect("id").to_string();
         let admin = admin_pool().await;
         sqlx::query(
@@ -81,7 +88,12 @@ impl Env {
             query["state"]
         );
         let (status, headers, bytes) = http_get(&self.stack.router, &callback, None, None).await;
-        assert_eq!(status, StatusCode::FOUND, "{}", String::from_utf8_lossy(&bytes));
+        assert_eq!(
+            status,
+            StatusCode::FOUND,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
         headers
             .get(axum::http::header::LOCATION)
             .and_then(|value| value.to_str().ok())
@@ -89,7 +101,11 @@ impl Env {
             .to_string()
     }
 
-    async fn exchange(&self, ticket: &str, tenant: Option<&str>) -> (StatusCode, serde_json::Value) {
+    async fn exchange(
+        &self,
+        ticket: &str,
+        tenant: Option<&str>,
+    ) -> (StatusCode, serde_json::Value) {
         let (status, _, bytes) = post_json(
             &self.stack.router,
             "/api/iam/sso/exchange",
@@ -103,7 +119,10 @@ impl Env {
 }
 
 fn ticket_of(location: &str) -> String {
-    let query = location.split_once('?').map(|(_, query)| query).unwrap_or("");
+    let query = location
+        .split_once('?')
+        .map(|(_, query)| query)
+        .unwrap_or("");
     query
         .split('&')
         .filter_map(|pair| pair.split_once('='))
@@ -121,7 +140,13 @@ async fn p4_the_callback_location_carries_only_a_ticket() {
         "必须落在前端回调页：{location}"
     );
     assert!(location.contains("ticket="), "{location}");
-    for forbidden in ["accessToken", "access_token", "refreshToken", "refresh_token", "id_token"] {
+    for forbidden in [
+        "accessToken",
+        "access_token",
+        "refreshToken",
+        "refresh_token",
+        "id_token",
+    ] {
         assert!(
             !location.contains(forbidden),
             "token 不得进 URL（§8）：{location}"
@@ -303,7 +328,10 @@ async fn the_sso_migration_is_reversible() {
             .expect("既有行应还在");
     assert_eq!(provider, "local");
 
-    sqlx::raw_sql(&down).execute(&probe).await.expect("down 应成功");
+    sqlx::raw_sql(&down)
+        .execute(&probe)
+        .await
+        .expect("down 应成功");
     let tables: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM information_schema.tables \
          WHERE table_schema = 'public' AND table_name IN \
@@ -319,7 +347,10 @@ async fn the_sso_migration_is_reversible() {
         .expect("既有表必须还在");
     assert_eq!(session_rows, 1, "down 不得丢既有数据");
 
-    sqlx::raw_sql(&up).execute(&probe).await.expect("再次 up 应成功");
+    sqlx::raw_sql(&up)
+        .execute(&probe)
+        .await
+        .expect("再次 up 应成功");
 
     probe.close().await;
     sqlx::query(&format!("DROP DATABASE {name}"))

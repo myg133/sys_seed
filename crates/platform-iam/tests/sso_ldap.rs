@@ -47,7 +47,14 @@ impl Env {
 
         let admin = admin_pool().await;
         // 前置：`erin` 已绑定（认证路径不做 JIT 时的真实形态）。
-        let user = register(&stack.router, &tenant, "erin", PASSWORD, Some("erin@example.com")).await;
+        let user = register(
+            &stack.router,
+            &tenant,
+            "erin",
+            PASSWORD,
+            Some("erin@example.com"),
+        )
+        .await;
         let user_id = user["id"].as_str().expect("id").to_string();
         sqlx::query(
             "INSERT INTO external_identity (tenant_id, id, provider, external_id, user_id) \
@@ -139,7 +146,12 @@ async fn ac_s_104_a_wrong_password_and_an_unknown_user_are_indistinguishable() {
         );
     }
     let keys = |value: &serde_json::Value| -> std::collections::BTreeSet<String> {
-        value.as_object().expect("应是对象").keys().cloned().collect()
+        value
+            .as_object()
+            .expect("应是对象")
+            .keys()
+            .cloned()
+            .collect()
     };
     assert_eq!(keys(&ghost_body), keys(&wrong_body));
 }
@@ -265,7 +277,12 @@ async fn ac_s_105_ldap_and_local_login_reach_the_same_account() {
         json!({ "username": "erin", "password": PASSWORD }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
     let local = json_of(&bytes);
     let local_id = local["user"]["id"].as_str().expect("id").to_string();
 

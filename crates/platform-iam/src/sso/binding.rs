@@ -175,15 +175,7 @@ async fn link_existing(
         return Err(IamError::SsoIdentityLinkConflict);
     }
 
-    let created = create_binding(
-        store,
-        ctx,
-        provider,
-        external_id,
-        &user.id,
-        Some(&user),
-    )
-    .await?;
+    let created = create_binding(store, ctx, provider, external_id, &user.id, Some(&user)).await?;
     Ok(BindingOutcome {
         user,
         created_user: false,
@@ -238,7 +230,8 @@ async fn provision(
         // （本租户已有同名账号）→ 409，不接管既有账号（P8）。
         .ok_or(IamError::SsoIdentityLinkConflict)?;
 
-    let created_link = create_binding(store, ctx, provider, external_id, &user.id, Some(&user)).await?;
+    let created_link =
+        create_binding(store, ctx, provider, external_id, &user.id, Some(&user)).await?;
     Ok(BindingOutcome {
         user,
         created_user: inserted > 0,
@@ -327,7 +320,10 @@ mod tests {
 
     #[test]
     fn username_is_the_local_part_of_the_email() {
-        assert_eq!(username_from_email("carol@example.com").as_deref(), Some("carol"));
+        assert_eq!(
+            username_from_email("carol@example.com").as_deref(),
+            Some("carol")
+        );
         assert_eq!(
             username_from_email("first.last@example.com").as_deref(),
             Some("first.last")

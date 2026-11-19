@@ -193,9 +193,8 @@ pub async fn build_stack(app_url: &str) -> Stack {
     let tenant_db = TenantDb::connect(app_url, DbOptions::default())
         .await
         .expect("应用角色连接串应可解析");
-    let service = Arc::new(
-        IamService::new(IamStore::new(tenant_db), test_config()).expect("服务应当能构造"),
-    );
+    let service =
+        Arc::new(IamService::new(IamStore::new(tenant_db), test_config()).expect("服务应当能构造"));
     let state = Arc::new(IamState {
         service: service.clone(),
     });
@@ -317,7 +316,10 @@ pub fn location_query(headers: &axum::http::HeaderMap) -> HashMap<String, String
         .get(header::LOCATION)
         .and_then(|value| value.to_str().ok())
         .expect("响应必须带 Location");
-    let query = location.split_once('?').map(|(_, query)| query).unwrap_or("");
+    let query = location
+        .split_once('?')
+        .map(|(_, query)| query)
+        .unwrap_or("");
     query
         .split('&')
         .filter(|pair| !pair.is_empty())
@@ -334,11 +336,7 @@ pub fn location_path(headers: &axum::http::HeaderMap) -> String {
         .get(header::LOCATION)
         .and_then(|value| value.to_str().ok())
         .expect("响应必须带 Location");
-    location
-        .split('?')
-        .next()
-        .unwrap_or_default()
-        .to_string()
+    location.split('?').next().unwrap_or_default().to_string()
 }
 
 fn percent_decode(raw: &str) -> String {
@@ -375,7 +373,12 @@ pub async fn register(
 ) -> Value {
     let body = json!({ "username": username, "password": password, "email": email });
     let (status, _, bytes) = post_json(router, "/api/iam/register", Some(tenant), None, body).await;
-    assert_eq!(status, StatusCode::CREATED, "注册应成功：{}", String::from_utf8_lossy(&bytes));
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "注册应成功：{}",
+        String::from_utf8_lossy(&bytes)
+    );
     json_of(&bytes)
 }
 
@@ -641,7 +644,10 @@ impl MockState {
     fn rotate(&self) {
         let next = format!("kid-{}", self.keys.lock().expect("锁").len() + 1);
         let (kid, encoding, jwk) = new_key(&next);
-        self.keys.lock().expect("锁").push((kid.clone(), encoding, jwk));
+        self.keys
+            .lock()
+            .expect("锁")
+            .push((kid.clone(), encoding, jwk));
         *self.current_kid.lock().expect("锁") = kid;
     }
 
@@ -681,7 +687,10 @@ async fn discovery(State(state): State<Arc<MockState>>) -> Response {
         return (StatusCode::OK, body).into_response();
     }
     if let Some(status) = behavior.discovery_status {
-        return (StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), "{}")
+        return (
+            StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+            "{}",
+        )
             .into_response();
     }
     axum::Json(json!({
@@ -704,14 +713,14 @@ async fn jwks(State(state): State<Arc<MockState>>) -> Response {
 
 async fn authorize(State(state): State<Arc<MockState>>) -> Response {
     // mock 的授权端点只用于「302 到 IdP」的落点断言；这里返回 200 占位。
-    (StatusCode::OK, axum::Json(json!({ "status": "authorized", "issuer": state.issuer })))
+    (
+        StatusCode::OK,
+        axum::Json(json!({ "status": "authorized", "issuer": state.issuer })),
+    )
         .into_response()
 }
 
-async fn token(
-    State(state): State<Arc<MockState>>,
-    body: String,
-) -> Response {
+async fn token(State(state): State<Arc<MockState>>, body: String) -> Response {
     let behavior = state.behavior.lock().expect("锁").clone();
     if let Some(status) = behavior.token_status {
         return (
@@ -740,7 +749,9 @@ async fn token(
     if form.get("redirect_uri") != Some(&entry.redirect_uri) {
         return (
             StatusCode::BAD_REQUEST,
-            axum::Json(json!({ "error": "invalid_grant", "error_description": "redirect mismatch" })),
+            axum::Json(
+                json!({ "error": "invalid_grant", "error_description": "redirect mismatch" }),
+            ),
         )
             .into_response();
     }
@@ -815,9 +826,7 @@ async fn token(
 mod sso_tls {
     use std::sync::Arc;
 
-    use rcgen::{
-        BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose,
-    };
+    use rcgen::{BasicConstraints, CertificateParams, DnType, IsCa, KeyPair, KeyUsagePurpose};
     use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 
     /// 造一套「测试根 CA + localhost leaf」，返回 (根证书 DER, 服务端 rustls 配置)。
@@ -1001,9 +1010,7 @@ impl SsoLdapClient for RecordingLdap {
             }
         }
         let state = self.state.clone();
-        Box::pin(async move {
-            Ok(Box::new(RecordingConn { state }) as Box<dyn SsoLdapConn>)
-        })
+        Box::pin(async move { Ok(Box::new(RecordingConn { state }) as Box<dyn SsoLdapConn>) })
     }
 }
 
@@ -1065,7 +1072,7 @@ impl SsoLdapConn for RecordingConn {
         &mut self,
         dn: &str,
         pw: &str,
-    ) -> SsoBoxFuture<'_, Result<bool, SsoLdapError>> {
+    ) -> SsoBoxFuture<'_, Result<ldap3::LdapResult, SsoLdapError>> {
         let dn = dn.to_string();
         let pw = pw.to_string();
         let state = self.state.clone();
@@ -1075,15 +1082,30 @@ impl SsoLdapConn for RecordingConn {
 
             // 服务账号（dn 为空）→ 按配置的开关。
             if dn.is_empty() {
-                return Ok(guard.service_bind_ok);
+                return Ok(ldap_result(if guard.service_bind_ok { 0 } else { 49 }));
             }
             let matched = guard
                 .users
                 .iter()
                 .find(|user| user.dn == dn)
                 .is_some_and(|user| user.password == pw);
-            Ok(matched)
+            // rc=0 = success；rc=49 = invalidCredentials。
+            //
+            // 这里**不返回 bool**：判定在生产 service 层（D129）。替身只回「目录怎么说」，
+            // 所以生产那一行判据被改坏时，`rc=49` 会流到它上面而让用例变红。
+            Ok(ldap_result(if matched { 0 } else { 49 }))
         })
+    }
+}
+
+/// 构造一个 `ldap3::LdapResult`（只有 `rc` 有语义，其余字段留空）。
+fn ldap_result(rc: u32) -> ldap3::LdapResult {
+    ldap3::LdapResult {
+        rc,
+        matched: String::new(),
+        text: String::new(),
+        refs: Vec::new(),
+        ctrls: Vec::new(),
     }
 }
 

@@ -38,13 +38,13 @@ impl Env {
                 ..Default::default()
             },
         );
+        stack.service.set_sso_http_client(Arc::new(
+            platform_iam::sso::oidc::OidcHttpClient::new().expect("http 客户端"),
+        ));
+        stack.service.set_sso_frontend_base_url(FRONTEND_BASE);
         stack
             .service
-            .set_sso_http_client(Arc::new(
-                platform_iam::sso::oidc::OidcHttpClient::new().expect("http 客户端"),
-            ));
-        stack.service.set_sso_frontend_base_url(FRONTEND_BASE);
-        stack.service.set_sso_oidc_client_secret("SECRET-CANARY-oidc");
+            .set_sso_oidc_client_secret("SECRET-CANARY-oidc");
         let admin = admin_pool().await;
         Self {
             stack,
@@ -62,7 +62,12 @@ impl Env {
     }
 
     /// 走一次完整的 OIDC 登录，返回 (状态码, body)。
-    async fn login_as(&self, sub: &str, email: &str, tenant: &str) -> (StatusCode, serde_json::Value) {
+    async fn login_as(
+        &self,
+        sub: &str,
+        email: &str,
+        tenant: &str,
+    ) -> (StatusCode, serde_json::Value) {
         // IdP 侧的 sub / email 由 claims_override 决定。
         self.idp.set_behavior(|behavior| {
             behavior
@@ -74,7 +79,12 @@ impl Env {
         });
         let path = format!("/api/iam/sso/oidc/authorize?tenant={tenant}");
         let (status, headers, bytes) = http_get(&self.stack.router, &path, None, None).await;
-        assert_eq!(status, StatusCode::FOUND, "{}", String::from_utf8_lossy(&bytes));
+        assert_eq!(
+            status,
+            StatusCode::FOUND,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
         let query = location_query(&headers);
         let code = format!("code-{}", uuid::Uuid::new_v4().simple());
         self.idp.register_code(
@@ -89,7 +99,12 @@ impl Env {
             query["state"]
         );
         let (status, headers, bytes) = http_get(&self.stack.router, &callback, None, None).await;
-        assert_eq!(status, StatusCode::FOUND, "{}", String::from_utf8_lossy(&bytes));
+        assert_eq!(
+            status,
+            StatusCode::FOUND,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
         let callback_query = location_query(&headers);
         let Some(ticket) = callback_query.get("ticket") else {
             // 失败分支：把错误码换成 HTTP 状态给调用方断言。
@@ -170,7 +185,10 @@ async fn ac_s_103_with_jit_on_a_new_account_is_provisioned_once() {
     .expect("应能读到账号");
     assert_eq!(email.as_deref(), Some(CAROL_MAIL));
     assert_eq!(username, "carol");
-    assert!(hash.starts_with("$argon2id$"), "占位必须是合法 PHC 串：{hash}");
+    assert!(
+        hash.starts_with("$argon2id$"),
+        "占位必须是合法 PHC 串：{hash}"
+    );
     // 占位串**不得**能被任何常见口令登进来。
     assert!(
         !platform_iam::password::verify_password("", &hash)
@@ -209,14 +227,18 @@ async fn ac_s_103_a_disabled_account_is_not_bypassed_by_sso() {
     .execute(&env.admin)
     .await
     .expect("绑定应能写入");
-    sqlx::query("UPDATE platform_iam_user SET status = 'disabled' WHERE tenant_id = $1 AND id = $2")
-        .bind(&env.tenant)
-        .bind(&dave_id)
-        .execute(&env.admin)
-        .await
-        .expect("禁用应成功");
+    sqlx::query(
+        "UPDATE platform_iam_user SET status = 'disabled' WHERE tenant_id = $1 AND id = $2",
+    )
+    .bind(&env.tenant)
+    .bind(&dave_id)
+    .execute(&env.admin)
+    .await
+    .expect("禁用应成功");
 
-    let (status, body) = env.login_as("idp-dave-001", "dave@example.com", &env.tenant).await;
+    let (status, body) = env
+        .login_as("idp-dave-001", "dave@example.com", &env.tenant)
+        .await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert_eq!(body["code"], "ACCOUNT_DISABLED");
 }
@@ -298,7 +320,9 @@ async fn ac_s_103_a_repointed_binding_is_a_conflict_and_is_not_rewritten() {
     env.set_jit(true);
 
     // eve 先正常绑定。
-    let (status, body) = env.login_as("idp-eve-001", "eve@example.com", &env.tenant).await;
+    let (status, body) = env
+        .login_as("idp-eve-001", "eve@example.com", &env.tenant)
+        .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let eve_id = body["user"]["id"].as_str().expect("id").to_string();
 
@@ -325,7 +349,9 @@ async fn ac_s_103_a_repointed_binding_is_a_conflict_and_is_not_rewritten() {
     .expect("改指应成功");
 
     // 登录：目录说这个身份是 eve@example.com，库里却绑给了别人 → 409。
-    let (status, body) = env.login_as("idp-eve-001", "eve@example.com", &env.tenant).await;
+    let (status, body) = env
+        .login_as("idp-eve-001", "eve@example.com", &env.tenant)
+        .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["code"], "SSO_IDENTITY_LINK_CONFLICT");
 

@@ -615,9 +615,11 @@ mod tests {
         // 既有契约**不变**：dimension-free 的布尔键仍是 flag。
         assert!(registry.is_flag("beta"));
         assert!(registry.is_flag("newInvoice"));
-        assert!(registry
-            .get("flags.beta.rolloutPercent")
-            .is_some_and(|registered| registered.kind == ConfigType::Number));
+        assert!(
+            registry
+                .get("flags.beta.rolloutPercent")
+                .is_some_and(|registered| registered.kind == ConfigType::Number)
+        );
     }
 
     #[test]

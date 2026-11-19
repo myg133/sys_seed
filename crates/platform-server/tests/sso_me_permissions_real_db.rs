@@ -34,8 +34,8 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use platform_core::extension::permission::{DataScope, PermissionProvider};
 use platform_core::RequestContext;
+use platform_core::extension::permission::{DataScope, PermissionProvider};
 use platform_iam::config::{
     Argon2Settings, IamConfig, JwtSettings, LoginSettings, PasswordPolicySettings, TokenSettings,
     TotpSettings,
@@ -144,11 +144,9 @@ impl MiniIdp {
         // 一把 ES256 密钥（与生产验签白名单一致）。
         let pem = platform_iam::jwt::generate_key_pair().expect("密钥");
         let encoding = jsonwebtoken::EncodingKey::from_ec_pem(pem.as_bytes()).expect("PEM");
-        let mut jwk = jsonwebtoken::jwk::Jwk::from_encoding_key(
-            &encoding,
-            jsonwebtoken::Algorithm::ES256,
-        )
-        .expect("应能导出公钥");
+        let mut jwk =
+            jsonwebtoken::jwk::Jwk::from_encoding_key(&encoding, jsonwebtoken::Algorithm::ES256)
+                .expect("应能导出公钥");
         jwk.common.key_id = Some("kid-test".to_string());
 
         let mut keys = BTreeMap::new();
@@ -242,10 +240,7 @@ async fn token(
             .into_response();
     }
 
-    let (encoding, _) = state
-        .keys
-        .get(&state.kid)
-        .expect("当前密钥应存在");
+    let (encoding, _) = state.keys.get(&state.kid).expect("当前密钥应存在");
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
     let header = jsonwebtoken::Header {
         alg: jsonwebtoken::Algorithm::ES256,
@@ -324,22 +319,24 @@ async fn world() -> World {
 
     // 1) IAM（真实服务）+ SSO 配置源。
     let iam = Arc::new(
-        IamService::new(IamStore::new(tenant_db.clone()), test_config())
-            .expect("IAM 应当能构造"),
+        IamService::new(IamStore::new(tenant_db.clone()), test_config()).expect("IAM 应当能构造"),
     );
     assert!(
-        iam.set_sso_config_source(Arc::new(platform_iam::sso::config::StaticSsoConfigSource::new(
-            platform_iam::sso::config::SsoConfig {
-                oidc: platform_iam::sso::config::OidcSettings {
-                    enabled: true,
-                    issuer: idp.issuer.clone(),
-                    client_id: "client-1".to_string(),
-                    scopes: "openid email profile".to_string(),
-                    redirect_uri: "http://app.example.com/api/iam/sso/oidc/callback".to_string(),
+        iam.set_sso_config_source(Arc::new(
+            platform_iam::sso::config::StaticSsoConfigSource::new(
+                platform_iam::sso::config::SsoConfig {
+                    oidc: platform_iam::sso::config::OidcSettings {
+                        enabled: true,
+                        issuer: idp.issuer.clone(),
+                        client_id: "client-1".to_string(),
+                        scopes: "openid email profile".to_string(),
+                        redirect_uri: "http://app.example.com/api/iam/sso/oidc/callback"
+                            .to_string(),
+                    },
+                    ..Default::default()
                 },
-                ..Default::default()
-            },
-        ))),
+            )
+        )),
         "SSO 配置源应能注入"
     );
     iam.set_sso_http_client(Arc::new(
@@ -368,7 +365,10 @@ async fn world() -> World {
     });
     let iam_router = axum::Router::new()
         .nest("/api/iam", platform_iam::http::router(iam_state.clone()))
-        .nest("/api/iam", platform_iam::http::sso_router(iam_state.clone()));
+        .nest(
+            "/api/iam",
+            platform_iam::http::sso_router(iam_state.clone()),
+        );
     let register_response = iam_router
         .clone()
         .oneshot(
@@ -441,7 +441,10 @@ async fn world() -> World {
     });
     let router = axum::Router::new()
         .nest("/api/iam", platform_iam::http::router(iam_state.clone()))
-        .nest("/api/iam", platform_iam::http::sso_router(iam_state.clone()))
+        .nest(
+            "/api/iam",
+            platform_iam::http::sso_router(iam_state.clone()),
+        )
         .nest("/api/rbac", platform_rbac::http::router(rbac_state));
 
     World {
@@ -490,7 +493,10 @@ fn location_query(headers: &axum::http::HeaderMap) -> BTreeMap<String, String> {
         .get("location")
         .and_then(|value| value.to_str().ok())
         .expect("响应必须带 Location");
-    let query = location.split_once('?').map(|(_, query)| query).unwrap_or("");
+    let query = location
+        .split_once('?')
+        .map(|(_, query)| query)
+        .unwrap_or("");
     query
         .split('&')
         .filter(|pair| !pair.is_empty())
@@ -522,7 +528,12 @@ async fn ac_s_100_step_5_an_sso_session_reaches_its_real_permission_points() {
             .expect("请求"),
     )
     .await;
-    assert_eq!(status, StatusCode::FOUND, "{}", String::from_utf8_lossy(&bytes));
+    assert_eq!(
+        status,
+        StatusCode::FOUND,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
     let query = location_query(&headers);
     let state = query.get("state").expect("state").clone();
     let nonce = query.get("nonce").expect("nonce").clone();
@@ -531,7 +542,9 @@ async fn ac_s_100_step_5_an_sso_session_reaches_its_real_permission_points() {
 
     // 2) 模拟 IdP 授权完成，回调（**不带** `x-tenant-id`，见 P3）。
     let code = format!("code-{}", uuid::Uuid::new_v4().simple());
-    world.idp.register_code(&code, &nonce, &challenge, &redirect_uri);
+    world
+        .idp
+        .register_code(&code, &nonce, &challenge, &redirect_uri);
     let callback = format!("/api/iam/sso/oidc/callback?code={code}&state={state}");
     let (status, headers, bytes) = send(
         &world.router,
@@ -550,7 +563,7 @@ async fn ac_s_100_step_5_an_sso_session_reaches_its_real_permission_points() {
     );
     let ticket_query = location_query(&headers);
     assert!(
-        ticket_query.get("error").is_none(),
+        !ticket_query.contains_key("error"),
         "回调不得失败：{ticket_query:?}"
     );
     let ticket = ticket_query
@@ -569,7 +582,12 @@ async fn ac_s_100_step_5_an_sso_session_reaches_its_real_permission_points() {
             .expect("请求"),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
     let login = json_of(&bytes);
     let access = login["accessToken"]
         .as_str()

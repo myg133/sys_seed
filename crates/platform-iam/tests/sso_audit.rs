@@ -17,8 +17,7 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use platform_core::extension::auditable::Auditable;
 use platform_iam::sso::audit::{
-    EVENT_LINK_CREATED, EVENT_LOGIN_FAILED, EVENT_LOGIN_SUCCEEDED, SsoAuditEvent,
-    SsoAuditPayload,
+    EVENT_LINK_CREATED, EVENT_LOGIN_FAILED, EVENT_LOGIN_SUCCEEDED, SsoAuditEvent, SsoAuditPayload,
 };
 use serde_json::json;
 
@@ -50,15 +49,22 @@ impl Env {
                 ..Default::default()
             },
         );
+        stack.service.set_sso_http_client(Arc::new(
+            platform_iam::sso::oidc::OidcHttpClient::new().expect("http 客户端"),
+        ));
         stack
             .service
-            .set_sso_http_client(Arc::new(
-                platform_iam::sso::oidc::OidcHttpClient::new().expect("http 客户端"),
-            ));
-        stack.service.set_sso_frontend_base_url("http://app.example.com");
+            .set_sso_frontend_base_url("http://app.example.com");
         stack.service.set_sso_oidc_client_secret(CANARY);
 
-        let user = register(&stack.router, &tenant, "bob", PASSWORD, Some("bob@example.com")).await;
+        let user = register(
+            &stack.router,
+            &tenant,
+            "bob",
+            PASSWORD,
+            Some("bob@example.com"),
+        )
+        .await;
         let user_id = user["id"].as_str().expect("id").to_string();
         let admin = admin_pool().await;
         sqlx::query(
@@ -72,11 +78,7 @@ impl Env {
         .await
         .expect("绑定应能写入");
 
-        Self {
-            stack,
-            idp,
-            tenant,
-        }
+        Self { stack, idp, tenant }
     }
 
     /// 一次 OIDC 登录（`alg_override` 为 `Some` 时制造失败）。
@@ -99,11 +101,15 @@ impl Env {
                     .encode(serde_json::to_vec(value).expect("json"))
             };
             self.idp.set_behavior(|behavior| {
-                behavior.id_token_override =
-                    Some(format!("{}.{}.", b64(&json!({"alg":"none"})), b64(&json!({"sub":"x"}))));
+                behavior.id_token_override = Some(format!(
+                    "{}.{}.",
+                    b64(&json!({"alg":"none"})),
+                    b64(&json!({"sub":"x"}))
+                ));
             });
         } else {
-            self.idp.set_behavior(|behavior| behavior.id_token_override = None);
+            self.idp
+                .set_behavior(|behavior| behavior.id_token_override = None);
         }
         let callback = format!(
             "/api/iam/sso/oidc/callback?code={code}&state={}",
@@ -132,13 +138,15 @@ impl Env {
 
 #[test]
 fn ac_s_108_the_declared_events_cover_the_three_required_codes() {
-    // `IamService` 实现了平台契约要求的 `Auditable`。
-    let app_url_holder = ();
-    let _ = app_url_holder;
+    // `IamService` 实现了平台契约要求的 `Auditable`（见下方 assertions）。
 
     let events = platform_iam::sso::audit::audit_events();
     let codes: Vec<&str> = events.iter().map(|spec| spec.code.as_str()).collect();
-    for required in [EVENT_LOGIN_SUCCEEDED, EVENT_LOGIN_FAILED, EVENT_LINK_CREATED] {
+    for required in [
+        EVENT_LOGIN_SUCCEEDED,
+        EVENT_LOGIN_FAILED,
+        EVENT_LINK_CREATED,
+    ] {
         assert!(codes.contains(&required), "缺少声明的事件 {required}");
     }
     for spec in events {
@@ -166,9 +174,7 @@ async fn ac_s_108_a_successful_login_emits_the_exact_succeeded_payload() {
     let env = Env::new().await;
     let recorder = Arc::new(RecordingAudit::new());
     assert!(
-        env.stack
-            .service
-            .with_sso_audit_recorder(recorder.clone()),
+        env.stack.service.with_sso_audit_recorder(recorder.clone()),
         "recorder 应能注入"
     );
 

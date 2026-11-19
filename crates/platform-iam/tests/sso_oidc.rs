@@ -42,18 +42,14 @@ impl Env {
                 ..Default::default()
             },
         );
+        stack.service.set_sso_http_client(std::sync::Arc::new(
+            platform_iam::sso::oidc::OidcHttpClient::new().expect("http 客户端应能构造"),
+        ));
+        stack.service.set_sso_frontend_base_url(FRONTEND_BASE);
         stack
             .service
-            .set_sso_http_client(std::sync::Arc::new(
-                platform_iam::sso::oidc::OidcHttpClient::new().expect("http 客户端应能构造"),
-            ));
-        stack.service.set_sso_frontend_base_url(FRONTEND_BASE);
-        stack.service.set_sso_oidc_client_secret("SECRET-CANARY-oidc");
-        let env = Self {
-            stack,
-            idp,
-            tenant,
-        };
+            .set_sso_oidc_client_secret("SECRET-CANARY-oidc");
+        let env = Self { stack, idp, tenant };
         // AC-S-100 的前置：`bob` 在 IdP 侧存在且**已绑定**到本地 user。
         env.bind_bob().await;
         env
@@ -87,10 +83,7 @@ impl Env {
 
 /// 发起授权，返回 (state, nonce, challenge, redirect_uri 等 query)。
 async fn authorize(env: &Env) -> (StatusCode, HashMap<String, String>) {
-    let path = format!(
-        "/api/iam/sso/oidc/authorize?tenant={}",
-        env.tenant
-    );
+    let path = format!("/api/iam/sso/oidc/authorize?tenant={}", env.tenant);
     let (status, headers, bytes) = http_get(&env.stack.router, &path, None, None).await;
     assert_eq!(
         status,
@@ -102,7 +95,12 @@ async fn authorize(env: &Env) -> (StatusCode, HashMap<String, String>) {
 }
 
 /// 走完授权 → 回调（返回 ticket）。
-async fn callback_with_ticket(env: &Env, code: &str, state: &str, tenant_header: Option<&str>) -> (StatusCode, HashMap<String, String>) {
+async fn callback_with_ticket(
+    env: &Env,
+    code: &str,
+    state: &str,
+    tenant_header: Option<&str>,
+) -> (StatusCode, HashMap<String, String>) {
     let path = format!("/api/iam/sso/oidc/callback?code={code}&state={state}");
     let (status, headers, bytes) = http_get(&env.stack.router, &path, tenant_header, None).await;
     assert_eq!(
@@ -112,7 +110,7 @@ async fn callback_with_ticket(env: &Env, code: &str, state: &str, tenant_header:
         String::from_utf8_lossy(&bytes)
     );
     let query = location_query(&headers);
-    assert!(query.get("error").is_none(), "回调意外失败：{query:?}");
+    assert!(!query.contains_key("error"), "回调意外失败：{query:?}");
     (status, query)
 }
 
@@ -132,7 +130,13 @@ async fn callback_error(env: &Env, path: &str, tenant_header: Option<&str>, expe
         "错误码不对：{query:?}"
     );
     // `error` 只放错误码：不得带 detail / 配置值 / token。
-    for forbidden in ["issuer", "clientId", "client_secret", "detail", "accessToken"] {
+    for forbidden in [
+        "issuer",
+        "clientId",
+        "client_secret",
+        "detail",
+        "accessToken",
+    ] {
         assert!(
             !format!("{query:?}").contains(forbidden),
             "失败交接的 query 不得包含 {forbidden}：{query:?}"
@@ -170,7 +174,7 @@ async fn ac_s_100_authorize_redirects_to_the_discovered_endpoint_with_every_para
         query.get("code_challenge_method").map(String::as_str),
         Some("S256")
     );
-    assert!(query.get("code_challenge").is_some());
+    assert!(query.contains_key("code_challenge"));
 }
 
 /// `state` / `nonce` 的形状与不重复（S38：替代「高熵」空话）。
@@ -183,10 +187,7 @@ async fn ac_s_100_state_and_nonce_are_long_random_and_never_repeat() {
         let (_, query) = authorize(&env).await;
         let state = query.get("state").expect("state").clone();
         let nonce = query.get("nonce").expect("nonce").clone();
-        for (label, value, set) in [
-            ("state", state, &mut states),
-            ("nonce", nonce, &mut nonces),
-        ] {
+        for (label, value, set) in [("state", state, &mut states), ("nonce", nonce, &mut nonces)] {
             assert!(value.len() >= 43, "{label} 太短：{value}");
             assert!(
                 value
@@ -239,7 +240,12 @@ async fn ac_s_100_the_callback_hands_off_a_ticket_and_exchange_returns_a_login_r
         serde_json::json!({ "ticket": ticket }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
     let login = json_of(&bytes);
     assert_eq!(login["tokenType"], "Bearer");
     assert!(login["expiresIn"].as_u64().is_some_and(|value| value > 0));
@@ -257,7 +263,14 @@ async fn ac_s_100_the_callback_hands_off_a_ticket_and_exchange_returns_a_login_r
 
     // 键集合与**本地登录**相同（AC-S-107 同构的直接要求）。
     let local_tenant = unique_tenant("local");
-    let _user = register(&env.stack.router, &local_tenant, "grace", PASSWORD, Some("grace@example.com")).await;
+    let _user = register(
+        &env.stack.router,
+        &local_tenant,
+        "grace",
+        PASSWORD,
+        Some("grace@example.com"),
+    )
+    .await;
     let (status, _, bytes) = post_json(
         &env.stack.router,
         "/api/iam/login",
@@ -269,7 +282,12 @@ async fn ac_s_100_the_callback_hands_off_a_ticket_and_exchange_returns_a_login_r
     assert_eq!(status, StatusCode::OK);
     let local = json_of(&bytes);
     let keys = |value: &Value| -> BTreeSet<String> {
-        value.as_object().expect("应是对象").keys().cloned().collect()
+        value
+            .as_object()
+            .expect("应是对象")
+            .keys()
+            .cloned()
+            .collect()
     };
     assert_eq!(
         keys(&login),
@@ -290,7 +308,12 @@ async fn ac_s_100_the_callback_hands_off_a_ticket_and_exchange_returns_a_login_r
             .expect("请求应能构造"),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
     let sessions = json_of(&bytes);
     let row = sessions
         .as_array()
@@ -307,7 +330,12 @@ async fn ac_s_100_the_callback_hands_off_a_ticket_and_exchange_returns_a_login_r
         serde_json::json!({ "refreshToken": refresh }),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
     assert!(json_of(&bytes)["accessToken"].is_string());
 }
 
@@ -327,20 +355,16 @@ async fn ac_s_100_an_https_issuer_works_with_an_injected_test_root() {
         },
     );
     // **只信任测试根**（`with_webpki_roots()` 不信任自签根 —— S13）。
+    stack.service.set_sso_http_client(std::sync::Arc::new(
+        platform_iam::sso::oidc::OidcHttpClient::with_root_certificate_der(&ca_der)
+            .expect("测试根应可用"),
+    ));
+    stack.service.set_sso_frontend_base_url(FRONTEND_BASE);
     stack
         .service
-        .set_sso_http_client(std::sync::Arc::new(
-            platform_iam::sso::oidc::OidcHttpClient::with_root_certificate_der(&ca_der)
-                .expect("测试根应可用"),
-        ));
-    stack.service.set_sso_frontend_base_url(FRONTEND_BASE);
-    stack.service.set_sso_oidc_client_secret("SECRET-CANARY-oidc");
+        .set_sso_oidc_client_secret("SECRET-CANARY-oidc");
 
-    let env = Env {
-        stack,
-        idp,
-        tenant,
-    };
+    let env = Env { stack, idp, tenant };
     env.bind_bob().await;
 
     let (_, query) = authorize(&env).await;
@@ -374,7 +398,8 @@ async fn ac_s_100_an_https_issuer_works_with_an_injected_test_root() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ac_s_100_authorize_without_a_tenant_is_401() {
     let env = Env::http().await;
-    let (status, _, bytes) = http_get(&env.stack.router, "/api/iam/sso/oidc/authorize", None, None).await;
+    let (status, _, bytes) =
+        http_get(&env.stack.router, "/api/iam/sso/oidc/authorize", None, None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(json_of(&bytes)["code"], "TENANT_CONTEXT_MISSING");
 }
@@ -385,13 +410,8 @@ async fn ac_s_100_the_tenant_query_parameter_wins_over_the_header() {
     let env = Env::http().await;
     let path = format!("/api/iam/sso/oidc/authorize?tenant={}", env.tenant);
     // 头里给一个**别的**租户：query 应当赢（否则拿错租户的 IdP 配置）。
-    let (status, headers, _) = http_get(
-        &env.stack.router,
-        &path,
-        Some("some-other-tenant"),
-        None,
-    )
-    .await;
+    let (status, headers, _) =
+        http_get(&env.stack.router, &path, Some("some-other-tenant"), None).await;
     assert_eq!(status, StatusCode::FOUND);
     let query = location_query(&headers);
     assert_eq!(query["client_id"], "client-1");
@@ -424,7 +444,8 @@ async fn ac_s_101_a_state_can_only_be_used_once() {
     let redirect_uri = query["redirect_uri"].clone();
 
     let first = "code-first".to_string();
-    env.idp.register_code(&first, &nonce, &challenge, &redirect_uri);
+    env.idp
+        .register_code(&first, &nonce, &challenge, &redirect_uri);
     let (status, _, _) = http_get(
         &env.stack.router,
         &format!("/api/iam/sso/oidc/callback?code={first}&state={state}"),
@@ -436,7 +457,8 @@ async fn ac_s_101_a_state_can_only_be_used_once() {
 
     // 同一个 state 再用一次（哪怕换一个新 code）。
     let second = "code-second".to_string();
-    env.idp.register_code(&second, &nonce, &challenge, &redirect_uri);
+    env.idp
+        .register_code(&second, &nonce, &challenge, &redirect_uri);
     callback_error(
         &env,
         &format!("/api/iam/sso/oidc/callback?code={second}&state={state}"),
@@ -523,7 +545,8 @@ async fn ac_s_101_a_mismatched_nonce_is_rejected() {
     });
 
     let code = "code-nonce".to_string();
-    env.idp.register_code(&code, &nonce, &challenge, &redirect_uri);
+    env.idp
+        .register_code(&code, &nonce, &challenge, &redirect_uri);
     callback_error(
         &env,
         &format!("/api/iam/sso/oidc/callback?code={code}&state={state}"),
@@ -555,7 +578,8 @@ async fn ac_s_101_a_tampered_code_verifier_is_detected_locally() {
     drop(admin);
 
     let code = "code-pkce".to_string();
-    env.idp.register_code(&code, &nonce, &challenge, &redirect_uri);
+    env.idp
+        .register_code(&code, &nonce, &challenge, &redirect_uri);
     callback_error(
         &env,
         &format!("/api/iam/sso/oidc/callback?code={code}&state={state}"),
@@ -594,7 +618,8 @@ async fn ac_s_101_a_consumed_state_is_marked_in_the_database() {
     let challenge = query["code_challenge"].clone();
     let redirect_uri = query["redirect_uri"].clone();
     let code = "code-consumed".to_string();
-    env.idp.register_code(&code, &nonce, &challenge, &redirect_uri);
+    env.idp
+        .register_code(&code, &nonce, &challenge, &redirect_uri);
     let _ = http_get(
         &env.stack.router,
         &format!("/api/iam/sso/oidc/callback?code={code}&state={state}"),
@@ -623,10 +648,16 @@ async fn ac_s_101_a_consumed_state_is_marked_in_the_database() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ac_s_020_a_500_from_the_issuer_is_discovery_failed() {
     let env = Env::http().await;
-    env.idp.set_behavior(|behavior| behavior.discovery_status = Some(500));
+    env.idp
+        .set_behavior(|behavior| behavior.discovery_status = Some(500));
     let path = format!("/api/iam/sso/oidc/authorize?tenant={}", env.tenant);
     let (status, _, bytes) = http_get(&env.stack.router, &path, None, None).await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{}", String::from_utf8_lossy(&bytes));
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
     assert_eq!(json_of(&bytes)["code"], "SSO_OIDC_DISCOVERY_FAILED");
 }
 
@@ -638,7 +669,12 @@ async fn ac_s_020_invalid_discovery_json_is_discovery_invalid() {
     });
     let path = format!("/api/iam/sso/oidc/authorize?tenant={}", env.tenant);
     let (status, _, bytes) = http_get(&env.stack.router, &path, None, None).await;
-    assert_eq!(status, StatusCode::BAD_GATEWAY, "{}", String::from_utf8_lossy(&bytes));
+    assert_eq!(
+        status,
+        StatusCode::BAD_GATEWAY,
+        "{}",
+        String::from_utf8_lossy(&bytes)
+    );
     assert_eq!(json_of(&bytes)["code"], "SSO_OIDC_DISCOVERY_INVALID");
 }
 
@@ -670,8 +706,10 @@ async fn ac_s_020_a_503_from_the_token_endpoint_is_endpoint_unavailable() {
     let challenge = query["code_challenge"].clone();
     let redirect_uri = query["redirect_uri"].clone();
     let code = "code-503".to_string();
-    env.idp.register_code(&code, &nonce, &challenge, &redirect_uri);
-    env.idp.set_behavior(|behavior| behavior.token_status = Some(503));
+    env.idp
+        .register_code(&code, &nonce, &challenge, &redirect_uri);
+    env.idp
+        .set_behavior(|behavior| behavior.token_status = Some(503));
 
     callback_error(
         &env,

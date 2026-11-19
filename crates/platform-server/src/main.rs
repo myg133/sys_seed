@@ -36,6 +36,7 @@ use platform_iam::service::IamService;
 use platform_iam::store::IamStore;
 use platform_schema::{SchemaRegistry, SchemaState};
 use platform_server::config::{ConfigError, DeployConfig, Environment};
+use platform_server::sso_source::ConfigServiceSsoSource;
 use platform_server::{db, health, isolation, migrate, policies, probe, static_files};
 use serde::Serialize;
 use sqlx::PgPool;
@@ -316,7 +317,10 @@ async fn serve() -> Result<(), Failure> {
             .nest("/api/iam", platform_iam::http::router(iam_state.clone()))
             .merge(platform_iam::http::jwks_router(iam_state.clone()))
             // SSO 入站（REQ-013）：`/api/iam/sso/*`（与 `/api/iam` 同一层 nest）。
-            .nest("/api/iam", platform_iam::http::sso_router(iam_state.clone()));
+            .nest(
+                "/api/iam",
+                platform_iam::http::sso_router(iam_state.clone()),
+            );
         sso_iam = Some(iam_state.service.clone());
 
         // 用户与组织架构（REQ-008）：`/api/org/*`。
@@ -450,9 +454,7 @@ async fn serve() -> Result<(), Failure> {
     // 配置源用 `ConfigService::read_entries` 实现 —— 与 `GET /api/config/entries`
     // **同一套解析**（三层覆盖 + manifest 默认值），不另开读路径。
     if let Some(service) = sso_iam {
-        let source = Arc::new(ConfigServiceSsoSource {
-            config: config_service.clone(),
-        });
+        let source = Arc::new(ConfigServiceSsoSource::new(config_service.clone()));
         if !service.set_sso_config_source(source) {
             tracing::warn!("SSO 配置源已经注入过：保留先装好的实现");
         }
@@ -597,89 +599,6 @@ async fn build_rbac_state(
         checker,
         tokens: Arc::new(platform_rbac::http::IamTokenVerifier::new(iam)),
     }))
-}
-
-/// SSO 配置源：用平台配置服务读那 12 个键（REQ-013）。
-///
-/// 与 `GET /api/config/entries` **同一套解析**：三层覆盖 + manifest 默认值，
-/// 「按精确键名读」——**没有**「全量导出配置」这种能力（P1 / S1）。
-struct ConfigServiceSsoSource {
-    config: Arc<platform_config::ConfigService>,
-}
-
-impl platform_iam::sso::config::SsoConfigSource for ConfigServiceSsoSource {
-    fn read(
-        &self,
-        ctx: &platform_core::RequestContext,
-    ) -> platform_iam::sso::config::SsoBoxFuture<
-        '_,
-        Result<
-            platform_iam::sso::config::SsoConfig,
-            platform_iam::sso::config::SsoConfigError,
-        >,
-    > {
-        let config = self.config.clone();
-        let ctx = ctx.clone();
-        Box::pin(async move {
-            let keys: Vec<String> = platform_iam::sso::config::SSO_CONFIG_KEYS
-                .iter()
-                .map(|key| (*key).to_string())
-                .collect();
-            let entries = config
-                .read_entries(&ctx, &keys)
-                .await
-                .map_err(|_| platform_iam::sso::config::SsoConfigError)?;
-            Ok(sso_config_from_entries(&entries))
-        })
-    }
-}
-
-/// 把解析结果映射成 [`platform_iam::sso::config::SsoConfig`]。
-///
-/// 缺失的键用**代码里的默认值**（与 `manifest.json` 登记的默认值一致）——
-/// 但注意：迁移 / 注册表都在时它们必然齐全，缺失只可能是注册表被改坏了。
-fn sso_config_from_entries(
-    entries: &[platform_core::ResolvedConfig],
-) -> platform_iam::sso::config::SsoConfig {
-    use platform_iam::sso::config::{LdapSettings, OidcSettings, SsoConfig};
-
-    fn text(entries: &[platform_core::ResolvedConfig], key: &str) -> Option<String> {
-        entries
-            .iter()
-            .find(|entry| entry.key == key)
-            .and_then(|entry| entry.value.as_str())
-            .map(str::to_string)
-    }
-    fn flag(entries: &[platform_core::ResolvedConfig], key: &str) -> Option<bool> {
-        entries
-            .iter()
-            .find(|entry| entry.key == key)
-            .and_then(|entry| entry.value.as_bool())
-    }
-
-    let defaults = SsoConfig::default();
-    SsoConfig {
-        enforce: flag(entries, "sso.enforce").unwrap_or(defaults.enforce),
-        jit_provisioning: flag(entries, "sso.jitProvisioning")
-            .unwrap_or(defaults.jit_provisioning),
-        oidc: OidcSettings {
-            enabled: flag(entries, "sso.oidc.enabled").unwrap_or(defaults.oidc.enabled),
-            issuer: text(entries, "sso.oidc.issuer").unwrap_or(defaults.oidc.issuer),
-            client_id: text(entries, "sso.oidc.clientId").unwrap_or(defaults.oidc.client_id),
-            scopes: text(entries, "sso.oidc.scopes").unwrap_or(defaults.oidc.scopes),
-            redirect_uri: text(entries, "sso.oidc.redirectUri")
-                .unwrap_or(defaults.oidc.redirect_uri),
-        },
-        ldap: LdapSettings {
-            enabled: flag(entries, "sso.ldap.enabled").unwrap_or(defaults.ldap.enabled),
-            url: text(entries, "sso.ldap.url").unwrap_or(defaults.ldap.url),
-            base_dn: text(entries, "sso.ldap.baseDn").unwrap_or(defaults.ldap.base_dn),
-            user_search_filter: text(entries, "sso.ldap.userSearchFilter")
-                .unwrap_or(defaults.ldap.user_search_filter),
-            mail_attribute: text(entries, "sso.ldap.mailAttribute")
-                .unwrap_or(defaults.ldap.mail_attribute),
-        },
-    }
 }
 
 /// 构造配置服务（注册表来自 manifest 根目录，数据访问只走 `platform-db`）。

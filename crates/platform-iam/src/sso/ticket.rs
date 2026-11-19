@@ -59,15 +59,12 @@ pub async fn issue(
         expires_at: OffsetDateTime::now_utc() + SSO_TICKET_TTL,
         consumed_at: None,
     };
-    store
-        .insert_sso_ticket(ctx, &record)
-        .await
-        .map_err(|err| {
-            tracing::error!(error = %err, "the sso ticket could not be stored");
-            IamError::Internal {
-                reason: "the data access layer failed".to_string(),
-            }
-        })
+    store.insert_sso_ticket(ctx, &record).await.map_err(|err| {
+        tracing::error!(error = %err, "the sso ticket could not be stored");
+        IamError::Internal {
+            reason: "the data access layer failed".to_string(),
+        }
+    })
 }
 
 /// 校验并**消费**一个票据，返回票据记录（含 `session_id` / `tenant_id`）。
@@ -113,7 +110,7 @@ pub async fn consume(
 fn internal(err: platform_db::DbError) -> IamError {
     tracing::error!(error = %err, "the sso ticket data access failed");
     IamError::Internal {
-        reason: "the data access layer failed".to_string()
+        reason: "the data access layer failed".to_string(),
     }
 }
 

@@ -430,9 +430,7 @@ async fn sso_providers(
     uri: Uri,
 ) -> Response {
     match state.service.sso_providers(&ctx).await {
-        Ok(providers) => {
-            Json(serde_json::json!({ "providers": providers })).into_response()
-        }
+        Ok(providers) => Json(serde_json::json!({ "providers": providers })).into_response(),
         Err(error) => problem_response(&error, &ctx, uri.path()),
     }
 }

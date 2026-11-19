@@ -45,16 +45,23 @@ impl Env {
                 ..Default::default()
             },
         );
+        stack.service.set_sso_http_client(std::sync::Arc::new(
+            platform_iam::sso::oidc::OidcHttpClient::new().expect("http 客户端"),
+        ));
+        stack.service.set_sso_frontend_base_url(FRONTEND_BASE);
         stack
             .service
-            .set_sso_http_client(std::sync::Arc::new(
-                platform_iam::sso::oidc::OidcHttpClient::new().expect("http 客户端"),
-            ));
-        stack.service.set_sso_frontend_base_url(FRONTEND_BASE);
-        stack.service.set_sso_oidc_client_secret("SECRET-CANARY-oidc");
+            .set_sso_oidc_client_secret("SECRET-CANARY-oidc");
 
         // 前置：bob 已绑定。
-        let user = register(&stack.router, &tenant, "bob", PASSWORD, Some("bob@example.com")).await;
+        let user = register(
+            &stack.router,
+            &tenant,
+            "bob",
+            PASSWORD,
+            Some("bob@example.com"),
+        )
+        .await;
         let user_id = user["id"].as_str().expect("id").to_string();
         let admin = admin_pool().await;
         sqlx::query(
@@ -68,11 +75,7 @@ impl Env {
         .await
         .expect("绑定应能写入");
 
-        Self {
-            stack,
-            idp,
-            tenant,
-        }
+        Self { stack, idp, tenant }
     }
 
     /// 发起授权并登记 code，返回 (state, code)。
@@ -111,10 +114,15 @@ impl Env {
     async fn callback_ok(&self, code: &str, state: &str) {
         let path = format!("/api/iam/sso/oidc/callback?code={code}&state={state}");
         let (status, headers, bytes) = http_get(&self.stack.router, &path, None, None).await;
-        assert_eq!(status, StatusCode::FOUND, "{}", String::from_utf8_lossy(&bytes));
+        assert_eq!(
+            status,
+            StatusCode::FOUND,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
         let query = location_query(&headers);
         assert!(
-            query.get("ticket").is_some(),
+            query.contains_key("ticket"),
             "应拿到 ticket，实际 {query:?}"
         );
     }
@@ -151,7 +159,10 @@ async fn ac_s_102_a_wrong_issuer_is_rejected() {
             .claims_override
             .insert("iss".to_string(), json!("https://evil.example.com"));
     });
-    assert_eq!(env.callback_error(&code, &state).await, "SSO_OIDC_TOKEN_INVALID");
+    assert_eq!(
+        env.callback_error(&code, &state).await,
+        "SSO_OIDC_TOKEN_INVALID"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -163,7 +174,10 @@ async fn ac_s_102_a_wrong_audience_is_rejected() {
             .claims_override
             .insert("aud".to_string(), json!("another-client"));
     });
-    assert_eq!(env.callback_error(&code, &state).await, "SSO_OIDC_TOKEN_INVALID");
+    assert_eq!(
+        env.callback_error(&code, &state).await,
+        "SSO_OIDC_TOKEN_INVALID"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -176,7 +190,10 @@ async fn ac_s_102_an_expired_token_reports_expiry() {
             json!(time::OffsetDateTime::now_utc().unix_timestamp() - 3600),
         );
     });
-    assert_eq!(env.callback_error(&code, &state).await, "SSO_OIDC_TOKEN_EXPIRED");
+    assert_eq!(
+        env.callback_error(&code, &state).await,
+        "SSO_OIDC_TOKEN_EXPIRED"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -236,10 +253,8 @@ async fn ac_s_102_rs512_outside_the_whitelist_is_rejected() {
     let (state, code) = env.prepare().await;
     let claims = claims_for(&env.idp, "irrelevant");
     env.idp.set_behavior(|behavior| {
-        behavior.id_token_override = Some(forged(
-            json!({ "alg": "RS512", "kid": "kid-1" }),
-            claims,
-        ));
+        behavior.id_token_override =
+            Some(forged(json!({ "alg": "RS512", "kid": "kid-1" }), claims));
     });
     assert_eq!(
         env.callback_error(&code, &state).await,
@@ -275,7 +290,7 @@ async fn ac_s_102_an_unknown_kid_triggers_a_jwks_refresh_and_succeeds() {
 
     let hits_after = env.idp.jwks_hits();
     assert!(
-        hits_after >= hits_before + 1,
+        hits_after > hits_before,
         "未知 kid 必须触发一次 JWKS 刷新（{hits_before} → {hits_after}）"
     );
     // 且刷新后确实用**新** kid 的密钥验过了（不是拿旧缓存硬蒙）。
@@ -310,7 +325,10 @@ async fn ac_s_102_a_tampered_payload_breaks_the_signature() {
     env.idp.set_behavior(|behavior| {
         behavior.id_token_override = Some(token);
     });
-    assert_eq!(env.callback_error(&code, &state).await, "SSO_OIDC_TOKEN_INVALID");
+    assert_eq!(
+        env.callback_error(&code, &state).await,
+        "SSO_OIDC_TOKEN_INVALID"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -379,7 +397,10 @@ async fn ac_s_102_an_x5c_embedded_key_is_not_trusted() {
     env.idp.set_behavior(|behavior| {
         behavior.id_token_override = Some(token);
     });
-    assert_eq!(env.callback_error(&code, &state).await, "SSO_OIDC_TOKEN_INVALID");
+    assert_eq!(
+        env.callback_error(&code, &state).await,
+        "SSO_OIDC_TOKEN_INVALID"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -388,7 +409,7 @@ async fn ac_s_102_an_x5c_embedded_key_is_not_trusted() {
 
 #[test]
 fn ac_s_020_every_referenced_code_has_an_ascii_title() {
-    use platform_core::titles::{title_of_code, is_registered};
+    use platform_core::titles::{is_registered, title_of_code};
     for code in [
         "SSO_REQUIRED",
         "SSO_PROVIDER_NOT_CONFIGURED",

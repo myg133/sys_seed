@@ -235,8 +235,15 @@ mod tests {
 
     #[test]
     fn declared_events_cover_the_three_required_codes() {
-        let codes: Vec<&str> = audit_events().iter().map(|spec| spec.code.as_str()).collect();
-        for required in [EVENT_LOGIN_SUCCEEDED, EVENT_LOGIN_FAILED, EVENT_LINK_CREATED] {
+        let codes: Vec<&str> = audit_events()
+            .iter()
+            .map(|spec| spec.code.as_str())
+            .collect();
+        for required in [
+            EVENT_LOGIN_SUCCEEDED,
+            EVENT_LOGIN_FAILED,
+            EVENT_LINK_CREATED,
+        ] {
             assert!(codes.contains(&required), "缺少声明的审计事件 {required}");
         }
         for spec in audit_events() {
@@ -260,18 +267,16 @@ mod tests {
             .keys()
             .map(String::as_str)
             .collect();
-        let expected: BTreeSet<&str> =
-            ["provider", "external_id", "user_id", "ip", "user_agent"]
-                .into_iter()
-                .collect();
+        let expected: BTreeSet<&str> = ["provider", "external_id", "user_id", "ip", "user_agent"]
+            .into_iter()
+            .collect();
         assert_eq!(keys, expected);
     }
 
     /// 失败的 payload 键集合**恰好**是 `{provider, code, ip}`（**不含** token / user_agent）。
     #[test]
     fn failed_payload_has_the_exact_whitelist() {
-        let mut payload =
-            SsoAuditPayload::failed("oidc", "SSO_OIDC_ALG_NOT_ALLOWED", "10.0.0.1");
+        let mut payload = SsoAuditPayload::failed("oidc", "SSO_OIDC_ALG_NOT_ALLOWED", "10.0.0.1");
         payload.user_agent = "should-not-be-emitted".to_string();
         let event = SsoAuditEvent::new(EVENT_LOGIN_FAILED, payload);
         let value = serde_json::to_value(&event).expect("应能序列化");
@@ -283,7 +288,9 @@ mod tests {
             .collect();
         assert_eq!(
             keys,
-            ["provider", "code", "ip"].into_iter().collect::<BTreeSet<_>>()
+            ["provider", "code", "ip"]
+                .into_iter()
+                .collect::<BTreeSet<_>>()
         );
         assert!(!value.to_string().contains("should-not-be-emitted"));
     }

@@ -432,7 +432,9 @@ impl IamError {
             Self::SsoOidcCallbackParamMissing => {
                 "the single sign-on callback is missing a required parameter".to_string()
             }
-            Self::SsoOidcTokenExchangeFailed => "the single sign-on code exchange failed".to_string(),
+            Self::SsoOidcTokenExchangeFailed => {
+                "the single sign-on code exchange failed".to_string()
+            }
             Self::SsoOidcTokenEndpointUnavailable => {
                 "the single sign-on token endpoint is unavailable".to_string()
             }
@@ -442,9 +444,7 @@ impl IamError {
                 "the single sign-on id token algorithm is not allowed".to_string()
             }
             Self::SsoOidcNonceMismatch => "the single sign-on nonce does not match".to_string(),
-            Self::SsoOidcPkceMismatch => {
-                "the single sign-on pkce verification failed".to_string()
-            }
+            Self::SsoOidcPkceMismatch => "the single sign-on pkce verification failed".to_string(),
             Self::SsoLdapUnreachable => "the ldap server is unreachable".to_string(),
             Self::SsoLdapBindFailed => "ldap authentication failed".to_string(),
             Self::SsoLdapEmptyPassword => "the ldap password must not be empty".to_string(),
