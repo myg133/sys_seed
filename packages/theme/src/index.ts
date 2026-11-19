@@ -37,7 +37,7 @@ import {
   DEFAULT_RADIUS,
   LIGHT_TOKENS,
   NEUTRAL_PRIMARY,
-} from './tokens';
+} from './tokens.js';
 
 /** 主题模式。 */
 export type ThemeMode = 'light' | 'dark';
