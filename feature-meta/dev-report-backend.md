@@ -247,3 +247,143 @@ INFO 业务模块已挂载：/api/sandbox/*（sandbox）
   只跑 `tenant-policies` 而从不 `serve` 的部署发现不了「字段权限点未登记」—— 但那种部署也没有可访问的前端。
 - 风险 4：`demo_items` 用例按**租户隔离**播种（每个用例自己的 `tenant-demo-*`），
   已在 `--test-threads=2`（CI 口径）下跑过：7 passed，互不影响。
+
+---
+
+# 补充：demoNote（D107：AC-S-085 需要第二个实体）
+
+- **依据**: `BA/demands/REQ-012-schema-driven/deviation-ruling.md` §2（D107）、`acceptance.md` AC-S-085
+- **提交**: `8ce359e` `[Dev] REQ-012 补 demoNote 实体以验零代码 (关联: REQ-012)`
+- **范围**: 只有 `modules/sandbox/**`（manifest / backend / migrations）。**未改** `packages/`、`apps/shell/`、`e2e/`、`crates/`。
+
+> 结论：第二个实体已真加（表 + 元数据 + 完整 CRUD），真机闭环可用，
+> 且前端源码里**不存在** `demoNote` 这个键 —— AC-S-085 从「无法验」变成「可验且已验」。
+
+## 1. 交付内容
+
+| # | 内容 | 位置 |
+|---|---|---|
+| 1 | `schema.demoNote`（5 字段 + `api` 子段） | `modules/sandbox/manifest.json` |
+| 2 | `tenantScoped.tables` 加 `sandbox_demo_note`（RLS 由平台生成） | 同上 |
+| 3 | 建表迁移（`tenant_id` + `(tenant_id, id)` 主键） | `modules/sandbox/migrations/20261119000200_sandbox_demo_note.{up,down}.sql` |
+| 4 | 记录 + 租户作用域仓储（游标分页 / 404 语义与 `demoItem` 同款） | `modules/sandbox/backend/src/demo_note.rs` |
+| 5 | HTTP 层（list/create/update/delete，**每条响应经 `SchemaProjector`**） | `modules/sandbox/backend/src/demo_note_http.rs` |
+| 6 | 状态多带一份元数据 + 4 条路由 | `modules/sandbox/backend/src/http.rs`、`mod.rs` |
+
+**字段组合与 `demoItem` 刻意不同**（这正是本任务的意义）：
+
+| | `demoItem` | `demoNote` |
+|---|---|---|
+| 数字 | `amount` | **无** |
+| 日期 | `dueAt` | **无** |
+| 引用 | `ownerId` | **无** |
+| 长文本 | — | `content`（maxLength 2000） |
+| 字段级权限 | `secret` | **无** |
+
+## 2. 关键决策
+
+1. **复用 `sandbox:demo:read` / `sandbox:demo:write`**（按任务要求）。两个实体属同一语义面；
+   另造 `sandbox:demo-note:*` 只会让权限表变长、且要求使用者配两遍同义权限。
+   副作用：`permission.rs` 与 `permissions.json` **零改动**。
+2. **`demoNote` 不加字段级权限点**，但**仍然**走 `SchemaProjector`：投影在今天是恒等的，
+   跳过它会让 C-6 的调用点从「有」变「无」，而未来加字段权限时必然漏。
+3. **列表信封复用** `demo_item_http::{ListParams, ListEnvelope}` —— 同一套信封语义，
+   抄一份必然分叉（`nextCursor` 是投影外的东西，最容易抄漏）。
+4. `SandboxState` 把「按实体键取元数据」抽成 `baked_entity_schema(entity)` /
+   一个闭包 `entity(key)`，两个实体共用；`demoItem` 的行为未变（`from_manifest`
+   仍只读一次文件，只是同时取出两份声明）。
+
+## 3. 验证（真机 + 自动化）
+
+环境：`base_test`（podman 里的 `base-postgres`）、`SERVER_PORT=8094`、
+`base serve` 同源托管 `apps/shell/dist`、IAM 已配（EC P-256 签名密钥）。
+
+### 3.1 自动化
+
+| 命令 | 结果 |
+|---|---|
+| `./scripts/test-integration.sh` | **exit 0**，`--include-ignored` 全跑；容器 2 → 2 |
+| `cargo clippy --workspace --all-targets -- -D warnings` | **exit 0**（0 warning） |
+| `cargo xtask capabilities --check` | **exit 0**（14 个文件一致） |
+| `cargo xtask check-modules` | **exit 0**（sandbox ✓） |
+| `cargo test -p sandbox --tests -- --include-ignored` | 10 + 4 + 6 + 7 + 6 全 `ok`（含 4 条新增的 `demo_note_http` 单测） |
+
+### 3.2 真机（curl，真实服务 + 真实令牌）
+
+| 检查 | 结果 |
+|---|---|
+| `GET /api/schema/sandbox/demoNote` | **200**，`fields` = `['id','title','content','pinned','tags']`，`api.list=/api/sandbox/demo-notes` |
+| `GET /api/sandbox/demo-notes` | **200**，`{"items":[],"nextCursor":null}` |
+| 创建 | **201** + `{"content","id":"note-…","pinned","tags","title"}` |
+| 更新 | **200**（整体替换，`tags` 未给则保留原值） |
+| 删除 / 再删除 | **204** / **404** |
+| `GET /api/sandbox/demo-items`（回归） | **200**（未受影响） |
+| 响应**不含** `demoItem` 字段 | `secret` / `amount` / `ownerId` / `dueAt` / `paid` / `internalNote` 全部 `✓ 不含` |
+| RLS | `pg_policies` 有 `sandbox_demo_note_tenant_isolation`（ALL）—— manifest 的 `tenantScoped` 生效 |
+
+### 3.3 AC-S-085 的核心断言（零前端代码）
+
+```bash
+$ grep -rn "demoNote" packages/schema/src apps/shell/src || echo "✓ 前端源码不含 demoNote"
+✓ 前端源码不含 demoNote
+```
+
+**反向对照**（证明 grep 本身没写错）：同一模式在 `modules/sandbox/backend/src/` 命中 3 个文件
+（`demo_note.rs` / `demo_note_http.rs` / `http.rs`）。所以「前端 0 命中」是因为真的没写，
+不是模式失效。
+
+顺带确认：`e2e/schema-driven.spec.ts` 的第二个实体默认值**已经是** `demoNote`
+（`SECOND_ENTITY = process.env.SCHEMA_SECOND_ENTITY ?? 'demoNote'`），
+后端声明之后该用例自动生效 —— **E2E 一行不用改**。
+
+## 4. 变异验证
+
+### 4.1 `api.list` 改错
+
+把 manifest 的 `"list"` 改成 `/api/sandbox/demo-notes-mutated` 后重启：
+
+| 观察 | 结果 |
+|---|---|
+| 元数据返回的 `api.list` | `/api/sandbox/demo-notes-mutated`（跟着变 → 声明真的被读） |
+| 按该 URL 请求（**同源托管静态目录**） | **200 `text/html`** —— 见下方发现 |
+| 按该 URL 请求（**不挂静态目录**） | **404 `text/plain`**（期望的判据） |
+| 真实路由 `/api/sandbox/demo-notes` | 仍 200（说明是元数据指错，不是接口消失） |
+
+> **发现（既有行为，非本次引入）**：`platform-server` 的 `static_fallback` 对**任何**未匹配路径
+> （含 `/api/*`）返回 SPA 的 `index.html` + 200。所以「接口路径写错」在浏览器侧的表现是
+> 「拿到一段 HTML、JSON 解析失败」，而不是 404。要不要给 `/api/*` 加 404 兜底是**平台的**决定，
+> 不在本次授权范围，登记为观察项。
+
+### 4.2 字段类型改成非法值
+
+把 `demoNote.fields[3].type` 改成 `"currency"` 后启动 → **退出码 1**，逐条点名：
+
+```
+✗ 实体元数据注册表不成立，进程退出（fail-fast）：
+  - modules/sandbox/manifest.json: schema.demoNote.fields[3].type: `currency` is not an allowed
+    field type; allowed: text, number, boolean, date, reference
+```
+
+已还原（`git diff` 只剩本次提交的内容）。
+
+## 5. 与任务描述的偏差（据实记录）
+
+| # | 任务描述 | 实际 |
+|---|---|---|
+| a | 「`cargo xtask capabilities` 重生成（`capabilities/schema/entity.schema.json` 会变）」 | 生成器跑过，**0 个文件变化**。`entity.schema.json` 描述的是 **Rust 类型**（`EntitySchema` + `FieldType`），不是具体实体清单；新增实体不进索引。`--check` 仍为绿 |
+| b | 「变异 1：列表请求应 404」 | 挂了静态目录时是 **200 HTML**（SPA 兜底）；不挂静态目录时才是 404。两态都记录在 §4.1 |
+| c | — | 仓库基线 `cargo fmt --all --check` **本来就红**（50 处，含本次未触碰的 `crates/platform-contracts/src/checks.rs`、`modules/sandbox/backend/src/demo_item*.rs`、`modules/sandbox/tests/demo_items.rs`）。我只格式化了本次新增/改动的 3 个文件（`demo_note.rs` / `demo_note_http.rs` / `http.rs`），**没有**顺手格式化别人的文件 |
+
+## 6. 假设与剩余风险
+
+- **假设 1**：`tags` 是「逗号分隔的纯文本」。本期 `FieldType` 只有 5 种，没有多值类型；
+  要在界面上做标签输入需要新的字段类型（属另一个需求）。
+- **假设 2**：`title` / `content` 的 `maxLength` 只在元数据里声明（前端据此限长），
+  库层不重复实现 —— 与 `demoItem.title` 的现状一致。
+- **风险 1**：`demoNote` **没有专属的自动化集成用例**（本次按「小任务、不扩围」处理）。
+  它由 (a) 4 条单测覆盖请求体契约、(b) 契约测试 C-1/C-2/C-5/C-6 覆盖声明与调用点、
+  (c) QA 的 E2E（`e2e/schema-driven.spec.ts` 的第二个实体用例）覆盖端到端。
+  若 QA 不跑 E2E，回归只能靠真机手测。
+- **风险 2**：`demoNote` 与 `demoItem` 共用权限点 —— 想只放开其中一个实体的读写，
+  本期做不到（需要拆权限点，并同步改 manifest、种子迁移、路由）。
+- **风险 3**：给 `/api/*` 的未匹配路径补 404 兜底（§4.1 的发现）未做，属平台层改动。
