@@ -17,7 +17,8 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use platform_core::extension::auditable::Auditable;
 use platform_iam::sso::audit::{
-    EVENT_LINK_CREATED, EVENT_LOGIN_FAILED, EVENT_LOGIN_SUCCEEDED,
+    EVENT_LINK_CREATED, EVENT_LOGIN_FAILED, EVENT_LOGIN_SUCCEEDED, SsoAuditEvent,
+    SsoAuditPayload,
 };
 use serde_json::json;
 
@@ -282,7 +283,14 @@ async fn ac_s_108_ldap_success_and_failure_are_both_recorded_with_provider_ldap(
     assert_eq!(ldap_failure[0].1["code"], "SSO_LDAP_BIND_FAILED");
 }
 
-/// 全部 payload 里**不得**出现 canary / token / 密码（带阳性对照）。
+/// 全部 payload 里**不得**出现 canary / token / 密码（带**真**阳性对照）。
+///
+/// # 阳性对照为什么必须走「真实 payload」这条路（D128 / Q1）
+///
+/// 上一版写成 `format!("{dump}\n{CANARY}").contains(CANARY)` —— 那个断言
+/// **对任何输入都成立**，它证明的是「字符串拼接能拼上」，不是「扫描判据有区分力」。
+/// 所以这里改成：往一个**真实的** [`SsoAuditPayload`] 的 `user_agent` 注入 canary，
+/// 用**与本用例完全相同的扫描判据**跑，断言命中；然后断言真实 payload 的扫描结果是 0 命中。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ac_s_108_no_payload_carries_a_secret() {
     let env = Env::new().await;
@@ -292,26 +300,65 @@ async fn ac_s_108_no_payload_carries_a_secret() {
     let _ = env.oidc(false).await;
     let _ = env.oidc(true).await;
 
-    let dump = recorder
+    let surfaces = recorded_payload_text(&recorder);
+    assert!(!surfaces.is_empty(), "应先录到审计 payload，否则扫描无意义");
+
+    // 1) 真实 payload：6 类敏感串 0 命中。
+    let forbidden = [
+        CANARY,
+        "accessToken",
+        "refreshToken",
+        "id_token",
+        "password",
+        PASSWORD,
+    ];
+    for needle in forbidden {
+        assert_eq!(
+            scan_hits(&surfaces, needle),
+            0,
+            "审计 payload 不得包含 {needle}：{surfaces}"
+        );
+    }
+
+    // 2) **阳性对照**：同一个扫描判据 + 一个真实的 `SsoAuditPayload`，
+    //    把 canary 注入到 `user_agent`（success 白名单里的键）。
+    //
+    //    若 `scan_hits` 退化成恒 0（例如判据被改成 `false`），第 3 步会红；
+    //    若序列化层把 canary 吞掉（白名单丢键），第 3 步也会红。
+    let injected = SsoAuditEvent::new(
+        EVENT_LOGIN_SUCCEEDED,
+        SsoAuditPayload::succeeded("oidc", "idp-bob-001", "user-1", "10.0.0.1", CANARY),
+    );
+    let injected_text = serde_json::to_value(&injected)
+        .expect("事件应能序列化")
+        .to_string();
+    assert_eq!(
+        scan_hits(&injected_text, CANARY),
+        1,
+        "扫描判据必须能命中注入到 user_agent 的 canary（否则上面的 0 命中不可信）"
+    );
+    // 同一个「真实 payload 全集」的拼接形态也必须能命中 —— 证明扫描面不是被缩窄过。
+    let injected_surface = format!("{surfaces}\n{injected_text}");
+    assert_eq!(
+        scan_hits(&injected_surface, CANARY),
+        1,
+        "注入后的扫描面必须命中恰好一次"
+    );
+}
+
+/// 把录到的全部 payload 拼成**一个扫描面**（与用例里的敏感值扫描同一份输入）。
+fn recorded_payload_text(recorder: &RecordingAudit) -> String {
+    recorder
         .payloads()
         .iter()
         .map(|(_, payload)| payload.to_string())
         .collect::<Vec<_>>()
-        .join("\n");
+        .join("\n")
+}
 
-    for forbidden in [CANARY, "accessToken", "refreshToken", "id_token", "password", PASSWORD] {
-        assert!(
-            !dump.contains(forbidden),
-            "审计 payload 不得包含 {forbidden}：{dump}"
-        );
-    }
-
-    // **阳性对照**：同一个扫描判据必须能命中注入的 canary。
-    let injected = format!("{dump}\n{CANARY}");
-    assert!(
-        injected.contains(CANARY),
-        "扫描器必须能命中 canary（否则 0 命中不可信）"
-    );
+/// **敏感值扫描判据**（用例与阳性对照共用同一个函数 —— 这是阳性对照成立的前提）。
+fn scan_hits(haystack: &str, needle: &str) -> usize {
+    haystack.matches(needle).count()
 }
 
 // ---------------------------------------------------------------------------

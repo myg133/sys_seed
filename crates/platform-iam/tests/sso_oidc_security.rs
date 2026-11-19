@@ -252,6 +252,9 @@ async fn ac_s_102_rs512_outside_the_whitelist_is_rejected() {
 // ---------------------------------------------------------------------------
 
 /// 未知 `kid`（IdP 轮换了密钥）→ 强制刷新一次 JWKS 后**登录成功**。
+///
+/// 不只断言「成功」：还要证明**真的又取了一次 JWKS**（AC-S-102 步骤 7 / D128 Q9）。
+/// 只断言成功的话，「实现改成未知 kid 直接失败但 mock 碰巧还能签发」也会绿。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ac_s_102_an_unknown_kid_triggers_a_jwks_refresh_and_succeeds() {
     let env = Env::new().await;
@@ -259,10 +262,28 @@ async fn ac_s_102_an_unknown_kid_triggers_a_jwks_refresh_and_succeeds() {
     let (state, code) = env.prepare().await;
     env.callback_ok(&code, &state).await;
 
+    let hits_before = env.idp.jwks_hits();
+    assert!(
+        hits_before >= 1,
+        "首次登录必须先取一次 JWKS（否则「再取一次」无法区分）：{hits_before}"
+    );
+
     // IdP 轮换：新 kid 不在我们的缓存里。
     env.idp.rotate_keys();
     let (state, code) = env.prepare().await;
     env.callback_ok(&code, &state).await;
+
+    let hits_after = env.idp.jwks_hits();
+    assert!(
+        hits_after >= hits_before + 1,
+        "未知 kid 必须触发一次 JWKS 刷新（{hits_before} → {hits_after}）"
+    );
+    // 且刷新后确实用**新** kid 的密钥验过了（不是拿旧缓存硬蒙）。
+    assert_ne!(
+        env.idp.current_kid(),
+        "kid-1",
+        "前置：轮换后当前 kid 应已变化"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

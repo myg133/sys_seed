@@ -125,6 +125,34 @@ pub fn is_empty_password(password: &str) -> bool {
     password.trim().is_empty()
 }
 
+/// `simple_bind` 的结果码 → 认证是否成功。
+///
+/// # 为什么单独抽成纯函数（P16，D128 / Q4）
+///
+/// 「`rc != 0` → 失败」这一行是**「任意密码都能登录」的唯一防线**。
+/// 在生产包装层里它无法被机械验证 —— 要驱动 [`Ldap3Conn::simple_bind`] 必须有一条
+/// 真实的 LDAP 连接（`ldap3` 没有服务端/内存实现），而所有测试走的都是
+/// 可计数的 [`SsoLdapConn`] 替身，**直接返回 `Ok(false)`**，正好跳过这一行。
+///
+/// 抽成纯函数后，`rc = 0 / 49 / 32` 的映射可以被直接断言；
+/// 并且有一条断言把本函数与 `ldap3::LdapResult::success()` 的语义**逐值对齐** ——
+/// 这样「实现改回 `simple_bind(..).await?` 当成功」这类回归会立刻变红。
+pub fn bind_succeeded(rc: u32) -> bool {
+    rc == 0
+}
+
+/// 从一个**真实的** `ldap3::LdapResult` 判定认证是否成功。
+///
+/// 这一层存在的理由：让「`rc` 被真的读出来」这件事有一个**可被直接驱动的类型**。
+/// 生产包装层只写 `Ok(bind_result(&result))` —— 于是 `rc → bool` 的映射
+/// 既被 [`bind_succeeded`] 的纯函数单测覆盖，又被本函数的真实 `LdapResult` 用例覆盖。
+///
+/// 它**不接受** `Result`：外层 `Ok` 只代表「请求发出并收到响应」，
+/// 与认证成败无关（S18）—— 把这一区分做进签名，误用就写不出来。
+pub fn bind_result(result: &ldap3::LdapResult) -> bool {
+    bind_succeeded(result.rc)
+}
+
 /// RFC 4515 的 filter 值转义。
 ///
 /// 五个字符：`\` → `\5c`、`*` → `\2a`、`(` → `\28`、`)` → `\29`、NUL → `\00`。
@@ -308,12 +336,16 @@ impl SsoLdapConn for Ldap3Conn {
         let pw = pw.to_string();
         Box::pin(async move {
             // ⚠️ 外层 `Ok` 只代表「请求发出并收到响应」；`rc != 0`（如 rc=49）才是密码错。
+            //
+            // 判定**必须**经过 [`bind_result`] / [`bind_succeeded`]（P16）——
+            // 那一行是「任意密码都能登录」的唯一防线，抽成纯函数后才能被单测机械验证
+            // （见本文件 `mod tests`）。
             let result = self
                 .ldap
                 .simple_bind(&dn, &pw)
                 .await
                 .map_err(|_| SsoLdapError::Bind)?;
-            Ok(result.success().is_ok())
+            Ok(bind_result(&result))
         })
     }
 }
@@ -377,5 +409,91 @@ mod tests {
         assert_eq!(entry.first("MAIL"), Some("erin@example.com"));
         assert_eq!(entry.first("mail"), Some("erin@example.com"));
         assert_eq!(entry.first("none"), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // P16（D128 / Q4）：`rc → 认证成功`的映射必须可机械验证
+    //
+    // 这一组是「任意密码都能登录」（S18）的**唯一**防线。若有人把它改回
+    // `simple_bind(..).await.is_ok()`（外层 Ok 即成功），下面第 2、3 条会红。
+    // -----------------------------------------------------------------------
+
+    /// `rc = 0` → 成功；`rc != 0` → **失败**（49 = invalidCredentials、32 = noSuchObject）。
+    #[test]
+    fn bind_succeeded_only_accepts_rc_zero() {
+        assert!(bind_succeeded(0), "rc=0 是认证成功");
+        assert!(!bind_succeeded(49), "rc=49（invalidCredentials）必须是失败");
+        assert!(!bind_succeeded(32), "rc=32（noSuchObject）必须是失败");
+        assert!(!bind_succeeded(1), "rc=1（operationsError）必须是失败");
+        assert!(
+            !bind_succeeded(u32::MAX),
+            "任何非 0 码都必须是失败 —— 这是「任意密码都能登录」的防线"
+        );
+    }
+
+    /// **对齐 ldap3 的真实语义**：本函数的判定必须与 `LdapResult::success()` 逐值一致。
+    ///
+    /// 这条不依赖网络：用构造的 `ldap3::LdapResult` 直接驱动。
+    /// 它守的是「我们自己的判据」与「库的判据」不会各自漂移。
+    #[test]
+    fn bind_succeeded_agrees_with_ldap3_success_semantics() {
+        let result_with = |rc: u32| ldap3::LdapResult {
+            rc,
+            matched: String::new(),
+            text: String::new(),
+            refs: Vec::new(),
+            ctrls: Vec::new(),
+        };
+
+        for rc in [0u32, 1, 32, 48, 49, 50, 51, 53] {
+            let expected = result_with(rc).success().is_ok();
+            assert_eq!(
+                bind_succeeded(rc),
+                expected,
+                "rc={rc}：bind_succeeded 与 ldap3::LdapResult::success() 不一致"
+            );
+        }
+
+        // 且「成功」的那一侧**恰好只有 rc=0**（不是「rc 小就算成功」）。
+        let successes: Vec<u32> = (0u32..=60).filter(|rc| bind_succeeded(*rc)).collect();
+        assert_eq!(successes, vec![0], "只有 rc=0 才算认证成功");
+    }
+
+    /// **P16 选项 (B)**：用构造的 `ldap3::LdapResult { rc: 49, .. }` 驱动生产用的判定函数，
+    /// 断言 `false`；`rc = 0` 断言 `true`。
+    ///
+    /// 这条是生产包装层 `Ldap3Conn::simple_bind` 里那一行的**来源**：
+    /// 包装层现在只写 `Ok(bind_result(&result))`，所以这里断言的行为就是生产的判定行为。
+    ///
+    /// 会红的情形：`bind_result` 改成 `true` / 改成 `result.success().is_ok() || true` /
+    /// 包装层改回「外层 `Ok` 即成功」（那时 `Ok(result)` 里根本读不到 rc）。
+    #[test]
+    fn a_real_ldap_result_with_rc_49_is_a_failed_bind() {
+        let result = |rc: u32| ldap3::LdapResult {
+            rc,
+            matched: String::new(),
+            text: String::new(),
+            refs: Vec::new(),
+            ctrls: Vec::new(),
+        };
+
+        assert!(
+            bind_result(&result(0)),
+            "rc=0 的 LdapResult 必须判定为认证成功"
+        );
+        assert!(
+            !bind_result(&result(49)),
+            "rc=49（invalidCredentials）必须判定为认证失败 —— 否则任意密码都能登录"
+        );
+        assert!(
+            !bind_result(&result(32)),
+            "rc=32（noSuchObject）必须判定为认证失败"
+        );
+        // 明确解码一句：`LdapResult` 本身**不是**成功/失败的载体，
+        // 外层 `Ok(...)` 与认证成败无关。
+        assert!(
+            result(49).success().is_err(),
+            "前置：ldap3 的 success() 在 rc=49 时返回 Err（本判据的来源语义）"
+        );
     }
 }

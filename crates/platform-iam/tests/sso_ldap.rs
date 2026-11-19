@@ -94,7 +94,16 @@ async fn ac_s_104_a_valid_bind_returns_a_login_response() {
     assert_eq!(status, StatusCode::OK, "{body}");
     assert_eq!(body["tokenType"], "Bearer");
     assert!(body["expiresIn"].as_u64().is_some_and(|value| value > 0));
-    assert!(body["permissions"].is_array());
+    // `permissions` 恒为数组（AC-S-100 预期 4）。这里顺带钉住**元素类型**：
+    // 只断言 `is_array()` 连 `[null]` / `[1,2]` 也放行。
+    // （「元素非空」的要求属于 AC-S-100 步骤 5，由 `platform-server` 的
+    //  `sso_me_permissions_real_db.rs` 用真实 RBAC 验 —— 本用例没注入权限点提供者。）
+    assert!(
+        body["permissions"]
+            .as_array()
+            .is_some_and(|items| items.iter().all(serde_json::Value::is_string)),
+        "permissions 必须是字符串数组：{body}"
+    );
 
     // 计数期望（P13）：connect=1 / search=1 / bind=2（服务账号 1 + 用户 1）。
     assert_eq!(env.ldap.connects(), 1);
@@ -323,9 +332,13 @@ async fn ac_s_105_a_changed_mail_attribute_does_not_change_the_account() {
 
 /// `mail` 撞上一个**已被别的外部身份绑定**的本地账号 → 409，不静默接管。
 ///
-/// ⚠️ AC-S-105 步骤 6 的原始步骤顺序（在步骤 2 已把 `frank` 绑上之后改 mail）
-/// 实际不可达 409 —— 那时 P6 第一步（按 `external_id` 命中）就已经返回了。
-/// 所以这里用**尚未绑定**的身份验证 P6 描述的规则本身。
+/// AC-S-105 步骤 6 的**当前措辞（rev 3.3，D128 裁定）**：
+/// 「用**未绑定**的 LDAP 身份 `henry`（`mail = gina@example.com`，该邮箱已被 `gina`
+/// 在该 provider 下绑定）→ 登录 → `409`」。
+///
+/// 原步骤写的是「把已绑定的 `frank` 的 mail 改成 `gina` 的邮箱」，那因
+/// **P6「`external_id`（DN）优先」而物理不可达**（DN 未变 → 第一步就命中 `frank`）。
+/// D128 已把规格改写为本用例的场景，所以这里不再有「AC 与测试不一致」的注记。
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ac_s_105_a_mail_colliding_with_another_bound_account_is_409() {
     let env = Env::new().await;
@@ -351,14 +364,29 @@ async fn ac_s_105_a_mail_colliding_with_another_bound_account_is_409() {
     .await
     .expect("gina 的绑定应能写入");
 
-    // 新用户 `frank`：DN 未绑定，mail 却是 gina 已用的地址 —— 他会按 mail 匹配到 gina，
-    // 而 gina 已经绑了别的 DN → 409。
+    // 未绑定的 LDAP 身份 `henry`：DN 没有绑定，mail 却是 gina 已用的地址 ——
+    // 按 mail 会匹配到 gina，而 gina 已经绑了别的 DN → 409。
     env.ldap.add_user(DirectoryUser {
-        dn: "uid=frank,ou=people,dc=example,dc=com".to_string(),
-        password: "Fr4nk-pass".to_string(),
+        dn: "uid=henry,ou=people,dc=example,dc=com".to_string(),
+        password: "H3nry-pass".to_string(),
         mail: Some("gina@example.com".to_string()),
     });
-    let (status, body) = env.login("frank", "Fr4nk-pass").await;
+    let (status, body) = env.login("henry", "H3nry-pass").await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["code"], "SSO_IDENTITY_LINK_CONFLICT");
+
+    // 且**没有**静默把 henry 绑到 gina 头上（绑定行仍是 gina 的旧 DN）。
+    let bound: String = sqlx::query_scalar(
+        "SELECT external_id FROM external_identity \
+         WHERE tenant_id = $1 AND provider = 'ldap' AND user_id = $2",
+    )
+    .bind(&env.tenant)
+    .bind(&gina_id)
+    .fetch_one(&env.admin)
+    .await
+    .expect("gina 的绑定行应仍在");
+    assert_eq!(
+        bound, "uid=gina,ou=people,dc=example,dc=com",
+        "冲突时不得改写既有绑定"
+    );
 }

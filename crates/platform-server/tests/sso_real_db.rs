@@ -329,6 +329,13 @@ async fn ac_s_021_enforcement_works_through_the_real_config_service() {
                 "sso.oidc.redirectUri",
                 json!("https://app.example.com/api/iam/sso/oidc/callback"),
             ),
+            // AC-S-021 前置：`tenant-a` 配好 **OIDC + LDAP** —— 两个入口都要可用，
+            // 否则下面的 `ssoProviders` 只能断言到一个（Q5）。
+            ("sso.ldap.enabled", json!(true)),
+            ("sso.ldap.url", json!("ldap://ldap.example.com:389")),
+            ("sso.ldap.baseDn", json!("dc=example,dc=com")),
+            ("sso.ldap.userSearchFilter", json!("(uid={username})")),
+            ("sso.ldap.mailAttribute", json!("mail")),
         ],
     )
     .await;
@@ -355,13 +362,155 @@ async fn ac_s_021_enforcement_works_through_the_real_config_service() {
         .expect("响应体");
     let problem: Value = serde_json::from_slice(&bytes).expect("应是 JSON");
     assert_eq!(problem["code"], "SSO_REQUIRED");
-    assert!(
-        problem["params"]["ssoProviders"].is_array(),
-        "params.ssoProviders 必须是数组：{problem}"
+    // AC-S-021 预期 1（rev 3.3 / Q5）：**可用 provider 列表**，不是「恰好是数组」。
+    let kinds: Vec<&str> = problem["params"]["ssoProviders"]
+        .as_array()
+        .expect("params.ssoProviders 必须是数组")
+        .iter()
+        .map(|provider| provider["type"].as_str().expect("每个 provider 都要有 type"))
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["oidc", "ldap"],
+        "params.ssoProviders 必须列出两个可用入口：{problem}"
     );
     assert_eq!(
         platform_iam::password::argon2_invocation_count(),
         before,
         "强制 SSO 时不得跑 Argon2"
+    );
+}
+
+/// **AC-S-021 步骤 4 / 预期 4（rev 3.3，D128 / Q6）**：`enforce` 是**租户级** ——
+/// 「`tenant-a` 开、`tenant-b` 关」必须**并存**。
+///
+/// 原用例用 `StaticSsoConfigSource`，它的 `read(&self, _ctx)` **忽略租户上下文**
+/// （一份全局快照），只能靠手动 `set(false)` 切回 —— 那验的是「关掉后能登录」，
+/// **不是**「两个租户并存时各自生效」。这条用**真实 `ConfigService`** 验：
+/// 只给 `tenant-a` 写 `sso.enforce=true`，`tenant-b` 一个键都不写。
+///
+/// 会红的情形：
+/// - 配置读取把 `enforce` 当成**全局**开关 → `tenant-b` 也 403；
+/// - 读配置时用错租户（例如忽略 `ctx` 读平台级默认值）→ 两侧对调；
+/// - 强制 SSO 判定跑到 Argon2 **之后** → a 侧计数不为 0；
+/// - `tenant-b` 因别的原因被拒（配置缺失被当成 fail closed）→ b 侧不是 200。
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ac_s_021_enforcement_is_tenant_scoped_through_the_real_config_service() {
+    let app_url = setup_database().await;
+    let (_service, config_service, router) = build_real_stack(&app_url).await;
+
+    let tenant_a = unique_tenant("scoped-a");
+    let tenant_b = unique_tenant("scoped-b");
+    let ctx_a = RequestContext::new().with_tenant(tenant_a.clone());
+
+    let password = "correct-horse-battery-staple";
+    for tenant in [&tenant_a, &tenant_b] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/iam/register")
+                    .header("x-tenant-id", tenant.as_str())
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        json!({
+                            "username": "alice",
+                            "password": password,
+                            "email": "alice@example.com",
+                        })
+                        .to_string(),
+                    ))
+                    .expect("请求"),
+            )
+            .await
+            .expect("请求应能发出");
+        assert_eq!(
+            response.status(),
+            StatusCode::CREATED,
+            "{tenant} 的账号应先能建成"
+        );
+    }
+
+    // **只给 tenant-a 开** enforce；tenant-b 一个键都不写（走 manifest 默认值）。
+    write_config(
+        &config_service,
+        &ctx_a,
+        vec![
+            ("sso.enforce", json!(true)),
+            ("sso.oidc.enabled", json!(true)),
+            ("sso.oidc.issuer", json!("https://idp.example.com")),
+            ("sso.oidc.clientId", json!("client-1")),
+            ("sso.oidc.scopes", json!("openid email profile")),
+            (
+                "sso.oidc.redirectUri",
+                json!("https://app.example.com/api/iam/sso/oidc/callback"),
+            ),
+            ("sso.ldap.enabled", json!(true)),
+            ("sso.ldap.url", json!("ldap://ldap.example.com:389")),
+            ("sso.ldap.baseDn", json!("dc=example,dc=com")),
+            ("sso.ldap.userSearchFilter", json!("(uid={username})")),
+            ("sso.ldap.mailAttribute", json!("mail")),
+        ],
+    )
+    .await;
+
+    let login = |tenant: &str| {
+        let router = router.clone();
+        let tenant = tenant.to_string();
+        let body = json!({ "username": "alice", "password": password }).to_string();
+        async move {
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/iam/login")
+                        .header("x-tenant-id", &tenant)
+                        .header("x-forwarded-for", unique_ip())
+                        .header("content-type", "application/json")
+                        .body(Body::from(body))
+                        .expect("请求"),
+                )
+                .await
+                .expect("请求应能发出");
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .expect("响应体");
+            (status, serde_json::from_slice::<Value>(&bytes).unwrap_or(Value::Null))
+        }
+    };
+
+    // a → 403，且**一次 Argon2 都不跑**。
+    let before_a = platform_iam::password::argon2_invocation_count();
+    let (status_a, body_a) = login(&tenant_a).await;
+    let after_a = platform_iam::password::argon2_invocation_count();
+    assert_eq!(status_a, StatusCode::FORBIDDEN, "{body_a}");
+    assert_eq!(body_a["code"], "SSO_REQUIRED");
+    assert_eq!(
+        after_a, before_a,
+        "tenant-a 开了 enforce：必须在密码校验之前返回（{before_a} → {after_a}）"
+    );
+
+    // b → 200，且**真的**跑了 Argon2（对照组，让「计数 == 0」有区分力）。
+    let before_b = platform_iam::password::argon2_invocation_count();
+    let (status_b, body_b) = login(&tenant_b).await;
+    let after_b = platform_iam::password::argon2_invocation_count();
+    assert_eq!(
+        status_b,
+        StatusCode::OK,
+        "tenant-b 没开 enforce，本地登录必须仍然可用：{body_b}"
+    );
+    assert!(
+        after_b > before_b,
+        "对照组：tenant-b 必须真的跑 Argon2（{before_b} → {after_b}）"
+    );
+
+    // 并存性：a 的写入没有影响 b，重打 a 仍然 403。
+    let (status_a_again, _) = login(&tenant_a).await;
+    assert_eq!(
+        status_a_again,
+        StatusCode::FORBIDDEN,
+        "两个租户的策略必须并存，a 不能因为 b 通而放行"
     );
 }

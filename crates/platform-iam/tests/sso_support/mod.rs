@@ -441,6 +441,8 @@ struct MockState {
     attacker_hits: Arc<Mutex<u32>>,
     /// 攻击者 JWKS 端点的地址（jku 指向它）。
     attacker_url: Mutex<String>,
+    /// **本 mock 的** `/jwks` 端点被请求的次数（AC-S-102 步骤 7：未知 kid 必须触发刷新）。
+    jwks_hits: Arc<Mutex<u32>>,
 }
 
 impl MockIdp {
@@ -521,6 +523,11 @@ impl MockIdp {
     /// 攻击者 JWKS 端点被请求的次数。
     pub fn attacker_hits(&self) -> u32 {
         *self.state.attacker_hits.lock().expect("锁")
+    }
+
+    /// **本 mock 的** `/jwks` 端点被请求的次数（AC-S-102 步骤 7：证明真的触发了刷新）。
+    pub fn jwks_hits(&self) -> u32 {
+        *self.state.jwks_hits.lock().expect("锁")
     }
 
     /// 攻击者 JWKS 端点 URL（`jku` 指向它）。
@@ -627,6 +634,7 @@ impl MockState {
             }),
             attacker_hits: Arc::new(Mutex::new(0)),
             attacker_url: Mutex::new(String::new()),
+            jwks_hits: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -686,6 +694,11 @@ async fn discovery(State(state): State<Arc<MockState>>) -> Response {
 }
 
 async fn jwks(State(state): State<Arc<MockState>>) -> Response {
+    // 计数真实请求次数（AC-S-102 步骤 7：未知 kid 必须**再取一次** JWKS）。
+    {
+        let hits = state.jwks_hits.clone();
+        *hits.lock().expect("锁") += 1;
+    }
     axum::Json(state.jwks()).into_response()
 }
 

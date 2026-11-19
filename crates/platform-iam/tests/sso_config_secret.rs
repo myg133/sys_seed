@@ -336,6 +336,24 @@ fn ac_s_106_the_twelve_keys_are_registered_as_tenant_scoped() {
 // AC-S-021：强制 SSO
 // ---------------------------------------------------------------------------
 
+/// 从 403 响应体里取出 `params.ssoProviders[*].type`（顺序即实现给出的顺序）。
+///
+/// 刻意**不用** `is_array()`：那条断言无法区分「正确的可用列表」与「空数组」，
+/// 而 `enforce_sso` 的读失败分支本来就传空 `Vec`（Q5）。
+fn provider_kinds(body: &serde_json::Value) -> Vec<String> {
+    body["params"]["ssoProviders"]
+        .as_array()
+        .unwrap_or_else(|| panic!("params.ssoProviders 必须是数组：{body}"))
+        .iter()
+        .map(|provider| {
+            provider["type"]
+                .as_str()
+                .unwrap_or_else(|| panic!("每个 provider 都要有 type：{provider}"))
+                .to_string()
+        })
+        .collect()
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ac_s_021_enforced_sso_rejects_local_login_without_touching_argon2() {
     let env = Env::new().await;
@@ -385,9 +403,15 @@ async fn ac_s_021_enforced_sso_rejects_local_login_without_touching_argon2() {
         assert_eq!(status, StatusCode::FORBIDDEN, "{}", String::from_utf8_lossy(bytes));
         let body = json_of(bytes);
         assert_eq!(body["code"], "SSO_REQUIRED");
-        assert!(
-            body["params"]["ssoProviders"].is_array(),
-            "params.ssoProviders 必须是数组：{body}"
+        // `params.ssoProviders` 必须是**可用 provider 列表**（AC-S-021 预期 1 / rev 3.3 Q5）。
+        //
+        // 只断言 `is_array()` 无法区分「正确列表」与「空数组」——
+        // 而 `enforce_sso` 在**读失败分支**传的正是 `Vec::new()`（service.rs）。
+        // 若正常分支哪天退化，光靠类型断言不会红。
+        assert_eq!(
+            provider_kinds(&body),
+            vec!["oidc".to_string(), "ldap".to_string()],
+            "params.ssoProviders 必须是 OIDC + LDAP 两个可用入口：{body}"
         );
     }
 

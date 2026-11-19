@@ -357,10 +357,15 @@ async fn ac_s_107_deleting_a_session_revokes_the_family_and_logout_all_covers_ss
             .expect("请求应能构造"),
     )
     .await;
-    // ⚠️ AC-S-107 步骤 4 写的是 204，但既有 `logout-all` 的契约（REQ-007 已合并）
-    //    是 `200 {"revokedSessions": n}`，`iam_real_db.rs` 也断言 200。
-    //    改它属于跨需求契约变更（D109），本轮不动 —— 见自验报告的偏离项。
+    // AC-S-107 步骤 4（**rev 3.3 由 D128 裁定**）：`200 {"revokedSessions": n}`。
+    // 原 AC 写 204，与 REQ-007 已合并的 `logout-all` 契约冲突；BA 裁定改规格而非改实现
+    // —— 200 带作废回执，语义优于无法告知数量的 204。
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
+    let body = json_of(&bytes);
+    assert!(
+        body["revokedSessions"].as_u64().is_some_and(|n| n >= 1),
+        "应回执本次作废的会话数：{body}"
+    );
     let (status, _, bytes) = post_json(
         &env.stack.router,
         "/api/iam/refresh",

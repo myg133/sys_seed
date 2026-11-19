@@ -243,7 +243,17 @@ async fn ac_s_100_the_callback_hands_off_a_ticket_and_exchange_returns_a_login_r
     let login = json_of(&bytes);
     assert_eq!(login["tokenType"], "Bearer");
     assert!(login["expiresIn"].as_u64().is_some_and(|value| value > 0));
-    assert!(login["permissions"].is_array(), "permissions 恒为数组");
+    // `permissions` **恒为数组**是本节预期 4；这里同时钉住元素类型。
+    //
+    // ⚠️ 「**非空**且含 bob 的真实权限点」是预期 **5** 的要求，**不是**这条 ——
+    // 那需要真实 RBAC 在场，见 `platform-server/tests/sso_me_permissions_real_db.rs`。
+    assert!(
+        login["permissions"]
+            .as_array()
+            .is_some_and(|items| items.iter().all(Value::is_string)),
+        "permissions 必须是字符串数组（预期 4）：{}",
+        login["permissions"]
+    );
 
     // 键集合与**本地登录**相同（AC-S-107 同构的直接要求）。
     let local_tenant = unique_tenant("local");
