@@ -187,7 +187,7 @@
     ],
     "expected": [
       "调用以异常结束",
-      "error.code === 'UNAUTHENTICATED'（**按 AC-S-070 步骤 3 原文**）",
+      "error.code === 'TOKEN_REVOKED'（**透传后端码**，D94 —— 不是合成的 'UNAUTHENTICATED'，也不是 'client.*'）",
       "error.status === 401",
       "业务路径的调用次数 === 1（失败后不重发）",
       "'/api/iam/refresh' 的调用次数 === 1（刷新失败后不反复试）",
@@ -201,7 +201,7 @@
     "refs": [
       "code/crates/platform-iam/src/error.rs:44,155,176 —— 刷新失败的后端码是 TOKEN_REVOKED / TOKEN_EXPIRED / TOKEN_REUSE_DETECTED，状态码 401"
     ],
-    "notes": "⚠️ **AC 冲突（挑刺 #4）**：本用例按 AC-S-070 步骤 3 断言 code='UNAUTHENTICATED'，但 AC-S-069 要求「code 精确等于响应体的 code」，而后端刷新失败返回的是 TOKEN_REVOKED 等。两条 AC 不可同时满足 → AC 修订后本条预期必须同步改写。"
+    "notes": "**rev 2 已修订**：原文断言 code='UNAUTHENTICATED'（照 AC-S-070 步骤 3 rev 1），但 AC-S-069 要求「code 精确等于响应体的 code」，后端刷新失败返 TOKEN_REVOKED 等 —— 两条互斥。BA 裁定选**透传**（D94）：合成码会丢掉「为什么被踢下线」的直接线索。实现若返回 'UNAUTHENTICATED' 或 'client.*' 均判失败。"
   },
   {
     "id": "TC-011-030",
@@ -265,7 +265,9 @@
     "id": "TC-011-032",
     "ac": "AC-S-071",
     "title": "读方法不注入 idempotency-key",
-    "preconditions": ["注入式 fake fetch：任意路径返回 200"],
+    "preconditions": [
+      "注入式 fake fetch：任意路径返回 200"
+    ],
     "steps": [
       "调用 client.request({ method:'GET', path:'/api/a' })",
       "调用 client.request({ method:'HEAD', path:'/api/b' })",
@@ -290,7 +292,9 @@
     "id": "TC-011-033",
     "ac": "AC-S-071",
     "title": "同一 SDK 实例连续两次写请求的幂等键不同",
-    "preconditions": ["注入式 fake fetch：任意路径返回 200"],
+    "preconditions": [
+      "注入式 fake fetch：任意路径返回 200"
+    ],
     "steps": [
       "调用 client.request({ method:'POST', path:'/api/a', body:{x:1} })",
       "调用 client.request({ method:'POST', path:'/api/a', body:{x:2} })",
@@ -313,7 +317,7 @@
   {
     "id": "TC-011-034",
     "ac": "AC-S-071",
-    "title": "401 刷新后的重放请求使用**新的**幂等键（否则后端返回 409）",
+    "title": "401 刷新后的重放请求 **不带** idempotency-key（否则后端返回 409）",
     "preconditions": [
       "注入式 fake fetch：",
       "  - 业务路径 POST 第一次返回 401，第二次返回 200",
@@ -326,8 +330,8 @@
     ],
     "expected": [
       "两次业务请求都被发出（次数 === 2）",
-      "第 2 次请求的 idempotency-key !== 第 1 次的 idempotency-key",
-      "两个键都匹配 UUID v4 正则",
+      "第 1 次请求的 idempotency-key 匹配 UUID v4 正则（首次照常注入）",
+      "第 2 次请求的 idempotency-key === null（**头根本不存在**，D92）",
       "调用以 resolve 结束（拿到第 2 次的 200 结果），不是以 409 CONFLICT 结束"
     ],
     "type": "功能",
@@ -341,7 +345,7 @@
       "code/crates/platform-iam/src/http.rs:336-356 —— 命中 status=0 的已声明键 → 返回 **409 CONFLICT**",
       "code/crates/platform-iam/src/store.rs:1042-1059 —— claim 是 INSERT ... status=0 ... ON CONFLICT DO NOTHING"
     ],
-    "notes": "⚠️ **这是本用例集里最危险的一条（挑刺 #1 / 硬伤）**：首个请求因令牌过期返回 401，但幂等键**已经被 claim 且没被 complete**；若重放沿用同一个键，后端会返回 409「the idempotent request is still being processed」而不是 200 —— 用户点保存没反应。AC-S-070 步骤 1 与 AC-S-071 步骤 1 合起来会让实现者自然地犯这个错，必须由 AC 明文约束。"
+    "notes": "**rev 2 已修订（这是本用例集最危险的一条，挑刺 #1）**：原文要求「第 2 次的键 !== 第 1 次」是**错的** —— 401 意味着请求**没有执行**，沿用旧键会让后端命中 status=0 的已声明键 → **409 CONFLICT**；换成新键则会在表里留两个半截键。BA 裁定（D92）：**重放时根本不注入该头**。⚠️ 断言必须是 `replayKey === null`，**不是**「两个键不同」—— 后者两种实现都能过。"
   },
   {
     "id": "TC-011-035",
