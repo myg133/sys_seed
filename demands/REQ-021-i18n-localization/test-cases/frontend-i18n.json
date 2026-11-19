@@ -72,7 +72,7 @@
   {
     "id": "TC-021-090",
     "ac": "AC-S-099",
-    "title": "SSR 与 CSR 输出逐字相同（守卫：本仓没有 SSR）",
+    "title": "单一实现：t() 是纯函数 + 组件零硬编码文案（SSR 不存在，rev 3 改写）",
     "preconditions": [
       "★ 实测：apps/shell 是纯 CSR —— main.ts 用 svelte 的 mount(App, {target})，vite.config.ts 只配了 svelte() 插件与 dev/preview 代理，没有 SSR 入口、没有 @sveltejs/kit、没有 render() 导出",
       "apps/shell/package.json 的 build 脚本是 `vite build`（客户端产物）"
@@ -83,16 +83,16 @@
       "在浏览器里取同一组件的 textContent"
     ],
     "expected": [
-      "若仓库确实没有 SSR：本步骤在 AC 里删除，改为「同一份资源被 CSR 与（未来）SSR 共用」的单测 —— 断言 t() 是纯函数（同输入同输出，不读 DOM、不读 navigator）",
-      "若新增 SSR：render() 的 HTML 片段 == 浏览器挂载后的 textContent（逐字，含空白归一化规则）",
-      "两种路径都必须断言「对同一 locale 同一键输出相同」",
-      "不得用「跳过」表示通过（D108）"
+      "t() 是纯函数：同输入同输出，**不读 DOM、不读 navigator**（单测断言）",
+      "组件源码剥注释后**零中文文案字面量**（全部走 t()）",
+      "语言切换后**已渲染的组件立即更新**（subscribe 机制，不刷新页面）—— E2E 验",
+      "**不得用「跳过」表示通过**（D108）"
     ],
     "type": "功能",
     "layer": "frontend-unit",
     "automatable": true,
     "priority": "P1",
-    "notes": "★ AC-S-099 步骤 4 的「SSR 与 CSR 逐字相同」在本仓**无处可测**：没有 SSR。BA 的怀疑 #7 成立。保留本条的意义是逼 BA 做一个选择：删掉这条，或新增 SSR 入口（= 新范围）。见挑刺 #14。"
+    "notes": "★ **rev 3 改写（QA S3）**：原标题「SSR 与 CSR 输出逐字相同」**物理不可达** —— `apps/shell` 是纯 CSR（mount() + 无 Kit + 无 ssr 配置）。rev 2 的 AC-S-099 步骤 4 已改写为「单一实现」（裁定 #14），本用例标题与步骤随之同步。"
   },
   {
     "id": "TC-021-091",
@@ -171,7 +171,7 @@
   {
     "id": "TC-021-094",
     "ac": "AC-S-099",
-    "title": "语言偏好的持久化：sessionStorage 与「持久化」语义冲突（守卫）",
+    "title": "语言偏好的持久化语义已裁定：sessionStorage（会话级，非跨设备）",
     "preconditions": [
       "design §7.2 写「用户级偏好存 sessionStorage（与 REQ-011 的 D99 一致）」",
       "D99 原文是「会话（token + 租户）存 sessionStorage」，理由是 refresh token 的 XSS 风险",
@@ -185,16 +185,14 @@
     ],
     "expected": [
       "同标签页刷新后 locale 仍为 en-US（sessionStorage 能保住）",
-      "BA 明确新标签页 B 的期望：en-US（真持久化）还是回到默认（会话级）",
-      "若为会话级：demand.md 的「持久化」必须改成「会话内保持」，并承认这是取舍",
-      "若为真持久化：改用 localStorage 或后存储（用户表 / config），并说明 XSS 影响评估",
-      "无论哪种，都必须有一条断言能区分这两条路径（否则等于没定义）"
+      "**新标签页回到租户/平台默认**（会话级语义，已裁定）",
+      "必须有一条断言能区分「会话级」与「真持久化」这两条路径"
     ],
     "type": "功能",
     "layer": "e2e",
     "automatable": true,
     "priority": "P1",
-    "notes": "★ D99 的适用范围是「token + 租户」，用它的理由（refresh token 长期驻留是 XSS 放大器）去论证「语言偏好」不成立：语言偏好不是凭据，XSS 拿到它没有任何危害。design 的引用是**错误类比**。见挑刺 #41。"
+    "notes": "★ **rev 3 改写（QA S5）**：D112 已裁定「用户级偏好只在前端、存 sessionStorage」。原用例把「持久化 vs 会话级」列为待裁定 —— 现在**已裁定**，标题不再带「守卫」。（要跨设备需另立需求：建用户表列 + 迁移。）"
   },
   {
     "id": "TC-021-095",

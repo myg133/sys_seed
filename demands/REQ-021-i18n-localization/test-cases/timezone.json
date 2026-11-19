@@ -262,7 +262,7 @@
   {
     "id": "TC-021-060",
     "ac": "AC-S-095",
-    "title": "用户时区偏好的持久化载体存在且跨标签页可见（守卫：design 与 AC 矛盾）",
+    "title": "用户时区偏好存在 sessionStorage（单标签页；新标签页回到租户/平台默认）",
     "preconditions": [
       "design §7.2 写「用户级偏好存 sessionStorage（与 D99 一致）」",
       "D99 的实际内容是「token + 租户存 sessionStorage」，理由是「refresh token 长期驻留是 XSS 放大器」",
@@ -274,15 +274,14 @@
       "读标签页 B 里的有效时区"
     ],
     "expected": [
-      "BA 明确偏好载体：sessionStorage（单标签页，新标签丢失）还是 后端/DB（跨设备、跨标签）",
-      "若选 sessionStorage：写明「新标签页回到租户/平台默认」并在 AC 里承认这是设计取舍",
-      "若选后端：给出存储位置（用户表新列 或 config 的 user 作用域）与对应迁移",
-      "无论选哪个，都必须有一条断言能区分两种行为"
+      "同标签页刷新后时区偏好仍在（sessionStorage 能保住）",
+      "**新标签页**回到租户/平台默认（sessionStorage 语义）—— E2E 已有用例固化",
+      "必须有一条断言能区分「sessionStorage」与「localStorage/后端存储」这两条路径"
     ],
     "type": "功能",
     "layer": "e2e",
     "automatable": true,
     "priority": "P1",
-    "notes": "★ sessionStorage 与「用户偏好」语义冲突：用户在新标签页打开就丢偏好，那它不是「偏好」而是「当前页设置」。design 用 D99 背书，但 D99 的理由（XSS/refresh token）不适用于语言时区。见挑刺 #41。"
+    "notes": "★ **rev 3 改写（QA S4）**：D112 已裁定「用户级偏好只在前端、存 sessionStorage」。原用例把「持久化 vs 会话级」列为待裁定 —— 现在**已裁定**，标题不再带「守卫」。"
   }
 ]

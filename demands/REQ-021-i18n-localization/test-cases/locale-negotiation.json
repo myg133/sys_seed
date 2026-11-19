@@ -548,5 +548,54 @@
     "automatable": true,
     "priority": "P1",
     "notes": "★ **rev 2 已改（裁定 #7）**：本用例原按 design 的 **4 级链**（目标 → 基准 → 最后一段 → \"?\"）写，与 AC-S-092 rev 2 冲突。现已改为 **3 级链**（目标 → 基准 → \"?\"），并把「四个结果两两不同」改成「k2 与 k3 不同」—— 因为 k3 与 k4 现在都落 \"?\"，要求「四个两两不同」会与新设计矛盾。"
+  },
+  {
+    "id": "TC-021-096",
+    "ac": "AC-S-090",
+    "title": "平台配置层生效：平台级写 locale，未配该键的租户读到 platform 层（rev 3 新增，D119）",
+    "preconditions": [
+      "操作者有 config:platform:write",
+      "平台级 platform_config 有 locale = \"en-US\"",
+      "租户 C **没有**自己的 locale 行（platform_tenant_config 无该键）",
+      "已注册语言含 en-US"
+    ],
+    "steps": [
+      "以租户 C 身份 GET /api/i18n/context（不带 Accept-Language，不带 ?locale=）",
+      "读响应里的 locale 与 source"
+    ],
+    "expected": [
+      "locale == \"en-US\"（**不是** manifest 默认的 zh-CN）",
+      "source == \"platform\"",
+      "协商结果仍是已注册语言之一"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P0",
+    "notes": "★ **rev 3 新增（QA Pre-merge 的 M1）**。\n原实现把 `ConfigSource::Platform` **静默丢弃**（`is_explicit()` 只认 Tenant|Space）→ i18n 协商读回 manifest 默认，而**同一个键**在 `/api/config/entries` 里读得到 `source=platform`。\n**两处对同一键给出不同答案 = 不一致**。D119 裁定：平台配置层**加入**协商（租户配置之后、manifest 默认之前）。\n依据 D53：`scope: tenant` 意味着平台层可以写，平台层的值就是组织级默认值 —— 平台管理员改了全组织默认语言却毫无效果 = 静默丢弃运维配置。"
+  },
+  {
+    "id": "TC-021-097",
+    "ac": "AC-S-090",
+    "title": "租户覆盖平台：平台 en-US、租户 ja-JP → 租户值生效（source=tenant）（rev 3 新增，D119）",
+    "preconditions": [
+      "平台级 platform_config 有 locale = \"en-US\"",
+      "租户 A 有自己的 locale = \"ja-JP\"",
+      "已注册语言含 en-US 与 ja-JP"
+    ],
+    "steps": [
+      "以租户 A 身份 GET /api/i18n/context（不带 Accept-Language，不带 ?locale=）",
+      "读响应里的 locale 与 source"
+    ],
+    "expected": [
+      "locale == \"ja-JP\"（租户**覆盖**平台）",
+      "source == \"tenant\"",
+      "与 ConfigSource::rank 的优先级一致（space > tenant > platform > default）"
+    ],
+    "type": "功能",
+    "layer": "rust-integration",
+    "automatable": true,
+    "priority": "P1",
+    "notes": "★ **rev 3 新增（D119 的配套）**：TC-021-096 只验「没人覆盖时用平台层」；\n这条验「**有人覆盖时仍用覆盖者**」—— 加了平台层**不能**改变租户优先级。"
   }
 ]

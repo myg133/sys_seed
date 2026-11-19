@@ -2,7 +2,7 @@
   {
     "id": "TC-021-001",
     "ac": "AC-S-088",
-    "title": "全部 title 生产函数的返回值都是 ASCII（表驱动，覆盖 iam/rbac/org/config 四个 title_of/title）",
+    "title": "每个错误码都能从 TITLES 集中表取到 ASCII 标题（表驱动，覆盖全部 crate 的 code()）",
     "preconditions": [
       "代码基线 code/ @ 88b7ca3；本需求尚未实现",
       "四个 title 生产者已定位：platform-iam/src/http.rs:134-153（17 个分支）、platform-rbac/src/http.rs:294-306（10）、platform-org/src/http.rs:263-280（15）、platform-config/src/error.rs:163-178（12）",
@@ -15,22 +15,23 @@
       "断言每个返回值的字符集"
     ],
     "expected": [
-      "断言样本数等于四个枚举的变体总数：iam = 17、rbac = 10、org = 15、config = 12（共 54；用 exhaustive match 编译期保证，不用手写列表）",
+      "TITLES 表覆盖**每一个**会进 HTTP 响应体 code 字段的码（各 crate 的 ALL_CODES 清单，见 TC-021-002 与 D113）",
       "每个 title 满足 title.is_ascii() == true",
       "每个 title 满足 title.is_empty() == false",
       "每个 title 对正则 /[\\u4e00-\\u9fff]/ 无匹配",
-      "core 三个构造函数的 title 依次等于 \"Unauthenticated\" / \"Insufficient Permission\" / \"Not Found\"（大小写敏感的精确字符串）"
+      "TITLES 无重复键；没有 title 等于 code 本身（那等于把机器码漏给用户）",
+      "未登记的码走 ASCII 兜底（不是 code 本身、不是中文）"
     ],
     "type": "功能",
     "layer": "rust-unit",
     "automatable": true,
     "priority": "P0",
-    "notes": "★ 这条是 AC-S-088 步骤 1 的**替代实现**。AC 原文要求「扫构造点的字符串字面量参数」——实测 title 全部经 title_of/title() 产出，构造点拿到的是函数调用而不是字面量（iam http.rs:97 `title: title_of(error)`、rbac :279、org :216、config http.rs:412），照 AC 字面扫会 0 命中而假绿。见挑刺 #1。"
+    "notes": "★ **rev 3 改写（QA S2）**：原用例要求「为 iam/rbac/org/config 四个枚举各建一张变体表」，但 D113 已定「收敛到**一张** TITLES 表 + 各 crate 的 ALL_CODES 完备性测试」。**用例随实现方式更新，不回退实现** —— 收敛后的方式才可机械验。（变体表的方式下，55 处分散在 4 个 match 里，静态扫不干净。）"
   },
   {
     "id": "TC-021-002",
     "ac": "AC-S-088",
-    "title": "直接传中文 title 字面量的构造点全部清零（当前 13 处）",
+    "title": "全仓（crates/ + modules/）剥注释后 title 位置零中文（跨行匹配 + 阳性对照）",
     "preconditions": [
       "已确认 13 处直接字面量：modules/sandbox/backend/src/{http.rs:194,320,348,388,403,444; demo_item_http.rs:130,223; demo_note_http.rs:100,188}、crates/platform-core/src/extension/permission.rs:387、crates/platform-config/src/http.rs:210、crates/platform-server/src/main.rs:632",
       "platform-core/src/problem.rs:125/146/167 的 3 处由 TC-021-001 覆盖"
@@ -41,15 +42,17 @@
       "断言该实参是 ASCII 字符串字面量或纯 ASCII 常量"
     ],
     "expected": [
-      "第 2 个实参位置匹配 CJK 正则的调用点数 == 0",
-      "同一扫描在修复前命中数 == 13（作为「扫描器真的能扫到东西」的阳性对照，必须先用修复前的快照跑一次并记录命中 13）",
-      "被扫描的文件集合包含 modules/sandbox/backend/src/ 与 crates/platform-server/src/（AC 原文只写 crates/ 与 modules/ 的 Rust 源码，需确认包含 server 层）"
+      "第 2 个实参位置（ProblemDetails::from_context 的 title 参数）与 title: 字段上匹配 CJK 正则的命中数 == 0",
+      "**扫描范围含 modules/**（AC-S-088 跨全部模块；modules/sandbox/backend 原有 10 处）",
+      "**必须跨行匹配**（那 10+2 处构造点全是跨行写的，单行正则会漏）",
+      "扫描前剥注释（注释里全是中文，不剥必然误报）",
+      "**阳性对照**：注入一段中文 title → 同一扫描器必须命中（否则「恒不命中」与「生效」无法区分）"
     ],
     "type": "功能",
     "layer": "rust-unit",
     "automatable": true,
     "priority": "P0",
-    "notes": "AC 原文的构造点清单只列了 new/from_context/unauthenticated/insufficient_permission —— 少了 not_found（problem.rs:167）与结构体直写字面量（platform-iam/src/http.rs:90-104 是 `ProblemDetails { .. }`），见挑刺 #33。"
+    "notes": "★ **rev 3 改写（QA S1）**：原用例写「修复前命中数 == 13」，而 design §1.1.1 的实测是 **19 处**构造点字面量 —— 数字对不上，且**「历史命中数」不该是可执行判据**（它依赖改动前的快照，不可复现）。改为「**注入式阳性对照**」—— 扫描器的有效性由注入证明，不依赖历史计数。（历史数字已统一为 73 = 54 函数产出 + 19 构造点，见 design §1.1.1。）"
   },
   {
     "id": "TC-021-003",

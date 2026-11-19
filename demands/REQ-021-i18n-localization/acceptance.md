@@ -2,11 +2,11 @@
 
 - **需求编号**: REQ-021
 - **父需求**: REQ-001
-- **状态**: 草稿（2026-11-19 19:50 经 QA 用例评审修订，**rev 2**）
+- **状态**: 草稿（2026-11-19 21:30 经 QA Pre-merge 修订，**rev 3**）
 - **设计摘要**: [design-summary.md](design-summary.md)
-- **用例集**: [test-cases/](test-cases/)（**95 条**，TC-021-001~095）
+- **用例集**: [test-cases/](test-cases/)（**97 条**，TC-021-001~097）
 - **裁定记录**: [acceptance-rev2-ruling.md](acceptance-rev2-ruling.md)
-- **更新时间**: 2026-11-19 19:50
+- **更新时间**: 2026-11-19 21:30
 
 > 父需求的完整验收标准见 [REQ-001 acceptance.md](../REQ-001-platform-foundation/acceptance.md)。
 > 本文件只列出本子需求承担的部分。
@@ -17,6 +17,9 @@
 - 原占位 `AC-S-029~032` 已被本段取代
 - **rev 2** 经 QA 用例评审挑出 **42 条**（高 **15** / 中 15 / 低 12），**全部接受**。
   逐条裁定见 [acceptance-rev2-ruling.md](acceptance-rev2-ruling.md)，新增决策 **D109~D114**。
+- **rev 3** 经 **QA Pre-merge 验证**修订：12 条 AC 全部 PASS，但暴露 **1 个中危项（M1）**
+  与 **7 条规格不一致（S1~S7）** → 新增决策 **D119**（平台配置层加入协商）、
+  **D120**（汇率换算不可逆）。详见 [qa-report-req021.md](../../feature-meta/qa-report-req021.md)。
 
 **rev 1 最严重的错误（必须记住）**：
 
@@ -102,7 +105,7 @@
 - **⚠️ 这是对 REQ-011 产物的修改**（D109）：`@base/sdk` 加 `params` 字段。
   必须在 demand 的依赖段声明（已声明），且改动要在提交信息里写明
 
-### AC-S-090: 语言协商的四级优先级
+### AC-S-090: 语言协商的多级优先级
 - **前置条件**: 平台默认 `zh-CN`；租户 T1 配置 `en-US`；
   用户 U1 偏好 `ja-JP`；存在两个已注册语言 `zh-CN` / `en-US`
 - **测试步骤**:
@@ -115,10 +118,12 @@
   7. 请求头 `Accept-Language: *` → 断言
   8. ★ **用户偏好已注册 + 请求头相反**：用户偏好 `en-US`（已注册）+ 请求头 `zh-CN`
      → 断言 `locale` 与 `source`
+  9. ★ **平台配置层**：平台级写 `locale=en-US`、**租户未配** → 断言
+  10. ★ **平台 + 租户都写**：平台 `en-US`、租户 `ja-JP` → 断言
 - **预期结果**:
   - 1 → `zh-CN`（请求头）
   - 2 → **`zh-CN`**（请求头 > 租户配置）。
-    顺序已按 design §3.1 固定为：**用户显式偏好 > `Accept-Language` > 租户配置 > 平台默认**
+    顺序已按 design §3.1 固定为：**用户显式偏好 > `Accept-Language` > 租户配置 > 平台配置 > manifest 默认**
   - 3 → `ja-JP` **未注册** → 回退到请求头的 `zh-CN`（因为用户偏好未注册即视为没设），
     **不是** `ja-JP`、**不是**租户的 `en-US`
   - 4 → `en-US`（用户偏好）
@@ -127,14 +132,31 @@
   - 7 → `*` → **平台默认**（不做「任意匹配」）；`q=0` 表示**明确拒绝**该语言，跳过
   - 8 → **`locale === "en-US"` 且 `source === "user"`** ——
     **这一步是优先级的唯一有效判据**：两者相同时无法区分谁生效
+  - 9 → **`en-US`**（平台配置层），`source === "platform"`；
+    **不是** manifest 默认的 `zh-CN`
+  - 10 → **`ja-JP`**（租户覆盖平台），`source === "tenant"`
   - **任何情况下**，协商结果**必须是已注册语言之一** —— 不允许返回未注册的 locale
   - **观测通道**（D110）：`GET /api/i18n/context` 返回
-    `{ locale, timezone, currency, source }`；`source ∈ {user, accept-language, tenant, default}`
-    > rev 1 的 7 步全写「断言协商结果」但**全仓没有观测点**（`locale` 0 命中、无 `Content-Language`）
+    `{ locale, timezone, currency, source }`；
+    `source ∈ {user, accept-language, tenant, platform, default}`
+    > **rev 3 修订（D119）**：原 4 值集合**缺 `platform`** ——
+    > 平台级配置被**静默丢弃**，而**同一个键**在通用配置路由 `/api/config/entries`
+    > 里读得到 `source=platform`。两处对同一键给出不同答案是**不一致**。
+    > **裁定**：平台配置层**加入**协商（排在租户配置之后、manifest 默认之前），
+    > `source` 集合扩为 **5 值**。
+    > 依据：**D53** 已定 `scope` 是「允许覆盖到的最深层」→
+    > `scope: tenant` 意味着**平台层可以写**，平台层的值就是**组织级默认值**。
+    > 平台管理员改了全组织默认语言却毫无效果 = **静默丢弃运维配置**。
+  - **时区的 `source`**：时区协商**不含请求头**（§3.4），故其 `source ∈ {user, tenant, platform, default}`
+    （**永不出现 `accept-language`**）
 - **类型**: 功能
-- **顺序已固定**（design §3.1）：**用户显式偏好 > `Accept-Language` > 租户配置 > 平台默认**。
+- **顺序已固定**（design §3.1）：
+  **用户显式偏好 > `Accept-Language` > 租户配置 > 平台配置 > manifest 默认**。
   > 起草时我把顺序写反了（原写「请求头 > 用户偏好」）——
   > **用户在我们系统里显式设的偏好应当最权威**，`Accept-Language` 只是「没设时的最佳猜测」
+  >
+  > rev 3 补入「平台配置层」（D119）—— 原 4 级链**少了**这一级，
+  > 导致平台层配置被静默丢弃
 
 ### AC-S-091: 翻译键的命名规则与单一来源
 - **前置条件**: 至少一个前端翻译包

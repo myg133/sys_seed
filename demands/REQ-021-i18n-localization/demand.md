@@ -82,7 +82,7 @@
 
 父需求 AC：**F12 国际化**（多语言、多时区、多币种；前后端文案一致）
 
-本需求自有 AC：**AC-S-088 ~ AC-S-099**（12 条，见 [acceptance.md](acceptance.md)）。
+本需求自有 AC：**AC-S-088 ~ AC-S-099**（12 条，见 [acceptance.md](acceptance.md)，**rev 3**）。
 
 > 原占位 `AC-S-029~032` 已被本段取代（D23：全局唯一段）
 

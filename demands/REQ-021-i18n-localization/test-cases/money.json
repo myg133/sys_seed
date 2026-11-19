@@ -346,7 +346,7 @@
   {
     "id": "TC-021-075",
     "ac": "AC-S-097",
-    "title": "同一 asOf 存在多条汇率时的裁决规则（守卫：未定义）",
+    "title": "同一 asOf 存在多条汇率时的裁决规则：唯一约束 + 覆盖写（已定）",
     "preconditions": [
       "设计假设：as_of 有唯一约束 (from,to,as_of)",
       "AC 与 design 都没规定 as_of 是否唯一"
@@ -356,15 +356,16 @@
       "若写入成功，则用该 asOf 换算并观察取哪条"
     ],
     "expected": [
-      "BA 明确二选一：① as_of 有唯一约束 → 第二条写入返回冲突（唯一索引名写进 design）；② 允许多条 → 明确「取 created_at 最新 / 取 rate_micros 最大 / 报错」中的一种",
-      "无论哪种，convert 的行为必须是确定的（同一 asOf 连调 10 次结果集合势 == 1）",
+      "platform_fx_rate 上有唯一约束 (from_currency, to_currency, as_of)",
+      "重复写同一 asOf 走 ON CONFLICT DO UPDATE → **覆盖**而非新增（幂等）",
+      "convert 的行为必须是确定的（同一 asOf 连调 10 次结果集合势 == 1）",
       "不得依赖数据库的返回顺序（无 ORDER BY 的 SELECT 不确定）"
     ],
     "type": "功能",
     "layer": "rust-integration",
     "automatable": true,
     "priority": "P1",
-    "notes": "★ design R4 提到「并发下可能不一致」，缓解措施是「显式传 asOf」—— 但显式传 asOf 并不能解决同一 asOf 有多条的情况。见挑刺 #40。"
+    "notes": "★ **rev 3 改写（QA S6）**：原用例标「守卫：未定义」—— 实际**已被实现解决**：`platform_fx_rate` 有 `CONSTRAINT platform_fx_rate_pair_as_of_key UNIQUE (from_currency, to_currency, as_of)`，写入走 ON CONFLICT DO UPDATE → 同一 asOf 不可能有多条，裁决确定。改为断言该行为。"
   },
   {
     "id": "TC-021-076",
@@ -419,7 +420,7 @@
   {
     "id": "TC-021-078",
     "ac": "AC-S-097",
-    "title": "反向换算不与正向互为精确倒数（守卫：未定义）",
+    "title": "汇率换算不可逆：往返不相等（D120 已裁定）",
     "preconditions": [
       "CNY→USD rate=140000，USD→CNY rate=714286（≈1/0.14，仍非精确）"
     ],
@@ -428,15 +429,16 @@
       "convert(x USD → CNY) 得 y"
     ],
     "expected": [
-      "BA 明确是否要求 y == 10000（往返无损）",
-      "若不要求：断言 |y - 10000| <= 2 并在 design 写明「换算不可逆，报表不得用往返做校验」",
-      "不得在未声明的情况下断言 y == 10000（那会因舍入必然失败的假红）"
+      "断言 convert(convert(a, r₁→r₂), r₂→r₁) **不等于** a（两次独立银行家舍入会产生偏差）",
+      "偏差有界（|y - a| <= 2 个最小单位量级，取决于两次舍入）",
+      "design §5.5 已写明「换算不可逆，报表不得用往返做校验」",
+      "金额比对必须用**同一 asOf 快照下的同向换算**"
     ],
     "type": "功能",
     "layer": "rust-unit",
     "automatable": true,
     "priority": "P2",
-    "notes": "金融系统的常见误解。AC 没提，但如果 Dev 或后续需求假设「换算可逆」，会出系统性对账偏差。"
+    "notes": "★ **rev 3 改写（QA S7）**：D120 已裁定「换算不可逆」。原用例标「守卫：未定义」—— 现在**已定义**：**不要求往返无损**，且明确禁止用往返做校验。"
   },
   {
     "id": "TC-021-079",
