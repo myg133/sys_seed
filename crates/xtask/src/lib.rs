@@ -7,7 +7,9 @@
 //! | `capabilities` | 生成 / 校验能力索引（`capabilities/`） |
 //! | `create-module` | 生成业务模块骨架（开箱即过契约检查） |
 //! | `tenant-policies` | 按 manifest 的 `tenantScoped` 段统一生成 / 校验 RLS 策略 |
+//! | `audit` | 审计链校验 / 归档（REQ-014） |
 
+pub mod audit;
 pub mod capabilities;
 pub mod catalog;
 pub mod cli;

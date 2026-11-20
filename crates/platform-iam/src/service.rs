@@ -45,12 +45,14 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use platform_core::RequestContext;
+use platform_core::extension::audit::{AuditEvent, AuditSink, AuditSinkSlot};
 use platform_core::extension::auditable::{AuditEventSpec, Auditable};
 use platform_core::extension::permission::PermissionProvider;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use crate::audit::login_event;
 use crate::config::{IamConfig, check_password_policy};
 use crate::crypto;
 use crate::error::IamError;
@@ -335,6 +337,8 @@ pub struct IamService {
     permission_provider: PermissionProviderSlot,
     /// SSO 入站（REQ-013）的后设槽。
     sso: SsoState,
+    /// 平台审计 sink（REQ-014；**可选** —— 未注入时不埋点，但**每次 warn**）。
+    audit: AuditSinkSlot,
 }
 
 impl IamService {
@@ -349,6 +353,7 @@ impl IamService {
             dummy_hash,
             permission_provider: PermissionProviderSlot::default(),
             sso: SsoState::default(),
+            audit: AuditSinkSlot::default(),
         })
     }
 
@@ -368,6 +373,47 @@ impl IamService {
     /// 返回 `false` = 已注入过（不覆盖）。
     pub fn with_sso_audit_recorder(&self, recorder: Arc<dyn SsoAuditRecorder>) -> bool {
         self.sso.audit_recorder.set(recorder).is_ok()
+    }
+
+    /// 注入**平台审计 sink**（REQ-014 D150）。
+    ///
+    /// 装配层（`platform-server`）构造 `PgAuditSink` 后以
+    /// `Arc<dyn AuditSink>` 注入到这里 —— `platform-iam` **只认 core 的 trait**，
+    /// 不依赖 `platform-audit` → **不成环**。
+    ///
+    /// 返回 `false` = 已注入过（不覆盖）。
+    pub fn with_audit_sink(&self, sink: Arc<dyn AuditSink>) -> bool {
+        self.audit.set(sink)
+    }
+
+    /// 记一条**登录审计**事件（REQ-014 AC-S-127 / D157）。
+    ///
+    /// # 失败语义
+    ///
+    /// - **未装配 sink** → 跳过（并记一条 **warn**：「以为在审计其实没有」
+    ///   比「没有审计」更危险）→ 登录**照常**（单测与裸用服务不装 sink）；
+    /// - **装配了但写失败** → **拒绝登录**，返回 **503**
+    ///   `AUDIT_SINK_UNAVAILABLE`（「宁可不登录，不可无审计地登录」，D157）。
+    async fn record_audit(&self, ctx: &RequestContext, event: AuditEvent) -> Result<(), IamError> {
+        let Some(sink) = self.audit.get() else {
+            tracing::warn!(
+                event = %event.action,
+                "a login audit event was produced but no platform audit sink is installed; \
+                 the event is NOT persisted"
+            );
+            return Ok(());
+        };
+        sink.record(ctx, &event).await.map_err(|error| {
+            tracing::error!(
+                event = %event.action,
+                code = error.code(),
+                "the platform audit sink could not persist a login audit event; \
+                 the login is rejected (REQ-014 D157)"
+            );
+            IamError::AuditUnavailable {
+                reason: error.detail(),
+            }
+        })
     }
 
     /// 注入 LDAP 客户端（生产用默认 [`crate::sso::ldap::Ldap3SsoClient`]；测试注入可计数实现）。
@@ -619,6 +665,12 @@ impl IamService {
                 .await
                 .map_err(internal)?;
             tx.commit().await.map_err(internal)?;
+            // 🔑 登录失败**也要审计**（AC-S-127）—— 事件**不含账号名**。
+            self.record_audit(
+                ctx,
+                login_event(tenant, None, false, false, &meta.ip, &meta.user_agent),
+            )
+            .await?;
             return Err(IamError::InvalidCredentials);
         };
 
@@ -631,6 +683,15 @@ impl IamService {
             // 耗时差只剩「多一条 UPDATE」—— 时序枚举的信号被压到最小。
             self.record_failed_login(ctx, &user, meta, &req.username, now)
                 .await?;
+            // 🔑 失败审计 —— **不含账号名**（AC-S-127 步骤 5 的不可枚举判据）。
+            //
+            // ⚠️ 与「账号不存在」那条路径**完全对称**（各 1 条）——
+            //    失败记录的条数不因账号是否存在而变化。
+            self.record_audit(
+                ctx,
+                login_event(tenant, None, false, false, &meta.ip, &meta.user_agent),
+            )
+            .await?;
             return Err(IamError::InvalidCredentials);
         }
 
@@ -640,6 +701,12 @@ impl IamService {
             // 记一条失败流水，但**不续期、不增计数**（见 `record_failed_login`）。
             self.record_failed_login(ctx, &user, meta, &req.username, now)
                 .await?;
+            // 🔑 失败审计（与上面两条失败路径**对称**：各 1 条）。
+            self.record_audit(
+                ctx,
+                login_event(tenant, None, false, false, &meta.ip, &meta.user_agent),
+            )
+            .await?;
             return Err(IamError::AccountLocked);
         }
 
@@ -669,6 +736,19 @@ impl IamService {
         self.record_attempt(ctx, meta, &req.username, true).await?;
 
         let response = self.issue_session(ctx, tenant, &user, meta).await?;
+        // 🔑 成功审计（AC-S-127 步骤 1：产生 1 条 `iam.login.succeeded`）。
+        self.record_audit(
+            ctx,
+            login_event(
+                tenant,
+                Some(&user.id),
+                true,
+                false,
+                &meta.ip,
+                &meta.user_agent,
+            ),
+        )
+        .await?;
         Ok(response)
     }
 
@@ -873,10 +953,40 @@ impl IamService {
             .await;
         match &outcome {
             Ok((tenant, user, sub, _session_id)) => {
-                self.record_sso_success("oidc", sub, &user.id, meta);
-                let _ = tenant;
+                self.record_sso_success("oidc", sub, &user.id, Some(tenant), meta);
             }
-            Err(error) => self.record_sso_failure("oidc", error.code(), meta),
+            Err(error) => {
+                self.record_sso_failure("oidc", error.code(), header_tenant, meta);
+            }
+        }
+        // 🔑 SSO 登录审计（AC-S-127 步骤 3：产生 1 条 `iam.sso.login.succeeded`）。
+        //
+        // ⚠️ **失败时可能拿不到租户**（回调还没解析出 state 的租户）→
+        //    审计记录**必须**属于某个租户 → 拿不到就**跳过并 warn**。
+        let tenant = match &outcome {
+            Ok((tenant, _user, _sub, _session_id)) => Some(tenant.clone()),
+            Err(_error) => header_tenant.map(|tenant| tenant.to_string()),
+        };
+        if let Some(tenant) = tenant {
+            let ctx = RequestContext::new().with_tenant(tenant.clone());
+            let event = match &outcome {
+                Ok((_tenant, user, _sub, _session_id)) => login_event(
+                    &tenant,
+                    Some(&user.id),
+                    true,
+                    true,
+                    &meta.ip,
+                    &meta.user_agent,
+                ),
+                Err(_error) => login_event(&tenant, None, false, true, &meta.ip, &meta.user_agent),
+            };
+            // 🔑 审计写不进去 → **拒绝登录**（D157）。
+            self.record_audit(&ctx, event).await?;
+        } else {
+            tracing::warn!(
+                "an SSO login audit event was produced but the tenant is unknown; \
+                 the event is NOT persisted"
+            );
         }
         outcome.map(|(_, _, _, location)| location)
     }
@@ -1015,7 +1125,8 @@ impl IamService {
         if binding.created_user || binding.created_link {
             self.sso.recorder().record(&SsoAuditEvent::new(
                 sso_audit::EVENT_LINK_CREATED,
-                SsoAuditPayload::link_created(OIDC_PROVIDER, &claims.sub, &binding.user.id),
+                SsoAuditPayload::link_created(OIDC_PROVIDER, &claims.sub, &binding.user.id)
+                    .with_tenant(&tenant),
             ));
         }
 
@@ -1064,10 +1175,28 @@ impl IamService {
         let outcome = self.do_ldap_login(ctx, req, meta).await;
         match &outcome {
             Ok((sub, user_id, _response)) => {
-                self.record_sso_success(LDAP_PROVIDER, sub, user_id, meta)
+                self.record_sso_success(LDAP_PROVIDER, sub, user_id, ctx.tenant_id(), meta)
             }
-            Err(error) => self.record_sso_failure(LDAP_PROVIDER, error.code(), meta),
+            Err(error) => {
+                self.record_sso_failure(LDAP_PROVIDER, error.code(), ctx.tenant_id(), meta)
+            }
         }
+        // 🔑 LDAP 登录按 D163 记 `iam.login.*`（**不是** `iam.sso.*`）。
+        //
+        // ⚠️ 审计**失败 → 拒绝登录**（D157）—— 这里的错误**替换**原错误。
+        let tenant = ctx.tenant_id().unwrap_or_default().to_string();
+        let audit = match &outcome {
+            Ok((_sub, user_id, _response)) => login_event(
+                &tenant,
+                Some(user_id.as_str()),
+                true,
+                false,
+                &meta.ip,
+                &meta.user_agent,
+            ),
+            Err(_error) => login_event(&tenant, None, false, false, &meta.ip, &meta.user_agent),
+        };
+        self.record_audit(ctx, audit).await?;
         outcome.map(|(_, _, response)| response)
     }
 
@@ -1149,7 +1278,8 @@ impl IamService {
         if binding.created_user || binding.created_link {
             self.sso.recorder().record(&SsoAuditEvent::new(
                 sso_audit::EVENT_LINK_CREATED,
-                SsoAuditPayload::link_created(LDAP_PROVIDER, &identity.dn, &binding.user.id),
+                SsoAuditPayload::link_created(LDAP_PROVIDER, &identity.dn, &binding.user.id)
+                    .with_tenant(tenant),
             ));
         }
         let response = self
@@ -1168,25 +1298,43 @@ impl IamService {
     }
 
     /// 发一条「成功」审计事件。
+    ///
+    /// ⚠️ **既有 recorder**（REQ-013 的接缝）**照旧**发出 —— 签名与行为都不变；
+    /// 平台 sink 的落库由**服务自己**做（见 `complete_oidc_callback`）。
     fn record_sso_success(
         &self,
         provider: &str,
         external_id: &str,
         user_id: &str,
+        tenant_id: Option<&str>,
         meta: &RequestMeta,
     ) {
+        let mut payload =
+            SsoAuditPayload::succeeded(provider, external_id, user_id, &meta.ip, &meta.user_agent);
+        if let Some(tenant) = tenant_id {
+            payload = payload.with_tenant(tenant);
+        }
         self.sso.recorder().record(&SsoAuditEvent::new(
             sso_audit::EVENT_LOGIN_SUCCEEDED,
-            SsoAuditPayload::succeeded(provider, external_id, user_id, &meta.ip, &meta.user_agent),
+            payload,
         ));
     }
 
     /// 发一条「失败」审计事件（**只带 provider / code / ip**）。
-    fn record_sso_failure(&self, provider: &str, code: &str, meta: &RequestMeta) {
-        self.sso.recorder().record(&SsoAuditEvent::new(
-            sso_audit::EVENT_LOGIN_FAILED,
-            SsoAuditPayload::failed(provider, code, &meta.ip),
-        ));
+    fn record_sso_failure(
+        &self,
+        provider: &str,
+        code: &str,
+        tenant_id: Option<&str>,
+        meta: &RequestMeta,
+    ) {
+        let mut payload = SsoAuditPayload::failed(provider, code, &meta.ip);
+        if let Some(tenant) = tenant_id {
+            payload = payload.with_tenant(tenant);
+        }
+        self.sso
+            .recorder()
+            .record(&SsoAuditEvent::new(sso_audit::EVENT_LOGIN_FAILED, payload));
     }
 
     /// 记一次 SSO 失败（只进限流桶与尝试流水，不动账号锁定 —— 目录里的账号不在本地）。

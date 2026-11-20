@@ -1558,6 +1558,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
+name = "platform-audit"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "platform-contracts",
+ "platform-core",
+ "platform-db",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "time",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "platform-config"
 version = "0.1.0"
 dependencies = [
@@ -1734,6 +1752,7 @@ dependencies = [
  "clap",
  "http-body-util",
  "jsonwebtoken",
+ "platform-audit",
  "platform-config",
  "platform-core",
  "platform-db",
@@ -3126,10 +3145,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "platform-audit",
  "platform-core",
  "platform-db",
  "serde",
  "serde_json",
+ "sqlx",
  "tokio",
 ]
 

@@ -1,0 +1,33 @@
+[package]
+name = "platform-audit"
+description = "平台审计：哈希链写入、查询、链校验与归档（REQ-014）"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# 平台核心：通用审计事件 / sink trait / JSON 规范化 / 敏感键扫描器 / 鉴权入口
+platform-core.workspace = true
+# 数据访问层：租户作用域入口（`TenantDb`），审计读写都走它（RLS 兜底）
+platform-db.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# 链校验要**独立重算** sha256。**已在依赖树里**（REQ-007 引入），不增长锁文件。
+sha2.workspace = true
+# 时间类型：timestamptz ↔ time::OffsetDateTime（契约 C13）
+time.workspace = true
+# 游标的 base64url 编码（**已在依赖树里**，REQ-007 引入）。
+base64.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# 真实库集成测试要直连（管理员连接 + 应用角色连接）。
+sqlx.workspace = true
+# `#[tokio::test]` 的运行时。
+tokio.workspace = true
+# C-5 契约扫描入口（不依赖 ContractFixture，D58）。
+platform-contracts.workspace = true
+# 造「足够旧的记录」用的 UUID（管理员直连 INSERT，D154）。
+uuid.workspace = true

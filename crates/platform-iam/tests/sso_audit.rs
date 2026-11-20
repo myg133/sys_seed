@@ -399,11 +399,27 @@ async fn ac_s_108_no_sso_audit_table_exists_yet() {
     .await
     .expect("应能列出表");
     // 只有两个**非审计**的 SSO 表：一次性凭证与交接票据。
-    // 任何 `*audit*` 表都不该在本轮存在（落库是 REQ-014）。
+    // 任何 **SSO 专用**的 `*audit*` 表都不该存在（落库走 REQ-014 的平台 sink）。
+    //
+    // ⚠️ REQ-014 起平台有了**通用**审计表（`platform_audit_log` /
+    //    `platform_audit_archive` / `platform_audit_chain_state`）——
+    //    它们是**平台级**的通用表，**不是**「SSO 审计表」，本用例的意图
+    //    （不要偷偷建 SSO 专用表）不受影响。
+    let sso_audit_tables: Vec<String> = tables
+        .iter()
+        .filter(|name| !name.starts_with("platform_audit_"))
+        .cloned()
+        .collect();
     assert_eq!(
-        tables,
+        sso_audit_tables,
         vec!["platform_iam_sso_ticket".to_string()],
-        "本轮不应存在任何 SSO 审计表（落库是 REQ-014）：{tables:?}"
+        "本轮不应存在任何 SSO 专用审计表（落库是 REQ-014 的平台 sink）：{tables:?}"
+    );
+
+    // 对照：平台级的**通用**审计表存在（REQ-014 落地后的预期形态）。
+    assert!(
+        tables.iter().any(|name| name == "platform_audit_log"),
+        "REQ-014 的通用审计表应当在库里：{tables:?}"
     );
 
     // 触发一次登录后，这几张表里也不该多出「审计」性质的行。

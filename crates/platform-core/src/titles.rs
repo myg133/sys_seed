@@ -50,6 +50,15 @@ pub const TITLES: &[(&str, &str)] = &[
     ("INTERNAL_ERROR", "Internal Server Error"),
     ("SCHEMA_MODULE_NOT_FOUND", "Schema Module Not Found"),
     ("SCHEMA_ENTITY_NOT_FOUND", "Schema Entity Not Found"),
+    // -- platform-audit（REQ-014，5 个）--------------------------------------
+    (
+        "AUDIT_SENSITIVE_PAYLOAD_REJECTED",
+        "Audit Payload Contains Sensitive Keys",
+    ),
+    ("AUDIT_CHAIN_BROKEN", "Audit Chain Integrity Check Failed"),
+    ("AUDIT_EVENT_NOT_FOUND", "Audit Event Not Found"),
+    ("AUDIT_INVALID_FILTER", "Invalid Audit Query"),
+    ("AUDIT_SINK_UNAVAILABLE", "Audit Sink Unavailable"),
     // -- platform-iam ------------------------------------------------------
     ("INVALID_CREDENTIALS", "Invalid Credentials"),
     ("MFA_REQUIRED", "Multi-Factor Authentication Required"),

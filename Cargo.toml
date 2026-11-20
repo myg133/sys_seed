@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/platform-core",
+    "crates/platform-audit",
     "crates/platform-config",
     "crates/platform-contracts",
     "crates/platform-contracts-macros",
@@ -24,6 +25,7 @@ publish = false
 
 [workspace.dependencies]
 platform-core = { path = "crates/platform-core" }
+platform-audit = { path = "crates/platform-audit" }
 platform-config = { path = "crates/platform-config" }
 platform-contracts = { path = "crates/platform-contracts" }
 platform-contracts-macros = { path = "crates/platform-contracts-macros" }

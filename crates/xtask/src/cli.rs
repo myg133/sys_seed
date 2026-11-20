@@ -23,6 +23,52 @@ pub enum Command {
     CreateModule(CreateModuleArgs),
     /// 按 manifest 的 `tenantScoped` 段统一生成 / 校验 RLS 策略。
     TenantPolicies(TenantPoliciesArgs),
+    /// 审计链校验与归档（REQ-014）。
+    Audit(AuditArgs),
+}
+
+/// `audit` 参数。
+#[derive(Debug, Args)]
+pub struct AuditArgs {
+    #[command(subcommand)]
+    pub action: AuditAction,
+}
+
+/// `audit` 的子动作。
+#[derive(Debug, Subcommand)]
+pub enum AuditAction {
+    /// 校验审计链的完整性（逐条独立重算 + 接续校验 + 末尾截断检测）。
+    Verify(AuditVerifyArgs),
+    /// 把超期记录搬进归档表（**单租户**）。
+    Archive(AuditArchiveArgs),
+}
+
+/// `audit verify` 参数。
+#[derive(Debug, Args)]
+pub struct AuditVerifyArgs {
+    /// 租户 ID；**省略** = 校验全部租户（需要能看见所有租户的行 —— 管理员连接）。
+    #[arg(long)]
+    pub tenant: Option<String>,
+    /// 数据库连接串；默认取环境变量 `DATABASE_URL`。
+    #[arg(long)]
+    pub database_url: Option<String>,
+}
+
+/// `audit archive` 参数。
+#[derive(Debug, Args)]
+pub struct AuditArchiveArgs {
+    /// 租户 ID（**必填** —— 归档是**单租户**的，D158）。
+    #[arg(long)]
+    pub tenant: String,
+    /// 在线保留天数；默认 90（与登记的 `audit.retention.onlineDays` 一致）。
+    #[arg(long, default_value_t = 90)]
+    pub days: i64,
+    /// 数据库连接串；默认取环境变量 `DATABASE_URL`。
+    ///
+    /// ⚠️ 应当是**应用角色**的连接（`base_app`）—— 受 RLS 约束，
+    /// 作用域由调用方的租户上下文 + 函数内的守卫限定（D158 / D174）。
+    #[arg(long)]
+    pub database_url: Option<String>,
 }
 
 /// `check-modules` 参数。

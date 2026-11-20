@@ -39,6 +39,27 @@
       ]
     },
     {
+      "manifest": "crates/platform-audit/manifest.json",
+      "module": "audit",
+      "permissions": [
+        {
+          "code": "audit:events:read",
+          "name": "查看审计日志",
+          "type": "menu"
+        },
+        {
+          "code": "audit:verify:run",
+          "name": "校验审计链",
+          "type": "button"
+        },
+        {
+          "code": "audit:archive:run",
+          "name": "触发审计归档",
+          "type": "button"
+        }
+      ]
+    },
+    {
       "manifest": "crates/platform-config/manifest.json",
       "module": "config",
       "permissions": [
@@ -142,5 +163,5 @@
       ]
     }
   ],
-  "total": 23
+  "total": 26
 }

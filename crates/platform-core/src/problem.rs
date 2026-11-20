@@ -45,6 +45,20 @@ pub const CODE_INTERNAL_ERROR: &str = "INTERNAL_ERROR";
 pub const CODE_SCHEMA_MODULE_NOT_FOUND: &str = "SCHEMA_MODULE_NOT_FOUND";
 /// 稳定的机器可读错误码：模块存在，但**实体**没声明元数据（REQ-012）。
 pub const CODE_SCHEMA_ENTITY_NOT_FOUND: &str = "SCHEMA_ENTITY_NOT_FOUND";
+/// 稳定的机器可读错误码：审计载荷含敏感键，写入被**硬拒绝**（REQ-014 D134 / D156）。
+///
+/// ⚠️ 这是**拒绝**，不是「悄悄把字段删掉再写」—— 静默剥离会让调用方以为已经记下来了。
+pub const CODE_AUDIT_SENSITIVE_PAYLOAD_REJECTED: &str = "AUDIT_SENSITIVE_PAYLOAD_REJECTED";
+/// 稳定的机器可读错误码：审计链完整性校验发现断裂（REQ-014 D146）。
+pub const CODE_AUDIT_CHAIN_BROKEN: &str = "AUDIT_CHAIN_BROKEN";
+/// 稳定的机器可读错误码：单条审计记录不存在（REQ-014）。
+pub const CODE_AUDIT_EVENT_NOT_FOUND: &str = "AUDIT_EVENT_NOT_FOUND";
+/// 稳定的机器可读错误码：审计查询的过滤 / 分页 / 排序参数非法（REQ-014 D153）。
+pub const CODE_AUDIT_INVALID_FILTER: &str = "AUDIT_INVALID_FILTER";
+/// 稳定的机器可读错误码：审计写入失败（REQ-014 D157）。
+///
+/// 语义是「**宁可不登录，不可无审计地登录**」：写不进去时调用方应当拒绝这次操作。
+pub const CODE_AUDIT_SINK_UNAVAILABLE: &str = "AUDIT_SINK_UNAVAILABLE";
 
 /// 错误类型 URI 的前缀。
 pub const PROBLEM_TYPE_BASE: &str = "https://errors.base.example";
@@ -61,6 +75,11 @@ pub const ALL_CODES: &[&str] = &[
     CODE_INTERNAL_ERROR,
     CODE_SCHEMA_MODULE_NOT_FOUND,
     CODE_SCHEMA_ENTITY_NOT_FOUND,
+    CODE_AUDIT_SENSITIVE_PAYLOAD_REJECTED,
+    CODE_AUDIT_CHAIN_BROKEN,
+    CODE_AUDIT_EVENT_NOT_FOUND,
+    CODE_AUDIT_INVALID_FILTER,
+    CODE_AUDIT_SINK_UNAVAILABLE,
 ];
 
 /// 统一错误响应体（RFC 9457）。
@@ -187,6 +206,88 @@ impl ProblemDetails {
             Some(params),
         )
     }
+
+    /// 构造「审计载荷含敏感键」错误体（400，REQ-014 D134 / D156）。
+    ///
+    /// ⚠️ `keys` 里**只有键名**，**没有值** —— 回显值等于再泄漏一次。
+    pub fn audit_sensitive_payload_rejected(
+        ctx: &RequestContext,
+        instance: &str,
+        keys: &[String],
+    ) -> Self {
+        let mut params = BTreeMap::new();
+        params.insert("keys".to_string(), serde_json::Value::from(keys.to_vec()));
+        Self::from_context(
+            CODE_AUDIT_SENSITIVE_PAYLOAD_REJECTED,
+            title_of_code(CODE_AUDIT_SENSITIVE_PAYLOAD_REJECTED),
+            400,
+            format!(
+                "the audit payload contains sensitive keys: {}",
+                keys.join(", ")
+            ),
+            ctx,
+            instance,
+            Some(params),
+        )
+    }
+
+    /// 构造「审计链断裂」错误体（409，REQ-014 D146）。
+    pub fn audit_chain_broken(ctx: &RequestContext, instance: &str, broken: usize) -> Self {
+        let mut params = BTreeMap::new();
+        params.insert("broken".to_string(), serde_json::Value::from(broken));
+        Self::from_context(
+            CODE_AUDIT_CHAIN_BROKEN,
+            title_of_code(CODE_AUDIT_CHAIN_BROKEN),
+            409,
+            format!("the audit chain integrity check found {broken} broken entries"),
+            ctx,
+            instance,
+            Some(params),
+        )
+    }
+
+    /// 构造「审计记录不存在」错误体（404，REQ-014）。
+    pub fn audit_event_not_found(ctx: &RequestContext, instance: &str) -> Self {
+        Self::from_context(
+            CODE_AUDIT_EVENT_NOT_FOUND,
+            title_of_code(CODE_AUDIT_EVENT_NOT_FOUND),
+            404,
+            "the audit event was not found",
+            ctx,
+            instance,
+            None,
+        )
+    }
+
+    /// 构造「审计查询参数非法」错误体（400，REQ-014 D153）。
+    pub fn audit_invalid_filter(ctx: &RequestContext, instance: &str, reason: &str) -> Self {
+        let mut params = BTreeMap::new();
+        params.insert("reason".to_string(), serde_json::Value::from(reason));
+        Self::from_context(
+            CODE_AUDIT_INVALID_FILTER,
+            title_of_code(CODE_AUDIT_INVALID_FILTER),
+            400,
+            format!("the audit query is invalid: {reason}"),
+            ctx,
+            instance,
+            Some(params),
+        )
+    }
+
+    /// 构造「审计写入不可用」错误体（503，REQ-014 D157）。
+    pub fn audit_sink_unavailable(ctx: &RequestContext, instance: &str, reason: &str) -> Self {
+        let mut params = BTreeMap::new();
+        params.insert("reason".to_string(), serde_json::Value::from(reason));
+        Self::from_context(
+            CODE_AUDIT_SINK_UNAVAILABLE,
+            title_of_code(CODE_AUDIT_SINK_UNAVAILABLE),
+            503,
+            format!("the audit sink is unavailable: {reason}"),
+            ctx,
+            instance,
+            Some(params),
+        )
+    }
 }
 
 /// 把错误体变成 HTTP 响应。
@@ -285,5 +386,82 @@ mod tests {
         let details = ProblemDetails::unauthenticated(&ctx(), "/x");
         let value = serde_json::to_value(&details).expect("应当能序列化");
         assert!(value.get("params").is_none());
+    }
+
+    /// REQ-014 的 5 个新错误码：**逐个**断言 code / status / detail。
+    #[test]
+    fn the_audit_problem_details_carry_their_stable_codes() {
+        let details = [
+            ProblemDetails::audit_sensitive_payload_rejected(
+                &ctx(),
+                "/api/audit/events",
+                &["password".to_string()],
+            ),
+            ProblemDetails::audit_chain_broken(&ctx(), "/api/audit/verify", 1),
+            ProblemDetails::audit_event_not_found(&ctx(), "/api/audit/events/x"),
+            ProblemDetails::audit_invalid_filter(
+                &ctx(),
+                "/api/audit/events",
+                "limit must be positive",
+            ),
+            ProblemDetails::audit_sink_unavailable(
+                &ctx(),
+                "/api/iam/login",
+                "the database is down",
+            ),
+        ];
+        let expected = [
+            ("AUDIT_SENSITIVE_PAYLOAD_REJECTED", 400),
+            ("AUDIT_CHAIN_BROKEN", 409),
+            ("AUDIT_EVENT_NOT_FOUND", 404),
+            ("AUDIT_INVALID_FILTER", 400),
+            ("AUDIT_SINK_UNAVAILABLE", 503),
+        ];
+        assert_eq!(details.len(), expected.len());
+        for (details, (code, status)) in details.iter().zip(expected) {
+            assert_eq!(details.code, code);
+            assert_eq!(details.status, status);
+            assert!(
+                details.detail.is_ascii(),
+                "detail must be english ASCII: {}",
+                details.detail
+            );
+            assert_eq!(details.title, title_of_code(code));
+        }
+    }
+
+    /// 敏感键被拒时，错误体**只含键名**、**不含值**（AC-S-133 step 4）。
+    #[test]
+    fn the_sensitive_rejection_body_does_not_echo_values() {
+        let details = ProblemDetails::audit_sensitive_payload_rejected(
+            &ctx(),
+            "/api/audit/events",
+            &["password".to_string()],
+        );
+        let value = serde_json::to_value(&details).expect("should serialize");
+        assert_eq!(value["code"], "AUDIT_SENSITIVE_PAYLOAD_REJECTED");
+        assert_eq!(value["params"]["keys"][0], "password");
+        let text = serde_json::to_string(&value).expect("should serialize");
+        assert!(
+            !text.contains("p@ssw0rd"),
+            "the body must not echo the value: {text}"
+        );
+    }
+
+    /// 5 个新码都进了 [`ALL_CODES`]（完备性清单漏一项 = 静默走兜底）。
+    #[test]
+    fn every_audit_code_is_registered_in_all_codes() {
+        for code in [
+            CODE_AUDIT_SENSITIVE_PAYLOAD_REJECTED,
+            CODE_AUDIT_CHAIN_BROKEN,
+            CODE_AUDIT_EVENT_NOT_FOUND,
+            CODE_AUDIT_INVALID_FILTER,
+            CODE_AUDIT_SINK_UNAVAILABLE,
+        ] {
+            assert!(
+                ALL_CODES.contains(&code),
+                "`{code}` must be registered in ALL_CODES"
+            );
+        }
     }
 }

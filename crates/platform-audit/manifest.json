@@ -1,0 +1,16 @@
+{
+  "id": "audit",
+  "name": "审计日志",
+  "version": "0.1.0",
+  "enabled": true,
+  "permissions": [
+    { "code": "audit:events:read", "name": "查看审计日志", "type": "menu" },
+    { "code": "audit:verify:run", "name": "校验审计链", "type": "button" },
+    { "code": "audit:archive:run", "name": "触发审计归档", "type": "button" }
+  ],
+  "menus": [
+    { "label": "审计日志", "icon": "file-search", "route": "/admin/audit", "perm": "audit:events:read" }
+  ],
+  "dependencies": [],
+  "config": {}
+}

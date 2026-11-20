@@ -63,6 +63,13 @@ pub mod code {
     /// 服务内部错误。
     pub const INTERNAL_ERROR: &str = "INTERNAL_ERROR";
 
+    // -- 审计（REQ-014）：1 个码 ----------------------------------------
+    /// 审计写入失败 → **拒绝登录**（D157）。
+    ///
+    /// ⚠️ 语义是「**宁可不登录，不可无审计地登录**」——
+    /// 放行 = 「有登录、无审计」→ 父 AC-022 的「完整且不可篡改」承诺被打破。
+    pub const AUDIT_SINK_UNAVAILABLE: &str = "AUDIT_SINK_UNAVAILABLE";
+
     // -- SSO 入站（REQ-013）：21 个码 ------------------------------------
     /// 强制 SSO：本地密码登录被拒（**在密码校验之前**）。
     pub const SSO_REQUIRED: &str = "SSO_REQUIRED";
@@ -130,6 +137,8 @@ pub const ALL_CODES: &[&str] = &[
     code::CONFLICT,
     code::NOT_IMPLEMENTED,
     code::INTERNAL_ERROR,
+    // 审计（REQ-014）
+    code::AUDIT_SINK_UNAVAILABLE,
     // SSO 入站（REQ-013）
     code::SSO_REQUIRED,
     code::SSO_PROVIDER_NOT_CONFIGURED,
@@ -283,6 +292,13 @@ pub enum IamError {
     SsoAccountNotLinked,
     /// 登录 ticket 无效（不存在 / 已用 / 过期 / 租户不匹配）。
     SsoTicketInvalid,
+    /// 审计写入失败 → **拒绝登录**（REQ-014 D157）。
+    ///
+    /// 「宁可不登录，不可无审计地登录」：写不进去时调用方**必须**拒绝这次操作。
+    AuditUnavailable {
+        /// 面向开发者的英文原因（**不得**含凭据）。
+        reason: String,
+    },
 }
 
 impl IamError {
@@ -327,6 +343,7 @@ impl IamError {
             Self::SsoIdentityLinkConflict => code::SSO_IDENTITY_LINK_CONFLICT,
             Self::SsoAccountNotLinked => code::SSO_ACCOUNT_NOT_LINKED,
             Self::SsoTicketInvalid => code::SSO_TICKET_INVALID,
+            Self::AuditUnavailable { .. } => code::AUDIT_SINK_UNAVAILABLE,
         }
     }
 
@@ -374,6 +391,8 @@ impl IamError {
                 StatusCode::SERVICE_UNAVAILABLE
             }
             Self::SsoIdentityLinkConflict => StatusCode::CONFLICT,
+            // 审计写不进去 → 503（D157：「宁可不登录，不可无审计地登录」）。
+            Self::AuditUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 
@@ -455,6 +474,9 @@ impl IamError {
                 "the single sign-on account is not linked to a local account".to_string()
             }
             Self::SsoTicketInvalid => "the single sign-on login ticket is invalid".to_string(),
+            Self::AuditUnavailable { reason } => {
+                format!("the audit sink is unavailable: {reason}")
+            }
         }
     }
 
@@ -590,6 +612,10 @@ mod tests {
             IamError::SsoIdentityLinkConflict,
             IamError::SsoAccountNotLinked,
             IamError::SsoTicketInvalid,
+            // 审计（REQ-014 D157）
+            IamError::AuditUnavailable {
+                reason: "the database is down".to_string(),
+            },
         ];
         for error in &errors {
             let code = error.code();
@@ -664,6 +690,10 @@ mod tests {
             IamError::SsoIdentityLinkConflict,
             IamError::SsoAccountNotLinked,
             IamError::SsoTicketInvalid,
+            // 审计（REQ-014 D157）
+            IamError::AuditUnavailable {
+                reason: "the database is down".to_string(),
+            },
         ];
         let mut seen = BTreeSet::new();
         for error in &variants {
@@ -739,6 +769,10 @@ mod tests {
             IamError::SsoIdentityLinkConflict,
             IamError::SsoAccountNotLinked,
             IamError::SsoTicketInvalid,
+            // 审计（REQ-014 D157）
+            IamError::AuditUnavailable {
+                reason: "the database is down".to_string(),
+            },
         ];
         for error in &errors {
             let detail = error.detail();

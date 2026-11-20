@@ -35,6 +35,7 @@
 //! 这样不需要引入 `async-trait` 依赖，同时保证返回的 future 是 `Send`
 //! （可安全交给 tokio 任务）。
 
+pub mod audit;
 pub mod auditable;
 pub mod config;
 pub mod expr;
@@ -49,6 +50,10 @@ pub mod schema;
 pub mod transaction;
 pub mod workflow;
 
+pub use audit::{
+    AuditError, AuditEvent, AuditSink, BoxFuture, GENESIS_HASH, SENSITIVE_KEYS, canonical_json,
+    canonical_json_opt, format_timestamp_micros_utc, normalize_sensitive_key, scan_sensitive_keys,
+};
 pub use auditable::{AuditEventSpec, Auditable};
 pub use config::{ConfigResolver, ConfigSource, FlagDecision, ResolvedConfig};
 pub use expr::{
