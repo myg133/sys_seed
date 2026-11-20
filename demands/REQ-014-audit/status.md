@@ -110,6 +110,6 @@ E2E：**35 passed / 0 failed / 0 skipped**（**干净库**，`tenant-a` 起点 1
 1. ✅ BA 提交修复轮 1 + 2 + 微修 → `feature/REQ-014` @ `c8dab33`
 2. ✅ 合并 `feature/REQ-014` → `develop` @ **`310e4d3`**（85 文件 / +14162 / -264）
 3. ✅ 回收 `feature-REQ-014` worktree（分支保留，与 REQ-011/012/013/021 一致）
-4. ✅ 复盘：[req014-retrospective.md](../../feature-meta/req014-retrospective.md)
+4. ✅ 复盘：[req-014-retro.md](../../sprint/req-014-retro.md)
 5. ✅ roadmap 同步 + dev-guide §9.8 / §9.9 / §9.13 写入本轮三条新规矩
 6. ✅ 技术债 35 → **40 条**（TD-036~TD-040）

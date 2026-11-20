@@ -49,7 +49,7 @@
 > 另修正一处**贯穿整个周期没人查的缺口**：回归清单一直写「11 crate」，
 > 实际 workspace 有 **12 个有测试的 crate** —— 漏掉的是 `platform-contracts`
 > （它有 **C6 错误响应契约**测试，而 REQ-014 恰恰在改错误响应）。BA 终验补跑 **32 passed / 0 failed**。
-> 复盘见 [req014-retrospective.md](../feature-meta/req014-retrospective.md)。
+> 复盘见 [req-014-retro.md](../sprint/req-014-retro.md)。
 > 已知技术债见 [tech-debt.md](tech-debt.md)（**40 条**，含「CI 从未真跑」「E2E 不能从零建库」）。
 
 ## 拆分总览
