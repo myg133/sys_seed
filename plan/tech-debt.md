@@ -780,3 +780,23 @@ Sprint 3 复盘的第 2 条教训：**修漏洞会制造新漏洞** —— 但�
   （如 `GET /api/oauth/clients/{client_id}/grants`，要 `oauth:grant:read`），
   把 `oauth:grant:read` / `oauth:grant:revoke` 挂到那里；
   「我的授权」两个端点则去掉权限点、只靠数据范围（当前用户）自证。
+
+---
+
+## TD-046: 私钥泄露时，自签 consent ticket 能**写出 grant 行**（但拿不到令牌）
+
+- **发现于**: REQ-022 棒 1 交付复核（报告 §6.2 / **D260**）
+- **证据**: `crates/platform-oauth/src/service.rs:1864` ——
+  `confirm` **只信 ticket**、**不**校验 scope（D204 字面）→
+  自签一个 `scope` 更大的票据可以通过 `confirm`，从而写入一行 `platform_oauth_grant`。
+- **影响面**: 威胁模型是「**E2E 私钥泄露**」（私钥为了 AC-S-146 的判断力落盘在 `target/`）。
+  泄露后攻击者能：① 写出用户没同意过的 grant 行（用户会在「我的授权」列表里看到）；
+  ② **拿不到**越权令牌（令牌端点的三重交集仍拒 → `invalid_scope`）。
+  → 是「**可见性污染**」，不是「越权」。
+- **为什么本期不修**（D260）: 要修就得让 `confirm` 能判断「票据 scope 比 preview 返回的更大」，
+  而 preview 的结果**没有持久化**（D204 定了「零新表」）→ 必须引入新表 / 新列。
+  代价是**废掉 AC-S-140 的 4 条 P0 用例**（`invalid_scope` 永不出现）→ 权衡后选了保 AC-S-140。
+- **建议修法**（后续 REQ）: preview 时把 `(jti, 交集 scope 摘要, 过期时间)` 持久化
+  （可以复用 `platform_oauth_code` 表加一列，或新建轻量表），
+  `confirm` 校验「票据 scope == 该 jti 记录的交集 scope」→ 自签票据必被拒（真正的 `OAUTH_TICKET_INVALID`）。
+  届时 TD-046 与 D260 的替代判据一并回滚。

@@ -1302,3 +1302,97 @@ axum 的 `Router::route_layer` **多次调用会叠加**（不是「后者覆盖
 > 要走这条路必须新增「管理他人授权」的端点（扩大本需求范围）→ **本轮不做**。
 > → 记为技术债 **TD-045**（见下）。
 
+
+---
+
+## rev 5（2026-11-21）：**棒 1 交付后**的两个实现级裁定（2 条）
+
+> **背景**：棒 1 在报告 §6.1 / §6.2 提出两个**需要 BA 拍板**的问题。
+> 两条都**不是**「Agent 想偷懒」—— 第一条是规格**漏写**，第二条是规格**自相矛盾**。
+
+## D260: AC-S-140 与 AC-S-146 步骤 3 **确实互斥** → **保 AC-S-140**，AC-S-146 步骤 3 换判据
+
+### 冲突（已逐字核对用例，不是推测）
+
+| 来源 | 要求 |
+|---|---|
+| **AC-S-140** / **TC-022-040**（P0） | 请求 `scope=rbac:role:read rbac:role:write`（用户无 write）→ **preview 通过、走到令牌交换** → **令牌端点** 400 `{"error":"invalid_scope"}` |
+| **AC-S-146 步骤 3** / **TC-022-080** | 用 E2E 私钥**自签**一个 `scope` 更大的 `consent_ticket` → **confirm** 400 `OAUTH_TICKET_INVALID` |
+
+### 为什么互斥（根本原因）
+
+consent ticket 是**无状态**的（`src/ticket.rs` 签发 / 验签，**不落库**，D204 定的是「零新表」）。
+confirm 时平台**没有可信参照物**去判断「这个票据的 scope 是不是比 preview 返回的更大」——
+因为「preview 返回了什么」**没有持久化**。
+
+唯一可信的参照物是**数据库里的两件事**：用户的真实权限点、`client.allowed_scopes`。
+
+于是：
+
+| confirm 的做法 | 后果 |
+|---|---|
+| **校验** `票据.scope ⊆ 用户真实权限 ∩ client.allowedScopes` | TC-022-040 的 `{read, write}` 会**在 confirm 就被拒** → **走不到令牌端点** → **AC-S-140 的 4 条 P0 用例全废**（`invalid_scope` 永不出现） |
+| **不校验**（只信 ticket，D204 字面） | 自签票据**过得了 confirm** → **TC-022-080 判不到** `OAUTH_TICKET_INVALID` |
+
+**没有第三条路**：要做到「confirm 能判更大」，就必须把 preview 的结果持久化（= 新表 / 新列），
+而 D204 明确选了「零新表」。
+
+### 决定：**保 AC-S-140**
+
+**依据是射程**：AC-S-140 承载的是 **scope 三重交集**这个核心安全语义（4 条 **P0** 用例）；
+AC-S-146 步骤 3 承载的是「私钥泄露后的纵深防御」（1 条步骤）。
+用 4 条 P0 去换 1 条纵深防御，不划算。
+
+→ **实现口径**（棒 1 现状，BA 确认）：
+1. `preview` **只判语法**，展示**请求的** scope（`src/service.rs:863`）；
+2. `confirm` **只信 ticket**，**不**校验 scope（`src/service.rs:1864`，D204 字面）；
+3. **令牌端点**做三重交集 + 通配一律拒 + **全有或全无**（`src/service.rs:1917`）→ `invalid_scope`。
+
+### AC-S-146 步骤 3 的**替代判据**（可判、且仍有意义）
+
+> 用 `target/e2e-jwt-private.pem` 自签一个 `typ="oauth_consent_ticket"`、
+> `scope` **比 preview 返回的更大**的票据 → 调 `POST /api/oauth/authorize/confirm`
+> → **即使 confirm 接受该票据**（D260 的实现选择），
+> **后续用该 code 交换令牌必须 400 `{"error":"invalid_scope"}`，
+> 且 `platform_oauth_token` 里没有任何行**。
+>
+> → 证明的是「**私钥泄露也拿不到越权令牌**」，而不是「confirm 能识破伪造票据」。
+
+⚠️ **代价（必须明说，记 TD-046）**：私钥泄露场景下，自签票据会**多写一行 `platform_oauth_grant`**
+（用户会在「我的授权」列表里看到一条自己没同意过的授权）。
+**不越权拿令牌**，但**能看到多一条记录** → 可在「我的授权」页撤销。
+
+## D261: 协议端点的**租户来源** —— 批准棒 1 的方案，写进规格
+
+### 问题（规格漏写）
+
+协议端点（`/token` / `/introspect` / `/revoke` / `/device_authorization`）是 **client 认证**，
+**没有用户会话** → **没有租户上下文**。而 4 张表都开了 RLS，**必须有 `app.tenant_id`**。
+→ spec 从没写过「协议端点的租户从哪来」。
+
+### 决定：采纳棒 1 的「**从授权凭据推导 + 伪租户兜底**」
+
+| 场景 | 租户来源 |
+|---|---|
+| 授权码交换 | **授权码行**的 `tenant_id`（覆盖上下文） |
+| 设备码交换 | **设备码行**的 `tenant_id` |
+| 内省 / 撤销 | 令牌 JWT 的 **`tid`** 声明 |
+| 兜底（`client_credentials`、**未批准**的设备码） | 保留伪租户 **`"oauth-platform"`** |
+
+- ⚠️ **为什么不是 `"platform"`**：`platform-config` 的 `read_platform_entries` **拒绝** `platform`
+  （D72 保留字）→ 用 `"platform"` 会被直接拒掉。
+- ⚠️ **伪租户的安全边界**（BA 已核）：
+  - `"oauth-platform"` 是**保留值**，真实租户不可能叫这个名字（`src/store.rs:45-48`）；
+  - 它只承载「**还没有用户主体**」的中间态（未批准的设备码、`client_credentials` 的令牌行）；
+  - 这些行**不含用户归属信息** → 即便读到也不构成跨租户泄漏。
+- ⚠️ **设备码批准要跨租户迁移那一行**（伪租户 → 用户的真实租户）：
+  普通 `UPDATE` 做不到（RLS 的 `USING` 看**旧行**）→ 用 **4 个 `SECURITY DEFINER` 函数**：
+  `platform_oauth_code_by_hash` / `platform_oauth_device_code_by_hash` /
+  `platform_oauth_device_code_by_user_code_hash` / `platform_oauth_device_code_decide`。
+  - **安全性**：这 4 个函数按**摘要**查询（SHA-256，**不可猜**）→ 不知道摘要就查不到；
+  - 每个函数都 `REVOKE ALL … FROM PUBLIC` + 用 `pg_roles` 守卫 `GRANT EXECUTE TO base_platform_app`
+    （BA 已核实：迁移里 **4 处** `REVOKE ALL`）。
+- **为什么不给协议端点也建伪租户表 / 加 tenant_id 列**：那要改 5 张表的结构并重做 RLS 分析，
+  收益为零（伪租户已经足够表达「无用户主体」这个语义）。
+
+→ **本条写入 `design-summary.md` §3.1 与 `manifest.json` 的 `tenantScoped` 段注释。**
