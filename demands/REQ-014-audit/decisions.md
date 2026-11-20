@@ -105,6 +105,7 @@
   2. 静默剥离也**不保证**没漏（键名变形、值里嵌 token）；
   3. 硬拒绝让错误用法**在类型/流程上暴露**，符合 D27 的思路。
 - **配套**：敏感键扫描器必须带**阳性对照**（AC-S-133 步骤 4）。
+  🔑 **基线键集合已由 D156 钉死为 14 个**（本条原写的「等」已作废）。
 - **注意**：这**不是**万能防护 —— 它挡不住「把密码塞进一个叫 `value` 的键」。
   真正的兜底是「调用方不把凭据放进去」。本条只做**降低概率 + 早暴露**。
 
@@ -275,6 +276,376 @@ D131 定义了拼接规则，但两处细节没定死，会导致「实现A 与 
   微秒为 0 → `2026-11-20T01:02:03.000000Z`（**恒 6 位** ✓）。
 - **配套**：Dev 必须写一条测试，断言 Rust 侧手工格式化的输出与 DB 侧 `to_char` 的
   输出**逐字节相同**（含微秒为 0 的边界）。
+
+---
+
+## rev 2（2026-11-20 10:10）：QA 挑刺 36 条的**逐条裁决**
+
+> QA 产出：[qa-req014-spec-review.md](../../feature-meta/qa-req014-spec-review.md)
+> （36 条挑刺 / 12 条阻塞）+ 120 条用例（`test-cases/`）。
+> **13 条 AC 全部有问题，无一条可原样实现并验收。**
+> 以下逐条裁决 —— **BA 对「不可判定 / 物理不可达 / 口径不一致」的最终拍板**。
+
+### 裁决总览
+
+| 挑刺 | 档位 | 裁决 | 决策 |
+|---|---|---|---|
+| S-01 | 口径不一致 | **接受** | D146 |
+| S-02 | 口径不一致 | **接受**（跟契约 C7） | D145 |
+| S-03 | 主体不存在 | **接受** | D147 |
+| S-04 | 物理不可达 | **接受** | D148 |
+| S-05 | 物理不可达 | **接受** | D149 |
+| S-06 | 主体不存在 | **接受** | D150 |
+| S-07 | 不可判定 | **接受** | D151 |
+| S-08 | 口径不一致 | **接受** | D152 |
+| S-09 | 口径不一致 | **接受** | D153 |
+| S-10 | 主体不存在 | **接受** | D154 |
+| S-11 | 不可判定 | **接受** | D155 |
+| S-12 | 不可判定 | **接受** | D164 |
+| S-13 | 不可判定 | **接受** | D164 |
+| S-14 | 口径不一致 | **接受** | D165 |
+| S-15 | 不可判定 | **接受** | D163 |
+| S-16 | 不可判定 | **接受** | D159 |
+| S-17 | 口径不一致 | **接受**（手写 policy，路线 B） | D166 |
+| S-18 | 不可判定 | **接受** | D167 |
+| S-19 | 主体不存在 | **接受** | D156 |
+| S-20 | 不可判定 | **接受** | D156 |
+| S-21 | 口径不一致 | **接受** | D156 |
+| S-22 | 表述 | **接受**（统一用 `tenant-a`/`tenant-b`） | D168 |
+| S-23 | 表述 | **接受**（响应字段名写进 AC） | D167 |
+| S-24 | 不可判定 | **接受**（检索面 = 全列） | D167 |
+| S-25 | 不可判定 | **接受**（QA 的锁法分析正确） | D161 |
+| S-26 | 口径不一致 | **接受**（事件码改用命名法） | D163 |
+| S-27 | 不可判定 | **接受**（在查询层验「不缺列」） | D167 |
+| S-28 | 表述 | **接受** | D168 |
+| S-29 | 不可判定 | **接受** | D157 |
+| S-30 | 不可判定 | **接受** | D163 |
+| S-31 | 不可判定 | **接受**（补创建/删除角色） | D163 |
+| S-32 | 表述 | **接受** | D168 |
+| S-33 | 口径不一致 | **接受**（忽略 + warn） | D162 |
+| S-34 | 口径不一致 | **接受** | D158 |
+| S-35 | 口径不一致 | **接受**（服务端分页） | D145 |
+| S-36 | 口径不一致 | **接受**（选项 A：薄封装） | D160 |
+
+**全部 36 条接受**，无一条驳回。
+
+---
+
+## D145: 查询接口**遵循契约 C7**（游标分页 + `filter[...]` + `sort`）
+
+- **决策**：AC-S-130 与 design §5.1 全部改为契约 C7 的口径：
+  - **游标分页**：`?cursor=<token>&limit=<n>`，默认 `limit=20`，**上限 200**，
+    响应含 `next_cursor`（无下一页时为 `null`）；
+  - **兼容页码**：`?page=N&page_size=M`；与 `cursor` **互斥**，同时给 → **400**；
+  - **排序**：`?sort=-created_at,actor_id`，白名单 = `created_at` / `actor_id` /
+    `action` / `object_type` / `object_id`，未声明字段 → **400**；
+  - **过滤**：`?filter[actorId][eq]=xxx`，`op` 白名单 = `eq` / `ne` / `in` /
+    `contains` / `range`；
+  - **数据范围过滤由平台自动叠加**（C7 原文），审计侧不得自行实现绕过开关。
+- **理由**：
+  1. **契约是平台级约束**。审计查询是平台 API，不能自己另立一套分页口径 ——
+     否则前端要同时支持两套，且「什么算合法的分页请求」在平台内有两种答案。
+  2. C7 给出的理由（深翻页在变动数据集上会漏数据或重复）对审计表**更成立**：
+     审计表**持续追加**，按页码翻页必然出现重复/遗漏。
+  3. 我原来写 `page` + `size`（默认 50）时**只读了契约 C12，没读 C7** ——
+     这正是 dev-guide §9.11 的老毛病（**「我记得契约是这样」不是证据**）。
+- **附带**：前端审计页**必须服务端分页**，不得照抄既有受保护页的客户端分页（S-35）。
+
+## D146: 链校验 = **逐条独立重算 + 接续校验**（两段式，两个 reason 都有意义）
+
+- **决策**：校验分两段，**两个 reason 都有真实用例**：
+  1. **逐条重算**：用**本条自己的 `prev_hash` 列** + 本条内容重算 `hash`，
+     与存储值比 → 不符 → `hash_mismatch`；
+  2. **接续校验**：本条的 `prev_hash` 与**同租户上一条的存储 `hash`** 比 →
+     不符 → `prev_hash_mismatch`。
+- **理由**：我原来的 AC-S-125 案例 B 写「第 3 条 `reason == hash_mismatch`」是**错的**：
+  第 3 条的 `prev_hash` 列没被改 → 它**自身**的重算值**等于**存储值 →
+  它不是 `hash_mismatch`，断的是**接续关系** → 应为 `prev_hash_mismatch`。
+  「这证明链是连锁的」这个**论证没错**，错的只是 reason 取值。
+- **收益**：两段式下，**篡改 `hash` 列**会同时触发第 2 条的 `hash_mismatch`
+  与第 3 条的 `prev_hash_mismatch` —— 两个 reason 都能被真实触发，没有死值。
+
+## D147: 部署种子脚本**必须**为审计表加例外块
+
+- **决策**：`deploy/seed/02-app-role.sql` 必须新增与 `platform_config` 同款的例外块：
+  ```sql
+  DO $$
+  BEGIN
+      IF to_regclass('public.platform_audit_log') IS NOT NULL THEN
+          EXECUTE 'GRANT SELECT, INSERT ON platform_audit_log TO base_platform_app';
+          EXECUTE 'REVOKE UPDATE, DELETE ON platform_audit_log FROM base_platform_app';
+      END IF;
+      IF to_regclass('public.platform_audit_archive') IS NOT NULL THEN
+          EXECUTE 'GRANT SELECT, INSERT ON platform_audit_archive TO base_platform_app';
+          EXECUTE 'REVOKE UPDATE, DELETE ON platform_audit_archive FROM base_platform_app';
+      END IF;
+  END
+  $$;
+  ```
+- **理由**：QA **已实测**（临时表，已清理）：
+  `base_platform_app=arwd` → 迁移 REVOKE → `=ar`（append-only 成立）
+  → **重跑种子脚本的 blanket GRANT** → 回到 `=arwd` → `base_app` 的 `UPDATE`
+  **成功执行**（无 permission denied）。
+  种子脚本 `:50` 是 `GRANT … ON ALL TABLES IN SCHEMA public`，
+  `:69-70` 是 `ALTER DEFAULT PRIVILEGES … GRANT … UPDATE, DELETE`。
+  迁移里的 REVOKE **只解决当前状态**，解决不了**重跑种子**。
+- **危险点**：**Dev 第一次跑是绿的，补建脚本之后才红** —— 极易被当成环境问题放过。
+  → AC-S-123 必须加一步「**重跑种子脚本后仍拒**」。
+
+## D148: RLS 验证必须在**单个事务内** `set_config` → 查询
+
+- **决策**：AC-S-126 的步骤 2/3 改成「**单事务内** `set_config('app.tenant_id', …, true)`
+  → 查询 → 提交」，**不得**用裸连接「设一次再查」。
+- **理由**：`app.tenant_id` 是**事务局部**的（`set_config` 第三参数 `true`
+  = 等价 `SET LOCAL`，见 `crates/platform-db/src/tenant.rs:28`）。
+  裸连接单条执行后事务即结束 → 值被清 → 查到 0 行 → 「查不到别的租户」**恒真** → 假绿。
+- **追加验收**：**未设**租户上下文时查询 → **0 行且不报错**（fail closed）。
+
+## D149: `ip` / `user_agent` 的来源与**可信度声明**
+
+- **决策**：
+  - 取值来源：`x-forwarded-for` 的**第一跳**（与 `crates/platform-iam/src/http.rs:267-269`
+    的既有惯例一致）；无该头 → **空串**；`user-agent` 同理。
+  - **谁填**：平台中间件（在 `platform-server` 的 middleware 层）负责把
+    `x-forwarded-for` / `user-agent` 填进 `RequestContext.client_ip` / `.user_agent`。
+  - AC-S-127 的步骤**显式带上** `X-Forwarded-For: 203.0.113.9`，并断言**逐字相等**。
+- **必须如实声明**：`ip` 是**客户端可控的头**，本仓**无法记录可信的物理来源**。
+  规格与代码注释都**不得**把它写成「来源 IP 即真实客户端地址」。
+  它的用途是**关联与排查**，不是**取证**。
+- **冲突消解**：AC-S-122 说「取不到落空串」，AC-S-127 说「均含非空」——
+  不矛盾：**AC-S-122 是默认行为，AC-S-127 是带头的情形**。两条都保留，但 AC-S-127
+  必须显式带头。
+
+## D150: sink 的**装配路径**（AC-S-129 的主体）
+
+- **决策**：装配路径固定为：
+  `platform-server` 构造 `PgAuditSink`（持有 `PgPool`）→
+  以 `Arc<dyn AuditSink>` **向下注入** `platform-iam` / `platform-rbac` /
+  `platform-config` / `platform-org` 的 service；
+  各模块**自己**实现「本模块事件 → 通用 `AuditEvent`」的转换（不引 `platform-audit` 的类型）。
+- **理由**：`AuditSink` trait 在 `platform-core`（零依赖）→ 各业务模块只依赖 core，
+  **不成环**；落库实现 `PgAuditSink` 在 `platform-audit`（依赖 db）→
+  由 `platform-server` 装配。
+- **AC-S-129 前置补**：「sink **已被注入**」。
+
+## D151: 哈希复算的时间戳格式（**给出确切 Rust 代码**）
+
+- **决策**：复算用的时间戳文本 =
+  `format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:06}Z", …)`，
+  且**必须先转 UTC**（`to_offset(time::UtcOffset::UTC)`）。
+- **禁用**：仓里现成的两个 helper —— `crates/platform-core/src/money.rs:484`
+  的 `format_rfc3339_utc` 与 `crates/platform-org/src/http.rs:248` 的
+  `format_timestamp` —— **都只有秒精度**，复用即**每条都对不上**。
+- **理由**：`format_description` 不含偏移分量，直接格式化 `OffsetDateTime`
+  会打印**本地时**的钟点再贴个 `Z` —— 差几小时，链永远「校验失败」。
+  仓里三处惯例都是先 `to_offset(UTC)`。
+
+## D152: 「业务模块不写审计表」的**扫描口径**
+
+- **决策**：AC-S-129 步骤 4 拆成两个断言：
+  1. 扫 `crates/**/*.rs` → `INSERT INTO platform_audit_log` **0 命中**；
+  2. 扫 `migrations/**/*.sql` → **恰好 1 处**（在平台自己的迁移里）。
+- **理由**：写入走 `SECURITY DEFINER` 函数 → `INSERT` 在 **plpgsql 函数体内**，
+  **Rust 源码里根本不会出现** → 原来「只有 sink 模块命中」的判据在 Rust 侧**恒为 0**
+  → 又是假绿。扫描器**必须有阳性对照**（TC-014-073）。
+
+## D153: 查询参数的**非法值 vs 超上限**
+
+- **决策**：
+  - **非数值**（`limit=abc`）/ **零值**（`limit=0` / `page=0`）→ **400**
+    `AUDIT_INVALID_FILTER`；
+  - **超上限**（`limit=1000`）→ **夹到 200**（C7 的上限）；
+  - 非法值与超上限**是两条不同的路径**，不得混成一条。
+- **响应体形态**：必须是 `application/problem+json` + `ProblemDetails`
+  （契约 C6）。🔑 axum 0.8 的 `QueryRejection` 是**纯文本** 400 → 违反 C6。
+  → **设计要求**：数值参数**自解析**（沿用既有惯例
+  `Query<HashMap<String, String>>`，见 `crates/platform-iam/src/http.rs:456`），
+  自行校验并返回 `ProblemDetails`。
+
+## D154: 「足够旧的记录」只能**管理员直连 INSERT** 构造
+
+- **决策**：AC-S-131 的前置改为「旧记录由**管理员直连 INSERT** 构造，
+  **不参与链校验断言**」。写入函数固定用 `clock_timestamp()`（D143），
+  **没有**指定 `created_at` 的入口 —— 这是有意的（时间戳由数据库生成 = 权威）。
+- **代价**：旧记录的 `hash` / `prev_hash` 需测试侧自行计算，
+  或用 admin 绕过链的自洽值。归档只关心「哪些行被搬走」，不重算链。
+
+## D155: 查询排序 = `created_at DESC, id DESC`
+
+- **决策**：默认排序 `ORDER BY created_at DESC, id DESC`；
+  `?sort=` 的白名单 = `created_at` / `actor_id` / `action` / `object_type` /
+  `object_id`（C7 格式，多字段逗号分隔，前缀 `-` 表示降序）。
+- **理由**：`created_at` 并列时，页码/游标分页会**重复或遗漏** →
+  AC-S-132 的「翻页后记录不重复」**判不出红绿**。`id` 作 tiebreaker 兜底。
+
+## D156: 敏感键 —— **14 键基线 + 完整键名匹配 + 递归 + 两侧都做**
+
+- **决策**：
+  - **基线键（14 个，恰好）**：
+    `password` / `passwd` / `pwd` / `secret` / `client_secret` / `token` /
+    `access_token` / `refresh_token` / `id_token` / `authorization` /
+    `credential` / `api_key` / `private_key` / `cookie`
+  - **归一化**：键名转小写，并把 `-` 视为 `_`（`client-secret` ≡ `client_secret`）。
+  - **匹配方式**：归一化后与基线键**精确相等**（**不是子串**）——
+    否则 `secretary` / `tokenizer` 会被误伤，业务方会绕开防护。
+  - **递归**：检查 JSON 的**每一层**（DB 侧 `jsonb_each_text` **不递归** → 必须自己递归）。
+  - **放在哪**：**两侧都做** —— DB 函数内做（权威，真正的「写入前」）
+    + Rust 侧提供 `scan_sensitive_keys(&str) -> BTreeSet<String>`
+    （供测试 / 工具 / 提前拦截用）。
+  - **一致性**：两侧的键集合**必须逐项相等** → 加一条**一致性测试**
+    （从迁移 SQL 抽出 DB 侧键数组，与 Rust 常量比对），防止两边漂移。
+- **理由**：D134 只写了「等」→ 集合留空 → AC-S-133 **不可判定**。
+
+## D157: 审计写入失败时，**拒绝登录**（503）
+
+- **决策**：审计 sink 写入失败（DB 不可用等）→ **拒绝登录**并返回 **503**
+  （新错误码 `AUDIT_SINK_UNAVAILABLE`）。
+- **理由**：放行 = 「有登录、无审计」→ 父 AC-022 的「完整且不可篡改」承诺被打破，
+  而运维从日志里看不出「这次登录没被记录」。**宁可不登录，不可无审计地登录。**
+- **代价**：审计表写不动 = 全平台登录不可用。**这是刻意的可用性取舍**，
+  记入 tech-debt（缓解手段：审计写入失败率告警 + 降级开关，**本轮不做**）。
+
+## D158: 归档**单租户**；xtask 用**应用角色**
+
+- **决策**：
+  - `POST /api/audit/archive` 的作用域 = **当前租户**（受 RLS 约束），
+    不提供全平台归档；
+  - `cargo xtask audit archive --tenant <id>` 用**应用角色**连接
+    （`base_app`，受 RLS 约束）→ 逐租户调用。
+- **理由**：全平台归档需要跨租户特权 + 独立权限点 → 本轮不做；
+  审计数据是租户级资产，跨租户批量操作应由部署侧的循环逐租户发起。
+
+## D159: 归档后的链校验语义 + **新增链状态表**
+
+- **决策**：新增第三张表 **`platform_audit_chain_state`**：
+  | 列 | 说明 |
+  |---|---|
+  | `tenant_id` | PK |
+  | `head_hash` | 该租户链的**当前基准**（genesis，或上次归档的尾 hash） |
+  | `archived_at` | 最近一次归档时间；未归档为 `NULL` |
+  | `updated_at` | 更新时间 |
+  - 写入时更新 `head_hash` = 新记录的 `hash`；
+  - 归档时更新 `head_hash` = **被搬走那段的尾 `hash`**、`archived_at` = 归档时间；
+  - 校验时：在线表**第一条**的 `prev_hash` 必须等于 `head_hash`（接续校验的基准）。
+- **理由**：不存基准的话，归档后在线表第一条的 `prev_hash` 指向**已被搬走**的那条 →
+  接续校验**必然误报断裂** → 归档一次就「链坏了」。
+
+## D160: C-5 契约检查 —— 在 `platform-audit/src/` 放**薄封装**（选项 A）
+
+- **决策**：在 `crates/platform-audit/src/` 暴露薄封装函数，
+  内部调用 **core** 里的鉴权入口：
+  ```rust
+  // crates/platform-audit/src/authz.rs
+  pub fn require_events_read(ctx: &RequestContext) -> Result<()> {
+      platform_core::extension::permission::require_permission(ctx, "audit:events:read")
+  }
+  ```
+  `platform-server/src/audit.rs` 调这些封装。
+- **理由**：C-5 契约检查 `check_c5_for(manifest_path, source_dir)` **只扫该 manifest
+  所属 crate 自己的 `src/`**。HTTP 在 `platform-server`、manifest 在 `platform-audit`
+  → 对 `platform-audit` 跑 C-5 会报「3 个已登记权限点**没有鉴权调用点**」→ **违例**。
+  薄封装同时满足：C-5 命中字面量 ✓、**不**引入 `platform-audit → platform-rbac` ✓
+  （鉴权入口在 **core**）。
+- **不选选项 B**（在基线快照里登记成新债）—— 新 crate 不应该再开一个同 `platform-org`
+  的缺口。
+
+## D161: 并发防分叉 —— **禁用 `FOR UPDATE` 方案**，改用 advisory lock + **新语句重读**
+
+- **决策**：写入函数内用
+  `pg_advisory_xact_lock(hashtext('audit:' || p_tenant_id))`
+  串行化同租户写入，**拿到锁后用新语句重读**最后一条。
+- **明确排除**：`SELECT … ORDER BY created_at DESC LIMIT 1 FOR UPDATE` 锁上一条。
+- **理由**（QA 的分析正确）：PostgreSQL 在 **READ COMMITTED**（sqlx 默认）下，
+  `FOR UPDATE` **不会**扩展语句快照去看**新插入的其它行**：
+  - 事务 A 锁住第 N 条，插入第 N+1 条（`prev_hash = hash(N)`），提交；
+  - 事务 B 的 `SELECT … FOR UPDATE` **快照早于 A 的提交** → 它拿到第 N 条的锁，
+    但**看不到** A 新插入的第 N+1 条 → 仍算出 `prev_hash = hash(N)`
+    → **两条 `prev_hash` 相同 → 链分叉 → 校验必然失败**。
+  - 正确手法是「**先拿锁，再在新语句里重读**」，让后到者**看到**先到者刚插入的那一行。
+- **验收**：AC-S-124 追加一条**并发**验收项 —— 两个独立连接**同时**向同一租户写 2 条 →
+  都成功；排序后第 2 条的 `prev_hash` == 第 1 条的 `hash`；两条 `prev_hash` **互不相同**；
+  链校验 `ok == true`。
+
+## D162: `tenant_id` 查询参数 = **忽略 + warn 日志**
+
+- **决策**：查询接口**不接受**来自查询参数的租户；传了**忽略**并记一条 **warn** 日志
+  （攻击尝试可观测），**不** 400。
+- **理由**：400 会把「该参数不被支持」这个信息暴露给探测方；忽略 + warn 兼顾
+  可观测与不泄露。租户只来自认证上下文 + RLS（D132）。
+
+## D163: 事件码 / `object_type` / `before`·`after` 形状 —— 全部钉死
+
+- **决策**：
+  | 事件 | 事件码 | `object_type` | `before` / `after` 形状 |
+  |---|---|---|---|
+  | 本地登录成功 | `iam.login.succeeded` | `iam_session` | `NULL` / `NULL` |
+  | 本地登录失败 | `iam.login.failed` | `iam_session` | `NULL` / `NULL` |
+  | LDAP 登录 | `iam.login.succeeded` / `iam.login.failed` | `iam_session` | 同上 |
+  | SSO 登录成功 | `iam.sso.login.succeeded` | `iam_sso_session` | 同上（沿用既有事件码） |
+  | SSO 登录失败 | `iam.sso.login.failed` | `iam_sso_session` | 同上 |
+  | 角色创建 | `rbac.role.create` | `role` | `NULL` / `{"permissions":[]}` |
+  | 角色删除 | `rbac.role.delete` | `role` | `{"permissions":[...]}` / `NULL` |
+  | 授予权限 | `rbac.role.grant` | `role` | `{"permissions":[...]}` / `{"permissions":[...+p-1]}` |
+  | 撤销权限 | `rbac.role.revoke` | `role` | `{"permissions":[...+p-1]}` / `{"permissions":[...]}` |
+  | 配置条目写入 | `config.entries.write` | `config_entry` | 变更前 / 变更后 |
+  | 配置 flag 写入 | `config.flag.write` | `config_flag` | 变更前 / 变更后 |
+  - `before` / `after` 的权限集合是**排序后**的字符串数组（确定性）。
+  - **事件码命名法**统一为 `<域>.<对象>.<动作>`（既有 `org.node.create`、
+    `iam.sso.login.succeeded`）。⚠️ AC-S-122 里我写的 `demo.update` **违反**该命名法
+    → 改为 `demo.item.update`（S-26）。
+  - AC-S-128 原本只点了「授予 / 撤销」→ **补上**「创建 / 删除角色」（S-31）。
+
+## D164: 告警日志字段名 + 「定期校验」的**执行者**
+
+- **决策**：
+  - 告警日志的字段名用 **`event_id`**（= 表列 `id`），并**不要求**「恰好 3 个字段」
+    —— 那是过度约束。必含：`tenant_id` / `event_id` / `reason`，**可含更多**。
+  - 「定期校验链完整性」的**执行者**：本轮**没有**常驻调度器（D137 同款理由）→
+    由 (a) `GET /api/audit/verify` 显式触发 + (b) `cargo xtask audit verify` 触发；
+    运维用外部定时任务调用。**「定期」= 由外部调度器周期性调用这两个入口**。
+  - 告警 = **error 级别结构化日志** + 校验结果里的 `ok = false`。
+- **理由**：AC-S-022 原文写「**定期**校验」但**没指定执行者** → 不可判定。
+
+## D165: 应用连接角色是 **`base_app`**（不是 `base_platform_app`）
+
+- **决策**：AC-S-123 / AC-S-126 的前置一律写 **`base_app`**。
+- **理由**：`base_platform_app` 是 **NOLOGIN 的组角色**，**连不上**。
+  `base_app` 是 LOGIN、且是 `base_platform_app` 的**成员** → 组权限继承
+  （实测 `has_table_privilege('base_app', 'platform_tenant_config', 'UPDATE') = true`
+  → 证实继承生效）→ `REVOKE ... FROM base_platform_app` **对 `base_app` 生效** ✓。
+- **同时**：ACL 断言必须**用 `base_app`**，用表 owner（`base`）**永远能改** → 测不出任何东西。
+
+## D166: RLS policy **手写**（路线 B）
+
+- **决策**：审计表的 policy **手写**在迁移里（照
+  `migrations/20261118000200_tenant_isolation.up.sql:32`），
+  **不**走 `cargo xtask tenant-policies` 生成器。
+- **理由**：design 内部自相矛盾（§14.5 给了两条路）。选手写是因为：
+  1. 形态完全可控，与 D132 的要求逐字对齐；
+  2. 生成器的 `tenantScoped.tables` 走的是**逻辑表名**（如 `org_node`），
+     审计表的物理名（`platform_audit_log`）与逻辑名的关系尚未验证；
+  3. 生成器路径是**运行时**行为，**测不到** → 违反 D108 的 skip 纪律精神。
+- **代价**：与生成器机制不一致 → 记入 tech-debt。
+
+## D167: 响应字段名 / 检索面 / 「不缺列」的验法
+
+- **决策**：
+  - 响应字段名**写进 AC**（camelCase，契约 C13）：
+    `id` / `actorId` / `action` / `objectType` / `objectId` / `before` / `after` /
+    `ip` / `userAgent` / `createdAt` / `prevHash` / `hash`；
+  - 「检索该租户的全部审计记录**文本**」的检索面 = **全部列的文本拼接**
+    （不只是 `before`/`after`）—— 凭据可能落在 `action` / `object_id` 等列；
+  - AC-S-122 的「`ip` 与 `user_agent` **存在该列**（不得缺列）」在**查询层**验
+    （读回的 JSON 对象里**有**这两个键），而不是在表结构层验。
+  - 403 的**具体错误码**钉死为 `INSUFFICIENT_PERMISSION`（既有码，不新增）。
+
+## D168: 夹具命名与契约关系
+
+- **决策**：
+  - 夹具租户名统一用 **`tenant-a` / `tenant-b`**（与 REQ-013 一致），
+    不用 `t-audit` / `t-other`；
+  - AC-S-122 与契约 C12 的关系写明：本需求的 13 个字段**就是** C12 的固定字段，
+    **不增不减**；`before`/`after` 的**类型**（`TEXT`）是 C12 未规定处的实现选择。
 
 ---
 
