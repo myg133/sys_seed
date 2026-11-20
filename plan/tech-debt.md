@@ -800,3 +800,30 @@ Sprint 3 复盘的第 2 条教训：**修漏洞会制造新漏洞** —— 但�
   （可以复用 `platform_oauth_code` 表加一列，或新建轻量表），
   `confirm` 校验「票据 scope == 该 jti 记录的交集 scope」→ 自签票据必被拒（真正的 `OAUTH_TICKET_INVALID`）。
   届时 TD-046 与 D260 的替代判据一并回滚。
+
+---
+
+## TD-047: **每个自带认证中间件的模块都必须自己调 `ensure_fresh`** —— 漏了就「第一次必 403」
+
+- **发现于**: REQ-022 终版 E2E（P3 第 1 轮：41 passed / **2 failed**）
+- **证据**（修前）:
+  - `crates/platform-oauth/src/http.rs` 的 `authenticate` 中间件**只**注入 `PermissionChecker`，
+    **没有**调 `PermissionRefresher::ensure_fresh`；
+  - `crates/platform-rbac/src/http.rs:235` 与 `platform-config` 的中间件**都调了**；
+  - 后果：`RbacChecker::has` 是**纯缓存查询**（`crates/platform-rbac/src/checker.rs:336-348`，
+    缓存里没有该用户 → `fail closed` 直接 `false`）→
+    用户**第一次**打 `POST /api/oauth/clients` 必然 **403 `INSUFFICIENT_PERMISSION`**，
+    **第二次就好**（缓存被别的请求填上了）。
+  - 实测：同一 token 连打 3 次 → `403 / 403 / 403`（服务刚起、缓存全空）；
+    一旦缓存被填过 → `201 / 201 / 201`。**「第一次失败、重试就好」是最难查的一类缺陷。**
+- **影响面**: 任何**新增的、自带认证中间件的**平台模块都会踩同一个坑。
+  `PermissionRefresher` 的 trait 注释（`crates/platform-core/src/extension/permission.rs:203-206`）
+  **已经明写了这件事**（「任何自带认证中间件的平台模块都要在 `require_permission` 之前刷新判定缓存」）
+  —— 但它是**散文**，没有任何机制强制。
+- **本轮已修**: `OAuthState` 加 `refresher` 字段 + `authenticate` 里 `ensure_fresh` +
+  装配层传同一个 `RbacChecker`（它同时实现 `PermissionChecker` 与 `PermissionRefresher`）。
+- **建议修法**（后续 REQ）: 把这件事从「散文」变成**可判定**：
+  ① 在 `platform-core` 提供一个 `authenticate_layer(state)` 的组合中间件
+  （验令牌 + 建 ctx + `ensure_fresh` + 注入 checker），新模块**直接用**，不自己写；
+  ② 或加一条契约检查：扫 `src/**/*.rs`，凡出现 `insert(checker)` 的文件，
+  同一函数体内必须出现 `ensure_fresh`（**带阳性对照**：临时删掉 → 必须报错）。
