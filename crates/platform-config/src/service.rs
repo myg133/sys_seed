@@ -461,14 +461,9 @@ impl ConfigService {
         }
         self.record_audit(
             ctx,
-            audit_event(
-                ctx,
-                "config.entries.write",
-                "config_entry",
-                &scope.as_str().to_string(),
-            )
-            .with_before(Value::Object(before))
-            .with_after(Value::Object(after)),
+            audit_event(ctx, "config.entries.write", "config_entry", scope.as_str())
+                .with_before(Value::Object(before))
+                .with_after(Value::Object(after)),
         )
         .await;
         Ok(entries.len())

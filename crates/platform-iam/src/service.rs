@@ -668,7 +668,7 @@ impl IamService {
             // 🔑 登录失败**也要审计**（AC-S-127）—— 事件**不含账号名**。
             self.record_audit(
                 ctx,
-                login_event(&tenant, None, false, false, &meta.ip, &meta.user_agent),
+                login_event(tenant, None, false, false, &meta.ip, &meta.user_agent),
             )
             .await?;
             return Err(IamError::InvalidCredentials);
@@ -689,7 +689,7 @@ impl IamService {
             //    失败记录的条数不因账号是否存在而变化。
             self.record_audit(
                 ctx,
-                login_event(&tenant, None, false, false, &meta.ip, &meta.user_agent),
+                login_event(tenant, None, false, false, &meta.ip, &meta.user_agent),
             )
             .await?;
             return Err(IamError::InvalidCredentials);
@@ -704,7 +704,7 @@ impl IamService {
             // 🔑 失败审计（与上面两条失败路径**对称**：各 1 条）。
             self.record_audit(
                 ctx,
-                login_event(&tenant, None, false, false, &meta.ip, &meta.user_agent),
+                login_event(tenant, None, false, false, &meta.ip, &meta.user_agent),
             )
             .await?;
             return Err(IamError::AccountLocked);
@@ -740,7 +740,7 @@ impl IamService {
         self.record_audit(
             ctx,
             login_event(
-                &tenant,
+                tenant,
                 Some(&user.id),
                 true,
                 false,

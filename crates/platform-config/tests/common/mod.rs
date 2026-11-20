@@ -232,7 +232,16 @@ async fn prepare(reset: bool) -> Fixture {
 /// 恢复 §3.5 的夹具（平台 / 租户 / 空间三层 + epoch）。
 pub async fn reset_fixture(pool: &PgPool) {
     // 平台级（管理员连接绕过 RLS / 直接 DML 权限）。
-    sqlx::query("DELETE FROM platform_config")
+    //
+    // ⚠️ **只删本夹具管的键**（D187）—— 不能用 `DELETE FROM platform_config` 清整表：
+    // 那会把**别的 crate 登记在迁移里的键**（如 `audit.*`）一并删掉，而迁移已进
+    // `_sqlx_migrations` **不会重跑** → 登记值在共享测试库里静默消失，且**没有任何用例变红**。
+    let platform_keys: Vec<String> = platform_fixture()
+        .into_iter()
+        .map(|(key, _)| key.to_string())
+        .collect();
+    sqlx::query("DELETE FROM platform_config WHERE key = ANY($1)")
+        .bind(&platform_keys)
         .execute(pool)
         .await
         .expect("平台级配置应能清空");

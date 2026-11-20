@@ -1802,3 +1802,79 @@ async fn a_dotted_boolean_key_is_writable_as_config_and_rejected_as_a_flag() {
     assert!(decision.enabled);
     assert_eq!(decision.flag, "beta");
 }
+
+// ---------------------------------------------------------------------------
+// REQ-014 D182 / D186：审计分页的**登记值**必须与契约 C7 的口径一致
+// ---------------------------------------------------------------------------
+
+/// `audit.page.defaultSize` 的**登记值**必须与契约 C7 的口径一致。
+///
+/// # 这条断言盯的是「登记在骗人」
+///
+/// 复验（H-01）查出：manifest 登记 `50`、`DEFAULT_LIMIT`（运行时）是 `20` →
+/// 运维在配置面板看到 50 而接口默认返回 20。**计数类断言抓不到它**，
+/// 必须把**登记侧的两处**与**契约口径**逐字比对。
+///
+/// # 本用例实际覆盖的**两处**（不是三处）
+///
+/// 1. `crates/platform-config/manifest.json`（登记值，经 `ConfigRegistry` 读）；
+/// 2. `platform_config` 表里的行（迁移种子写进去的值）。
+///
+/// 第 2 处比对的目标是**契约 C7 的口径常量**（下面写死的 `CONTRACT_DEFAULT_LIMIT`），
+/// **不是**运行时常量 `platform_audit::DEFAULT_LIMIT` —— `platform-config`
+/// **不依赖** `platform-audit`（刻意的分层，本轮也不许加依赖）。
+///
+/// # 运行时默认由谁钉住
+///
+/// 「运行时默认 == 20」由 `platform-audit` 自己的
+/// `the_defaults_are_the_contract_defaults`（`crates/platform-audit/src/query.rs` 单测）钉住。
+/// 那条单测**看不到** manifest / DB 的登记值 → 本用例与它**各自只钉一半**。
+///
+/// 把「运行时默认 / manifest 登记 / DB 登记」**三者接起来**的跨 crate 断言在
+/// `crates/platform-server/tests/audit_default_size_real_db.rs`
+/// （装配层是唯一同时依赖 `platform-audit` 与 `platform-config` 的地方）。
+#[tokio::test]
+async fn the_audit_page_default_size_matches_the_contract_in_manifest_and_db() {
+    let _guard = serial().await;
+    let fx = setup().await;
+
+    const KEY: &str = "audit.page.defaultSize";
+
+    // 1) manifest 登记值。
+    let registry = platform_config::ConfigRegistry::from_manifest_root(&repo_root())
+        .expect("配置注册表应能加载");
+    let registered = registry.get(KEY).expect("该键必须已登记");
+    assert_eq!(
+        registered.default,
+        json!(20),
+        "manifest 登记的 {KEY} 必须是 20（D182 / D186）"
+    );
+
+    // 2) 契约 C7 的口径（20）—— **常量**，不是运行时值。
+    //
+    // ⚠️ 不在这里引用 `platform_audit::DEFAULT_LIMIT` —— `platform-config`
+    // **不依赖** `platform-audit`（那是刻意的分层），本轮也不许加依赖。
+    // 「运行时默认 == 20」由 `platform-audit` 自己的
+    // `the_defaults_are_the_contract_defaults`（`query.rs` 单测）钉住；
+    // 本用例负责的是「**登记值**不能与契约口径不一致」。
+    // 三者接起来的断言在 `platform-server/tests/audit_default_size_real_db.rs`。
+    const CONTRACT_DEFAULT_LIMIT: i64 = 20;
+    assert_eq!(
+        registered.default,
+        json!(CONTRACT_DEFAULT_LIMIT),
+        "登记值与契约 C7 的口径（20）**必须相等** —— 否则就是「登记在骗人」（D182）"
+    );
+
+    // 3) DB 里的登记行（迁移种子；已进 `_sqlx_migrations` 不会重跑 → 也会漂）。
+    let stored: Option<Value> =
+        sqlx::query_scalar("SELECT value FROM platform_config WHERE key = $1")
+            .bind(KEY)
+            .fetch_optional(&fx.admin_pool)
+            .await
+            .expect("应当能读 DB 配置行");
+    assert_eq!(
+        stored,
+        Some(json!(CONTRACT_DEFAULT_LIMIT)),
+        "DB 里的 {KEY} 必须是 20（迁移种子 20261120000400）"
+    );
+}

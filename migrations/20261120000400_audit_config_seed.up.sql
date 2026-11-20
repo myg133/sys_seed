@@ -25,8 +25,8 @@
 -- | `audit.page.default_size` | `audit.page.defaultSize` |
 -- | `audit.page.max_size` | `audit.page.maxSize` |
 --
--- ⚠️ **这是与规格的字面不一致**，已记入本轮自验报告「与规格不一致的发现」，
--- 待 BA 确认（要么改 D178 正文，要么改契约 C9）。
+-- ⚠️ D178 正文的 snake_case 写法**与契约 C9 冲突**，**D181 已裁定改用 camelCase**，
+-- D178 的 snake_case 写法**作废**。
 --
 -- # 写通道：只走 `platform_config_upsert`（SECURITY DEFINER）
 --
@@ -45,7 +45,7 @@ SELECT platform_config_upsert('audit.retention.onlineDays', '90'::jsonb);
 SELECT platform_config_upsert('audit.retention.archiveDays', '365'::jsonb);
 
 -- 列表默认每页条数。
-SELECT platform_config_upsert('audit.page.defaultSize', '50'::jsonb);
+SELECT platform_config_upsert('audit.page.defaultSize', '20'::jsonb);
 
 -- 列表每页条数上限。
 SELECT platform_config_upsert('audit.page.maxSize', '200'::jsonb);

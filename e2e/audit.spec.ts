@@ -227,6 +227,14 @@ test('TC-014-113（回退）：「上一页」→ 请求回到第 1 页（不带
   await login(page, AUDITOR);
   await page.goto('/admin/audit');
 
+  // 页大小调到 10（默认 20 的话夹具记录数不够凑出两页）。
+  // ⚠️ 不许省这一行：夹具只播 11 条（`scripts/seed-e2e.sh` 的 `FOR v_index IN 1..11`），
+  // 默认 `limit=20` 时 `total(11) < limit(20)` → `nextCursor == null`
+  // →「下一页」按钮 `disabled` → 点击超时。省掉它就会偷偷依赖「历史运行把库喂到 > 20 条」，
+  // 干净库（`DROP SCHEMA public CASCADE` 后重播 seed）上**必红**。
+  await page.getByLabel('每页条数').selectOption('10');
+  await expect(page.getByTestId('audit-pager')).toBeVisible();
+
   const targetCalls = trackAuditRequests(page);
   await page.getByTestId('audit-next-page').click();
   await expect(page.getByTestId('audit-page-indicator')).toHaveText('本次浏览第 2 页');

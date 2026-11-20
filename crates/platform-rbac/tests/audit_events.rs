@@ -77,8 +77,8 @@ fn build(fixture: &Fixture) -> (Arc<RbacService>, Arc<RecordingSink>) {
 fn last_of(sink: &RecordingSink, action: &str) -> AuditEvent {
     sink.events()
         .into_iter()
-        .filter(|event| event.action == action)
-        .next_back()
+        .rev()
+        .find(|event| event.action == action)
         .unwrap_or_else(|| panic!("应当有一条 `{action}` 事件"))
 }
 

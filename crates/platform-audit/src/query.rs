@@ -18,7 +18,8 @@
 //! # 为什么参数要**自解析**
 //!
 //! axum 0.8 的 `QueryRejection` 是**纯文本** 400 → 违反契约 C6 的
-//! `application/problem+json` 要求。本模块只吃
+//! **Problem Details 形状**要求（Content-Type 跟随平台现状 `application/json`，D183）。
+//! 本模块只吃
 //! `HashMap<String, String>`，自己校验、自己报错（错误由调用方转成
 //! [`ProblemDetails`](platform_core::problem::ProblemDetails)）。
 //!
@@ -417,7 +418,9 @@ impl AuditQueryService {
             None => (params.limit, 0),
         };
         sql.push_str(&format!(" ORDER BY {} LIMIT ?", render_order(&params.sort)));
-        binds.push(BindValue::Int(limit as i64));
+        // 多取一条用来判断「还有下一页」（D184）—— 少取这一条的话
+        // `rows.len() > limit` 恒假 → `next_cursor` 恒 `None`，翻页功能不存在。
+        binds.push(BindValue::Int(limit as i64 + 1));
         if params.page.is_some() {
             sql.push_str(" OFFSET ?");
             binds.push(BindValue::Int(offset as i64));
@@ -479,26 +482,33 @@ impl AuditQueryService {
 }
 
 /// 渲染过滤条件（SQL 片段 + 绑定值）。
+///
+/// # 每一段**自带** ` AND ` 前缀（D185）
+///
+/// 调用点把结果直接贴在 `WHERE tenant_id = {tenant}{clause}` 后面
+/// → 第一个过滤器**也**必须有分隔符，否则拼成
+/// `tenant_id = $1actor_id = $2`（PG 报 `trailing junk after parameter`）。
+///
+/// `continue` 掉的分支（「时间戳 + `contains`」与长度不为 2 的 `range`）
+/// 在 `parse` 阶段已被拒 → 这里**先**判断是否跳过，**再**写前缀，
+/// 保证不会留下一个空的 ` AND `。
 fn render_filters(filters: &[Filter]) -> (String, Vec<BindValue>) {
     let mut clause = String::new();
     let mut binds = Vec::new();
     for filter in filters {
-        if !clause.is_empty() {
-            clause.push_str(" AND ");
-        }
         let column = filter.column;
         let is_timestamp = column == "created_at";
         match filter.op {
             FilterOp::Eq => {
-                clause.push_str(&format!("{column} = ?{}", cast_suffix(is_timestamp)));
+                clause.push_str(&format!(" AND {column} = ?{}", cast_suffix(is_timestamp)));
                 binds.push(BindValue::Text(filter.values[0].clone()));
             }
             FilterOp::Ne => {
-                clause.push_str(&format!("{column} <> ?{}", cast_suffix(is_timestamp)));
+                clause.push_str(&format!(" AND {column} <> ?{}", cast_suffix(is_timestamp)));
                 binds.push(BindValue::Text(filter.values[0].clone()));
             }
             FilterOp::In => {
-                clause.push_str(&format!("{column} = ANY(?)"));
+                clause.push_str(&format!(" AND {column} = ANY(?)"));
                 binds.push(BindValue::TextArray(filter.values.clone()));
             }
             FilterOp::Contains => {
@@ -506,7 +516,7 @@ fn render_filters(filters: &[Filter]) -> (String, Vec<BindValue>) {
                     // 不可能走到这里：`parse` 已经拒掉了「时间戳 + contains」。
                     continue;
                 }
-                clause.push_str(&format!("{column} LIKE ? ESCAPE '\\'"));
+                clause.push_str(&format!(" AND {column} LIKE ? ESCAPE '\\'"));
                 binds.push(BindValue::Text(format!(
                     "%{}%",
                     escape_like(&filter.values[0])
@@ -517,7 +527,7 @@ fn render_filters(filters: &[Filter]) -> (String, Vec<BindValue>) {
                     continue;
                 }
                 clause.push_str(&format!(
-                    "{column} >= ?{cast} AND {column} <= ?{cast}",
+                    " AND {column} >= ?{cast} AND {column} <= ?{cast}",
                     cast = cast_suffix(is_timestamp)
                 ));
                 binds.push(BindValue::Text(filter.values[0].clone()));

@@ -49,10 +49,36 @@ use serde::Serialize;
 use serde_json::Value;
 use time::OffsetDateTime;
 
+/// 令牌校验的失败原因。
+///
+/// # 为什么不是 `Result<_, ()>`
+///
+/// 仓内惯例是**带类型的错误**（`platform-rbac` 用 `RbacError`、
+/// `platform-schema` 用 `AuthError`）—— `()` 会让 clippy 报
+/// `result_unit_err`，也丢掉「令牌为什么无效」这个信息（D191）。
+///
+/// ⚠️ 本 trait **只**属于 `platform-server`：其他 crate 的同名 `TokenVerifier`
+/// 是**各自独立的 trait**，签名不受此处影响。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenVerifyError {
+    /// 令牌缺失、过期、被篡改，或签发方不认。
+    Invalid,
+}
+
+impl std::fmt::Display for TokenVerifyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid => f.write_str("the access token is not valid"),
+        }
+    }
+}
+
+impl std::error::Error for TokenVerifyError {}
+
 /// 令牌校验接缝（可对象化 —— 测试不必连 IAM）。
 pub trait TokenVerifier: Send + Sync {
     /// 校验 access token，返回其中的身份。
-    fn verify(&self, token: &str) -> Result<VerifiedToken, ()>;
+    fn verify(&self, token: &str) -> Result<VerifiedToken, TokenVerifyError>;
 }
 
 /// 令牌里的身份。
@@ -78,8 +104,11 @@ impl IamTokenVerifier {
 }
 
 impl TokenVerifier for IamTokenVerifier {
-    fn verify(&self, token: &str) -> Result<VerifiedToken, ()> {
-        let claims = self.inner.verify_access_token(token).map_err(|_| ())?;
+    fn verify(&self, token: &str) -> Result<VerifiedToken, TokenVerifyError> {
+        let claims = self
+            .inner
+            .verify_access_token(token)
+            .map_err(|_| TokenVerifyError::Invalid)?;
         Ok(VerifiedToken {
             user_id: claims.subject,
             tenant_id: claims.tenant_id,
@@ -304,7 +333,9 @@ async fn authenticate(
     };
     let verified = match state.tokens.verify(&token) {
         Ok(verified) => verified,
-        Err(()) => return problem_response(&ProblemDetails::unauthenticated(&ctx, &instance)),
+        Err(TokenVerifyError::Invalid) => {
+            return problem_response(&ProblemDetails::unauthenticated(&ctx, &instance));
+        }
     };
 
     // 请求头租户与令牌租户不一致 → **404**（不泄露资源存在性，契约 C3）。
@@ -532,7 +563,7 @@ mod tests {
     struct FixedTokens;
 
     impl TokenVerifier for FixedTokens {
-        fn verify(&self, _token: &str) -> Result<VerifiedToken, ()> {
+        fn verify(&self, _token: &str) -> Result<VerifiedToken, TokenVerifyError> {
             Ok(VerifiedToken {
                 user_id: "u-2001".to_string(),
                 tenant_id: "tenant-a".to_string(),
