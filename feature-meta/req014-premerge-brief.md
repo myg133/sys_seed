@@ -3,7 +3,7 @@
 - **需求**: REQ-014 审计日志
 - **被验对象**: `/home/myg133/Projects/system_seed/feature-REQ-014`，分支 `feature/REQ-014`
 - **验收基线**: `BA/demands/REQ-014-audit/acceptance.md` **rev 3**（13 条 AC）
-- **决策基线**: `BA/demands/REQ-014-audit/decisions.md` **rev 2**（**D130~D180**）
+- **决策基线**: `BA/demands/REQ-014-audit/decisions.md` **rev 3**（**D130~D183**）
 - **设计基线**: `BA/demands/REQ-014-audit/design-summary.md` rev 2
 - **用例基线**: `BA/demands/REQ-014-audit/test-cases/`（120 条，QA 产出）
 - **契约**: `BA/contracts/api-conventions/v1.md`（C6 / C7 / C12 / C13）
@@ -37,7 +37,7 @@ cargo test -p <crate> --all-targets -- --test-threads=1 --include-ignored \
 ## 1. 必读
 
 1. `BA/demands/REQ-014-audit/acceptance.md`（rev 3，13 条 AC）
-2. `BA/demands/REQ-014-audit/decisions.md`（rev 2，D130~D180）—— **逐条读**
+2. `BA/demands/REQ-014-audit/decisions.md`（rev 3，D130~D183）—— **逐条读**
 3. `BA/demands/REQ-014-audit/design-summary.md`（rev 2）
 4. `BA/demands/REQ-014-audit/test-cases/`（120 条；**注意 `frontend.md` 是 rev 1 口径**，
    已被 D169 + C7 推翻 → 以 D169/C7 为准）
@@ -89,8 +89,8 @@ export DATABASE_URL_TEST="postgres://base:base@127.0.0.1:5432/base_test"
 | # | 查什么 |
 |---|---|
 | 10 | **权限点三处齐**：`crates/platform-audit/manifest.json` 的 `permissions[]` + 迁移的 INSERT + `source` 列 == `'crates/platform-audit/manifest.json'`（D27 漏任一处 → **启动失败**） |
-| 11 | **配置项登记**：`audit.retention.*` / `audit.page.*` 在 `crates/platform-config/manifest.json` **和** 迁移 INSERT 里**都**有（D178） |
-| 12 | **`TITLES` 条数** == **84**（79 + 5 个新错误码）。⚠️ 计数**必须**用宽松正则 `\(\s*"([^"]*)"\s*,\s*`（全大写正则会漏 6 条 `org.*`） |
+| 11 | **配置项登记**：`audit.retention.*` / `audit.page.*` 在 `crates/platform-config/manifest.json` **和** 迁移 INSERT 里**都**有（D178）。🔑 **两个容易错的点（D181/D182）**：① 键名必须 **camelCase**（`audit.retention.onlineDays` / `archiveDays` / `audit.page.defaultSize` / `maxSize`）—— `ConfigKey::parse` 要求每段只含字母数字，**snake_case 会让服务起不来**（`ConfigError::KeyInvalid`），必须实测服务能起；② `audit.page.defaultSize` 的**登记值必须是 20**（与契约 C7 默认 limit 一致）—— 登记值与行为不一致 = **登记在骗人** |
+| 12 | **`TITLES` 条数** == **84**（79 + 5 个新错误码）。⚠️ 计数**必须**用**多行感知**口径 —— 复验者实测：题面原给的正则 `\(\s*"([^"]*)"\s*,\s*` 在 GNU `grep -E` 下 `\s` **不跨行**，10 条多行条目被漏 → 只数到 **74**（≠ 84）。正确口径用 `perl -0777 -ne '...'`，且**必须同时**核对：唯一值 == 84、与 i18n `error.*` 双向零差集 |
 | 13 | **13 个错误码的 8 处编辑点**（D125）一个不缺 |
 | 14 | **既有 recorder trait 签名未被破坏**（`platform-org` 的 `AuditRecorder`、`platform-iam` 的 `SsoAuditRecorder`）→ 既有测试全绿（AC-S-129 步骤 6） |
 | 15 | **`sso_audit.rs` 那条断言的修改**（D177）保留了**原意图**（不许偷偷建 SSO 专用表）**且加了阳性对照**（平台级通用审计表应当存在） |
@@ -168,8 +168,17 @@ git status --short                      # 必须干净
 ## 6. 停止条件
 
 - 发现**阻塞级**问题（AC 不可达 / 安全缺口 / 假绿）→ **先写完报告**，不要顺手改代码。
-- 复验**不修改** feature worktree 的任何文件（除上面第 5.2 明确要求的 `test-cases/frontend.md`）。
-- 复验前后 `git status` 应保持一致（除了 `test-cases/frontend.md`）。
+- **你的角色是「复验者」不是「修复者」**：
+  - ❌ **不许**修改 feature worktree 的**任何**生产代码、测试代码、迁移、配置来「让检查通过」；
+  - ❌ **不许**为了让测试变绿而改测试断言、放宽阈值、跳过用例；
+  - ✅ 发现问题 → **写进报告**，附证据与建议改法，**由 BA 决定是否派修复轮**。
+- **唯一允许写入的两个文件**（都在 **BA worktree**，不在 feature worktree）：
+  1. `/home/myg133/Projects/system_seed/BA/feature-meta/qa-premereq-req014.md`（复验报告）
+  2. `/home/myg133/Projects/system_seed/BA/demands/REQ-014-audit/test-cases/frontend.md`（用例口径修订）
+- ⚠️ **§4.1 的变异注入是唯一允许临时改动 feature worktree 的例外**，
+  但必须**逐字节还原**（`sha256sum -c` 通过 + `git status --short` 干净 + `grep -c 'MUTATION'` 为 0）。
+  「不修改」指的是**不得留下任何改动**。
+- 复验前后 `git status --short` 应保持一致（feature worktree；BA worktree 允许多出上述两个文件）。
 - 遇到无法判定的问题 → 写进报告，**不要**自己拍板改规格。
 
 ---

@@ -1,8 +1,15 @@
 # 决策记录：REQ-014 审计日志
 
 - **需求编号**: REQ-014
-- **状态**: rev 1（2026-11-20）
-- **更新时间**: 2026-11-20 09:20
+- **状态**: rev 4（2026-11-20）
+- **更新时间**: 2026-11-20 13:10
+
+> **修订历史**
+> - rev 1（09:20）：BA 初版自决 D130~D144
+> - rev 2（10:10）：QA 挑刺 36 条的逐条裁决 → D145~D180
+> - rev 3（11:30）：**BA 自查发现两处规格缺陷并修正** → D181~D183（配置键名按契约 C9 改 camelCase；
+>   `audit.page.defaultSize` 登记值改 20；错误响应 Content-Type 跟随平台现状 `application/json`）
+> - rev 4（13:10）：**Pre-merge 复验 FAIL 的逐条裁决** → D184~D193（含**流程规则** D193）
 
 > 本文件记录 BA 在写规格时的**自决**（BA 对验收标准、字段名、错误码、默认行为有拍板权）。
 > 涉及不可逆事项或与用户原意相关的事，必须回到用户，见 D130~D140 里标「用户裁定」的条目。
@@ -820,7 +827,10 @@ D131 定义了拼接规则，但两处细节没定死，会导致「实现A 与 
 - **理由**：
   1. 未实现的 API 端点返回 **200 + HTML** → 客户端按 JSON 解析会炸，
      且**错误语义完全错**（客户端以为成功了）；
-  2. 契约 C6 要求错误响应是 `application/problem+json`；
+  2. 契约 C6 要求错误响应是 **RFC 9457 Problem Details 形状**
+     （`code`/`status`/`detail`/`instance`/`trace_id`）—— 回落成 HTML **完全违反**
+     （⚠️ 早期版本的这条正文误写成「C6 要求 `application/problem+json`」，
+     **C6 并未规定 Content-Type**，已由 D183 修正；见本文件 D183）。
   3. 「就绪探测」只能靠「响应是不是 JSON」这种**间接**判据 —— 脆弱，
      前端已被迫写了一段特例；
   4. 这是**平台级缺陷**，不只是审计的问题 —— 任何未来未实现的 API 都会踩到。
@@ -880,6 +890,112 @@ D131 定义了拼接规则，但两处细节没定死，会导致「实现A 与 
   然后把「RFC 9457」自动脑补成了 `application/problem+json`。
   **契约没写的 ≠ 契约要求的** —— §9.11 的第四类「加字段的连带影响」之外的第五条：
   **「引用契约时，要区分『它要求什么』与『我以为它要求什么』。**
+
+---
+
+## rev 4（2026-11-20 13:10）：Pre-merge 复验 FAIL 的**逐条裁决**（D184~D193）
+
+> 复验报告：[qa-premereq-req014.md](../../feature-meta/qa-premereq-req014.md)
+> 结论 **FAIL**：阻塞 2 / 高 1 / 中 3 / 低 4。
+> 复验者自跑了全部 11 个 crate（912 passed）、前端 3 包、E2E、5 处变异验证，
+> 数字**不采信** Dev 自验（Dev 报 143/99/44，实测 153/178/46）。
+> BA 已**独立读码复核** B-01 / B-02 / H-01 三条 → 全部属实。
+
+### B-01 —— `nextCursor` 恒为 `null`
+
+- **根因（BA 复核属实）**：`crates/platform-audit/src/query.rs` 的主查询绑的是
+  `LIMIT ?` ← **`limit`**，而下一行判 `has_more = rows.len() > limit` ——
+  只取回 `limit` 行，`rows.len()` **永远不可能大于 `limit`** → `has_more` 恒假 →
+  `next_cursor` 恒 `None`。上一行的注释「多取一条用来判断『还有下一页』」与 SQL **不符**。
+- **为什么 Dev 的自验没抓到**：仓库里**没有任何**断言 `nextCursor` 非 null 的用例
+  （`crates/platform-audit/tests/` 零命中）；前端 vitest 用的是 **mock**（自己造 `nextCursor`），
+  E2E 的翻页用例在 Dev 交付时处于 **skip**（系统未就绪）→ **两条路径都测不到**。
+- **裁决**：
+  1. 主查询绑 **`limit + 1`**，再 `truncate(limit)`；`has_more` 在截断前判定；
+  2. **必须补库级断言**（否则下一次改动会以同样的方式假绿通过）：
+     - `total > limit` ⟺ `nextCursor` 非 `null`（`total` 是**带过滤**的总数，
+       见 `count_sql` 复用同一 `clause` → 该等价式成立）；
+     - 连续两页的 `id` 集合**无交集**。
+
+### B-02 —— 过滤子句拼不出合法 SQL
+
+- **根因（BA 复核属实）**：`render_filters` 只在过滤器**之间**补 `AND`
+  （`if !clause.is_empty() { clause.push_str(" AND ") }`）→ **第一个**过滤器贴死在
+  `WHERE tenant_id = {tenant}` 后面 → 渲染成 `tenant_id = $1actor_id = $2`
+  → PG 报 `trailing junk after parameter` → 503 `AUDIT_SINK_UNAVAILABLE`。
+- **裁决**：改法**钉死**为「`render_filters` 产出的每一段**自带 ` AND ` 前缀**」，
+  调用点 `WHERE tenant_id = {tenant}{clause}` **保持不变**。
+  - 为什么不选另一种改法（调用点写 `AND {clause}`）：零过滤器时会拼出
+    `WHERE tenant_id = $1AND ` → **更坏**。
+  - 一处改，两个调用点（`count_sql` 与主查询）**同时**修好。
+- **必须补**：五个 op（`eq`/`ne`/`in`/`contains`/`range`）各一条**打到真库**的断言。
+- **不采信的附带建议**：把「SQL 拼错」与「DB 不可达」分成 400/503 ——
+  **本轮不改**（SQL 由内部生成，列与 op 都有白名单，用户输入拼不出 SQL）→ 记 **TD-037**。
+
+### H-01 —— D182 未落地
+
+- **裁决**：按 D182 落地 —— `crates/platform-config/manifest.json` 的 `default` 改 **20**
+  且删掉 label 里那句补丁说明；`migrations/20261120000400_audit_config_seed.up.sql`
+  的 `'50'::jsonb` 改 `'20'::jsonb`。
+- ⚠️ 迁移已进 `_sqlx_migrations` **不会重跑** → 必须同步既有行（`platform_config_upsert` 幂等）。
+
+### M-01 —— `platform-config` 测试夹具清空整张 `platform_config` 表
+
+- **裁决**：夹具复位改成**只删自己管的键**（`platform_fixture()` 里那 6 个）。
+  ⚠️ 必须同时检查：**是否有 platform-config 自己的用例依赖「整表为空」这个前提**，
+  有的话一并改。
+- **不加**「启动自检：manifest 的每个配置键在 `platform_config` 里都有行」——
+  那是**平台级**改动（对所有 crate 生效），超出 REQ-014 范围，
+  且在当前测试库上会立刻让一批测试变红 → 记 **TD-036**。
+
+### M-02 —— org / config 两条链路只有 mock sink 断言
+
+- **定性**：**判据缺失**，**不是**生产链路有洞。
+  依据（BA 已核 `main.rs`）：`main.rs:320` 构造真实 `PgAuditSink`，
+  并经 `build_org_state(..., audit_sink.clone())`（org）与
+  `ConfigService::with_audit_sink`（config）接进生产链路 → 生产链路是通的。
+- **裁决**：补**真库端到端断言**：走**生产适配器**（org 的 `PlatformSinkAuditRecorder`、
+  config 的 `ConfigService::with_audit_sink`）→ 查 `platform_audit_log` →
+  断言事件码 / `object_type` / `before`·`after` 形状符合 D163。
+  **放在 `crates/platform-server/tests/`**（platform-server 同时依赖 org / config / audit / db，
+  **不需要**给 org / config 加 dev-dependency）。
+
+### M-03 / L-01 / L-03 —— 表述类
+
+- `crates/platform-audit/src/query.rs` 的模块注释仍写「违反契约 C6 的
+  `application/problem+json` 要求」→ 改为 D183 的口径（**Problem Details 形状**，
+  Content-Type 跟随平台现状 `application/json`）。
+- `crates/platform-audit/tests/audit_chain.rs:1` 的 2 个 U+FFFD 改回「分」。
+- `migrations/20261120000400_audit_config_seed.up.sql` 里「待 BA 确认」的注释 →
+  改成 D181 已裁定的说明（snake_case 写法作废）。
+
+### L-02 —— clippy 新增 8 条 warning
+
+- **裁决**：`platform-server/src/audit.rs` 的 `TokenVerifier::verify`
+  从 `Result<VerifiedToken, ()>` 改成**带类型的错误** ——
+  与仓内惯例一致（`platform-rbac` 用 `RbacError`、`platform-schema` 用 `AuthError`；
+  **只有** platform-server 的 audit 用 `()`）。
+  ⚠️ 已核实影响面**仅限** `crates/platform-server/src/audit.rs`
+  （`IamTokenVerifier` + 其 `FixedTokens` 测试实现）——
+  其他 crate 的同名 trait **是各自独立的 trait**，不是同一个。
+  → 引入 `TokenVerifyError`，**不引新依赖**。
+- 其余 7 条风格 lint 一次 `cargo clippy --fix` 修掉（其中 5 条在本轮 Dev 改过的文件里）。
+
+### L-04 —— `TITLES` 与 i18n 错误域只对计数
+
+- **裁决**：补一条**集合相等**断言：`TITLES` 的 code 集合 == `en-US.json` 的 `error.*` 键集合。
+  可行性已核：`platform-server` 已有 `serde_json` 依赖 → **不引新依赖**，
+  直接读 `packages/i18n/src/locales/en-US.json`（用 `env!("CARGO_MANIFEST_DIR")` 定位仓库根）。
+
+### D193 —— **流程规则新增**：skip 状态下不得声称该功能已验证
+
+- **背景**：Dev 报「E2E 30 passed / 5 skipped / 0 failed」→ 那 5 条 skip **正好包含**
+  审计页的翻页与过滤用例 → B-01 / B-02 因此在**交付时完全没被发现**。
+- **裁决**：D108 只规定「skip 的理由只允许『被测系统未就绪』」—— 本条**补充**：
+  1. skip 本身**仍然合规**（系统未就绪时 skip 是对的）；
+  2. 但**报告里必须把「真跑通过」与「skip」分开列**；
+  3. **处于 skip 状态的功能不得计入「已验证」** —— 交付前必须让系统就绪后**真跑一遍**。
+- **这是 D108 的补强，不是推翻** —— D108 管「能不能 skip」，D193 管「skip 了之后怎么说话」。
 
 ---
 
