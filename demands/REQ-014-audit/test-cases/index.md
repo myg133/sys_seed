@@ -265,7 +265,7 @@ podman exec base-postgres psql -U base_app   -d base_test -tAc "<SQL>"   # 应�
 | TC-014-059 | AC 未禁「失败记录含用户名」 | 补不可枚举判据 | S-05 |
 | TC-014-066 | 「`object_type` == 角色对象类型」没有字面量 | 断言「非空 + 逐字等于钉死值 + 不是 `permission`」 | S-15 |
 | TC-014-072 | 步骤 4 期望「只有 sink 模块命中」，但设计里 INSERT 在 SQL 函数体内 → Rust 侧 **0 命中** | Rust 侧断言 **0 命中**；另补 TC-014-074 扫 `migrations/**.sql` 断言**恰好 1 处** | **S-08** |
-| TC-014-086 | AC 未说非法参数的**响应体形状** | 断言 400 + `application/problem+json`（axum 默认是纯文本） | S-09 |
+| TC-014-086 | AC 未说非法参数的**响应体形状** | 断言 400 + RFC 9457 Problem Details 形状（axum 默认是纯文本）；Content-Type 跟随平台现状 `application/json`（D183） | S-09 |
 | TC-014-088 | design 说「忽略**或**直接 400」→ 判据不可判定 | 二选一断言 + 标为待拍板 | S-33 |
 | TC-014-090 | AC-S-132 要求「翻页不重复」，但**排序未定义** | 断言三页 id 的并集恰好 5 条、两两无交集 | S-11 |
 | TC-014-093 | AC 说「逐字段相同」，没说归档表会不会多列 | 断言归档表列集合 = 在线表 **∪** `{archived_at}` | S-16 |

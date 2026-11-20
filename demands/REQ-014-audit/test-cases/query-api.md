@@ -370,7 +370,7 @@
   2. 读状态码与**响应头 `Content-Type`** 与响应体
 - **预期结果**:
   1. HTTP `400`
-  2. `Content-Type` 是 `application/problem+json`（**不是** `text/plain`）
+  2. 响应体是 **RFC 9457 Problem Details 形状**（**不是** `text/plain`）；Content-Type 跟随平台现状 `application/json`（D183）
   3. 响应体可解析成 JSON，且含 `code` 与 `trace_id`
   4. `code` 是 `AUDIT_INVALID_FILTER` 或另一枚**已登记**的错误码（**不是**裸文本）
 - **类型**: 功能

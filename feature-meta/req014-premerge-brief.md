@@ -80,7 +80,7 @@ export DATABASE_URL_TEST="postgres://base:base@127.0.0.1:5432/base_test"
 | 4 | **`tip_hash` 截断检出** | 在线表**末尾删掉一条** → 链校验必须报出截断（D171）。⚠️ 若 `tip_hash` 没实现或没维护 → **检不出**，是「不可篡改」承诺的漏 |
 | 5 | **链校验的 reason 取值** | 改 `after` → `hash_mismatch`；改存储 `hash` → 第 2 条 `hash_mismatch` **且** 第 3 条 `prev_hash_mismatch`（D146）。两个 reason **都要有真实触发路径**，不能有死值 |
 | 6 | **查询接口的分页口径** | `?limit=2` → **2 条 + total + nextCursor**；`?cursor=&limit=2` → **不与上一页重复**；`?cursor` 与 `?page` 同给 → **400**；`?limit=0` / `?limit=abc` → **400 + `AUDIT_INVALID_FILTER`**；`?limit=1000` → **夹到 200**；`?sort=unknownField` → **400**；`?tenant_id=…` → **被忽略**（D162）；**游标 + 非默认 `sort`** → **400**（D179） |
-| 7 | **400/403 的响应体形态** | 必须是 `application/problem+json` + `ProblemDetails`（契约 C6）。⚠️ axum 的 `QueryRejection` 是**纯文本** → 若实现直接用 `Query<T>` 反序列化，**C6 被破** |
+| 7 | **400/403 的响应体形态** | 必须是 **RFC 9457 Problem Details 形状**（`code`/`status`/`detail`/`instance`/`trace_id`，契约 C6）。⚠️ axum 的 `QueryRejection` 是**纯文本** → 若实现直接用 `Query<T>` 反序列化，**C6 被破**。🔑 **Content-Type 跟随平台现状 `application/json`**（D183 —— C6 **没有**规定 Content-Type，别按 `application/problem+json` 判） |
 | 8 | **未注册 `/api/*` 的回落** | `GET /api/does-not-exist` → **404**，**不是** 200 + HTML（D180）。同时确认静态资源（`/`、`/assets/**`）仍正常回落 |
 | 9 | **C-5 契约检查** | `crates/platform-audit/src/` 里必须有 `require_permission("字面量")` 调用点（3 个权限点）。跑 `platform-config` 的契约测试看它是否红 |
 

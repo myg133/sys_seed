@@ -456,7 +456,8 @@ D131 定义了拼接规则，但两处细节没定死，会导致「实现A 与 
     `AUDIT_INVALID_FILTER`；
   - **超上限**（`limit=1000`）→ **夹到 200**（C7 的上限）；
   - 非法值与超上限**是两条不同的路径**，不得混成一条。
-- **响应体形态**：必须是 `application/problem+json` + `ProblemDetails`
+- **响应体形态**：必须是 **RFC 9457 Problem Details 形状**（契约 C6）——
+  ⚠️ Content-Type **跟随平台现状 `application/json`**，见 D183
   （契约 C6）。🔑 axum 0.8 的 `QueryRejection` 是**纯文本** 400 → 违反 C6。
   → **设计要求**：数值参数**自解析**（沿用既有惯例
   `Query<HashMap<String, String>>`，见 `crates/platform-iam/src/http.rs:456`），
@@ -825,6 +826,60 @@ D131 定义了拼接规则，但两处细节没定死，会导致「实现A 与 
   4. 这是**平台级缺陷**，不只是审计的问题 —— 任何未来未实现的 API 都会踩到。
 - **范围**：只改 API 前缀的回落行为，**不动**静态资源的既有回落逻辑。
 - **归属**：棒 2 后端（`platform-server` 在其文件集内）。
+
+---
+
+## D181: 配置键名用 **camelCase**（契约 C9）—— 修正 D178 正文（**BA 写错了**）
+
+- **背景**：棒 2 的 Dev 报 🔴 偏离 1 —— D178 正文写的是 snake_case
+  （`audit.retention.online_days` 等），但**契约 C9** 要求「键名 **camelCase**，
+  层级用 `.` 分隔」；且 `platform_config::ConfigRegistry::from_manifest_root`
+  在**启动时**用 `ConfigKey::parse` 校验每个键，要求每段「小写字母开头 + 只含字母数字」
+  → **带 `_` 的键名直接让服务起不来**（`ConfigError::KeyInvalid`）。
+  仓内现无任何 snake_case 配置键。
+- **裁决**：**采纳 camelCase**，**改 D178 正文**（契约 C9 是对的，D178 是 BA 写错的）。
+  | D178 正文（snake_case，**作废**） | 登记用（camelCase） |
+  |---|---|
+  | `audit.retention.online_days` | `audit.retention.onlineDays` |
+  | `audit.retention.archive_days` | `audit.retention.archiveDays` |
+  | `audit.page.default_size` | `audit.page.defaultSize` |
+  | `audit.page.max_size` | `audit.page.maxSize` |
+- **这条是 BA 的规格缺陷**（不是 Dev 的）→ 记入本轮复盘。
+  🔑 **教训与 dev-guide §9.11 同源**：D178 写这四个键名时**没有打开契约 C9**，
+  是照着自己写的 snake_case 习惯写的 —— 又是「读的是自己上一版的设计，不是契约」。
+
+## D182: `audit.page.defaultSize` 的**登记值**改 **20**（与契约 C7 的默认 limit 一致）
+
+- **背景**：棒 2 的 Dev 报 🟡 偏离 2 —— D178 登记的是 **50**，而契约 C7 的
+  **默认 limit 是 20**（上限 200）。Dev 的处置是「只登记不执行」，行为按 C7（20）。
+- **裁决**：**把登记值改成 20**。
+- **理由**：登记值与实际行为不一致 = **登记本身在骗人**。
+  运维看配置面板看到 50，行为却是 20 → 排查时会走错方向。
+  「只登记不执行」是权宜之计，但**登记值必须与行为一致**，否则不如不登记。
+- **配套**：`manifest.json` 的 label 去掉「契约 C7 的默认口径仍是 20」这句补丁说明
+  （既然已经一致，就不需要解释差异）。
+
+## D183: 错误响应的 Content-Type **跟随平台现状 `application/json`**（修正 BA 写错的判据）
+
+- **背景**：棒 2 的 Dev 报 🟡 偏离 3 —— BA 在 AC-S-130、D153、D180 与 Pre-merge 任务卡里
+  写「契约 C6 要求错误响应是 `application/problem+json`」。
+  **实测**：契约 C6 只钉**错误体的形状**（RFC 9457 Problem Details：
+  `code` / `status` / `detail` / `instance` / `trace_id`），
+  **没有**规定 Content-Type；平台全站的 `problem_response()` 统一发 **`application/json`**。
+- **裁决**：
+  1. **与平台保持一致** → Content-Type 是 `application/json`；
+  2. **判据改为「响应体是 RFC 9457 Problem Details 形状」**（这才是 C6 真正要求的，
+     也是本轮真正要防的 —— axum 的 `QueryRejection` 是**纯文本**，那才是违规）；
+  3. 已同步修正：`acceptance.md`（AC-S-130 步骤 5/6 + 全局约定表）、
+     `decisions.md`（D153）、`test-cases/query-api.md`、`test-cases/index.md`、
+     `BA/feature-meta/req014-premerge-brief.md` 第 7 条。
+- **理由**：改全局 `problem_response` 让全站都发 `application/problem+json`
+  超出本需求范围**且**有全站回归风险 → 若要改，应是一个**跨全站的独立需求**。
+- **这条是 BA 的规格缺陷** → 记入本轮复盘。
+  🔑 **同样的病根**：BA 只读了 C6 的**标题和示例**，没读它「没写什么」，
+  然后把「RFC 9457」自动脑补成了 `application/problem+json`。
+  **契约没写的 ≠ 契约要求的** —— §9.11 的第四类「加字段的连带影响」之外的第五条：
+  **「引用契约时，要区分『它要求什么』与『我以为它要求什么』。**
 
 ---
 

@@ -38,7 +38,7 @@
 | 造数 / 篡改连接 | **`base`**（表 owner + 超管） | — |
 | 库 | **`base_test`**（绝不写 `base_dev`） | dev-guide §9.8 |
 | `app.tenant_id` | **事务局部**；凡涉及租户上下文的查询**必须在单个事务内** `set_config` → 查询 | D148 |
-| 响应体 | 错误一律 `application/problem+json` + `ProblemDetails`（契约 C6） | D153 |
+| 响应体 | 错误体为 **RFC 9457 Problem Details 形状**（契约 C6）；**Content-Type 跟随平台现状 `application/json`**（D183） | D153 / D183 |
 | 时间格式 | UTC、RFC3339、**微秒 6 位** | D142 / D151 |
 | 哈希复算 | 测试侧**独立实现**，**直接使用列里存的 `before`/`after` 文本**，**不得**解析回 JSON 再序列化 | D141 |
 | 静态扫描 | 必须带**阳性对照**（否则「0 命中」不可信） | dev-guide §9.2 |
@@ -327,13 +327,14 @@
   - 步骤 3 每种过滤的结果与写入的数据**一致**（不多不少）；
   - 步骤 4 排序结果与 `createdAt` 的升/降序**一致**；
   - 步骤 5 返回 **400**（`cursor` 与 `page` **互斥**，契约 C7），错误码明确，
-    响应体是 `application/problem+json`；
+    响应体是 **RFC 9457 Problem Details 形状**（`code` / `status` / `detail` / `instance` / `trace_id`）；
   - 步骤 6 的四个子项**分别**：
     - `limit=0` → **400**，错误码 `AUDIT_INVALID_FILTER`；
     - `limit=abc` → **400**，错误码 `AUDIT_INVALID_FILTER`；
     - `limit=1000` → **不报错**，实际按 **200** 上限执行（**夹到上限**）；
     - `sort=unknownField` → **400**（未声明字段，C7），错误码 `AUDIT_INVALID_FILTER`；
-    - 所有 400 的响应体均为 `application/problem+json` + `ProblemDetails`；
+    - 所有 400 的响应体均为 **RFC 9457 Problem Details 形状**（**不是** `text/plain`）——
+      Content-Type 跟随平台现状 `application/json`（D183）；
   - 步骤 7 返回 **403**，错误码 == `INSUFFICIENT_PERMISSION`（**不是** 500）；
   - 步骤 8 的 `tenant_id` 参数被**忽略**（结果仍是 `tenant-a` 的记录），
     且产生一条 **warn** 级日志。
