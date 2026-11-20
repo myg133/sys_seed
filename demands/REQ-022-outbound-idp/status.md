@@ -126,3 +126,86 @@
 | [status.md](status.md) | ✅ 本文件 |
 | `test-cases/` | ⏳ **待 QA 产出** |
 | `BA/contracts/api-conventions/v3.md` | ✅ 本轮已建 |
+
+---
+
+## 10. BA 自查发现（QA 挑刺期间做的独立核实）
+
+> 这一节是 BA 在 QA 跑挑刺期间**自己打开源码核实**的结果（dev-guide §9.11）。
+> QA 的报告回来后，这些要么并入 `decisions.md` rev 2，要么被 QA 的同款发现覆盖。
+
+### 10.1 ✅ D203 的前提**成立**（三处核实）
+
+| 核实点 | 结论 | 证据 |
+|---|---|---|
+| `/oauth/*` 会不会被回落到 SPA | ✅ **会**（且**应该**） | `crates/platform-server/src/static_files.rs:36` `is_api_path` 只覆盖 `/api` 与 `/api/**`；`:61-64` API 路径 404，其余无扩展名路径回落 `index.html` |
+| SPA 能不能读 URL 的 query | ✅ 能 | `apps/shell/src/lib/router.ts:229-242` `write()` 保留 `location.search`；`apps/shell/src/pages/SsoCallback.svelte:55` 读 `window.location.search` 取 ticket（**同类先例已跑通**） |
+| 登录后能不能回到原页面 | ⚠️ **有条件**（见 10.2） | `apps/shell/src/lib/router.ts:217-225` + `:261` `intendedPath`；`apps/shell/src/App.svelte:122` `router.navigate(resolution.intendedPath ?? '/')` |
+
+### 10.2 ⚠️ **BA-01（阻塞级候选）**：`intendedPath` 回跳**丢掉 query** → 授权参数全丢
+
+- **机制**（`apps/shell/src/lib/router.ts`）：
+  - `start()`（`:298`）调 `apply(environment.location.pathname, true)` —— **只传 pathname**；
+  - `apply()`（`:252-268`）在守卫拒绝时 `const intendedPath = path;`（`:261`）—— **仍然只有 pathname**；
+  - `write()`（`:232`）`const keepsQuery = path === environment.location.pathname;`
+    → 跳 `/login` 时 `keepsQuery` 为 **false** → **query 被抹掉**；
+  - 登录后 `App.svelte:122` 跳 `intendedPath` —— **原 query 已丢**。
+- **后果**：用户被导航到
+  `/oauth/authorize?response_type=code&client_id=…&redirect_uri=…&scope=…&state=…&code_challenge=…`
+  后若未登录 → 登录 → 回到 `/oauth/authorize`（**参数全无**）→
+  授权流程**断裂**（`client_id` 缺失 → 400）。
+- **为什么现有 SSO 回调没踩到**：`/sso/callback` 是**公开路由**
+  （`apps/shell/src/lib/routes.ts:71-76`，无 `requiresAuth`）→ 不触发 redirect 分支 →
+  `write()` 的 `keepsQuery` 为 true → ticket 保住了。
+  → **「公开路由」才是这个坑的安全区**。
+- **建议修法（棒 2 范围内，不动 `router.ts`）**：
+  1. `/oauth/authorize` 注册为**公开路由**（**不设** `requiresAuth`）；
+  2. 页面自己读 `window.location.search` 取全部授权参数；
+  3. 未登录 → 渲染「登录并继续」按钮 → 把**完整 URL** 编码进 `?return_to=` → 跳 `/login?return_to=…`；
+  4. **改 `Login.svelte`**：登录成功后 `location.replace(return_to)`（回跳），
+     **没有** `return_to` 时保持现行为（跳首页）——
+     `apps/shell/src/pages/Login.svelte` 与 `apps/shell/src/App.svelte`
+     **都在棒 2 的文件集内**，**不动** `router.ts`（REQ-011 的核心）。
+  5. ⚠️ 改动 `Login.svelte` / `App.svelte` 会影响 REQ-011 的既有前端用例 → 棒 2 必须跑前端回归。
+- **为什么不改 `router.ts`**：`resolve()` 用带 query 的字符串去 `match()` 会匹配失败
+  （`:204-207`）→ 要改就得让 `resolve` 先剥 query → 牵动 REQ-011 已交付的路由核心，
+  风险远大于收益。
+
+### 10.3 ✅ 编号段核实：`AC-S-134 ~ AC-S-155` **无真冲突**
+
+- 用 `git grep` 核 **改动前的基线 `b65a73d`**（排除 REQ-022 自己的目录）：
+  基线最大真编号 = **133**；`134` 与 `155` 在基线里**未被占用**。
+- 唯一的 `AC-S-136` 出现在 `BA/feature-meta/qa-recheck-req014.md:638`
+  —— 那是 **REQ-014 复核报告里的一处笔误**（REQ-014 的 AC 是 `AC-S-022` + `AC-S-122~133`，
+  没有 136）。→ 记为 **BA-02（低）**，在裁决轮一并处理。
+
+### 10.4 ✅ 零新增依赖核实（锁文件级）
+
+`Cargo.lock` 里 **21 个**必需包**全部已在**：
+`sha2 0.10.9` / `base64 0.22.1` / `jsonwebtoken 10.4.0` / `hyper 1.12.0` /
+`hyper-util 0.1.21` / `hyper-rustls 0.27.10` / `rustls 0.23.46` / `uuid 1.29.3` /
+`time 0.3.55` / `serde 1.0.229` / `serde_json 1.0.154` / `tokio 1.54.1` /
+`rand 0.8.8` / `p256 0.13.2` / `argon2 0.5.3` / `inventory 0.3.25` / `sqlx 0.8.6` /
+`tower 0.5.3` / `http-body-util 0.1.5` / `bytes 1.12.1` / `http 1.5.0`
+→ D197 的「零新增第三方依赖」成立。
+
+### 10.5 ⚠️ **BA-03（高）**：棒 1 ∥ 棒 2 的文件集必须**严格不相交**
+
+- `packages/i18n/src/locales/*.json` **两个棒都要改**
+  （棒 1 要加 10 个 `error.OAUTH_*`；棒 2 要加 `oauth.*` 的界面文案）→ **同文件 = 冲突**。
+- **裁定**：**整个 `packages/i18n/**` 归棒 2**；
+  棒 1 把 10 个错误码的**精确清单**（码 + ASCII 标题 + 中文文案）写进任务卡，
+  由棒 2 一并写进词库。
+  → `crates/platform-core/src/titles.rs` 与 `crates/platform-server/tests/i18n_titles.rs`
+  仍归棒 1（后端侧）。
+- 其余分棒边界（初步）：
+
+  | 棒 | 文件集 |
+  |---|---|
+  | **棒 1**（后端） | `crates/platform-oauth/**`、`crates/platform-iam/src/{jwt,service}.rs`、`crates/platform-server/src/main.rs`、`crates/platform-server/tests/i18n_titles.rs`、`crates/platform-core/src/titles.rs`、`migrations/**`、`Cargo.toml`、`Cargo.lock` |
+  | **棒 2**（前端） | `apps/shell/**`、`packages/i18n/**` |
+
+  → 两侧**零重叠** ✓（`Cargo.toml` / `Cargo.lock` 只归棒 1）。
+  ⚠️ 两棒之间靠**约定字符串**耦合，任务卡必须写死：
+  ① 10 个错误码的**精确清单**；② 前端路由路径 `/oauth/authorize` / `/oauth/device` / `/oauth/grants`；
+  ③ `manifest.json` 的 `menus[].route` 与前端路由**逐字相同**。
