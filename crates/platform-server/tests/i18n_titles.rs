@@ -120,13 +120,16 @@ fn titles_cover_every_code() {
 ///
 /// 已上报 BA。这里钉的是**实测值** 58 + 21 = 79：
 /// 断言的目的（「加码必须同时加标题」）不受影响，被钉住的仍然是真实的表。
+///
+/// REQ-014（审计日志）再加 **5** 个码（`AUDIT_*`）→ 79 + 5 = **84**。
 #[test]
 fn the_title_table_has_the_pinned_number_of_rows() {
     const BASELINE_ROWS_BEFORE_REQ_013: usize = 58;
     const REQ_013_NEW_CODES: usize = 21;
+    const REQ_014_NEW_CODES: usize = 5;
     assert_eq!(
         TITLES.len(),
-        BASELINE_ROWS_BEFORE_REQ_013 + REQ_013_NEW_CODES,
+        BASELINE_ROWS_BEFORE_REQ_013 + REQ_013_NEW_CODES + REQ_014_NEW_CODES,
         "TITLES 行数变了：新增错误码必须同时登记标题（D125）"
     );
 }

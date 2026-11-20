@@ -21,14 +21,16 @@
   import { applyBranding, fetchBranding } from './lib/branding';
   import { createAppApi } from './lib/api';
   import { AUTH_CONTEXT_KEY } from './lib/auth-context';
+  import type { AuditLoadResult } from './lib/audit-api';
   import { i18nRuntime } from './lib/i18n';
   import { createRouter, initialResolution } from './lib/router';
-  import { createRoutes, SCHEMA_ROUTE_PATH, toRoles } from './lib/routes';
+  import { createRoutes, AUDIT_ROUTE_PATH, SCHEMA_ROUTE_PATH, toRoles } from './lib/routes';
   import { SSO_CALLBACK_ROUTE_PATH } from './lib/sso-api';
 
   import LanguageSwitcher from './components/LanguageSwitcher.svelte';
   import LocaleInfo from './components/LocaleInfo.svelte';
 
+  import Audit from './pages/Audit.svelte';
   import Forbidden from './pages/Forbidden.svelte';
   import Home from './pages/Home.svelte';
   import Login from './pages/Login.svelte';
@@ -45,11 +47,19 @@
   let booted = $state(false);
   let authState = $state(auth.state);
   let roles = $state(toRoles(undefined));
+  /** 审计页首屏（由路由的 `load` 取；`undefined` = 还没取到）。 */
+  let audit = $state<AuditLoadResult | undefined>(undefined);
   let resolution = $state(initialResolution(window.location.pathname));
 
-  const routes = createRoutes(client, (loaded) => {
-    roles = toRoles(loaded);
-  });
+  const routes = createRoutes(
+    client,
+    (loaded) => {
+      roles = toRoles(loaded);
+    },
+    (result) => {
+      audit = result;
+    },
+  );
 
   const router = createRouter({
     routes,
@@ -176,6 +186,13 @@
   <SsoCallback {auth} onLoggedIn={handleSsoLoggedIn} onBackToLogin={handleBackToLogin} />
 {:else if resolution.path === '/403'}
   <Forbidden onback={() => router.navigate('/')} />
+{:else if resolution.path === AUDIT_ROUTE_PATH && resolution.allowed}
+  <!--
+    审计查询页（REQ-014 / AC-S-132）：`resolution.allowed` 是**硬要求** ——
+    守卫不放行时**路由的 `load` 不会被调用**、页面也不渲染
+    → `GET /api/audit/events` 的请求计数为 **0**。
+  -->
+  <Audit {client} initial={audit} />
 {:else if resolution.path === '/admin/roles' && resolution.allowed}
   <ProtectedRoles {roles} />
 {:else if resolution.route?.path === SCHEMA_ROUTE_PATH && resolution.allowed}

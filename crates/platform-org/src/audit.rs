@@ -12,10 +12,11 @@
 //! - 测试用 [`RecordingAuditRecorder`] 断言「事件确实产生了」；
 //! - REQ-014 的平台 sink 落地后，换一个实现即可，**模块代码不用改**。
 
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 use anyhow::Result;
 use platform_core::RequestContext;
+use platform_core::extension::audit::{AuditEvent, AuditSink};
 use platform_core::extension::auditable::AuditEventSpec;
 
 /// 装箱的 future（让接缝保持**可对象化**）。
@@ -122,9 +123,82 @@ impl AuditRecorder for RecordingAuditRecorder {
     }
 }
 
-/// 本模块声明的审计事件（平台的 `Auditable` 消费这份声明）。
+/// 把既有 `OrgAuditEvent` **桥接**到平台 sink 的实现（REQ-014 D135 / D150）。
 ///
-/// 用 `LazyLock` 而不是 `const` —— `AuditEventSpec::new` 不是 const fn。
+/// # 为什么不改既有 trait 的签名
+///
+/// D135 钉死：`platform-org` 的 `AuditRecorder`（绑死 `OrgAuditEvent`）
+/// **签名一律不改** —— REQ-008 已合并，改签名会连带破坏既有测试。
+/// → 这里实现**同一个 trait**，把事件翻译成通用 `AuditEvent` 后交给平台 sink。
+///
+/// 装配层（`platform-server`）把本实现传给 `OrgService::new` 的第 4 个参数
+/// （**既有注入点，签名不变**）。
+#[derive(Clone)]
+pub struct PlatformSinkAuditRecorder {
+    sink: Arc<dyn AuditSink>,
+}
+
+impl PlatformSinkAuditRecorder {
+    /// 用平台 sink 构造。
+    pub fn new(sink: Arc<dyn AuditSink>) -> Self {
+        Self { sink }
+    }
+}
+
+impl std::fmt::Debug for PlatformSinkAuditRecorder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlatformSinkAuditRecorder").finish()
+    }
+}
+
+impl AuditRecorder for PlatformSinkAuditRecorder {
+    fn record<'a>(
+        &'a self,
+        ctx: &'a RequestContext,
+        event: &'a OrgAuditEvent,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let translated = translate(ctx, event);
+            self.sink.record(ctx, &translated).await.map_err(|error| {
+                anyhow::anyhow!(
+                    "the platform audit sink could not persist an org audit event: {}",
+                    error.detail()
+                )
+            })
+        })
+    }
+}
+
+/// 把 `OrgAuditEvent` 翻译成通用 `AuditEvent`。
+///
+/// # 形状
+///
+/// | 通用事件 | 取自 |
+/// |----------|------|
+/// | `action` | [`OrgAuditEvent::code`]（**事件码**，如 `org.node.create`） |
+/// | `object_type` | [`OrgAuditEvent::object_type`] |
+/// | `object_id` | [`OrgAuditEvent::object_id`] |
+/// | `before` | `{"detail": …}` —— org 事件**没有**前后值，明细放这里 |
+///
+/// ⚠️ 明细是**面向开发者的英文**（既有约定）→ 不含凭据；
+/// 敏感键扫描器也只拦**敏感键名**（`detail` 不在其中）。
+fn translate(ctx: &RequestContext, event: &OrgAuditEvent) -> AuditEvent {
+    let mut translated = AuditEvent::new(
+        ctx.tenant_id().unwrap_or_default(),
+        event.code.clone(),
+        event.object_type.clone(),
+    )
+    .with_object_id(event.object_id.clone());
+    if let Some(user_id) = ctx.user_id() {
+        translated = translated.with_actor(user_id);
+    }
+    if !event.detail.is_empty() {
+        translated = translated.with_before(serde_json::json!({ "detail": event.detail }));
+    }
+    translated
+}
+
+/// 本模块声明的审计事件（平台的 `Auditable` 消费这份声明）。
 pub static AUDIT_EVENTS: LazyLock<Vec<AuditEventSpec>> = LazyLock::new(|| {
     vec![
         AuditEventSpec::new("org.node.create", "create", "org_node")
@@ -151,6 +225,31 @@ pub static AUDIT_EVENTS: LazyLock<Vec<AuditEventSpec>> = LazyLock::new(|| {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use platform_core::extension::audit::AuditError;
+
+    /// 记录事件的**假 sink**（测试用）。
+    #[derive(Debug, Default)]
+    struct RecordingSink(Mutex<Vec<AuditEvent>>);
+
+    impl RecordingSink {
+        fn events(&self) -> Vec<AuditEvent> {
+            self.0.lock().unwrap_or_else(|err| err.into_inner()).clone()
+        }
+    }
+
+    impl AuditSink for RecordingSink {
+        fn record<'a>(
+            &'a self,
+            _ctx: &'a RequestContext,
+            event: &'a AuditEvent,
+        ) -> BoxFuture<'a, Result<(), AuditError>> {
+            self.0
+                .lock()
+                .unwrap_or_else(|err| err.into_inner())
+                .push(event.clone());
+            Box::pin(async { Ok(()) })
+        }
+    }
 
     #[test]
     fn every_declared_event_has_a_stable_code() {
@@ -177,5 +276,57 @@ mod tests {
         let ctx = RequestContext::new().with_tenant("tenant-a");
         let event = OrgAuditEvent::new("org.node.create", "create", "org_node", "n1");
         recorder.record(&ctx, &event).await.expect("不应失败");
+    }
+
+    /// 桥接**不改**既有 trait 的形状，但**真的**把事件送进平台 sink（REQ-014 D150）。
+    #[tokio::test]
+    async fn the_platform_sink_recorder_forwards_the_event() {
+        let sink = Arc::new(RecordingSink::default());
+        let recorder = PlatformSinkAuditRecorder::new(sink.clone());
+        let ctx = RequestContext::new()
+            .with_tenant("tenant-a")
+            .with_user("u-2001");
+        let event = OrgAuditEvent::new("org.node.create", "create", "org_node", "n-1")
+            .with_detail("created the node n-1");
+        recorder.record(&ctx, &event).await.expect("桥接应当成功");
+
+        let events = sink.events();
+        assert_eq!(events.len(), 1, "一次事件 = 一条记录");
+        let recorded = &events[0];
+        assert_eq!(recorded.action, "org.node.create", "action = 事件码");
+        assert_eq!(recorded.object_type, "org_node");
+        assert_eq!(recorded.object_id.as_deref(), Some("n-1"));
+        assert_eq!(recorded.actor_id.as_deref(), Some("u-2001"));
+        assert_eq!(recorded.tenant_id, "tenant-a");
+        // org 事件**没有**前后值 → 明细放 `before` 的 `detail` 键里。
+        assert_eq!(recorded.after, None);
+        assert_eq!(
+            recorded.before,
+            Some(serde_json::json!({ "detail": "created the node n-1" }))
+        );
+    }
+
+    /// 桥接**失败**必须**报错**（不得静默吞掉 —— 「以为在审计其实没有」）。
+    #[tokio::test]
+    async fn the_platform_sink_recorder_reports_a_failure() {
+        struct FailingSink;
+        impl AuditSink for FailingSink {
+            fn record<'a>(
+                &'a self,
+                _ctx: &'a RequestContext,
+                _event: &'a AuditEvent,
+            ) -> BoxFuture<'a, Result<(), AuditError>> {
+                Box::pin(async {
+                    Err(AuditError::SinkUnavailable {
+                        reason: "boom".to_string(),
+                    })
+                })
+            }
+        }
+        let recorder = PlatformSinkAuditRecorder::new(Arc::new(FailingSink));
+        let ctx = RequestContext::new().with_tenant("tenant-a");
+        let event = OrgAuditEvent::new("org.node.create", "create", "org_node", "n-1");
+        let result = recorder.record(&ctx, &event).await;
+        assert!(result.is_err(), "写失败必须报出来");
     }
 }

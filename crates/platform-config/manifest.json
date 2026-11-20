@@ -194,6 +194,30 @@
       "default": "mail",
       "scope": "tenant",
       "label": "映射到本地账号的属性名"
+    },
+    "audit.retention.onlineDays": {
+      "type": "number",
+      "default": 90,
+      "scope": "platform",
+      "label": "审计在线保留天数（超期记录由归档搬进归档表；本轮只登记，不自动执行）"
+    },
+    "audit.retention.archiveDays": {
+      "type": "number",
+      "default": 365,
+      "scope": "platform",
+      "label": "审计归档保留天数（归档记录物理删除的阈值；本轮只登记，不执行）"
+    },
+    "audit.page.defaultSize": {
+      "type": "number",
+      "default": 50,
+      "scope": "platform",
+      "label": "审计列表默认每页条数（登记值；契约 C7 的默认口径仍是 20）"
+    },
+    "audit.page.maxSize": {
+      "type": "number",
+      "default": 200,
+      "scope": "platform",
+      "label": "审计列表每页条数上限（登记值；与契约 C7 的上限一致）"
     }
   }
 }

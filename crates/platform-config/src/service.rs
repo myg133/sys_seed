@@ -40,11 +40,12 @@ use std::sync::Arc;
 
 use platform_core::config::{ConfigKey, ConfigScope};
 use platform_core::context::RequestContext;
+use platform_core::extension::audit::{AuditEvent, AuditSink, AuditSinkSlot};
 use platform_core::extension::config::{ConfigResolver, FlagDecision, ResolvedConfig};
 use platform_core::extension::manifest::ConfigType;
 use platform_db::TenantDb;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::error::{ConfigError, json_type_name};
 use crate::flag;
@@ -93,12 +94,32 @@ pub enum WriteRoute {
     Platform,
 }
 
+/// 造一条**配置写入**审计事件（租户与操作人取自请求上下文）。
+///
+/// ⚠️ 租户的**唯一来源**是请求上下文（契约 C3）—— 不从参数取。
+/// ⚠️ 没有操作人（未认证）→ **不设** `actor_id`（不是空串）。
+fn audit_event(
+    ctx: &RequestContext,
+    action: &str,
+    object_type: &str,
+    object_id: &str,
+) -> AuditEvent {
+    let mut event = AuditEvent::new(ctx.tenant_id().unwrap_or_default(), action, object_type)
+        .with_object_id(object_id);
+    if let Some(user_id) = ctx.user_id() {
+        event = event.with_actor(user_id);
+    }
+    event
+}
+
 /// 配置服务。
 #[derive(Debug, Clone)]
 pub struct ConfigService {
     store: ConfigStore,
     registry: Arc<ConfigRegistry>,
     resolver: Arc<DbConfigResolver>,
+    /// 平台审计 sink（REQ-014；**可选** —— 未注入时不埋点，但**每次 warn**）。
+    audit: AuditSinkSlot,
 }
 
 impl ConfigService {
@@ -110,7 +131,76 @@ impl ConfigService {
             store,
             registry,
             resolver,
+            audit: AuditSinkSlot::default(),
         }
+    }
+
+    /// 注入**平台审计 sink**（REQ-014 D150）。
+    ///
+    /// 装配层（`platform-server`）构造 `PgAuditSink` 后以 `Arc<dyn AuditSink>`
+    /// 注入 —— `platform-config` **只认 core 的 trait** → 不依赖 `platform-audit`
+    /// → **不成环**。
+    ///
+    /// 返回 `false` = 已注入过（不覆盖）。
+    pub fn with_audit_sink(&self, sink: Arc<dyn AuditSink>) -> bool {
+        self.audit.set(sink)
+    }
+
+    // -- 审计埋点（REQ-014 D163）------------------------------------------
+
+    /// 记一条**配置写入**审计事件。
+    ///
+    /// # 失败语义
+    ///
+    /// 与权限变更**同款**：写入**已经提交** → 这时再返回错误是**撒谎**
+    /// → 记一条 **error** 日志（可观测），操作本身照常返回成功。
+    /// 未装配 sink → **跳过并 warn**。
+    async fn record_audit(&self, ctx: &RequestContext, event: AuditEvent) {
+        let Some(sink) = self.audit.get() else {
+            tracing::warn!(
+                event = %event.action,
+                "a config write audit event was produced but no platform audit sink \
+                 is installed; the event is NOT persisted"
+            );
+            return;
+        };
+        if let Err(error) = sink.record(ctx, &event).await {
+            tracing::error!(
+                event = %event.action,
+                code = error.code(),
+                "the platform audit sink could not persist a config write audit event"
+            );
+        }
+    }
+
+    /// 读**被写入那一层**上的当前值（键 → 值；该层没有这个键 → `null`）。
+    ///
+    /// # 为什么读「那一层」而不是「生效值」
+    ///
+    /// 审计要记的是「**这次写入**把哪一层的什么值换成了什么」——
+    /// 生效值会混进「平台默认 + 租户覆盖 + 空间覆盖」的解析结果，
+    /// 读**那一层**才是这次写入的直接对象。
+    async fn layer_values(
+        &self,
+        ctx: &RequestContext,
+        scope: ConfigScope,
+        keys: &[String],
+    ) -> Map<String, Value> {
+        let mut out = Map::new();
+        let tenant = ctx.tenant_id();
+        let space = ctx.space_id();
+        let Ok(layers) = self.store.load(tenant, space).await else {
+            return out;
+        };
+        let source = match scope {
+            ConfigScope::Platform => &layers.platform,
+            ConfigScope::Tenant => &layers.tenant,
+            ConfigScope::Space => &layers.space,
+        };
+        for key in keys {
+            out.insert(key.clone(), source.get(key).cloned().unwrap_or(Value::Null));
+        }
+        out
     }
 
     /// 底层的解析器（HTTP 中间件在每个请求前调用 `refresh`）。
@@ -355,10 +445,32 @@ impl ConfigService {
             .iter()
             .map(|entry| (entry.key.clone(), entry.value.clone()))
             .collect();
+        // 🔑 变更前的值（**在写入之前**读那一层）。
+        let keys: Vec<String> = entries.iter().map(|(key, _)| key.clone()).collect();
+        let before = self.layer_values(ctx, scope, &keys).await;
         match route {
             WriteRoute::Scoped => self.store.write_scoped(ctx, scope, &entries).await?,
             WriteRoute::Platform => self.store.write_platform(&entries).await?,
         }
+        // 🔑 审计：配置条目写入（D163：`config.entries.write` / `config_entry`）。
+        //
+        // ⚠️ 一次批量写 = **一条**审计事件（`before` / `after` 是「键 → 值」的映射）。
+        let mut after = Map::new();
+        for (key, value) in &entries {
+            after.insert(key.clone(), value.clone());
+        }
+        self.record_audit(
+            ctx,
+            audit_event(
+                ctx,
+                "config.entries.write",
+                "config_entry",
+                &scope.as_str().to_string(),
+            )
+            .with_before(Value::Object(before))
+            .with_after(Value::Object(after)),
+        )
+        .await;
         Ok(entries.len())
     }
 
@@ -423,9 +535,24 @@ impl ConfigService {
         }
 
         if !entries.is_empty() {
+            // 🔑 变更前的值（**在写入之前**读租户层）。
+            let keys: Vec<String> = entries.iter().map(|(key, _)| key.clone()).collect();
+            let before = self.layer_values(ctx, ConfigScope::Tenant, &keys).await;
             self.store
                 .write_scoped(ctx, ConfigScope::Tenant, &entries)
                 .await?;
+            // 🔑 审计：配置 flag 写入（D163：`config.flag.write` / `config_flag`）。
+            let mut after = Map::new();
+            for (key, value) in &entries {
+                after.insert(key.clone(), value.clone());
+            }
+            self.record_audit(
+                ctx,
+                audit_event(ctx, "config.flag.write", "config_flag", name)
+                    .with_before(Value::Object(before))
+                    .with_after(Value::Object(after)),
+            )
+            .await;
         }
         self.resolver.refresh(ctx).await?;
         Ok(self.resolver.flag(ctx, name))

@@ -1,5 +1,6 @@
 //! 认证与账号体系（REQ-007）。
 
+pub mod audit;
 pub mod config;
 pub mod crypto;
 pub mod error;

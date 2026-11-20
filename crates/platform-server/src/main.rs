@@ -306,6 +306,19 @@ async fn serve() -> Result<(), Failure> {
     let mut config_checker: Arc<dyn PermissionChecker> = Arc::new(DenyAllPermissions);
     let mut config_permissions: Arc<dyn PermissionRefresher> = Arc::new(DenyAllPermissions);
 
+    // 审计 sink（REQ-014 D150）：**平台构造** sink → 以 `Arc<dyn AuditSink>`
+    // **向下注入**各业务模块。
+    //
+    // ⚠️ 数据访问走 `platform-db` 的租户作用域入口（**不得**直连池）。
+    let audit_db =
+        platform_db::TenantDb::connect(&config.database_url, platform_db::DbOptions::default())
+            .await
+            .map_err(|err| Failure::Runtime(format!("数据库连接串非法：{err}")))?;
+    // 🔑 各业务模块**只认 core 的 trait**（`platform-core/extension/audit.rs`）→
+    // 它们**不依赖** `platform-audit` → 不成环（D150）。
+    let audit_sink: Arc<dyn platform_core::extension::audit::AuditSink> =
+        Arc::new(platform_audit::PgAuditSink::new(audit_db.clone()));
+
     // 认证与账号体系（REQ-007）：`/api/iam/*` + JWKS。
     //
     // **配了就必须配对**：环境变量里只要出现过一个 IAM 相关变量，就要求整套配置
@@ -323,11 +336,17 @@ async fn serve() -> Result<(), Failure> {
             );
         sso_iam = Some(iam_state.service.clone());
 
+        // 🔑 审计 sink 注入 IAM（REQ-014 D150）：登录埋点靠它。
+        if !iam_state.service.with_audit_sink(audit_sink.clone()) {
+            tracing::warn!("审计 sink 已经注入过：保留先装好的实现");
+        }
+
         // 用户与组织架构（REQ-008）：`/api/org/*`。
         //
         // **依赖 IAM**：组织数据是租户数据，接口必须验令牌（否则改个请求头就能读别人的组织树）。
         // 所以 IAM 没配 → 不提供 /api/org/*。
-        let org_state = build_org_state(&config, iam_state.service.clone()).await?;
+        let org_state =
+            build_org_state(&config, iam_state.service.clone(), audit_sink.clone()).await?;
         app = app.nest("/api/org", platform_org::http::router(org_state));
         tracing::info!("用户与组织架构已启用：/api/org/*");
 
@@ -339,6 +358,28 @@ async fn serve() -> Result<(), Failure> {
         reconcile_permissions(&config, &rbac_state).await?;
         app = app.nest("/api/rbac", platform_rbac::http::router(rbac_state.clone()));
         tracing::info!("角色与权限已启用：/api/rbac/*");
+
+        // 🔑 审计 sink 注入 RBAC（REQ-014 D150）：角色 / 授权变更靠它。
+        if !rbac_state.service.with_audit_sink(audit_sink.clone()) {
+            tracing::warn!("审计 sink 已经注入过：保留先装好的实现");
+        }
+
+        // 审计查询（REQ-014）：`/api/audit/*`。
+        //
+        // **依赖 IAM / RBAC**：审计记录是租户数据（要验令牌 + 判权限点）。
+        // 所以 IAM 没配 → 不提供 /api/audit/*。
+        let audit_state = Arc::new(platform_server::audit::AuditState {
+            query: Arc::new(platform_audit::AuditQueryService::new(audit_db.clone())),
+            verifier: Arc::new(platform_audit::ChainVerifier::new(audit_db.clone())),
+            archive: Arc::new(platform_audit::ArchiveService::new(audit_db.clone())),
+            tokens: Arc::new(platform_server::audit::IamTokenVerifier::new(
+                iam_state.service.clone(),
+            )),
+            checker: rbac_state.checker.clone(),
+            permissions: rbac_state.checker.clone(),
+        });
+        app = app.nest("/api/audit", platform_server::audit::router(audit_state));
+        tracing::info!("审计日志已启用：/api/audit/*");
 
         // 权限点提供者（REQ-011）：登录响应要带上**真实**的权限点集合。
         //
@@ -440,6 +481,10 @@ async fn serve() -> Result<(), Failure> {
     //
     // 品牌接口公开（登录页在认证前就要显示 logo）；其余接口需要令牌 + 权限点。
     let config_service = build_config_service(&config).await?;
+    // 🔑 审计 sink 注入配置服务（REQ-014 D150）：配置写入靠它。
+    if !config_service.with_audit_sink(audit_sink.clone()) {
+        tracing::warn!("审计 sink 已经注入过：保留先装好的实现");
+    }
     let config_state = Arc::new(platform_config::http::ConfigState {
         service: config_service.clone(),
         tokens: config_tokens.clone(),
@@ -457,6 +502,19 @@ async fn serve() -> Result<(), Failure> {
         let source = Arc::new(ConfigServiceSsoSource::new(config_service.clone()));
         if !service.set_sso_config_source(source) {
             tracing::warn!("SSO 配置源已经注入过：保留先装好的实现");
+        }
+        // 🔑 审计：把既有的 SSO 审计事件**桥接**到平台 sink（REQ-014 D150）。
+        //
+        // ⚠️ 桥接器**只**搬 `iam.sso.link.created`；
+        //    两个**登录**事件码由 IAM 服务自己写（await 平台 sink）——
+        //    否则一次登录会产生**两条**记录（AC-S-127 的「产生 1 条」会失败）。
+        //
+        // ⚠️ 既有 `SsoAuditRecorder` trait 的**签名不变**（D135）→ 这里只是
+        //    换一个实现装进既有的后设槽。
+        if !service.with_sso_audit_recorder(Arc::new(
+            platform_iam::sso::bridge::PlatformSinkSsoRecorder::new(audit_sink.clone()),
+        )) {
+            tracing::warn!("SSO 审计 recorder 已经注入过：保留先装好的实现");
         }
         if let Ok(base) = std::env::var("BASE_SSO_FRONTEND_BASE_URL") {
             service.set_sso_frontend_base_url(base);
@@ -500,6 +558,20 @@ async fn serve() -> Result<(), Failure> {
     });
     let app = app.merge(platform_server::i18n::router(i18n_state));
     tracing::info!("国际化已启用：/api/i18n/context、/api/i18n/fx/convert");
+
+    // 🔑 **全局**中间件：把来源 IP 与设备填进 `RequestContext`（REQ-014 D149）。
+    //
+    // 为什么必须在**顶层**：各子系统**各自**建上下文（`platform-config`、
+    // `platform-rbac`、`platform-i18n`、业务模块的 `authenticate_module`）
+    // → 「对所有路由生效」只能在顶层加一次。
+    // 各子系统的中间件随后 `extensions().get::<RequestContext>().cloned()`
+    // **继承**它。
+    //
+    // ⚠️ `ip` 是**客户端可控的头**（`x-forwarded-for` 的第一跳）——
+    // 用途是**关联与排查**，**不是取证**（D149）。
+    let app = app.layer(axum::middleware::from_fn(
+        platform_server::client_info::client_info,
+    ));
 
     let addr = config.socket_addr();
     let listener = tokio::net::TcpListener::bind(addr)
@@ -552,9 +624,13 @@ async fn build_iam_state(config: &DeployConfig) -> Result<Arc<IamState>, Failure
 /// 构建用户与组织架构的状态（数据访问 + 服务 + 令牌校验）。
 ///
 /// 组织接口**必须**验令牌（组织数据是租户数据）—— 所以它依赖 IAM 的认证服务。
+///
+/// 🔑 审计落库用**平台 sink**（REQ-014 D150）：既有的 `AuditRecorder` trait
+/// **签名不变**（D135）→ 这里装的是**桥接实现**（`platform-org` 自带）。
 async fn build_org_state(
     config: &DeployConfig,
     iam: Arc<platform_iam::service::IamService>,
+    audit_sink: Arc<dyn platform_core::extension::audit::AuditSink>,
 ) -> Result<Arc<platform_org::http::OrgState>, Failure> {
     // 数据访问走 `platform-db` 的租户作用域入口（**不得**直连池）。
     let tenant_db =
@@ -567,8 +643,10 @@ async fn build_org_state(
         platform_iam::store::IamStore::new(tenant_db),
         // 通知通道（REQ-015）还没落地：事件照常产生，先写日志。
         std::sync::Arc::new(platform_org::notify::LoggingNotifier),
-        // 审计落库（REQ-014）还没落地：事件照常产生，先用空实现。
-        std::sync::Arc::new(platform_org::audit::NoopAuditRecorder),
+        // 审计落库（REQ-014）：**桥接**到平台 sink（既有 trait 签名不变）。
+        std::sync::Arc::new(platform_org::audit::PlatformSinkAuditRecorder::new(
+            audit_sink,
+        )),
     );
 
     Ok(Arc::new(platform_org::http::OrgState {

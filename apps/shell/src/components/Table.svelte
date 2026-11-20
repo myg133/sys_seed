@@ -12,9 +12,22 @@
 
   import { i18nRuntime } from '../lib/i18n';
 
+  /**
+   * 组件 props（D97：必须有类型，且**整体取值**而不是解构）。
+   *
+   * `hidePager` 是壳层的**扩展**（`@base/ui` 的 `TableProps` 里没有）：
+   * 自带的分页器是**页码**语义（「N / M 页」+ 可跳页），
+   * 游标分页的页面（审计页，D169）必须**自己**画分页器
+   * —— 页码指示要如实表达「本次浏览翻到第几页」，不能写「第 N 页 / 共 M 页」。
+   */
+  type ShellTableProps<Row> = TableProps<Row> & {
+    /** 不渲染自带的页码分页器（消费方自己画）。 */
+    readonly hidePager?: boolean;
+  };
+
   // props 整体取值：svelte-check 会把「解构出来的可选 props」当成必填，
   // 消费方就得把每个可选值都传一遍 —— 契约反而没法用。
-  const props: TableProps<Row> = $props();
+  const props: ShellTableProps<Row> = $props();
   const i18n = i18nRuntime();
 
   // `total` 没给（或给了 0）就退回当前页的行数。
@@ -52,7 +65,7 @@
   </tbody>
 </table>
 
-{#if info.pageCount > 1}
+{#if info.pageCount > 1 && props.hidePager !== true}
   <nav class="base-table-pager">
     <button
       type="button"

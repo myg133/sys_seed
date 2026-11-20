@@ -6,6 +6,8 @@
 //! 2. **健康检查**：`/health/live`（进程活着）与 `/health/ready`（数据库连通 + 迁移已应用）。
 //! 3. **迁移独立化**：迁移是独立命令，不在服务启动流程里跑。
 
+pub mod audit;
+pub mod client_info;
 pub mod config;
 pub mod db;
 pub mod health;

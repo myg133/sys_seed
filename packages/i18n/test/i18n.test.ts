@@ -178,6 +178,12 @@ describe('语言包与键体系（AC-S-091）', () => {
       'SSO_IDENTITY_LINK_CONFLICT',
       'SSO_ACCOUNT_NOT_LINKED',
       'SSO_TICKET_INVALID',
+      // REQ-014（审计日志）新增的 5 个码，见 acceptance.md「错误码总表」
+      'AUDIT_SENSITIVE_PAYLOAD_REJECTED',
+      'AUDIT_CHAIN_BROKEN',
+      'AUDIT_EVENT_NOT_FOUND',
+      'AUDIT_INVALID_FILTER',
+      'AUDIT_SINK_UNAVAILABLE',
     ];
     for (const code of codes) {
       expect(catalog[`error.${code}`], `缺少键 error.${code}`).toBeTypeOf('string');

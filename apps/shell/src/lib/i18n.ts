@@ -37,6 +37,7 @@ import {
   type I18n,
   type LocaleOption,
 } from '@base/i18n';
+import { ApiError } from '@base/sdk';
 
 /** 用户偏好的存储键（带版本号：结构变化时旧结构不会被当成新结构读）。 */
 export const I18N_PREFERENCE_KEY = 'base.shell.i18n.v1';
@@ -455,4 +456,30 @@ export function toMessageParams(
     }
   }
   return result;
+}
+
+/** 翻译函数（与 `@base/i18n` 的 `t` 同形）。 */
+export type Translate = (key: string, params?: Record<string, string | number>) => string;
+
+/**
+ * 把异常转成**当前语言**的可展示文案（错误码仍要透出，不能只剩「出错了」）。
+ *
+ * 文案不在这里硬编码：按稳定错误码取 `error.<CODE>`，并用后端 `params` 插值
+ * （`ApiError.params`，D109）。没有对应文案时退回 `"<code> (HTTP <status>)"` ——
+ * 那是技术信息，不是本地化文案，所以不带中文、也不显示 `"?"`。
+ *
+ * # 为什么住在 `i18n.ts`
+ *
+ * 它是**通用的**「错误码 → 文案」helper（与 `errorMessageKey` / `toMessageParams`
+ * 是一套），不只服务于数据页面 → 放在错误码相关的这一层，
+ * 审计页（AC-S-132）等新页面直接复用，不再各写一份。
+ */
+export function describeError(error: unknown, translate: Translate): string {
+  if (error instanceof ApiError) {
+    const key = errorMessageKey(error.code);
+    const text = translate(key, toMessageParams(error.params));
+    const message = text === '?' ? error.code : text;
+    return `${message} (HTTP ${error.status})`;
+  }
+  return translate('common.unexpectedError');
 }

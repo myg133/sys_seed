@@ -34,6 +34,10 @@ fn main() -> ExitCode {
             Ok(code) => code,
             Err(err) => fail(err),
         },
+        Command::Audit(args) => match run_audit(&args) {
+            Ok(code) => code,
+            Err(err) => fail(err),
+        },
     }
 }
 
@@ -185,4 +189,68 @@ fn run_tenant_policies(args: &xtask::cli::TenantPoliciesArgs) -> Result<ExitCode
         println!("  ✓ {}：{}", scope.module, scope.spec.tables.join(", "));
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// 执行审计链校验 / 归档（REQ-014）。
+fn run_audit(args: &xtask::cli::AuditArgs) -> Result<ExitCode> {
+    let runtime = tokio::runtime::Runtime::new()?;
+
+    match &args.action {
+        xtask::cli::AuditAction::Verify(verify) => {
+            let database_url = database_url_of(verify.database_url.clone())?;
+            let tenants = match &verify.tenant {
+                Some(tenant) => vec![xtask::audit::require_tenant(Some(tenant))?],
+                None => {
+                    let tenants = runtime.block_on(xtask::audit::list_tenants(&database_url))?;
+                    if tenants.is_empty() {
+                        println!(
+                            "没有找到任何有审计链状态的租户。\n  \
+                             ⚠️ 用**应用角色**连接时这是**预期的**（RLS 只让本租户可见）——\n  \
+                             「校验全部租户」需要**管理员**连接。"
+                        );
+                        return Ok(ExitCode::SUCCESS);
+                    }
+                    tenants
+                }
+            };
+
+            let mut outcomes = Vec::with_capacity(tenants.len());
+            for tenant in &tenants {
+                let outcome =
+                    runtime.block_on(xtask::audit::verify_tenant(&database_url, tenant))?;
+                println!(
+                    "  {}：{}（检查 {} 条，断裂 {} 条）",
+                    outcome.tenant_id,
+                    if outcome.ok { "通过" } else { "失败" },
+                    outcome.checked,
+                    outcome.broken
+                );
+                outcomes.push(outcome);
+            }
+            println!("{}", xtask::audit::summarize(&outcomes));
+            if xtask::audit::has_failures(&outcomes) {
+                return Ok(ExitCode::FAILURE);
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        xtask::cli::AuditAction::Archive(archive) => {
+            let database_url = database_url_of(archive.database_url.clone())?;
+            let tenant = xtask::audit::require_tenant(Some(&archive.tenant))?;
+            let days = xtask::audit::require_positive_days(archive.days)?;
+            let moved =
+                runtime.block_on(xtask::audit::archive_tenant(&database_url, &tenant, days))?;
+            println!("已归档租户 {tenant} 的超期记录：{moved} 条（在线保留 {days} 天）");
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+/// 取数据库连接串：显式参数优先，其次环境变量 `DATABASE_URL`。
+fn database_url_of(explicit: Option<String>) -> Result<String> {
+    explicit
+        .or_else(|| std::env::var("DATABASE_URL").ok())
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("缺少数据库连接串：传 --database-url 或设置环境变量 DATABASE_URL")
+        })
 }

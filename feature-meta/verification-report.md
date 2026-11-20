@@ -1,183 +1,116 @@
-# REQ-010 验证报告（自验）
+# REQ-014 验证报告（简版总表）
 
-- **需求**: REQ-010「配置、品牌与 Feature Flag」
-- **分支**: `feature/REQ-010`（基线 `develop` @ `12366e9`）
-- **验收基线**: `BA/demands/REQ-010-config-branding/acceptance.md`（**rev 3**，AC-S-049 ~ AC-S-063，15 条）
-- **契约**: `api-conventions v2`（C3 / C6 / C9 / C10）、`extension-points v2`（C-5）
-- **开发者**: myg133-dev-1（Worker 会话）
-- **更新时间**: 2026-11-18
+- **需求编号**：REQ-014（审计日志）
+- **本轮范围**：**棒 1 —— 后端地基**（平台核心审计类型 + 新 crate `platform-audit` + 数据库 + 权限）
+- **分支 / worktree**：`feature/REQ-014` @ `feature-REQ-014`（基线 `develop@0683115`）
+- **规格版本**：`BA/demands/REQ-014-audit/acceptance.md` **rev 3**（13 条 AC）+ `decisions.md` rev 2（D130~D168）
+- **详细自验**（逐 AC 断言、逐 crate 测试数字、变异验证）：见 [req-014-dev-backend-foundation.md](req-014-dev-backend-foundation.md)
 
-> 本报告只写**实际跑过**的东西。没跑的一律进 §6「未验证项」，不写成「应该没问题」。
+> ⚠️ 本文件**覆盖**了上一轮（REQ-010）的同名报告 —— 历史版本在 git 里。
+> **状态口径**：**已实现** = 本轮（棒 1）已落地且有可重跑的测试断言；
+> **未实现（棒 2）** = 本轮**刻意未做**（下一棒的接入 / 装配 / 前端）；
+> **未开始** = 既不在棒 1 也不在棒 2 的规划内。
+
+**一句话结论**：棒 1 的 13 条 AC 中 **9 条已实现**（AC-S-022 / 122 / 123 / 124 / 125 / 126 / 129 / 131 / 133）
+**/ 4 条留给棒 2**（AC-S-127 / 128 / 130 / 132）/ **0 条未开始**；
+逐 crate 测试 **827 passed / 0 failed / 0 ignored**（10 个 crate，命令见自验报告 §2）；
+**5 处变异验证全部变红并逐字节还原**（自验报告 §3）。
 
 ---
 
-## 1. 结果摘要
+## 1. 13 条 AC 逐条状态
 
-| 项 | 结果 |
+| AC | 内容 | 状态 | 落点 / 依据 |
+|---|---|---|---|
+| **AC-S-022** | 哈希链可校验：篡改任一条目即告警 | **已实现（链路与告警部分）** | `platform-audit/src/verify.rs`：两段式校验 + `tracing::error!`（含 `tenant_id` / `event_id` / `reason`，D164）；HTTP 入口（`GET /api/audit/verify`）属**棒 2** |
+| **AC-S-122** | 一次敏感操作产生一条含全部固定字段的审计记录 | **已实现** | `platform-audit/src/sink.rs` + `migrations/20261120000200_audit.up.sql`（13 个固定字段，C12）；查询层的「`ip` / `userAgent` **不得缺键**」属**棒 2**（HTTP 响应层） |
+| **AC-S-123** | 审计表 append-only（应用角色无法 UPDATE / DELETE） | **已实现** | 迁移的 `REVOKE UPDATE, DELETE` + **`deploy/seed/02-app-role.sql` 的审计表例外块**（D147）；测试含「**重跑种子脚本后仍拒**」 |
+| **AC-S-124** | 哈希链按租户分链且可链接，并发写入不产生分叉 | **已实现** | 迁移的 `pg_advisory_xact_lock` + **新语句重读**（D161）+ 测试侧的**独立复算**；分链见 D130 |
+| **AC-S-125** | 篡改可检测且沿链连锁 | **已实现** | `platform-audit/src/verify.rs`：两个 reason（`hash_mismatch` / `prev_hash_mismatch`，D146）都有真实触发路径 |
+| **AC-S-126** | 审计记录跨租户不可见（数据库强制） | **已实现** | 三张表的 RLS（**手写**，D166）+ `WITH CHECK`；归档表同样受约束 |
+| **AC-S-127** | 登录审计：成功与失败各一条，含 IP 与设备，不含凭据 | **未实现（棒 2）** | 业务模块埋点（iam）+ 平台中间件填 `client_ip` / `user_agent` 在**棒 2**；棒 1 已备好 `RequestContext.client_ip` / `.user_agent`（D140）与 sink |
+| **AC-S-128** | 权限变更审计：授予 / 撤销 / 创建 / 删除各一条 | **未实现（棒 2）** | 业务模块埋点（rbac）在**棒 2**；事件码与 `before`/`after` 形状已按 D163 钉死并写进自验报告 |
+| **AC-S-129** | 统一埋点入口：业务模块不需自建审计表 | **已实现（扫描口径那一半）** | `platform-core/src/extension/audit.rs` 的通用 `AuditEvent` + `AuditSink`；**Rust 侧 0 命中 + `migrations/**/*.sql` 恰好 1 处 + 阳性对照**已有测试；「各模块事件送进平台 sink」的**接入**属**棒 2** |
+| **AC-S-130** | 审计查询接口：分页 / 过滤 / 排序 / 权限控制 | **未实现（棒 2）** | 查询**服务**（参数自解析 + C7 游标分页 + 过滤 + 排序）已在 `platform-audit/src/query.rs` 落地并有单测；**HTTP 路由**（`/api/audit/events`、403、ProblemDetails 响应体）在**棒 2** |
+| **AC-S-131** | 保留策略与归档：超期记录搬入归档表，归档表同样 append-only | **已实现** | 迁移的 `platform_audit_archive_move`（`SECURITY DEFINER`）+ 链基准表（D159）；测试覆盖「搬走 / 幂等 / 归档表 append-only / 归档不破坏链」 |
+| **AC-S-132** | 审计查询界面：列表、分页、过滤、字段展示 | **未实现（棒 2）** | 前端页面属**棒 2** |
+| **AC-S-133** | 敏感值防护：`before` / `after` 含敏感键时写入被拒绝 | **已实现** | DB 侧 `platform_audit_sensitive_keys`（权威）+ Rust 侧 `scan_sensitive_keys`；**14 键基线 / 完整键名匹配 / 递归 / 两侧都做 / 一致性测试** |
+
+---
+
+## 2. 棒 1 ↔ 棒 2 的边界（**棒 2 不需要重做棒 1 的任何东西**）
+
+棒 2 直接可用的落点：
+
+| 棒 2 要做的 | 棒 1 已经备好的 |
 |---|---|
-| Rust 全量（`cargo test --workspace -- --test-threads=2`） | **475 passed / 0 failed / 70 ignored**（ignored 的是 IAM / ORG / RBAC / sandbox 的真实库用例，默认 `#[ignore]`，由下一行的集成脚本用 `--include-ignored` 跑到） |
-| Rust 集成（`scripts/test-integration.sh`，**重置 base_test 后 `--include-ignored`**） | **539 passed / 0 failed / 0 ignored**（含 IAM / ORG / RBAC / sandbox 的真实库用例；多轮连跑 536 → 537 → 539，差值都来自本轮新增的用例） |
-| 本需求新增/改动的 Rust 用例 | **72**（`platform-config` lib 30 + `config_real_db` 25 + `http_authz` 10 + `contract_c5` 3 + `branding_static` 4） |
-| 前端单测（`pnpm -r test`） | **19 passed**（shell 9：`nav` 4 + `branding` 5；packages 10：i18n 3 / sdk 2 / theme 2 / ui 3） |
-| 前端类型检查（`pnpm -r check`） | **通过**（svelte-check 0 errors / 0 warnings） |
-| E2E（Playwright，**同源** `platform-server` 静态目录） | **2 passed / 0 failed**，连跑两轮均绿（标题来自品牌接口；渲染色 ≠ `#1677ff`；菜单过滤） |
-| `cargo fmt --all --check` | 通过 |
-| `cargo clippy --workspace --all-targets -- -D warnings` | 通过 |
-| `cargo xtask check-deps` / `check-modules` / `capabilities --check` | 通过 |
-| `cargo xtask tenant-policies --check` | 通过（4 个模块声明的表都开了 RLS 且有策略） |
-| `./scripts/sync-contracts.sh` | 通过（`docs/contracts/api-conventions/v2.md`、`extension-points/v2.md` 与 BA 正本逐字节一致） |
-| `Cargo.lock` | **第三方 registry 仍 284**；总包数 294 → **295**（新增的是本仓 workspace 成员 `platform-config`，不是第三方依赖） |
-
-**真实跑过的关键数字**：
-- 灰度 p=50、n=200 的命中数 **104**（接受区间 [70,130]）；
-- 两进程命中集合**完全一致**（104 个用户，逐条比对）；
-- p=60 相对 p=50 **严格超集**；改回 p=50 **完全复原**；
-- 平台级 `platform_config_upsert` 写一行 → `platform` epoch **+1**；
-- 掩蔽顺序：`tenant:tenant-a = 5`、`platform = 1`，平台级改值后 T1 仍读到新值。
+| `/api/audit/events` 路由 | `platform_audit::AuditQueryService::query` + `AuditQueryParams::parse`（参数自解析；非法值 → `AUDIT_INVALID_FILTER`；超上限 → 夹到 200） |
+| `/api/audit/verify` 路由 | `platform_audit::ChainVerifier::verify` → `VerifyReport { ok, checked, broken }` |
+| `/api/audit/archive` 路由 | `platform_audit::ArchiveService::archive_before` → `ArchiveResult { moved, archivedAt, nextRecommendedAt }` |
+| 路由鉴权 | `platform_audit::{require_events_read, require_verify_run, require_archive_run}`（C-5 字面量调用点） |
+| sink 装配 | `platform_audit::PgAuditSink::new(TenantDb)` + `impl AuditSink` |
+| 中间件填 IP / UA | `RequestContext::with_client_ip()` / `.with_user_agent()`（D140） |
+| 业务模块埋点 | `platform_core::extension::audit::{AuditEvent, AuditSink}`（通用、带 payload） |
+| 错误码 → ProblemDetails | `platform_core::problem::ProblemDetails::audit_*`（5 个构造器） |
 
 ---
 
-## 2. AC 逐条结论（15 / 15）
+## 3. 本轮**未开始**（既不在棒 1 也不在棒 2 的任务卡里）
 
-| AC | 结论 | 直接证据（实测） |
-|----|------|------------------|
-| AC-S-049 | ✅ | `three_layer_resolution_reports_the_hit_layer`（platform/tenant/space/跨租同名 space）；`source_default_is_distinct_from_an_explicit_platform_value`（default vs platform 的判别性反例）；混合批量 404 + `params.unknownKeys` |
-| AC-S-050 | ✅ | `scope_escalation_is_rejected_and_leaves_no_rows`（6 步 + 平台正对照 + 库侧 0 行）；`space_writes_require_the_branding_whitelist`（`loginBanner` 空间写 400，`reason=whitelist`） |
-| AC-S-051 | ✅ | `unknown_keys_and_type_errors_follow_the_fixed_order`（未登记/类型/顺序 5 例）；`five_registered_types_are_checked_by_json_type`（5 种类型 × 正反 + `jsonb_typeof`） |
-| AC-S-052 | ✅ | `a_platform_change_invalidates_every_tenant_and_survives_a_higher_tenant_epoch`（TTL=300s，两实例）；`a_platform_write_is_visible_on_the_next_request`（HTTP） |
-| AC-S-053 | ✅ | 同上：先 5 次租户写（tenant epoch=5）再改平台（platform=1），T1 仍返回新值；平台写入不改租户 epoch |
-| AC-S-054 | ✅ | `branding_returns_only_whitelisted_keys_and_resolves_the_tenant`（T1/T2/无租户/未知租户/空间忽略/键集合）；HTTP 同源实测（见 §4） |
-| AC-S-055 | ✅ | `branding_static.rs` 4 条（`底座壳`/`#1677ff`/`示例平台`/`#0055aa` = 0；品牌接口被调用；`<title>` 留空；e2e 同步）；E2E 2 条实测通过（标题 = 接口值；计算色 ≠ `rgb(22,119,255)`） |
-| AC-S-056 | ✅ | `flags_are_tenant_isolated_and_close_returns_200_semantics`；HTTP 同用例（T1 true/tenant、T2 false/default、无令牌 401） |
-| AC-S-057 | ✅ | `rollout_is_deterministic_monotonic_and_bounded`（10 次一致；104 ∈ [70,130]；S50 ⊊ S60；S50'==S50；S10⊆S50；0/100；两独立实例 + 独立公式）；`rollout_across_two_processes_is_identical`（**真子进程**）；`rollout_out_of_range...`（写 400 / 读 fail closed） |
-| AC-S-058 | ✅ | 同上第 6 段（无 user → false，p=100 不变）；HTTP 无令牌 → 401 |
-| AC-S-059 | ✅（含 1 条与 AC 冲突的取舍，见 §5-Q1） | `unknown_and_invalid_flag_names_follow_the_contract`：拼错 → 200 false default；换行/1KB/kebab → 400 `FLAG_NAME_INVALID`；对照 `newInvoice` → true |
-| AC-S-060 | ✅ | `write_permission_matrix_has_no_implicit_hierarchy`（M/A/P/O/R 五档 + 4 个权限点正交）；401（7 条路由）；跨租头 404 且不落库；`the_generic_write_route_rejects_the_flag_namespace`（400 `CONFIG_FLAG_USE_FLAG_ENDPOINT`） |
-| AC-S-061 | ✅ | `contract_c5.rs` 3 条：4 个调用点逐个；删 1 → 1 条点名、删 2 → 2 条、不误报；基线 org 9/0、rbac 4/≥3、`rbac:permission:read` 仍缺；sandbox 无 `config:` |
-| AC-S-062 | ✅ | `base_app_can_read_but_cannot_write_the_platform_table_directly`（SELECT 可；3 种 DML 均 **42501**；函数可写 + epoch +1；权限矩阵 5 项）；RLS 读写隔离（含跨租同名 space）；三列 `jsonb`；独立库 up/down/up 插 3 种 JSON 类型；保留租户 id 全入口拒绝 |
-| AC-S-063 | ✅ | `read_authorization_splits_platform_scoped_keys`（M 读租户键 200 / 平台键 403 / 混合 403 无 `entries` / `favicon` 平台值不需要权限点 / 独立路由 M 403、P 200）；`the_platform_read_endpoint_only_serves_platform_scoped_keys` |
-
----
-
-## 3. 破坏性验证（造违规 → 确认拦住 → **逐字节还原**）
-
-每一项都用 `sha256sum` 记录修改前/后的文件指纹；还原后指纹**完全一致**，且测试重新变绿。
-
-| # | 违规 | 期望被谁拦住 | 实测 |
-|---|------|--------------|------|
-| D1 | down 迁移追加 `DROP TABLE platform_tenant_config` | `the_schema_migration_is_reversible_without_dropping_the_historical_table` 的静态断言 | ✅ 测试 **FAILED**；还原后 sha256 一致 |
-| D2 | 迁移/种子里的 `REVOKE` 被去掉（模拟忘了 REVOKE） | `base_app_can_read_but_cannot_write_the_platform_table_directly` 的 42501 断言 | ✅ 直接 DML 成功 → 测试 **FAILED**；恢复 REVOKE 后 **passed** |
-| D3 | 通用写路由去掉 flag 命名空间隔离（D70） | `flags_cannot_be_written_through_the_generic_config_route` | ✅ **FAILED**；还原后 sha256 一致 |
-
-> D2 的「造违规」按**运行时**做（`GRANT INSERT/UPDATE/DELETE ... TO base_platform_app`），
-> 因为迁移已经应用过；同时把 `deploy/seed/02-app-role.sql` 里的守护 REVOKE 临时改成 GRANT，
-> 否则夹具重跑会把违规又盖回去。恢复后脚本与 DB 权限都还原。
-
-## 4. 变异验证（≥4 处；改坏 → 测试必须红 → 还原 → 绿）
-
-| # | 变异 | 命中的测试 | 结果 | 还原指纹 |
-|---|------|-----------|------|----------|
-| M1 | 缓存新鲜度改回 `max(platform, tenant)` | `a_platform_change_invalidates_every_tenant_and_survives_a_higher_tenant_epoch` | **FAILED**（0 passed） | sha256 一致 |
-| M2 | 灰度改用 `RandomState` 随机播种哈希 | `rollout_across_two_processes_is_identical` | **FAILED**（两进程集合不同；同进程每次运行也不同） | sha256 一致 |
-| M3 | 品牌白名单加入 `conflictStrategy`（非白名单键） | `branding_returns_only_whitelisted_keys_and_resolves_the_tenant` | **FAILED**（公开接口泄露运维键） | sha256 一致 |
-| M4 | 去掉 flag 命名空间检查（D70） | `flags_cannot_be_written_through_the_generic_config_route` | **FAILED** | sha256 一致 |
-| M5 | down 迁移加 `DROP TABLE platform_tenant_config` | 迁移可逆性测试 | **FAILED** | sha256 一致 |
-| M6 | 去掉 `REVOKE`（运行时） | 平台表写权限测试 | **FAILED**；恢复后 passed | 脚本 sha256 一致 |
-| M7 | 去掉空间级写的**品牌白名单门**（D66 第二道门） | `space_writes_require_the_branding_whitelist` | **FAILED**（`loginBanner` 空间写变成功） | sha256 一致 |
-
-> 每次变异都先 `cp` 备份、改坏、跑**指定**用例、再 `cp` 还原；还原后重跑为绿。
-> M1 若用 `max(epoch)`，掩蔽用例在「tenant epoch=5 > platform epoch=2」时返回旧值。
-
-## 5. 对规格的疑问 / 自行取舍（**按规格实现，未改设计**）
-
-| # | 位置 | 问题 | 本实现的取舍 |
-|---|------|------|--------------|
-| Q1 | AC-S-059 步骤 4 vs 同节「flag 名规范 `^[a-z][a-zA-Z0-9]{0,63}$`（**无连字符**）」 | 步骤 4 要求 `new-invoice`（kebab）→ 200 + false；字符集规则要求它 **400**。**同一条 AC 内部矛盾**。 | 按**更严格**的字符集规则实现：`new-invoice` → **400 `FLAG_NAME_INVALID`**。理由：D65 的安全动机（非法名不进日志，防日志注入 / 刷爆），且「不归一化」已由 `newinvoce` vs `newInvoice` 两个合法名覆盖。**QA 若按 TC-010-030 步骤 4 断言 200，会红** —— 需 BA 裁定。 |
-| Q2 | design §1 的 `ConfigResolver` 方法是**同步**的；§7.1 又要求**每个请求**读 `(platform_epoch, tenant_epoch)` 判新鲜 | 同步 trait 无法做 DB I/O；若在异步 handler 里 `block_on` 会阻塞运行时。 | trait 保持同步（dyn 兼容，业务模块 `Arc<dyn ConfigResolver>`）；平台实现 `DbConfigResolver` 另提供 **异步 `refresh(&ctx)`**，HTTP 中间件在每个请求进入时调用，trait 方法只读已刷新快照。**未改 trait 签名**。 |
-| Q3 | 规格没有说明「哪些 `config` 键是 flag」 | `ConfigSpec` 没有 `isFlag` 字段；D57 只说不改 manifest schema。 | 把**登记为 `boolean` 的配置键**视为 flag（当前仓库只有 `newInvoice` / `beta`）。派生键因此可自动生成。若将来出现「布尔但非开关」的配置，需要新字段。 |
-| Q4 | D71 要求 `platform_config_upsert` 同事务自增 epoch；AC-S-062 步骤 7 只验「写一行 +1」 | 一次请求写 N 条平台级配置会 +N（函数按行调用）。 | 保持函数按调用 +1（与 design 的 DDL 一致）；多条目平台写会多次 bump。**不影响正确性**（任何 +1 都让缓存失效），但「一次写请求只 +1」需要函数改成批量签名（规格未要求）。 |
-| Q5 | D72 要求真实租户 id 为 `"platform"` 时读写报错，但**没有给错误码** | 新增稳定码会扩大 D62 的清单。 | 新增 `CONFIG_TENANT_RESERVED`（400），四个对外入口（读/写/品牌/refresh）都拒绝；写进本报告。 |
-| Q6 | AC-S-050 / TC-010-005 步骤 8 要求「另外两张表 `key='conflictStrategy'` 行数均为 0」，但 AC-S-054 的夹具**故意**在 `platform_space_config` 放了一行 `conflictStrategy=remote_wins`（管理员 SQL 合成） | 两条用例的夹具互斥。 | 测试改为断言「**本次越级写没有新增行**」：租户表 0 行；空间表除夹具合成行外 0 行。规格文本未改。 |
-| Q7 | 通用读路由混入平台级键的行为在 acceptance 里是「整请求 403」，但**没有说**持 `config:platform:read` 的用户能否走通用路由 | 契约 9.7 只说「通用端点收到平台级键 → 整请求 403」。 | 通用路由**无条件 403**（平台级读一律走独立路由），避免「同一端点两种授权语义」。 |
-| Q8 | 品牌公开接口遇到 `X-Tenant-Id: platform` | D72 说保留值读写都报错；branding 是公开接口，规格没说。 | 返回 **400 `CONFIG_TENANT_RESERVED`**（更严格；不会把平台伪租户当成真实租户去解析）。 |
-| Q9 | `GET /api/feature-flags`（批量）的响应形状 | design §6 只给了单条 `{"flag","enabled","source"}`；TC 写 `{"flags":[...]}`。 | 实现为 `{"flags":[FlagDecision...]}`（按 registry 的 flag 名排序）。 |
-| Q10 | TC-010-013（rev 2）步骤 4 用 **通用读路由** 读 `conflictStrategy,scimBaseUrl,cacheTtlSeconds` 并期望 200 | 与 rev 3 的 AC-S-063 / 契约 C9 §9.7 冲突：通用端点收到平台级键必须**整请求 403**，平台级读走独立端点。 | 按 **AC（rev 3）** 实现：通用读路由 403；平台级键请改用 `GET /api/config/platform-entries`（P/R 角色 200）。TC-010-013 需按 rev 3 修订。 |
-
-## 6. 未验证项（如实列出）
-
-| 项 | 原因 | 影响 |
-|----|------|------|
-| **CI 真跑**（6 个 job / 镜像体积门禁 / Trivy） | 本仓**无 remote**，GitHub Actions 跑不起来（与 REQ-009 相同） | 本地跑通了 lint / test / build / E2E；CI 配置未改 |
-| **分支保护**（required check + Code Owners） | 代码里做不到，需人工在远端配置 | — |
-| **真实多实例部署的缓存收敛** | 本机单实例；AC-S-052/053 用**两个独立解析器实例**、AC-S-057 用**真子进程**模拟 | 未在 K8s / 多副本下实测 |
-| **主题令牌体系**（深色模式 / 组件密度 / 字体栈的组件级应用） | 明确属 REQ-011（D52） | 本期只做「shell 从接口读并应用」 |
-| **配置管理界面** | 属 REQ-012 | — |
-| **覆盖率数字** | 本期不设覆盖率门槛 | — |
-| **`platform-org` / `platform-rbac` 的 C-5 缺口** | 本需求**不扩围**（D58） | 基线：org 9/0、rbac 4/3（`rbac:permission:read` 仍缺）；已在本报告登记 |
-| **未知租户 404 vs 回落平台默认** | 本仓没有租户注册表；AC-S-054/TC-010-014 采用「回落平台默认」 | 若后续裁定未知租户必须 404，需要租户注册表 |
-| **`X-Tenant-Id` 在既有 `/api/rbac` 路由上的跨租 404** | 既有中间件不解析该头（它假定上游注入）；本需求只在 `/api/config` / `/api/feature-flags` 自带中间件里实现 | 未改 rbac（超出本需求范围）；已在 §7 风险里点名 |
-
-## 7. 风险与遗留
-
-| # | 风险 | 处置 |
-|---|------|------|
-| R1 | **`deploy/seed/02-app-role.sql` 被修改**：重跑时会对 `platform_config` 再收一次直接 DML | 这是保持 AC-S-062 在「补建角色」场景下仍成立的**必要**改动（否则 `GRANT ALL TABLES` 会把迁移里的 REVOKE 盖回去）。已加条件 `to_regclass`，表不存在时跳过 |
-| R2 | 平台级写一次请求写 N 条 → epoch +N | 正确性不受影响；若要「一次请求 +1」，需改函数签名为批量（规格未要求） |
-| R3 | `ConfigResolver` 的「先 refresh 再 resolve」是**调用约定**，不是类型强制 | 平台 HTTP 中间件已统一 refresh；业务模块直接调用同步 trait 时若忘了 refresh，会读到 `None`（fail closed，不会读旧值） |
-| R4 | E2E 依赖 `DATABASE_URL_TEST` 与本机容器 | `scripts/e2e-server.sh` 已说明前置；`playwright.config.ts` 的 webServer 会自动迁移 + 起服务 |
-| R5 | C-5 扫描器修了「生命周期被当字符字面量」的缺陷 | 新增 2 条单元测试守住；影响面是**修复**（此前 permission.rs 无生命周期所以未暴露） |
-| R6 | `platform_space_config` 同时由迁移与 `cargo xtask tenant-policies` 建策略 | 两者条件/名字一致（`platform_space_config_tenant_isolation`），幂等 |
-| R7 | `feature-meta/verification-report.md` 与 `traceability.md` 覆盖了分支上原有的 REQ-009 副本 | 这两个文件在 `feature/REQ-010` 分支上本是模板副本；本报告替换为 REQ-010 内容 |
-
-## 8. 实际命令与输出（可复跑）
-
-```bash
-# 1) 全量 Rust（真实库用例默认 ignored）
-export CARGO_TARGET_DIR=/home/myg133/Projects/system_seed/code/target
-export DATABASE_URL_TEST='postgres://base:base@127.0.0.1:5432/base_test'
-cargo test --workspace -- --test-threads=2
-# → 475 passed / 0 failed / 70 ignored
-
-# 2) 集成（重置 base_test + include-ignored）
-./scripts/test-integration.sh
-# → 539 passed / 0 failed / 0 ignored；容器数量 2 → 2
-
-# 3) lint / 结构
-cargo fmt --all --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo xtask check-deps
-cargo xtask check-modules
-cargo xtask capabilities --check
-DATABASE_URL='postgres://base:base@127.0.0.1:5432/base_test' cargo xtask tenant-policies --check
-./scripts/sync-contracts.sh
-
-# 4) 前端
-pnpm install --offline --frozen-lockfile
-pnpm -r test        # → 19 passed
-pnpm -r check       # → 0 errors / 0 warnings
-pnpm --filter @base/shell build
-
-# 5) E2E（同源：platform-server 托管 apps/shell/dist）
-pnpm run test:e2e   # → 2 passed
-
-# 6) 同源手工冒烟（无 IAM 时公开品牌仍可用）
-DATABASE_URL='postgres://base_app:base@127.0.0.1:5432/base_test' \
-BASE_STATIC_DIR=/tmp/req010-static BASE_MANIFEST_ROOT=. SERVER_PORT=18080 \
-  ./target/debug/base serve
-curl -s -H 'X-Tenant-Id: tenant-a' http://127.0.0.1:18080/api/config/branding
-# → logo=/branding/tenant-a.svg（T1 租户值）
-curl -s http://127.0.0.1:18080/api/config/branding
-# → logo=/branding/platform-a.svg（平台默认）
-curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:18080/api/config/entries?keys=logo'
-# → 401
-```
-
-## 9. 权限点三件套与注册表对账
-
-| 项 | 值 |
+| 项 | 说明 |
 |---|---|
-| manifest | `crates/platform-config/manifest.json`（4 个权限点） |
-| 种子迁移 | `migrations/20261118000902_config_permission_seed.up.sql`（4 行；down 只删这 4 行） |
-| `capabilities/permissions.json` | 4 个 config 点；总数 22 |
-| `platform_permission` 实测 | 4 行（`config:entry:write` / `config:flag:write` / `config:platform:read` / `config:platform:write`） |
-| 启动对账 | `reconcile_permissions` 扫描 `crates/*/manifest.json` 时自然包含本 crate；种子迁移已应用 → 一致（未在「配 IAM」的完整启动里重复跑，见 §6） |
+| `audit.retention.*` / `audit.page.*` 四个配置项登记 | design §8 要求登记进 `crates/platform-config/manifest.json` + 迁移 INSERT（配置项有严格流程，漏 INSERT → 启动失败）。棒 1 的 `crates/platform-audit/manifest.json` 的 `config` 段**留空**（**不引入未登记的配置项**）；归档节奏当前是常量 `RECOMMENDED_INTERVAL_DAYS = 1` |
+| `platform_audit_log` 的**物理清理**（`archive_days`） | design §8：本轮只登记不执行 → 记入 tech-debt |
+| 审计的**分库 / 分区** | 父 AC 之外的容量议题，本轮无判据 |
+
+---
+
+## 4. 棒 2 —— **前端（AC-S-132）** 更新（**追加**，不改上面棒 1 的任何内容）
+
+| AC | 内容 | 状态 | 落点 / 依据 |
+|---|---|---|---|
+| **AC-S-132** | 审计查询界面：列表、分页、过滤、字段展示 | **已实现（前端侧；数据类 E2E 待后端路由落地）** | `apps/shell/src/lib/audit-api.ts` + `apps/shell/src/pages/Audit.svelte` + `apps/shell/src/lib/routes.ts`（`/admin/audit`，权限点 `audit:events:read`，路由 `load` 取首屏 → 守卫不放行时目标接口请求数 **0**）；**游标取数 + 游标栈页码指示**（D169）；5 个错误码 i18n（D170-1）；E2E 夹具（`scripts/seed-e2e.sh`：`u-perm-audit@example.com` + 11 条审计记录，D170-2） |
+
+**测试数字（真跑）**：`@base/shell` **206 passed**（棒 1 后 195 → **+11**）／`@base/i18n` **43 passed**／
+`@base/sdk` **38 passed**／`pnpm -r build` 全绿／`svelte-check` 0 errors 0 warnings／
+**E2E 全量 30 passed / 5 skipped / 0 failed**（审计页 1 passed = TC-014-118/119 真跑通过；
+5 条数据类按「**被测系统未就绪**」跳过 —— `crates/platform-server/src/audit.rs` 尚未落地，
+探测口径见自验报告 §5.3）。
+
+**详见**：[req-014-dev-frontend-round2.md](req-014-dev-frontend-round2.md)（含 2 条需 BA 确认的发现：
+① 后端拒绝「游标 + 任何排序」；② 未注册的 `/api/...` 回落成 SPA → 就绪探测必须看内容类型）。
+
+---
+
+## 5. 棒 2 —— **后端（接入与接口）** 更新（**追加**，不改上面棒 1 的任何内容）
+
+- **本棒范围**：D171 链尖 + 末尾截断检出、D172 驼峰拆词、业务模块埋点（iam / rbac / config / org）、
+  sink 装配（D150）、`/api/audit` 路由、全局中间件（D149）、xtask、D178 配置登记、**D180**（静态回落的 API 前缀）。
+- **详细自验**（逐 AC 断言、逐 crate 测试数字、5 处变异验证证据）：见
+  [req-014-dev-backend-integration.md](req-014-dev-backend-integration.md)
+
+| AC | 内容 | 状态 | 落点 / 依据 |
+|---|---|---|---|
+| **AC-S-022** | 哈希链可校验：篡改任一条目即告警 | **已实现** | 棒 1 的校验器 + **本棒**的 D171 链尖（`platform_audit_chain_state.tip_hash` + `platform_audit_tip_hash`）→ **末尾截断**也能检出（`a_truncated_online_tail_is_detected_after_the_archive`）；**HTTP 入口** `GET /api/audit/verify`（`crates/platform-server/src/audit.rs`）+ **`cargo xtask audit verify`**（实测：篡改一条 → `失败（断裂 1 条）` + **exit=1**） |
+| **AC-S-126** | 审计记录跨租户不可见（数据库强制） | **已实现（本棒补齐接入面）** | 三张表的 RLS + `WITH CHECK`（棒 1）；**本棒**新增的三个业务模块埋点全部走**租户上下文**（`RequestContext.tenant_id`）→ 事件**无法**写到别的租户；`platform_audit_tip_hash` / `platform_audit_archive_move` 有**显式租户守卫** |
+| **AC-S-127** | 登录审计：成功与失败各一条，含 IP 与设备，不含凭据 | **已实现** | `crates/platform-iam/src/audit.rs` 的 `login_event()`（**结构上无法**产出含账号名的失败事件）+ `crates/platform-iam/src/service.rs` 的三条失败路径各写 1 条；**全局中间件** `crates/platform-server/src/client_info.rs` 填 `client_ip`（`x-forwarded-for` 第一跳）/ `user_agent`；`tests/audit_events.rs` 4 条真库用例断言「成功 1 条 / 失败 1 条 / 两条失败路径**条数相同**（不可枚举）/ 审计写失败 → **503 `AUDIT_SINK_UNAVAILABLE`**」 |
+| **AC-S-128** | 权限变更审计：授予 / 撤销 / 创建 / 删除各一条 | **已实现** | `crates/platform-rbac/src/service.rs` 四处埋点（`rbac.role.create/delete/grant/revoke`）；`before` / `after` 是**排序后**的字符串数组；**新增** `crates/platform-rbac/tests/audit_events.rs` 5 条真库用例逐条断言事件码 / `objectType` / `objectId` / 两侧数组 / 排序 |
+| **AC-S-129** | 统一埋点入口：业务模块不需自建审计表 | **已实现（本棒补齐「注入」那一半）** | **装配路径落地**：`crates/platform-server/src/main.rs` 构造 `PgAuditSink` → `Arc<dyn AuditSink>` → 注入 iam / rbac / config / org / sso-recorder；既有 recorder trait 的**签名一律未改**（`SsoAuditRecorder` / org 的 `AuditRecorder` 都实现**同一个 trait**）；棒 1 的扫描用例仍绿（Rust 侧 **0** 命中 + `migrations/**` 恰好 **1** 处 + 阳性对照） |
+| **AC-S-130** | 审计查询接口：分页 / 过滤 / 排序 / 权限控制 | **已实现（HTTP 层）** | `crates/platform-server/src/audit.rs`：`GET /api/audit/events`（**参数自解析** → 非法值 **400 `AUDIT_INVALID_FILTER`**、超上限夹到 200）、`GET /api/audit/events/{id}`（404 `AUDIT_EVENT_NOT_FOUND`）；权限点走 `platform-audit` 的**鉴权薄封装**（D160，**不**在本文件写权限点字面量）；`tenant_id` 查询参数**忽略 + warn**（D162）；响应字段 **camelCase**（D167）；⚠️ **游标 + 排序 → 400** 是本仓的**收紧**（D179，契约 C7 未写 → 见自验报告 §5 偏离 4） |
+| **AC-S-131** | 保留策略与归档：超期记录搬入归档表，归档表同样 append-only | **已实现（本棒补齐「执行入口」）** | 棒 1 的 `platform_audit_archive_move` + `ArchiveService`；**本棒**：`ArchiveService::DEFAULT_ONLINE_DAYS = 90`（与登记的 `audit.retention.onlineDays` 一致）、`archive_older_than()`、**HTTP 入口** `POST /api/audit/archive`（权限点 `audit:archive:run`）与 **`cargo xtask audit archive --tenant <id>`**（**单租户**，D158；**应用角色**连接，D174）；实测：`已归档租户 tenant-b 的超期记录：1 条`，旧记录进归档表、新记录留在线表 |
+
+**测试数字（真跑）**：**912 passed / 0 failed / 0 ignored**（11 个 crate，命令见自验报告 §2）；
+逐 crate：`platform-core` 153 / `platform-audit` 46 / `platform-iam` 178 / `platform-rbac` 83 /
+`platform-config` 88 / `platform-org` 93 / `platform-server` 121 / `platform-db` 46 /
+`platform-schema` 20 / `xtask` 51 / `sandbox` 33。
+**6 处变异验证全部变红并逐字节还原**（自验报告 §3：M1 末尾截断 / M2 驼峰拆词 / M3 API 前缀 /
+M4 `after` 排序 / M5 `before` 排序 / M6 路由提取器接线）。
+**另外如实记录两个本棒自己写出来、又在交付前抓到的接线 bug**（`Extension<ReqCtx>` / `Extension<Arc<AuditState>>`
+→ `/api/audit/*` 会全返回 **500**）与对应的兜底用例，见自验报告 §3.6。
+**真实库**（`base_test`）：3 张表 + 7 个函数 + 迁移 `20261120000400`（4 个 `audit.*` 配置项）全部就位。
+
+**需 BA 裁定（3 条，详见自验报告 §5）**：
+① **D178 的键名**（snake_case vs 契约 C9 的 camelCase）—— 本棒按 camelCase 落地并留了映射表；
+② `audit.page.defaultSize` = 50 vs 契约 C7 的默认 limit = 20 —— 本棒**只登记不执行**，行为按 C7；
+③ 契约 C6 是否强制 `application/problem+json` —— 全平台 `problem_response` 目前统一 `application/json`，
+本棒**只改错误体形状**、不另立一套 Content-Type。

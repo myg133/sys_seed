@@ -8,17 +8,44 @@ use std::path::{Component, Path, PathBuf};
 use axum::body::Body;
 use axum::http::{StatusCode, Uri, header};
 use axum::response::Response;
+use platform_core::RequestContext;
+use platform_core::problem::{ProblemDetails, problem_response};
 
 /// 根路径默认回落到 `index.html`（单页应用路由）。
 const INDEX_FILE: &str = "index.html";
+
+/// API 前缀（**不回落**成 SPA —— 见 [`is_api_path`]）。
+const API_PREFIX: &str = "/api";
+
+/// 该路径是否是 **API 路径**（`/api` 本身，或 `/api/**`）。
+///
+/// # 为什么 API 路径**不回落**成 SPA（D180）
+///
+/// 回落条件是「路径**没有扩展名**」→ `/api/audit/events` 没有扩展名 → 回落
+/// `index.html` → 未实现的端点返回 **200 + `text/html`**。
+///
+/// 三个后果：
+///
+/// 1. 客户端按 JSON 解析会炸，且**错误码语义完全错**（200 而不是 404）；
+/// 2. 契约 C6 要求错误响应是**机器可读的 ProblemDetails**（而不是 HTML）；
+/// 3. 「就绪探测」只能靠「响应是不是 JSON」这种**间接**判据 —— 脆弱。
+///
+/// → API 前缀的未命中一律 **404**（带 `ProblemDetails`）。
+/// ⚠️ **只改 API 前缀**的回落行为 —— 静态资源（`/assets/**`、`/`、`index.html`）
+/// 的既有回落逻辑**一字不改**。
+fn is_api_path(path: &str) -> bool {
+    path == API_PREFIX || path.starts_with("/api/")
+}
 
 /// 按 URI 解析出要返回的文件内容。
 ///
 /// - 路径逃逸（`..`）一律拒绝
 /// - 文件不存在且路径不带扩展名时，回落到 `index.html`（前端路由）
 /// - 文件不存在且路径带扩展名时，返回 404
+/// - **文件不存在且路径在 `/api/` 前缀下时，返回 404**（**不回落**成 SPA，D180）
 pub async fn serve(root: &Path, uri: &Uri) -> Response {
-    let Some(relative) = safe_relative_path(uri.path()) else {
+    let path = uri.path();
+    let Some(relative) = safe_relative_path(path) else {
         return not_found("非法路径");
     };
 
@@ -30,6 +57,10 @@ pub async fn serve(root: &Path, uri: &Uri) -> Response {
         },
         Ok(_) => not_found("不是文件"),
         Err(_) => {
+            // 🔑 API 前缀**不回落**成 SPA（D180）：未实现的端点必须 404。
+            if is_api_path(path) {
+                return api_not_found(path);
+            }
             // 前端路由：路径无扩展名 → 回落 index.html
             if relative.extension().is_none() {
                 let index = root.join(INDEX_FILE);
@@ -108,6 +139,22 @@ fn not_found(reason: &str) -> Response {
         .expect("静态响应构造不应失败")
 }
 
+/// API 路径未命中时的 **404**（RFC 9457 错误体，契约 C6 的形状）。
+///
+/// ⚠️ 与静态资源的 404 **形态不同**：API 路径的未命中是**接口语义**上的
+/// 「端点不存在」→ 必须是机器可读的错误体（契约 C6），
+/// 而不是一段纯文本。
+///
+/// ⚠️ **Content-Type 跟随平台统一口径**（`application/json`）——
+///    平台**所有**错误响应都走 `platform_core::problem::problem_response`
+///    （同一个函数、同一张表）→ 这里**不另立一套**。
+///    契约 C6 钉的是**错误体的形状**（`code` / `status` / `detail` / `instance` /
+///    `trace_id`），不是 Content-Type。
+fn api_not_found(path: &str) -> Response {
+    let ctx = RequestContext::new();
+    problem_response(&ProblemDetails::not_found(&ctx, path, "endpoint"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,5 +197,55 @@ mod tests {
             content_type(Path::new("unknown.bin")),
             "application/octet-stream"
         );
+    }
+
+    /// D180：API 前缀**不回落**成 SPA。
+    #[test]
+    fn api_paths_are_recognized() {
+        assert!(is_api_path("/api"));
+        assert!(is_api_path("/api/"));
+        assert!(is_api_path("/api/audit/events"));
+        assert!(is_api_path("/api/audit/events/123"));
+        // 相似但**不是** API 前缀的路径 → 仍然按前端路由回落。
+        assert!(!is_api_path("/apidocs"));
+        assert!(!is_api_path("/admin/audit"));
+        assert!(!is_api_path("/"));
+        assert!(!is_api_path("/assets/app.js"));
+    }
+
+    /// D180：未实现的 API 端点 → **404**（不是 200 + HTML）。
+    #[tokio::test]
+    async fn an_unknown_api_path_returns_404_instead_of_the_spa() {
+        let root = std::env::temp_dir().join("base-static-fallback-test");
+        tokio::fs::create_dir_all(&root)
+            .await
+            .expect("应当能建临时目录");
+        tokio::fs::write(root.join(INDEX_FILE), b"<html>spa</html>")
+            .await
+            .expect("应当能写入口文件");
+
+        let uri: Uri = "/api/audit/events".parse().expect("URI 应当合法");
+        let response = serve(&root, &uri).await;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        // 错误体是**机器可读**的（契约 C6 的形状），不是一段纯文本。
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("应当能读出响应体");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("错误体应当是 JSON");
+        assert_eq!(value["code"], "NOT_FOUND");
+        assert_eq!(value["status"], 404);
+        assert_eq!(value["instance"], "/api/audit/events");
+        assert!(
+            !value["trace_id"].as_str().unwrap_or_default().is_empty(),
+            "错误体必须带 trace_id（契约 C6）"
+        );
+
+        // 前端路由**仍然**回落成 SPA（既有行为一字不改）。
+        let spa: Uri = "/admin/audit".parse().expect("URI 应当合法");
+        let spa_response = serve(&root, &spa).await;
+        assert_eq!(spa_response.status(), StatusCode::OK);
+
+        tokio::fs::remove_dir_all(&root).await.ok();
     }
 }

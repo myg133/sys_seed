@@ -1,10 +1,14 @@
 /**
- * 路由表（REQ-011 的最小壳 + REQ-012 的**一条通配路由**）。
+ * 路由表（REQ-011 的最小壳 + REQ-012 的**一条通配路由** + REQ-014 的审计页）。
  *
  * # 受保护页的权限点
  *
  * `/admin/roles` 声明 `rbac:role:write` ——
  * 守卫不放行时，**它的 `load` 不会被调用** → `/api/rbac/roles` 的请求计数为 **0**。
+ *
+ * `/admin/audit` 声明 `audit:events:read`（契约 C4；REQ-014 / AC-S-132）——
+ * 同样的机制：守卫不放行 → 地址改写成 `/403` → **路由的 `load` 不会被调用**
+ * → `GET /api/audit/events` 的请求计数为 **0**。
  *
  * # 零代码的关键是通配路由（D104 / AC-S-085）
  *
@@ -18,11 +22,15 @@
 
 import type { ApiClient } from '@base/sdk';
 
+import { AUDIT_EVENTS_PERMISSION, loadAuditFirstPage, type AuditLoadResult } from './audit-api';
 import type { RouteDefinition } from './router';
 import { SSO_CALLBACK_ROUTE_PATH } from './sso-api';
 
 /** 数据页面的通配路由（D104）。 */
 export const SCHEMA_ROUTE_PATH = '/schema/:moduleId/:entityKey';
+
+/** 审计查询页的路由（REQ-014 / AC-S-132）。 */
+export const AUDIT_ROUTE_PATH = '/admin/audit';
 
 /** 受保护页的数据接口。 */
 export const PROTECTED_ROLES_PATH = '/api/rbac/roles';
@@ -53,6 +61,7 @@ export function toRoles(loaded: unknown): Role[] {
 export function createRoutes(
   client: ApiClient,
   onRoles?: (roles: unknown) => void,
+  onAudit?: (result: AuditLoadResult) => void,
 ): readonly RouteDefinition[] {
   // `title` 存**翻译键**而不是文案：路由表在模块加载时构造，
   // 存文案会把它钉死在加载时的语言上（页面标题由渲染层用 `t()` 取）。
@@ -79,6 +88,24 @@ export function createRoutes(
       load: async () => {
         const roles = await client.get(PROTECTED_ROLES_PATH);
         onRoles?.(roles);
+      },
+    },
+    {
+      // 审计查询页（REQ-014 / AC-S-132）：权限点 `audit:events:read`。
+      //
+      // 首屏数据在**路由的 `load`** 里取（与 `/admin/roles` 同一套机制）：
+      // 守卫不放行 → **`load` 不会被调用**（`router.ts:244-250`）
+      // → `GET /api/audit/events` 的请求计数为 **0**。
+      //
+      // 翻页 / 过滤由页面自己再发请求（服务端分页：每页一次新的请求）。
+      path: AUDIT_ROUTE_PATH,
+      title: 'nav.audit',
+      permission: AUDIT_EVENTS_PERMISSION,
+      load: async () => {
+        // ⚠️ **先取数据、再回调**：`onAudit?.(await …)` 会在没有回调时
+        // 把整个表达式短路掉 → **请求根本不会发**（数据永远不来）。
+        const result = await loadAuditFirstPage(client);
+        onAudit?.(result);
       },
     },
   ];

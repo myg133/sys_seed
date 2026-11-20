@@ -28,6 +28,7 @@
 
 pub mod audit;
 pub mod binding;
+pub mod bridge;
 pub mod config;
 pub mod ldap;
 pub mod oidc;

@@ -60,6 +60,25 @@ pub struct SsoAuditPayload {
     pub user_agent: String,
     /// 失败时的错误码（成功时为 `None`）。
     pub code: Option<String>,
+    /// 租户（**REQ-014 桥接用**）。
+    ///
+    /// ⚠️ **不序列化** —— 载荷的键集合由**白名单**钉死（`Serialize` 是手写的），
+    /// 加这个字段**不改变**任何事件的键集合（AC-S-108 的断言不受影响）。
+    ///
+    /// 为什么需要它：既有的 `SsoAuditRecorder::record` **签名不可改**
+    /// （D135）→ 没有 `ctx` → 桥接到平台 sink 时**不知道租户**。
+    /// → 由**知道租户的服务**在构造载荷时填上。
+    pub tenant_id: Option<String>,
+}
+
+impl SsoAuditPayload {
+    /// 绑定租户（REQ-014 桥接用）。
+    ///
+    /// 返回 `self`（链式）。
+    pub fn with_tenant(mut self, tenant_id: impl Into<String>) -> Self {
+        self.tenant_id = Some(tenant_id.into());
+        self
+    }
 }
 
 impl SsoAuditPayload {
@@ -78,6 +97,7 @@ impl SsoAuditPayload {
             ip: ip.into(),
             user_agent: user_agent.into(),
             code: None,
+            tenant_id: None,
         }
     }
 
@@ -94,6 +114,7 @@ impl SsoAuditPayload {
             ip: ip.into(),
             user_agent: String::new(),
             code: Some(code.into()),
+            tenant_id: None,
         }
     }
 
@@ -110,6 +131,7 @@ impl SsoAuditPayload {
             ip: String::new(),
             user_agent: String::new(),
             code: None,
+            tenant_id: None,
         }
     }
 }

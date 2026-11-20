@@ -16,9 +16,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use platform_core::RequestContext;
+use platform_core::extension::audit::{AuditEvent, AuditSink, AuditSinkSlot};
 use platform_core::extension::permission::{DataScope, PermissionProvider};
+use serde_json::json;
 
 use crate::entity::{BUILTIN_ADMIN, BUILTIN_USER, PermissionPattern, Role, RolePermission};
 use crate::error::RbacError;
@@ -30,6 +33,26 @@ use crate::store::{RbacStore, RoleRow};
 pub struct RbacService {
     store: RbacStore,
     policy: ScopePolicy,
+    /// 平台审计 sink（REQ-014；**可选** —— 未注入时不埋点，但**每次 warn**）。
+    audit: AuditSinkSlot,
+}
+
+/// 造一条**权限变更**审计事件（租户与操作人取自请求上下文）。
+///
+/// ⚠️ 租户的**唯一来源**是请求上下文（契约 C3）—— 不从参数取。
+/// ⚠️ 没有操作人（未认证）→ **不设** `actor_id`（不是空串）。
+fn audit_event(
+    ctx: &RequestContext,
+    action: &str,
+    object_type: &str,
+    object_id: &str,
+) -> AuditEvent {
+    let mut event = AuditEvent::new(ctx.tenant_id().unwrap_or_default(), action, object_type)
+        .with_object_id(object_id);
+    if let Some(user_id) = ctx.user_id() {
+        event = event.with_actor(user_id);
+    }
+    event
 }
 
 /// 一个角色的视角（供 HTTP 层返回）。
@@ -120,7 +143,22 @@ impl RoleGraph {
 impl RbacService {
     /// 构造服务。
     pub fn new(store: RbacStore, policy: ScopePolicy) -> Self {
-        Self { store, policy }
+        Self {
+            store,
+            policy,
+            audit: AuditSinkSlot::default(),
+        }
+    }
+
+    /// 注入**平台审计 sink**（REQ-014 D150）。
+    ///
+    /// 装配层（`platform-server`）构造 `PgAuditSink` 后以 `Arc<dyn AuditSink>`
+    /// 注入 —— `platform-rbac` **只认 core 的 trait** → 不依赖 `platform-audit`
+    /// → **不成环**（依赖方向是 `rbac → iam`，反过来会成环）。
+    ///
+    /// 返回 `false` = 已注入过（不覆盖）。
+    pub fn with_audit_sink(&self, sink: Arc<dyn AuditSink>) -> bool {
+        self.audit.set(sink)
     }
 
     /// 底层的数据访问。
@@ -131,6 +169,60 @@ impl RbacService {
     /// 范围策略。
     pub fn policy(&self) -> &ScopePolicy {
         &self.policy
+    }
+
+    // -- 审计埋点（REQ-014 AC-S-128 / D163）------------------------------
+
+    /// 角色的**直接授权**权限点集合（**排序后**的字符串数组）。
+    ///
+    /// ⚠️ 是**直接**授权（不含继承展开）—— 审计要记的是「这个角色的授权行」
+    /// 变了，不是「这个用户的有效权限」变了。
+    async fn role_permission_codes(
+        &self,
+        ctx: &RequestContext,
+        role_id: &str,
+    ) -> Result<Vec<String>, RbacError> {
+        let mut codes: Vec<String> = self
+            .store
+            .list_permissions_of_role(ctx, role_id)
+            .await
+            .map_err(|error| RbacError::Internal {
+                reason: format!("the role permissions could not be read: {error}"),
+            })?
+            .into_iter()
+            .map(|row| row.permission_code)
+            .collect();
+        codes.sort();
+        Ok(codes)
+    }
+
+    /// 记一条**权限变更**审计事件。
+    ///
+    /// # 失败语义（与登录**不同**，刻意）
+    ///
+    /// 登录是「**还没**生效」就能拒绝（D157）→ 审计写失败 → **拒绝登录**。
+    ///
+    /// 权限变更**已经提交**了 → 这时再返回错误是**撒谎**（客户端会以为没改，
+    /// 重试就变成重复应用）。→ **记一条 error 日志**（可观测），
+    /// **操作本身照常返回成功**。
+    ///
+    /// ⚠️ 未装配 sink → **跳过并 warn**（「以为在审计其实没有」比没有更危险）。
+    async fn record_audit(&self, ctx: &RequestContext, event: AuditEvent) {
+        let Some(sink) = self.audit.get() else {
+            tracing::warn!(
+                event = %event.action,
+                "a permission change audit event was produced but no platform audit sink \
+                 is installed; the event is NOT persisted"
+            );
+            return;
+        };
+        if let Err(error) = sink.record(ctx, &event).await {
+            tracing::error!(
+                event = %event.action,
+                code = error.code(),
+                "the platform audit sink could not persist a permission change audit event"
+            );
+        }
     }
 
     // -- 权限点注册表 ----------------------------------------------------
@@ -292,7 +384,15 @@ impl RbacService {
             reason: format!("the transaction could not be committed: {error}"),
         })?;
 
-        self.get_role(ctx, &role.id).await
+        // 🔑 审计：角色创建（D163：`before = NULL` / `after = {"permissions":[]}`）。
+        let view = self.get_role(ctx, &role.id).await?;
+        self.record_audit(
+            ctx,
+            audit_event(ctx, "rbac.role.create", "role", &role.id)
+                .with_after(json!({ "permissions": Vec::<String>::new() })),
+        )
+        .await;
+        Ok(view)
     }
 
     /// 删角色（**内置角色受保护**）。
@@ -304,6 +404,8 @@ impl RbacService {
                 role_code: row.code.clone(),
             });
         }
+        // 🔑 变更前的权限集合（审计要记「删掉之前它有什么」）。
+        let before = self.role_permission_codes(ctx, role_id).await?;
         let mut tx = self
             .store
             .db()
@@ -327,6 +429,13 @@ impl RbacService {
         tx.commit().await.map_err(|error| RbacError::Internal {
             reason: format!("the transaction could not be committed: {error}"),
         })?;
+        // 🔑 审计：角色删除（D163：`before = {"permissions":[…]}` / `after = NULL`）。
+        self.record_audit(
+            ctx,
+            audit_event(ctx, "rbac.role.delete", "role", role_id)
+                .with_before(json!({ "permissions": before })),
+        )
+        .await;
         Ok(())
     }
 
@@ -421,6 +530,14 @@ impl RbacService {
             });
         }
 
+        // 🔑 变更前后的权限集合（审计要记「授权之前 / 之后它有什么」）。
+        let before = self.role_permission_codes(ctx, role_id).await?;
+        let mut after = before.clone();
+        if !after.iter().any(|code| code == permission_code) {
+            after.push(permission_code.to_string());
+            after.sort();
+        }
+
         let mut tx = self
             .store
             .db()
@@ -444,6 +561,15 @@ impl RbacService {
         tx.commit().await.map_err(|error| RbacError::Internal {
             reason: format!("the transaction could not be committed: {error}"),
         })?;
+        // 🔑 审计：授予权限（D163：`before = {"permissions":[…]}` /
+        // `after = {"permissions":[…+p]}`）。
+        self.record_audit(
+            ctx,
+            audit_event(ctx, "rbac.role.grant", "role", role_id)
+                .with_before(json!({ "permissions": before }))
+                .with_after(json!({ "permissions": after })),
+        )
+        .await;
         Ok(())
     }
 
@@ -461,6 +587,10 @@ impl RbacService {
                 role_code: row.code.clone(),
             });
         }
+        // 🔑 变更前后的权限集合（撤销**之后**少了那个权限点）。
+        let before = self.role_permission_codes(ctx, role_id).await?;
+        let mut after = before.clone();
+        after.retain(|code| code != permission_code);
         let mut tx = self
             .store
             .db()
@@ -484,6 +614,15 @@ impl RbacService {
         tx.commit().await.map_err(|error| RbacError::Internal {
             reason: format!("the transaction could not be committed: {error}"),
         })?;
+        // 🔑 审计：撤销权限（D163：`before = {"permissions":[…+p]}` /
+        // `after = {"permissions":[…]}` —— **方向与授权相反**）。
+        self.record_audit(
+            ctx,
+            audit_event(ctx, "rbac.role.revoke", "role", role_id)
+                .with_before(json!({ "permissions": before }))
+                .with_after(json!({ "permissions": after })),
+        )
+        .await;
         Ok(())
     }
 

@@ -65,6 +65,36 @@ BEGIN
 END
 $$;
 
+-- ⚠️ **例外：审计表（REQ-014 D147）**。
+--
+-- 审计表是 **append-only** 的：应用角色只允许 SELECT / INSERT，
+-- UPDATE / DELETE 必须被收回（权限层面禁止，契约 C12）。
+--
+-- 上面那句 `GRANT ... ON ALL TABLES` 是补建场景的兜底，它会在**本脚本重跑时**
+-- 把迁移里的 REVOKE 又盖回去 —— **QA 已实测**：
+-- `arwd` → REVOKE → `ar`（成立）→ 重跑种子 → `arwd` → `base_app` 的 `UPDATE`
+-- **成功执行**（无 permission denied）。
+--
+-- 所以这里必须再收一次（表还不存在时跳过：首次建库先跑本脚本、后跑迁移）。
+-- ⚠️ **只写迁移里的 REVOKE 是不够的** —— 第一次跑是绿的，补建脚本之后才红。
+DO $$
+BEGIN
+    IF to_regclass('public.platform_audit_log') IS NOT NULL THEN
+        EXECUTE 'GRANT SELECT, INSERT ON platform_audit_log TO base_platform_app';
+        EXECUTE 'REVOKE UPDATE, DELETE ON platform_audit_log FROM base_platform_app';
+    END IF;
+    IF to_regclass('public.platform_audit_archive') IS NOT NULL THEN
+        EXECUTE 'GRANT SELECT, INSERT ON platform_audit_archive TO base_platform_app';
+        EXECUTE 'REVOKE UPDATE, DELETE ON platform_audit_archive FROM base_platform_app';
+    END IF;
+    -- 链基准表：应用角色**只读**（更新只发生在两个受限的特权函数里）。
+    IF to_regclass('public.platform_audit_chain_state') IS NOT NULL THEN
+        EXECUTE 'GRANT SELECT ON platform_audit_chain_state TO base_platform_app';
+        EXECUTE 'REVOKE INSERT, UPDATE, DELETE ON platform_audit_chain_state FROM base_platform_app';
+    END IF;
+END
+$$;
+
 -- **增量**：之后由本角色（base）创建的表自动授权给应用角色组（省掉逐表 GRANT）
 ALTER DEFAULT PRIVILEGES IN SCHEMA public
     GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO base_platform_app;

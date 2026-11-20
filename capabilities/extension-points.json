@@ -6,6 +6,21 @@
   "traits": [
     {
       "associated_types": [],
+      "description": "审计落点（可对象化）。",
+      "generics": "",
+      "kind": "platform-capability",
+      "methods": [
+        {
+          "declaration": "fn record<'a>(&'a self, ctx: &'a RequestContext, event: &'a AuditEvent) -> BoxFuture<'a, Result<(), AuditError>>",
+          "has_default": false,
+          "name": "record"
+        }
+      ],
+      "name": "AuditSink",
+      "supertraits": "Send + Sync"
+    },
+    {
+      "associated_types": [],
       "description": "审计埋点扩展点。",
       "generics": "",
       "kind": "extension-point",

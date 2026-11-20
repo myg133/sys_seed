@@ -83,21 +83,25 @@ if ! printf 'SELECT 1;\n' | run_sql >/dev/null 2>&1; then
 fi
 
 # --- 模式检查：没有平台表就先跑迁移 ------------------------------------------
+#
+# ⚠️ 审计夹具（REQ-014）需要 `platform_audit_append`（审计写通道）。
+# 迁移没跑 → 夹具写不进去 → E2E 的翻页 / 过滤用例会因为「没有数据」而红。
+# 所以这里把它也算进「模式是否就绪」的判据。
 has_schema() {
   local out
-  out="$(printf "SELECT to_regclass('public.platform_iam_user') IS NOT NULL;\n" | run_sql -tA)" || return 1
+  out="$(printf "SELECT to_regclass('public.platform_iam_user') IS NOT NULL AND to_regprocedure('public.platform_audit_append(text,text,text,text,text,text,text,text,text)') IS NOT NULL;\n" | run_sql -tA)" || return 1
   [ "$out" = 't' ]
 }
 
 if ! has_schema; then
-  echo "base_test 还没有平台表 → 先应用迁移（管理员连接）…"
+  echo "base_test 还没有平台表 / 审计写通道 → 先应用迁移（管理员连接）…"
   if [ -z "${CARGO_TARGET_DIR:-}" ] && [ -d ../code/target ]; then
     CARGO_TARGET_DIR="$(cd ../code/target && pwd)"
     export CARGO_TARGET_DIR
   fi
   DATABASE_URL="$ADMIN_URL" cargo run -q -p platform-server --bin base -- migrate up
   if ! has_schema; then
-    echo "✗ 迁移后仍然缺 platform_iam_user —— 迁移可能失败了。" >&2
+    echo "✗ 迁移后仍然缺 platform_iam_user / platform_audit_append —— 迁移可能失败了。" >&2
     exit 1
   fi
 fi
@@ -119,11 +123,17 @@ E2E_PASSWORD_PHC='$argon2id$v=19$m=16384,t=2,p=1$ZTJlLWZpeHR1cmUtc2FsdC0wMDAx$uN
 # | u-perm-read@example.com  | rbac:role:read + sandbox:demo:read  | 只读 → 能读列表、不能写；看不到 `secret` 字段 |
 # | u-perm-write@example.com | rbac:role:read + rbac:role:write + sandbox:demo:read + sandbox:demo:write + sandbox:demo:secret | 写用户 → 深链可达、CRUD 可跑、能看到 `secret` 字段 |
 # | u-perm-none@example.com  | （无）                              | fail closed |
+# | u-perm-audit@example.com | audit:events:read                   | 审计页的数据用例（REQ-014 / AC-S-132） |
 #
 # `sandbox:demo:*` 是 REQ-012 的权限点（`sandbox` 模块的两个实体共用）。
 # **漏授就会让 `e2e/schema-driven.spec.ts` 的列表请求 403**，而按 D108，
 # 403 必须让用例 **fail**（不是 skip）—— 所以这份清单是 E2E 能否真跑的前提。
 # `sandbox:demo:secret` 只授给写用户：AC-S-084 要的就是「两个用户看到的字段不同」。
+#
+# `audit:events:read` 是 REQ-014 的权限点（登记在
+# `crates/platform-audit/manifest.json`，并由迁移
+# `20261120000300_audit_permission_seed.up.sql` 写进 `platform_permission`）。
+# **漏授就会让 `e2e/audit.spec.ts` 的数据用例 403** → 同样必须 fail，不能 skip。
 #
 # id 用固定值（不是随机 uuid）：重复执行时能精确命中同一行，
 # 也让「用户数不翻倍」这件事一眼可查。**同名既有行除外** —— 冲突时沿用它的 id
@@ -137,7 +147,8 @@ INSERT INTO platform_iam_user (id, tenant_id, username, email, password_hash, st
 VALUES
     ('e2e-user-perm-read',  'tenant-a', 'u-perm-read@example.com',  'u-perm-read@example.com',  :'phc', 'active'),
     ('e2e-user-perm-write', 'tenant-a', 'u-perm-write@example.com', 'u-perm-write@example.com', :'phc', 'active'),
-    ('e2e-user-perm-none',  'tenant-a', 'u-perm-none@example.com',  'u-perm-none@example.com',  :'phc', 'active')
+    ('e2e-user-perm-none',  'tenant-a', 'u-perm-none@example.com',  'u-perm-none@example.com',  :'phc', 'active'),
+    ('e2e-user-perm-audit', 'tenant-a', 'u-perm-audit@example.com', 'u-perm-audit@example.com', :'phc', 'active')
 ON CONFLICT (tenant_id, username) DO UPDATE SET
     email            = EXCLUDED.email,
     password_hash    = EXCLUDED.password_hash,
@@ -146,21 +157,22 @@ ON CONFLICT (tenant_id, username) DO UPDATE SET
     locked_until     = NULL,
     updated_at       = now();
 
--- 2) 角色：两个自定义角色（非内置；内置管理员会拿到注册表全集，不是这里要的）。
+-- 2) 角色：三个自定义角色（非内置；内置管理员会拿到注册表全集，不是这里要的）。
 INSERT INTO platform_role (tenant_id, id, code, name, data_scope, builtin)
 VALUES
     ('tenant-a', 'e2e-role-read',  'e2e-role-read',  'E2E 只读角色',   'ALL', FALSE),
-    ('tenant-a', 'e2e-role-write', 'e2e-role-write', 'E2E 读写角色',   'ALL', FALSE)
+    ('tenant-a', 'e2e-role-write', 'e2e-role-write', 'E2E 读写角色',   'ALL', FALSE),
+    ('tenant-a', 'e2e-role-audit', 'e2e-role-audit', 'E2E 审计角色',   'ALL', FALSE)
 ON CONFLICT (tenant_id, id) DO UPDATE SET
     code       = EXCLUDED.code,
     name       = EXCLUDED.name,
     data_scope = EXCLUDED.data_scope,
     builtin    = FALSE;
 
--- 3) 授权：先清空这两个角色的授权再按清单写回（收敛，不积累历史垃圾）。
+-- 3) 授权：先清空这三个角色的授权再按清单写回（收敛，不积累历史垃圾）。
 DELETE FROM platform_role_permission
  WHERE tenant_id = 'tenant-a'
-   AND role_id IN ('e2e-role-read', 'e2e-role-write');
+   AND role_id IN ('e2e-role-read', 'e2e-role-write', 'e2e-role-audit');
 
 INSERT INTO platform_role_permission (tenant_id, role_id, permission_code, data_scope)
 VALUES
@@ -170,7 +182,8 @@ VALUES
     ('tenant-a', 'e2e-role-write', 'rbac:role:write',    NULL),
     ('tenant-a', 'e2e-role-write', 'sandbox:demo:read',  NULL),
     ('tenant-a', 'e2e-role-write', 'sandbox:demo:write', NULL),
-    ('tenant-a', 'e2e-role-write', 'sandbox:demo:secret', NULL)
+    ('tenant-a', 'e2e-role-write', 'sandbox:demo:secret', NULL),
+    ('tenant-a', 'e2e-role-audit', 'audit:events:read',  NULL)
 ON CONFLICT (tenant_id, role_id, permission_code) DO NOTHING;
 
 -- 4) 绑定：**用查出来的实际 id**（第 1 步的 upsert 只把同名既有行「修好登录字段」，
@@ -181,7 +194,7 @@ DELETE FROM platform_user_role
    AND user_id IN (
        SELECT id FROM platform_iam_user
         WHERE tenant_id = 'tenant-a'
-          AND username IN ('u-perm-read@example.com', 'u-perm-write@example.com', 'u-perm-none@example.com')
+          AND username IN ('u-perm-read@example.com', 'u-perm-write@example.com', 'u-perm-none@example.com', 'u-perm-audit@example.com')
    );
 
 INSERT INTO platform_user_role (tenant_id, user_id, role_id)
@@ -189,7 +202,8 @@ SELECT 'tenant-a', u.id, r.role_id
   FROM platform_iam_user u
   JOIN (VALUES
         ('u-perm-read@example.com',  'e2e-role-read'),
-        ('u-perm-write@example.com', 'e2e-role-write')
+        ('u-perm-write@example.com', 'e2e-role-write'),
+        ('u-perm-audit@example.com', 'e2e-role-audit')
        ) AS r(username, role_id) ON r.username = u.username
  WHERE u.tenant_id = 'tenant-a'
 ON CONFLICT (tenant_id, user_id, role_id) DO NOTHING;
@@ -245,6 +259,65 @@ ON CONFLICT (scope_key) DO UPDATE SET
     epoch      = platform_config_epoch.epoch + 1,
     updated_at = now();
 
+-- 8) REQ-014 的审计记录夹具（AC-S-132 的翻页 / 过滤用例需要）。
+--
+--    # 为什么走 `platform_audit_append`（而不是直接 INSERT）
+--
+--    直接 INSERT 的行 `hash` / `prev_hash` 与内容**不自洽** → 链校验必然报断裂，
+--    还会连累别的判据。`platform_audit_append` 是**平台唯一的审计写通道**
+--    （SECURITY DEFINER；同租户 advisory lock；敏感键硬拒绝；`clock_timestamp()`
+--      生成时间戳；规范事件体 → sha256）→ 用它造的夹具**链是自洽的**，
+--    不参与链校验断言也不会污染任何别的判据。
+--
+--    # 幂等（D101）
+--
+--    按 (tenant_id, object_type, object_id) 判存在：已存在就**不重复写**。
+--    既不删行也不改行 → 重跑不产生重复数据，也**不打断**已有的链。
+--
+--    # 为什么是 11 条
+--
+--    翻页用例把每页条数调到 10 → 第 1 页 10 条 + 第 2 页 1 条
+--    → 响应带 `nextCursor`（「下一页」可点）→ 「翻页后记录不重复」可判。
+--
+--    # 形状
+--
+--    `actor_id` / `action` **互不相同** → 按操作人 / 按动作过滤各自只命中 1 条
+--    （QA 的 TC-014-115 / TC-014-116 的前置条件）。
+--    `ip` 给一个文档地址段（TEST-NET-3）→ 「来源 IP」列非空（TC-014-112）。
+DO $$
+DECLARE
+    v_index  INTEGER;
+    v_actor  TEXT;
+    v_object TEXT;
+    v_action TEXT;
+BEGIN
+    FOR v_index IN 1..11 LOOP
+        v_actor  := format('e2e-actor-%s',  lpad(v_index::text, 2, '0'));
+        v_object := format('e2e-obj-%s',    lpad(v_index::text, 2, '0'));
+        v_action := format('e2e.fixture.item-%s', lpad(v_index::text, 2, '0'));
+        IF NOT EXISTS (
+            SELECT 1
+              FROM platform_audit_log
+             WHERE tenant_id = 'tenant-a'
+               AND object_type = 'e2e_fixture'
+               AND object_id = v_object
+        ) THEN
+            PERFORM platform_audit_append(
+                'tenant-a',
+                v_actor,
+                v_action,
+                'e2e_fixture',
+                v_object,
+                '{"name":"old"}',
+                '{"name":"new"}',
+                '203.0.113.10',
+                'e2e-seed-agent'
+            );
+        END IF;
+    END LOOP;
+END
+$$;
+
 COMMIT;
 SQL
 
@@ -255,7 +328,8 @@ WITH fixture AS (
     SELECT * FROM (VALUES
         ('u-perm-read@example.com',  2),
         ('u-perm-write@example.com', 3),
-        ('u-perm-none@example.com',  1)
+        ('u-perm-none@example.com',  1),
+        ('u-perm-audit@example.com', 1)
     ) AS t(username, expected_users)
 )
 SELECT u.username,
@@ -271,19 +345,20 @@ SELECT u.username,
          WHERE r.tenant_id = 'tenant-a' AND r.user_id = u.id) AS granted_permissions
   FROM platform_iam_user u
  WHERE u.tenant_id = 'tenant-a'
-   AND u.username IN ('u-perm-read@example.com', 'u-perm-write@example.com', 'u-perm-none@example.com')
+   AND u.username IN ('u-perm-read@example.com', 'u-perm-write@example.com', 'u-perm-none@example.com', 'u-perm-audit@example.com')
  ORDER BY u.username;
 SQL
 
-# 强断言：三个用户各 **恰好 1 行**（不翻倍），权限点数目符合清单。
+# 强断言：四个用户各 **恰好 1 行**（不翻倍），权限点数目符合清单。
 bad="$(printf '%s\n' \
-  "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username IN ('u-perm-read@example.com', 'u-perm-write@example.com', 'u-perm-none@example.com');" \
+  "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username IN ('u-perm-read@example.com', 'u-perm-write@example.com', 'u-perm-none@example.com', 'u-perm-audit@example.com');" \
   "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username = 'u-perm-read@example.com';" \
   "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username = 'u-perm-write@example.com';" \
   "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username = 'u-perm-none@example.com';" \
+  "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username = 'u-perm-audit@example.com';" \
   | run_sql -tA | tr '\n' ' ')"
-if [ "$bad" != '3 1 1 1 ' ]; then
-  echo "✗ 夹具核对失败：期望 '3 1 1 1'，实际 '$bad'" >&2
+if [ "$bad" != '4 1 1 1 1 ' ]; then
+  echo "✗ 夹具核对失败：期望 '4 1 1 1 1'，实际 '$bad'" >&2
   exit 1
 fi
 
@@ -296,14 +371,16 @@ fi
 # 期望：read=2（rbac:role:read + sandbox:demo:read）
 #       write=5（rbac:role:read/write + sandbox:demo:read/write/secret）
 #       none=0
+#       audit=1（audit:events:read）
 grants="$(printf '%s\n' \
   "SELECT count(*) FROM platform_role_permission p JOIN platform_user_role r ON r.tenant_id = p.tenant_id AND r.role_id = p.role_id JOIN platform_iam_user u ON u.tenant_id = r.tenant_id AND u.id = r.user_id WHERE u.tenant_id = 'tenant-a' AND u.username = 'u-perm-read@example.com';" \
   "SELECT count(*) FROM platform_role_permission p JOIN platform_user_role r ON r.tenant_id = p.tenant_id AND r.role_id = p.role_id JOIN platform_iam_user u ON u.tenant_id = r.tenant_id AND u.id = r.user_id WHERE u.tenant_id = 'tenant-a' AND u.username = 'u-perm-write@example.com';" \
   "SELECT count(*) FROM platform_role_permission p JOIN platform_user_role r ON r.tenant_id = p.tenant_id AND r.role_id = p.role_id JOIN platform_iam_user u ON u.tenant_id = r.tenant_id AND u.id = r.user_id WHERE u.tenant_id = 'tenant-a' AND u.username = 'u-perm-none@example.com';" \
+  "SELECT count(*) FROM platform_role_permission p JOIN platform_user_role r ON r.tenant_id = p.tenant_id AND r.role_id = p.role_id JOIN platform_iam_user u ON u.tenant_id = r.tenant_id AND u.id = r.user_id WHERE u.tenant_id = 'tenant-a' AND u.username = 'u-perm-audit@example.com';" \
   | run_sql -tA | tr '\n' ' ')"
-if [ "$grants" != '2 5 0 ' ]; then
-  echo "✗ 夹具授权核对失败：期望 read=2 / write=5 / none=0，实际 '$grants'" >&2
-  echo "  （REQ-012 的 E2E 需要 sandbox:demo:read/write/secret；漏授会让用例 403。）" >&2
+if [ "$grants" != '2 5 0 1 ' ]; then
+  echo "✗ 夹具授权核对失败：期望 read=2 / write=5 / none=0 / audit=1，实际 '$grants'" >&2
+  echo "  （REQ-012 的 E2E 需要 sandbox:demo:read/write/secret；REQ-014 的需要 audit:events:read；漏授会让用例 403。）" >&2
   exit 1
 fi
 
@@ -317,5 +394,21 @@ if [ "$sso_keys" != '12' ]; then
   exit 1
 fi
 
-echo "✓ E2E 夹具就绪：u-perm-read / u-perm-write / u-perm-none（tenant-a，密码 Tr0ub4dor&3xKq）"
-echo "  授权：read=2 / write=5 / none=0 个权限点（含 sandbox:demo:*）"
+# 强断言 ④：REQ-014 的审计夹具**至少 11 条**（AC-S-132 的翻页用例：
+# 每页 10 条 → 第 2 页还有 1 条 → 响应带 nextCursor）。
+#
+# 少一条 → 翻页用例的「下一页」是禁用的 → 用例红。
+# 这里断 **≥ 11** 而不是 **== 11**：登录等真实事件也会写审计表，
+# 总数可以更多，但夹具行本身必须齐（用 object_type 精确取）。
+audit_fixture="$(printf '%s\n' \
+  "SELECT count(*) FROM platform_audit_log WHERE tenant_id = 'tenant-a' AND object_type = 'e2e_fixture';" \
+  | run_sql -tA | tr -d '[:space:]')"
+if [ "${audit_fixture:-0}" -lt 11 ]; then
+  echo "✗ 审计夹具核对失败：期望至少 11 条，实际 '$audit_fixture'" >&2
+  echo "  （AC-S-132 的翻页用例需要两页；每页 10 条 → 第 2 页必须还有记录。）" >&2
+  exit 1
+fi
+
+echo "✓ E2E 夹具就绪：u-perm-read / u-perm-write / u-perm-none / u-perm-audit（tenant-a，密码 Tr0ub4dor&3xKq）"
+echo "  授权：read=2 / write=5 / none=0 / audit=1 个权限点（含 sandbox:demo:* 与 audit:events:read）"
+echo "  审计夹具：$audit_fixture 条（object_type = e2e_fixture）"

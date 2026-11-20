@@ -1,6 +1,7 @@
 //! 请求上下文骨架。
 //!
-//! 只放当前已确定的维度：租户、空间、追踪 ID、进入时刻。
+//! 只放当前已确定的维度：租户、空间、追踪 ID、进入时刻，
+//! 以及 REQ-014（D140）新增的来源 IP 与设备。
 //! REQ-006（多租户）会在此基础上扩展隔离维度与校验规则，
 //! 平台中间件负责注入，业务模块不得手工解析请求头（`api-conventions v1` C3）。
 
@@ -23,6 +24,10 @@ pub struct RequestContext {
     user_id: Option<String>,
     trace_id: String,
     entered_at: OffsetDateTime,
+    /// 来源 IP（客户端可控的 `x-forwarded-for` 第一跳）。
+    client_ip: Option<String>,
+    /// 设备（`user-agent`）。
+    user_agent: Option<String>,
 }
 
 impl Default for RequestContext {
@@ -40,6 +45,8 @@ impl RequestContext {
             user_id: None,
             trace_id: new_trace_id(),
             entered_at: OffsetDateTime::now_utc(),
+            client_ip: None,
+            user_agent: None,
         }
     }
 
@@ -91,6 +98,36 @@ impl RequestContext {
     /// 从进入时刻算起的耗时。
     pub fn elapsed(&self) -> time::Duration {
         OffsetDateTime::now_utc() - self.entered_at
+    }
+
+    /// 绑定来源 IP；空值视为未知。
+    ///
+    /// # ⚠️ 这个值**不可信**（REQ-014 D149）
+    ///
+    /// 它来自**客户端可控的请求头**（`x-forwarded-for` 的第一跳），
+    /// 本仓**无法**记录可信的物理来源。它的用途是**关联与排查**，
+    /// **不是取证** —— 代码注释与规格都**不得**把它写成「真实客户端地址」。
+    ///
+    /// 由平台中间件填充；业务模块**不得**手工解析请求头（契约 C3）。
+    pub fn with_client_ip(mut self, client_ip: impl Into<String>) -> Self {
+        self.client_ip = normalize(client_ip.into());
+        self
+    }
+
+    /// 来源 IP；未知时为 `None`（审计记录里落**空串**，不是 `NULL`）。
+    pub fn client_ip(&self) -> Option<&str> {
+        self.client_ip.as_deref()
+    }
+
+    /// 绑定设备（`user-agent`）；空值视为未知。
+    pub fn with_user_agent(mut self, user_agent: impl Into<String>) -> Self {
+        self.user_agent = normalize(user_agent.into());
+        self
+    }
+
+    /// 设备；未知时为 `None`（审计记录里落**空串**，不是 `NULL`）。
+    pub fn user_agent(&self) -> Option<&str> {
+        self.user_agent.as_deref()
     }
 }
 
@@ -154,5 +191,27 @@ mod tests {
         assert_eq!(ctx.user_id(), Some("u-1001"));
         let blank = RequestContext::new().with_user("   ");
         assert_eq!(blank.user_id(), None, "空值视为未认证");
+    }
+
+    /// REQ-014 D140：新增的两个字段默认是 `None`，既有行为不变。
+    #[test]
+    fn a_fresh_context_has_no_client_ip_or_user_agent() {
+        let ctx = RequestContext::new();
+        assert_eq!(ctx.client_ip(), None);
+        assert_eq!(ctx.user_agent(), None);
+    }
+
+    #[test]
+    fn the_client_ip_and_user_agent_are_bound_and_trimmed() {
+        let ctx = RequestContext::new()
+            .with_client_ip(" 203.0.113.9 ")
+            .with_user_agent(" audit-test-agent ");
+        assert_eq!(ctx.client_ip(), Some("203.0.113.9"));
+        assert_eq!(ctx.user_agent(), Some("audit-test-agent"));
+        let blank = RequestContext::new()
+            .with_client_ip("   ")
+            .with_user_agent("");
+        assert_eq!(blank.client_ip(), None);
+        assert_eq!(blank.user_agent(), None);
     }
 }

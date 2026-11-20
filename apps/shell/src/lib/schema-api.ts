@@ -32,7 +32,14 @@ import {
 } from '@base/schema';
 import { ApiError, type ApiClient } from '@base/sdk';
 
-import { errorMessageKey, toMessageParams } from './i18n';
+/**
+ * `describeError` 已搬到 `lib/i18n.ts`（它是**通用**的「错误码 → 文案」helper，
+ * 审计页等新页面也要用）。
+ *
+ * 这里**继续导出**同一个函数：既有调用点（`SchemaPage.svelte`）与既有测试
+ * 的 import 路径不变 —— 搬家不该逼着别人改 import。
+ */
+export { describeError, type Translate } from './i18n';
 
 /** 元数据接口路径。 */
 export function schemaMetaPath(moduleId: string, entityKey: string): string {
@@ -144,24 +151,4 @@ export async function deleteRecord(
     throw new Error('entity metadata does not declare api.delete');
   }
   await client.delete(resolveApiPath(api.delete, recordId(record)));
-}
-
-/** 翻译函数（与 `@base/i18n` 的 `t` 同形）。 */
-export type Translate = (key: string, params?: Record<string, string | number>) => string;
-
-/**
- * 把异常转成**当前语言**的可展示文案（错误码仍要透出，不能只剩「出错了」）。
- *
- * 文案不在这里硬编码：按稳定错误码取 `error.<CODE>`，并用后端 `params` 插值
- * （`ApiError.params`，D109）。没有对应文案时退回 `"<code> (HTTP <status>)"` ——
- * 那是技术信息，不是本地化文案，所以不带中文、也不显示 `"?"`。
- */
-export function describeError(error: unknown, translate: Translate): string {
-  if (error instanceof ApiError) {
-    const key = errorMessageKey(error.code);
-    const text = translate(key, toMessageParams(error.params));
-    const message = text === '?' ? error.code : text;
-    return `${message} (HTTP ${error.status})`;
-  }
-  return translate('common.unexpectedError');
 }
