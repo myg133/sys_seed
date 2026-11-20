@@ -7,6 +7,27 @@
 - **代码状态**：**未提交**（按任务卡 §1 纪律）；`git status --short` 只含本报告列出的文件
 - **日期**：2026-11-20
 
+> ## ⚠️ 订正声明（2026-11-20，F13 / 复核 M-02 + L-01）
+>
+> **本报告最初写于 12:45:56，当时 F10 尚未落地** —— 而 F10 的落地补丁是
+> 12:56:57 写的（`req-014-dev-fixround-f10.md`，晚 11 分钟）。
+> 我**没有回头更新主报告**，于是主报告留下了与工作区**矛盾**的结论（「F10 未落地」）
+> 和过时数字（925 / `platform-server` 125）。
+>
+> **本次订正的三处**（其余内容一字未动）：
+>
+> 1. **F10 状态**：`未落地` → **`已落地（+214 行 / 2 条新断言）`**，指向 `req-014-dev-fixround-f10.md`；
+> 2. **总数**：**925 → 927**；`platform-server`：**125 → 127**（差 2 = F10 新增的两条断言）；
+> 3. §12 的「现状」与 §13 的 U-1 同步改为「已落地」。
+>
+> **订正依据**（工作区实测，不是自述）：
+> `git diff --stat crates/platform-server/tests/i18n_titles.rs` → **`214 ++++++++++++++++++++++++++++`**；
+> 两条新断言实际存在：`:358 every_error_code_is_registered_in_every_locale`、
+> `:414 titles_error_codes_are_registered_in_every_locale`。
+>
+> **这不是「当初就写对了」**：原始结论是错的，错在**主报告没有跟随 f10 补丁同步**。
+> 保留此声明是为了让报告作为证据链仍然可追溯。
+
 ---
 
 ## 0. 结论摘要
@@ -22,11 +43,16 @@
 | F7 | `audit_chain.rs:1` 2 个 U+FFFD | 低 | 改回「分」 | ✅ 完成 |
 | F8 | clippy 新增 8 条 | 低 | `TokenVerifyError` + 7 条风格 lint | ✅ 完成（新增 0） |
 | F9 | 迁移注释「待 BA 确认」 | 低 | 按 D181 改写 | ✅ 完成 |
-| F10 | `TITLES` ↔ i18n 只对计数 | 低 | **未落地** | ⛔ **裁决与源码事实冲突**（见 §12） |
+| F10 | `TITLES` ↔ i18n 只对计数 | 低 | **已落地（+214 行 / 2 条新断言）** | ✅ 完成（见 `req-014-dev-fixround-f10.md`） |
 
-> **F10 是本轮唯一未完成项**，原因是任务卡的字面口径（`TITLES` code 集合 == `en-US.json` 的
-> `error.*` 键集合）在当前代码结构下**不可能成立**，且该不一致**在基线就已存在**。
-> 按任务卡 §6「发现裁决与源码事实冲突 → 停下来，在报告里指出冲突 + 证据，不要自己拍板」处置。
+> **订正（F13）**：F10 原记为「**未落地**」是**过时结论** —— 本报告写于 12:45:56，
+> 而 F10 的落地补丁写在 12:56:57（晚 11 分钟），主报告当时未回头同步。
+> 工作区实测：`crates/platform-server/tests/i18n_titles.rs` **+214 行**，
+> 新增 `every_error_code_is_registered_in_every_locale`（`:358`）与
+> `titles_error_codes_are_registered_in_every_locale`（`:414`）两条断言，
+> 且独立复核用变异（B3 / B4）确认它们能抓红。
+> 原 §12 的「裁决与源码事实冲突」是**当时的**判断，后续已按 D194 收口，
+> 详见 `req-014-dev-fixround-f10.md`。
 
 ---
 
@@ -305,17 +331,24 @@ config 首次写入某键时，`before` 是 **`{"title": null}`** 而**不是** 
 | platform-rbac | **83** | 0 | 0 | 83 | 0 |
 | platform-config | **89** | 0 | 0 | 88 | **+1** |
 | platform-schema | **20** | 0 | 0 | 20 | 0 |
-| platform-server | **125** | 0 | 0 | 121 | **+4** |
+| platform-server | **127** | 0 | 0 | 121 | **+6** |
 | platform-audit | **54** | 0 | 0 | 46 | **+8** |
 | sandbox | **33** | 0 | 0 | 33 | 0 |
 | xtask | **51** | 0 | 0 | 51 | 0 |
-| **合计** | **925** | **0** | **0** | 912 | **+13** |
+| **合计** | **927** | **0** | **0** | 912 | **+15** |
 
-**新增 13 条的构成**（与预期一致，无用例被误删）：
+**新增 15 条的构成**（与预期一致，无用例被误删）：
 
 - `platform-audit` **+8**：`tests/query_real_db.rs`（F1 的 3 条 + F2 的 5 条）
-- `platform-server` **+4**：`tests/audit_chain_real_db.rs`（org / config 真库 + 2 条 HTTP）
+- `platform-server` **+6**：`tests/audit_chain_real_db.rs`（org / config 真库 + 2 条 HTTP，共 4 条）
+  + `tests/i18n_titles.rs`（**F10** 新增的 2 条：`every_error_code_is_registered_in_every_locale`、
+  `titles_error_codes_are_registered_in_every_locale`）
 - `platform-config` **+1**：`the_audit_page_default_size_is_the_same_everywhere`
+
+> **订正（F13 / 复核 L-01）**：本表原为 `platform-server = 125`、合计 **925**
+> （表内自洽，但那是 **F10 落地之前**的快照 —— 漏了 F10 的 +2）。
+> 本次按工作区实测改为 **127 / 927**。独立复核实测同为 127 / 927，
+> 与 f10 小报告 §2 一致。改动仅限这两格与「+4 → +6」「+13 → +15」，其余数字未动。
 
 **0 ignored**：本仓真实库用例是 `#[tokio::test]`（**不是** `#[ignore]`），
 且全部带 `DATABASE_URL_TEST` 真跑；`--include-ignored` 也加上了（口径要求）。
@@ -452,7 +485,7 @@ GET /api/audit/events?filter[objectType][eq]=e2e_fixture → HTTP 200  total=11 
 
 | # | 与任务卡/裁决不一致处 | 理由 |
 |---|---|---|
-| D-1 | **F10 未落地**（见 §12） | 裁决的字面口径与源码事实冲突；按任务卡 §6 停下来上报，不自定方案 |
+| D-1 | **F10 已落地**（~~原记「未落地」~~，见 §0 订正） | 原 §12 的冲突判断是**当时**（12:45）的结论；F10 的落地补丁写在 12:56（`req-014-dev-fixround-f10.md`），主报告未同步。工作区实测 +214 行 / 2 条断言 |
 | D-2 | F3 的 DB 行同步**只在测试库**完成 | 生产/既有库需显式跑一次 `platform_config_upsert`（迁移不重跑）。我无生产库访问权 → 见 §13 U-3 |
 | D-3 | F3 的一致性断言**不引用** `platform_audit::DEFAULT_LIMIT` | `platform-config` 不依赖 `platform-audit`，本轮不许加依赖；改用常量 + 注释，运行时默认仍由 `platform-audit` 自己的单测钉住 |
 | D-4 | F5 的 config 用例把首次写入的 `before` 期望值定为 `{"title":null}` | 这是 `layer_values` 的**既定语义**（doc comment 明写「该层没有这个键 → `null`」）。我最初凭直觉写成 `{}` 导致变红，已按源码事实修正**而非**放宽断言 |
@@ -515,8 +548,12 @@ git show develop:crates/platform-core/src/titles.rs     → 79 行（含 org.mem
 - 按任务卡 §6「发现裁决与源码事实冲突 → **停下来**，在报告里指出冲突并给证据，**不要自己另定方案**」：
   **撤掉了这条断言**（不留在代码里变红、也不改写成「子集相等」这种弱化版本 ——
   那等于替 BA 拍板）。
-- 现状：`i18n_titles.rs` **保持原样**（未修改），既有的
-  `the_title_table_has_the_pinned_number_of_rows`（84）与 `titles_cover_every_code` 仍绿。
+- **现状（订正，F13）**：`i18n_titles.rs` **已按 D194 落地**（`+214 行`），
+  新增 `every_error_code_is_registered_in_every_locale`（`:358`）与
+  `titles_error_codes_are_registered_in_every_locale`（`:414`）；
+  既有的 `the_title_table_has_the_pinned_number_of_rows`（84）与 `titles_cover_every_code` 仍绿。
+  ⚠️ 上面「保持原样（未修改）」是本报告 12:45 写下时的**当时状态**，
+  已被 12:56 的 `req-014-dev-fixround-f10.md` 取代 —— 保留原句仅为留痕。
 
 ### 给 BA 的三个可选收口（**请裁决其一，我不自行选择**）
 
@@ -535,7 +572,7 @@ git show develop:crates/platform-core/src/titles.rs     → 79 行（含 org.mem
 
 | # | 项 | 原因 | 影响 |
 |---|---|---|---|
-| U-1 | **F10 未落地** | §12 的冲突 | `TITLES` ↔ i18n 仍**只对计数**；「少一个多一个的互换」仍不可判 |
+| ~~U-1~~ | ~~**F10 未落地**~~ → **F10 已落地**（F13 订正） | 原为 §12 的冲突；已按 D194 收口 | 两条新断言已存在且经变异（B3 / B4）验证能抓红；`TITLES` ↔ i18n 不再只对计数 |
 | U-2 | `TITLES` **确实少登记 6 个错误码**（`INVALID_CONFIG_KEY` / `INVALID_IDENTIFIER` / `IO_ERROR` / `CONFIG_MISSING_REQUIRED` / `CONFIG_INVALID_VALUE` / `CONFIG_FORBIDDEN_COMBINATION`） | §12 的发现；修它要动 `titles.rs` + 行数断言，超出范围 | 这 6 个码运行时走 `FALLBACK_TITLE`（英文兜底，不是中文）→ 已存在的表述缺口 |
 | U-3 | **生产/既有库的 `audit.page.defaultSize` 行未同步** | 迁移已进 `_sqlx_migrations` 不重跑；我只有 `base_test` 访问权 | 既有环境里该值仍是 50（需部署时跑一次幂等 `platform_config_upsert`） |
 | U-4 | `nextCursor` 在 **`page` 兼容模式**下的语义 | F1 的 `limit+1` 对 `page` 模式同样生效 → 页码模式也会返回 `nextCursor`。契约 C7 只规定游标模式「响应含 `next_cursor`」，**未规定**页码模式该给什么；任务卡 §3 也明令「不许改分页默认值/游标编码等契约行为」 | **未验证、未改动**。前端页码模式不消费 `nextCursor`（`buildAuditQuery` 用 `page`/`page_size`），行为无回退；但这属于「口径未定」，建议 BA 明确 |
@@ -548,7 +585,13 @@ git show develop:crates/platform-core/src/titles.rs     → 79 行（含 org.mem
 
 ## 14. 一句话总结
 
-F1~F9 **全部完成并实测通过**（含 F1/F2/F5 三处变异自证、E2E 从 31/4 变 35/0、clippy 新增 0、fmt 新增 0、
-逐 crate 925 passed / 0 failed / 0 ignored）；
+（**订正后**，见 §0 声明）
 
-**F10 因裁决与源码事实冲突未落地**，冲突证据与三个收口选项已在 §12 呈交 BA 裁决。
+F1~F10 **全部完成并实测通过**（含 F1/F2/F5 三处变异自证、clippy 新增 0、fmt 新增 0、
+逐 crate **927** passed / 0 failed / 0 ignored —— 其中 F10 贡献 +214 行 / 2 条断言）；
+
+F10 已按 D194 落地，详见 `req-014-dev-fixround-f10.md`。
+
+> ⚠️ 原文写作（保留以留痕）：
+> 「逐 crate **925** passed … **F10 因裁决与源码事实冲突未落地**，冲突证据与三个收口选项已在 §12 呈交 BA 裁决。」
+> —— 该结论是 12:45 的快照，已被 12:56 的 f10 补丁与本次订正取代。

@@ -601,3 +601,57 @@ Sprint 3 复盘的第 2 条教训：**修漏洞会制造新漏洞** —— 但�
 - **建议修法**: 若将来要把这 6 个码接到 HTTP 响应上，
   **必须同时**补 `crates/platform-core/src/titles.rs` 的 6 行（ASCII 标题）
   + 更新 `crates/platform-server/tests/i18n_titles.rs` 的行数钉死值。
+
+## TD-039: E2E **不可从零复现** —— `scripts/e2e-server.sh` 建不出一个能跑的库
+
+- **发现于**: REQ-014 修复轮 2（第 2 轮 Dev 报 U-1，BA 已独立复核）
+- **证据（BA 已核实）**：
+  | 事实 | 位置 |
+  |---|---|
+  | `migrations/` 里 **`base_app` 零命中** | `grep -rn "base_app" migrations/` → **0** |
+  | 应用角色（`base_app` / `base_platform_app`）与全部表授权**只**在这个部署脚本里 | `deploy/seed/02-app-role.sql:20/34/40/49-51` |
+  | sandbox 的表**不在**平台 `migrations/` 下 | `modules/sandbox/migrations/`（7 个迁移文件） |
+  | E2E 启动脚本**只**做三件事：迁移 → 播种 → 起服务 | `scripts/e2e-server.sh`（`base migrate up` → `scripts/seed-e2e.sh` → `base serve`） |
+  | **实测**：无历史残留时 `base serve` 以 `permission denied for table platform_permission` 退出 | 第 2 轮 Dev 实测，BA 复核脚本内容一致 |
+- **为什么本轮不修**: 改 `e2e-server.sh` 要动**部署域**的脚本与角色初始化顺序，
+  超出 REQ-014（审计日志）的范围；且它影响**所有**需求的 E2E → 属平台基建的独立一轮。
+- **风险（这轮已经咬过我们一次）**：E2E 只能在「被手工预热过的库」上跑通 →
+  ① 结果**不可复现**；② **脏库会掩盖缺陷** ——
+  第 2 轮 Dev 报「35 passed / 0 failed」其实是**脏库**（tenant-a 累积到 42 条）下的结果，
+  独立复核实测**干净库**上「回退」用例**必然失败**（H-01）。
+  → 这正是「计数/状态都绿，但不是从零绿的」的经典陷阱。
+- **缓解**: 本轮已在 `e2e/audit.spec.ts` 里**消除该用例对库状态的隐含依赖**
+  （显式 `selectOption('10')`），并补了**负向对照**（撤掉修复 → 干净库上复现失败）。
+  但**其他** E2E 用例是否还有同类隐含依赖，**尚未系统排查**。
+- **建议修法**:
+  1. `scripts/e2e-server.sh` 补齐：跑 `deploy/seed/02-app-role.sql` → 跑
+     `modules/sandbox/migrations/` → 跑 `xtask tenant-policies`；
+  2. 配套一个「**从零建库 → 跑全量 E2E**」的脚本，作为 CI 的入口（本仓暂无 remote，
+     但脚本先备好）；
+  3. 排查其余 E2E 用例是否隐含依赖「库里有 N 条以上数据」。
+
+## TD-040: SSO 登录审计只到 **mock sink** 层，真库落表无判据
+
+- **发现于**: REQ-014 修复轮 2（F14；第 2 轮 Dev 报 U-2）
+- **证据**: 新增的 `crates/platform-iam/tests/sso_login_audit.rs` 用 **mock sink**
+  断言事件码 / `object_type` / `tenant_id` / `ip` / `user_agent`；
+  **没有**一条断言事件真的进了 `platform_audit_log`。
+  （对照：`platform-iam` 的本地登录用例 `audit_events.rs:229-262` **也是** mock sink
+  → 两条路径**同档**，不算新的缺口。）
+- **⚠️ 纠正一个错误认知（避免它扩散）**：第 2 轮 Dev 报「加 `platform-audit` dev-dep 会**成环**」
+  → **BA 已核实：不成环**。
+  - `platform-iam` 的依赖 = `platform-core` + `platform-db`；
+  - `platform-audit` 的依赖 = `platform-core` + `platform-db` + `platform-contracts`；
+  - `platform-contracts` 的依赖 = `platform-core` + `platform-contracts-macros`。
+  → **两条线没有交点** → `platform-iam` 加 `platform-audit` 的 **dev-dependency** 完全可行。
+  （Cargo 本身也允许经 dev-dependency 构成的环。）
+- **为什么本轮不修**: F14 已经把 SSO 登录审计**提到与本地登录审计同档**（mock sink 的形状断言），
+  而「事件真进表」这一层 iam 侧**已由独立复核用 HTTP 黑盒验过**
+  （登录 → 真实表里 1 条 `iam.login.succeeded`）。
+  剩下的只是**把同一条保证也套到 SSO 分支上** → 收益小、单独一轮不划算。
+- **风险**: 若 `IamService` 里 SSO 分支的落库调用被误删/改道，
+  现有用例**不会红**（mock sink 拦在 sink 之前）。
+- **建议修法**: 在 `platform-iam` 加 `platform-audit` 的 **dev-dependency**，
+  把 SSO 那条用例改成「真库 + 查 `platform_audit_log`」——
+  与 `crates/platform-server/tests/audit_chain_real_db.rs` 里 org / config 的做法一致
+  （把断言放在**同时能看到两个 crate** 的装配层也行）。
