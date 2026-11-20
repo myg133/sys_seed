@@ -1149,3 +1149,89 @@
      `/oauth/authorize` / `/oauth/device` / `/oauth/grants`；
      ③ `manifest.json` 的 `menus[].route` 与前端路由**逐字相同**。
 
+---
+
+## rev 3（2026-11-21）：**并行实现前**发现的耦合缺口补记（2 条）
+
+> **为什么有 rev 3**：D221~D256 是 QA 挑刺后的裁决轮；本 rev 是 BA 在**写 Dev 任务卡**
+> 时发现的**两个规格缺口** —— 它们都不是「挑刺能挑出来」的问题，而是
+> **只有把规格落成「两个互不相交的文件集」时才会暴露**的缺口：
+> - **D257**：设备码流程里「用户点允许」**没有对应的后端端点** →
+>   AC-S-142 步骤 4 要求这个动作存在，但 design §3 的端点清单里**没有它** →
+>   棒 1 与棒 2 并行时，**两边会各造各的**。
+> - **D258**：平台端点的**请求 / 响应字段名**没钉死 → 棒 2 只能**猜** →
+>   猜错就是终版 E2E 期的返工。
+>
+> ⚠️ **本 rev 不改任何一条 AC**（22 条 AC 与 131 条用例**不受影响**），
+> 只补「让 AC-S-142 步骤 4 **可实现**」的端点与「让两棒**不猜**」的字段名。
+
+## D257: 设备码的「用户批准」端点 —— **补规格缺口**
+
+- **问题**：AC-S-142 步骤 4 要求「浏览器访问 `verification_uri`，输入 `user_code`，
+  点「允许」」→ 这个「允许」必须**调一个后端端点**。
+  但 design §3.1 / §3.2 的端点清单里**没有任何「批准设备码」的端点**
+  （`/api/oauth/device_authorization` 只是**申请**设备码，
+  `POST /api/oauth/token` 是**轮询**换令牌，两头都不是「批准」）。
+  → 前端设备码页**没有可调的接口**；棒 2 只能自己编一个路径 → 棒 1 不会实现它。
+- **决定**：补 **2 个**平台端点（说平台的话 → Problem Details + `OAUTH_*`）：
+
+  | 方法 | 路径 | 认证 | 作用 |
+  |---|---|---|---|
+  | `GET` | `/api/oauth/device/verify?userCode=<code>` | 用户会话（Bearer） | **批准前**展示 client 名与请求的 scope |
+  | `POST` | `/api/oauth/device/approve` | 用户会话（Bearer） | **批准 / 拒绝** |
+
+  1. **`verify` 的响应体（200）**：
+     `{ "clientId": "<id>", "clientName": "<名>", "scopes": ["<权限点码>", …] }`
+  2. **`approve` 的请求体**：`{ "userCode": "<8 位 base20>", "action": "approve" | "deny" }`
+  3. **`approve` 的响应体（200）**：`{ "status": "approved" | "denied" }`
+  4. **查不到 / 已过期 / 已使用的 `user_code`** → 两个端点**都**返回
+     **400 + Problem Details + `code` 逐字等于 `OAUTH_INVALID_REQUEST`**。
+     → **不新增第 10 个错误码** → **`TITLES` 行数仍是 93**（D223 / AC-S-152 不动）。
+  5. **批准**的动作：把设备码行 `status` 置 `approved`、写入 `user_id`、
+     并**写 / 更新 `platform_oauth_grant`**（`tenant_id` / `client_id` / `user_id` /
+     `scopes` / `status=active` / `consent_at`）→ 令牌才能被 grant 级撤销（D210 / D202）。
+  6. **拒绝**的动作：设备码行 `status` 置 `denied` → 轮询 `POST /api/oauth/token`
+     返回 **400 + `{"error":"access_denied"}`**（协议码，`access_denied` 在契约 C14 的集合内）。
+  7. **查询一律按摘要**：`user_code_hash`（`digest_base64url`，D228）→ 库里不存明文。
+  8. ⚠️ 这两个端点**不**在 design §3.2 的原表里 → **本条是新增**，
+     已在 design-summary.md §3.2 同步补上。
+
+## D258: 跨栈 JSON 契约钉死（**字段名 = camelCase**）
+
+- **问题**：棒 2 的 4 个页面要调棒 1 的 8 个平台端点；
+  但「请求体 / 响应体的字段名」在规格里**从没钉死**
+  → 棒 2 只能猜 `client_id` 还是 `clientId` → 猜错 = 终版 E2E 全红 + 返工一轮。
+- **依据**：契约 **C13**（D167）—— API 的 JSON 字段名一律 **camelCase**
+  （既有事实：`crates/platform-audit` 的 Rust 侧是 `next_cursor` /
+  `created_at`，接口给的是 `nextCursor` / `createdAt`；
+  `apps/shell/src/lib/audit-api.ts` 的 `AUDIT_SORT_FIELDS` 也是 camelCase）。
+  协议端点（`/token` / `/introspect` / `/revoke` / `/device_authorization`）
+  的字段名**由 RFC 定死**（`access_token` / `token_type` / `expires_in` /
+  `scope` / `device_code` / `user_code` / `verification_uri` /
+  `verification_uri_complete` / `interval` / `active` / `client_id` …）
+  → **协议端点用 RFC 的 snake_case，平台端点用 camelCase**，**两套不混**。
+- **决定**：把两套字段名**逐字写死**（棒 1 实现、棒 2 调用，**照抄**）：
+
+  ### 平台端点（camelCase）
+
+  | 端点 | 请求体 | 响应体（200） |
+  |---|---|---|
+  | `POST /api/oauth/authorize/preview` | `{ "responseType": "code", "clientId": "…", "redirectUri": "…", "scope": "…", "state": "…", "codeChallenge": "…", "codeChallengeMethod": "S256", "prompt": "none" }`（`prompt` 可选；`state` 可选） | `{ "needsConsent": true, "ticket": "<JWT>", "application": { "clientId": "…", "name": "…" }, "scopes": ["…"], "redirectTo": "…" }`（`ticket` 仅 `needsConsent == true` 时有；`redirectTo` 仅 `needsConsent == false`（免登直发）时有） |
+  | `POST /api/oauth/authorize/confirm` | `{ "ticket": "<JWT>" }` | `{ "redirectTo": "https://client.example/cb?code=…&state=…" }` |
+  | `POST /api/oauth/authorize/deny` | `{ "ticket": "<JWT>" }` | `{ "redirectTo": "https://client.example/cb?error=access_denied&state=…" }` |
+  | `GET /api/oauth/grants` | — | `[{ "clientId": "…", "clientName": "…", "scopes": ["…"], "grantedAt": "<RFC3339>", "status": "active", "revokedAt": null }]` |
+  | `POST /api/oauth/grants/revoke` | `{ "clientId": "…" }` | `{ "status": "revoked" }` |
+  | `POST /api/oauth/logout` | — | `{ "loggedOut": { "grants": 2, "sessions": 3 }, "frontChannel": [{ "clientId": "…", "logoutUrl": "…", "logoutToken": "<JWT>" }] }` |
+  | `GET /api/oauth/device/verify` | 查询参数 `userCode` | `{ "clientId": "…", "clientName": "…", "scopes": ["…"] }`（D257） |
+  | `POST /api/oauth/device/approve` | `{ "userCode": "…", "action": "approve" \| "deny" }` | `{ "status": "approved" \| "denied" }`（D257） |
+
+  - `grants` 的**字段是「包含」关系**（AC-S-147 用「含」）→ 棒 1 **可以**多给字段，
+    但上面列出的字段名与**类型**不得改。
+  - `frontChannel` 数组**可能为空**（没有 client 配 front-channel URI 时）→ 空数组，不是 `null`。
+  - `POST /api/oauth/authorize/preview` 的 **`scope` 是空格分隔的字符串**
+    （RFC 的写法）；响应里的 `scopes` 是**数组**（前端好渲染）。
+  - ⚠️ **`prompt` 的缺省值 = 允许交互**（AC-S-148 步骤 5）；
+    `prompt=none` 时**不得**跳登录页（D233）。
+  - ⚠️ 前端把 `login_required` / `consent_required` 透出到**授权页的 URL query**
+    （D233）→ 棒 2 用 `history.replaceState`，**不重新导航**。
+

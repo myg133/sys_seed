@@ -1,7 +1,9 @@
 # 设计摘要：出站 IdP 与单点登出（REQ-022）
 
 - **需求编号**: REQ-022
-- **状态**: rev 2（2026-11-20 —— BA 规格阶段；rev 2 同步 QA 挑刺 39 条的裁决 D221~D256）
+- **状态**: rev 3（2026-11-21 —— rev 3 = 写 Dev 任务卡时发现的**两个并行耦合缺口**补记：
+  D257 设备码「用户批准」端点补缺 + D258 跨栈 JSON 字段名钉死；
+  rev 2 同步 QA 挑刺 39 条的裁决 D221~D256）
 - **配套**: [demand.md](demand.md) / [acceptance.md](acceptance.md) / [decisions.md](decisions.md)
 - **基线代码**: `develop` @ `310e4d3`
 
@@ -161,6 +163,16 @@
 | `GET` | `/api/oauth/grants` | `oauth:grant:read` | **我的**授权记录 |
 | `POST` | `/api/oauth/grants/revoke` | `oauth:grant:revoke` | 撤销授权（= 按应用登出） |
 | `POST` | `/api/oauth/logout` | 用户会话 | **全局登出**（撤销全部 grant + 全部会话 + 通知） |
+| `GET` | `/api/oauth/device/verify?userCode=` | 用户会话 | **批准前**展示 client 名与 scope（**D257 补**） |
+| `POST` | `/api/oauth/device/approve` | 用户会话 | 设备码**批准 / 拒绝**（**D257 补**） |
+
+> ⚠️ **rev 3（D257）**：最后两个端点是**补规格缺口** ——
+> AC-S-142 步骤 4 的「输入 `user_code` → 点「允许」」需要一个后端端点，
+> 而原端点清单里**没有**它 → 棒 1 与棒 2 并行时会**各造各的**。
+> 两个端点**不新增错误码**：查不到 / 过期 / 已用 → **400 + `OAUTH_INVALID_REQUEST`**
+> → **`TITLES` 行数仍是 93**（D223 / AC-S-152 不动）。
+> 字段名逐字见 [decisions.md](decisions.md) **D258**（平台端点 camelCase /
+> 协议端点用 RFC 的 snake_case，**两套不混**）。
 
 > ⚠️ 契约 C2「业务 API 路径形式」针对**业务模块**；平台自身端点沿用既有的
 > `/api/<module>/<resource>` 形态（对照 `/api/audit/events`）。

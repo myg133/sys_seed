@@ -30,6 +30,17 @@
    真 C-5 命令是 `cargo test -p platform-oauth --test contract_c5`（D240）
 6. **AC-S-139 / AC-S-142 的「SHA-256 摘要」** —— 编码是 **base64url 无填充**，不是 hex（D228）
 
+### rev 3 补记（2026-11-21，**不改任何一条 AC**）
+
+写 Dev 任务卡时发现两个**并行实现的耦合缺口**，已由 BA 补记：
+
+| 决策 | 补的是什么 | 对本文件的影响 |
+|---|---|---|
+| **D257** | 设备码的「用户批准」端点：`GET /api/oauth/device/verify` + `POST /api/oauth/device/approve`（**AC-S-142 步骤 4 要这个动作，但端点清单里没有**） | **无** —— 只是让步骤 4 可实现；**不新增错误码** → 下面「9 个平台错误码」与「`TITLES` 行数 == 93」**都不动** |
+| **D258** | 跨栈 JSON **字段名**：平台端点 camelCase、协议端点用 RFC 的 snake_case；8 个平台端点的请求 / 响应字段**逐字写死** | **无** —— 但 AC-S-147 / AC-S-150 里的 `clientId` / `scopes` / `status` 等字段名**以 D258 为准** |
+
+> 两条的原文见 [decisions.md](decisions.md) 的 rev 3 段。
+
 ## 承接的父 AC
 
 父 AC：**AC-006**（底座作为 IdP 向第三方应用签发令牌）。
