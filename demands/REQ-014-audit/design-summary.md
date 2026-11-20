@@ -795,19 +795,19 @@ crate 自己的 `src/`」**（`crates/platform-contracts/src/checks.rs:479-504`�
 
 ```rust
 // crates/platform-audit/src/authz.rs
-use platform_core::extension::permission::require_permission;
-use platform_core::RequestContext;
+use platform_core::extension::permission::{require_permission, PermissionLayer};
 
-pub fn require_events_read(ctx: &RequestContext) -> anyhow::Result<()> {
-    require_permission(ctx, "audit:events:read")     // ← 字面量，C-5 扫得到
+pub fn require_events_read() -> PermissionLayer {
+    require_permission("audit:events:read")     // ← 字面量，C-5 扫得到
 }
-pub fn require_verify_run(ctx: &RequestContext) -> anyhow::Result<()> {
-    require_permission(ctx, "audit:verify:run")
-}
-pub fn require_archive_run(ctx: &RequestContext) -> anyhow::Result<()> {
-    require_permission(ctx, "audit:archive:run")
-}
+pub fn require_verify_run() -> PermissionLayer { require_permission("audit:verify:run") }
+pub fn require_archive_run() -> PermissionLayer { require_permission("audit:archive:run") }
 ```
+
+> ⚠️ **签名以 D173 为准**：core 的 `require_permission` 是**路由层构造器**
+> （返回 `PermissionLayer`），**没有**「传 ctx 直接判定」的形态 ——
+> rev 2 里写的 `require_events_read(ctx: &RequestContext) -> Result<()>` **编译不过**。
+> Dev-A 已按 D173 实现，与既有惯例 `crates/platform-rbac/src/http.rs:451` 一致。
 
 - `platform-server/src/audit.rs` 调这些封装。
 - 🔑 `require_permission` 在 **core** 里 → **不**引入 `platform-audit → platform-rbac`

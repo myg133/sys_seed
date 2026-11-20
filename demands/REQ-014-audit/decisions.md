@@ -683,6 +683,115 @@ D131 定义了拼接规则，但两处细节没定死，会导致「实现A 与 
 
 ---
 
+## D171: D159 的「2 与 3 互斥」——**采纳 Dev 的实现**，并补 `tip_hash` 列
+
+- **背景**：Dev-A 报 🔴 偏离 1 —— D159 同时说了
+  ① `head_hash` = 当前基准（genesis 或上次归档的尾 hash）；
+  ② **写入时**更新 `head_hash` = 新记录的 `hash`；
+  ③ 校验时在线表**第一条**的 `prev_hash` 必须等于 `head_hash`。
+  **② 与 ③ 互斥**：若 ② 成立，接续校验会拿「在线段第一条的 `prev_hash`」（= genesis）
+  与「链尖」（= 最新一条）比 → **每写一条都误报断裂**。
+  Dev 实测：按 ② 实现，4 条链/并发/篡改用例**全红**（`PrevHashMismatch`）。
+- **裁决**：**采纳 ① + ③**（Dev 的实现正确）——
+  `head_hash` = 当前**在线段**的基准；**写入只维护 `updated_at`**；**归档才更新 `head_hash`**。
+- **追加**（Dev 提出的缺口，本轮补上）：①+③ 的代价是「**链的尖端不落库**
+  → **末尾被截断检不出来**」（链内相邻断裂仍能检出）。
+  → **`platform_audit_chain_state` 增加 `tip_hash` 列**：
+  | 列 | 语义 | 谁更新 |
+  |---|---|---|
+  | `head_hash` | 在线段的**基准**（genesis 或上次归档的尾 hash） | **只在归档时**更新 |
+  | `tip_hash` | 链**尖端**（最新一条的 `hash`） | **写入时**更新；归档时 → `head_hash` |
+  - 校验时：接续校验用 `head_hash`；**截断检测**用 `tip_hash`
+    （在线表最后一条的 `hash` 必须 == `tip_hash`，否则「尾巴被砍了」）。
+- **为什么不违反契约**：`platform_audit_chain_state` 是**本需求自建**的表；
+  契约 C12 只钉死 `platform_audit_log` 的 **13 个字段**，与本表无关。
+- **本条是 BA 的规格缺陷**（不是 Dev 的）→ 记入本轮复盘。
+
+## D172: 敏感键归一化**追加「驼峰拆词」**规则（修正 D156 的漏网）
+
+- **背景**：Dev-A 报 🟡 偏离 5 —— QA 的 TC-014-107 期望 `{"apiKey":"x"}` **命中**，
+  而 D156 的归一化（转小写 + `-`→`_`）把 `apiKey` 变成 `apikey` ≠ `api_key` → **不命中**。
+- **裁决**：**采纳 QA 的期望，归一化规则追加「驼峰拆词」**。完整规则（按序）：
+  1. 在**小写/数字与随后的大写字母**之间插入 `_`；
+  2. 全部转**小写**；
+  3. `-` 视为 `_`。
+  | 输入 | 归一化 | 是否命中 |
+  |---|---|---|
+  | `apiKey` | `api_key` | ✅ |
+  | `APIKey` | `api_key` | ✅ |
+  | `clientSecret` | `client_secret` | ✅ |
+  | `api_key` / `api-key` | `api_key` | ✅ |
+  | `secretary` | `secretary` | ❌ 不命中 |
+  | `tokenizer` | `tokenizer` | ❌ 不命中 |
+- **理由**：D156 的目的是「挡不住就等于没挡」。`apiKey` / `clientSecret` 是**极常见**的写法，
+  只挡 `api_key` 等于给了一个绕过口。而 `secretary` / `tokenizer` 仍**不**命中 →
+  「非子串匹配」这条纪律**不受影响**。
+- **同步**：AC-S-133 追加一条断言（`apiKey` 必须命中）。
+
+## D173: 鉴权薄封装的**正确签名**（修正 design §15.2 的写不成的示例）
+
+- **背景**：Dev-A 报 🟡 偏离 2 —— design §15.2 写的
+  `require_events_read(ctx: &RequestContext) -> Result<()>` **编译不过**：
+  core 的 `require_permission` 是**路由层构造器**（返回 `PermissionLayer`），
+  **没有**「传 ctx 直接判定」的形态。
+- **裁决**：**采纳 Dev 的实现** —— `pub fn require_events_read() -> PermissionLayer { require_permission("audit:events:read") }`，
+  与既有惯例一致（`crates/platform-rbac/src/http.rs:451`）。
+  C-5 照样扫得到字面量 ✓，**不影响任何 AC**。
+
+## D174: 归档函数**必须带租户参数 + 显式守卫**（SECURITY DEFINER 绕过 RLS）
+
+- **背景**：Dev-A 报 🟡 偏离 3 —— design §3.6 的
+  `platform_audit_archive_move(p_before TIMESTAMPTZ)` **没有**租户参数，
+  但 D158 要求归档**单租户**。
+- **裁决**：**采纳 Dev 的实现** ——
+  `platform_audit_archive_move(p_tenant_id TEXT, p_before TIMESTAMPTZ)`，
+  函数内**显式守卫**：`p_tenant_id` 必须与 `current_setting('app.tenant_id', true)` 一致，
+  否则 `RAISE EXCEPTION … ERRCODE = 'insufficient_privilege'`。
+  `platform_audit_head_hash(p_tenant_id)` 同样带守卫。
+- **理由（重要）**：`SECURITY DEFINER` 函数**以 owner 身份执行 → 绕过 RLS**。
+  若按 design 的签名实现，就等于给应用一把**跨租户搬数据**的钥匙 ——
+  与 D158「单租户」直接矛盾。**守卫是必须的**，不能靠「上层已经过滤了」。
+
+## D175: 排序字段名 —— **camelCase 为规范**，snake_case 为**兼容别名**
+
+- **裁决**：采纳 Dev 的实现：**两种写法都接受**（指向同一列）；
+  **未声明**的字段一律 **400 `AUDIT_INVALID_FILTER`**。
+- **规范**：以 **camelCase** 为准（契约 C13 的 JSON 字段惯例，acceptance rev 3 用它）；
+  snake_case 仅作兼容别名。
+
+## D176: JSON 规范化**只在 Rust 侧做**，DB 侧只做敏感键检查
+
+- **裁决**：**采纳 Dev 的实现** —— Rust 侧 `canonical_json` 产出规范化文本 →
+  传给 DB 函数的就是**规范化文本** → DB **原样存储**（哈希覆盖存进去的那段文本，D141）。
+- **理由**：D142 要求键序是「UTF-8 **字节序**升序」，而 Postgres 的 `jsonb`
+  是按「**长度 + 字节**」排的 → **DB 侧用 jsonb 做不出这个序**；
+  用 plpgsql 递归实现 JSON 规范化复杂且易错。
+- **代价**（记入 tech-debt）：绕过 Rust 直接调 `platform_audit_append` 时，
+  存进去的 JSON **可能不是规范形态** —— 但**哈希仍自洽**（哈希覆盖的就是存进去的那段文本）。
+
+## D177: 批准修改 REQ-013 的那条既有断言（保留原意 + 加阳性对照）
+
+- **背景**：Dev-A 报 🟡 偏离 7 —— `crates/platform-iam/tests/sso_audit.rs` 的
+  `ac_s_108_no_sso_audit_table_exists_yet` 断言「库里**没有任何** `*audit*` 表」，
+  REQ-014 落地后**必然红**。
+- **裁决**：**批准**。改为「没有任何 **SSO 专用**审计表」（排除 `platform_audit_*`），
+  并**加一条阳性对照**：平台级通用审计表**应当存在**。
+- **理由**：那条断言的**意图**是「不要偷偷建 SSO 专用表」—— 意图**完整保留**，
+  只是把「平台级通用审计表」从「不存在」改成了「存在」。
+  这是**需求演进导致的必然修改**，不是放宽判据。
+
+## D178: 4 个配置项的登记归**棒 2**
+
+- **裁决**：`audit.retention.online_days` / `audit.retention.archive_days` /
+  `audit.page.default_size` / `audit.page.max_size` 的登记（改
+  `crates/platform-config/manifest.json` + 加迁移 INSERT）**归棒 2**。
+- **理由**：登记配置项要**同时**改 manifest 与迁移，漏 INSERT → **启动失败**（D27）。
+  棒 1 的文件清单不含 `platform-config/manifest.json` →
+  Dev-A 选择**不引入未登记的配置项**（`platform-audit/manifest.json` 的 `config` 段留空）
+  是**正确**的保守做法。
+
+---
+
 ## 待用户裁定（**不阻塞开工**，但需在合并前回执）
 
 | 编号 | 事项 | BA 默认 | 影响 |
