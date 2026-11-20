@@ -577,3 +577,27 @@ Sprint 3 复盘的第 2 条教训：**修漏洞会制造新漏洞** —— 但�
   会以 503 呈现，**客户端无法区分**「重试有用」与「请求本身非法」。
 - **缓解**: 现有白名单 + 本轮已把渲染逻辑修对；F2 补的**真库断言**会在
   「拼错」发生时**立刻变红**（而不是等到线上 503）。
+
+## TD-038: 6 个错误码在 i18n 词库里，**但不在 `TITLES`** —— 一旦被接到 HTTP 响应上，`title` 会兜底成 `"Error"`
+
+- **发现于**: REQ-014 修复轮（D194 / F10 判据订正）
+- **证据**: 两侧的集合差（BA 已逐条读源码核实）：
+  - `TITLES` = **78 个错误码** + 6 个 `org.*` **组织事件码** = 84；
+  - i18n `error.*` = 那 78 个 + **6 个当前不进 HTTP 响应体**的码 = 84
+    （两个文件 `packages/i18n/src/locales/{en-US,zh-CN}.json` 键集一致）。
+- **这 6 个码**：
+  | 码 | 出处 | 为什么当前不进响应体 |
+  |---|---|---|
+  | `CONFIG_MISSING_REQUIRED` / `CONFIG_INVALID_VALUE` / `CONFIG_FORBIDDEN_COMBINATION` | `crates/platform-server/src/config.rs:16-20` | **启动期**环境变量诊断（`main.rs` 的 `Config(ConfigError)`）—— 启动就失败了，没有 HTTP |
+  | `INVALID_CONFIG_KEY` / `INVALID_IDENTIFIER` / `IO_ERROR` | `crates/platform-core/src/error.rs:31-33`（`CoreError::code()`） | 全仓**无任何地方**把它转成 `ProblemDetails` |
+- **为什么本轮不修**: 它们当前**不出现**在响应体里 → 在 `TITLES` 里缺席是**正确的**；
+  补进去会让「有标题」变成谎称。
+- **风险**: 将来若把其中任一码接到 HTTP 响应上，`title_of_code` 会走
+  `FALLBACK_TITLE` = **`"Error"`** → 响应体的 `title` 变成泛泛的 `"Error"`，
+  而前端**有**本地化译文（i18n 词库里已备好）→ 两侧表现不一致
+  （前端显示中文具体文案，API 的 `title` 是 `"Error"`）。
+- **缓解**: 本轮已把这条**变成机械可判的**：新增断言「`TITLES` 的错误码都有 i18n 条目」
+  → 一旦有人给这 6 个码补了 `TITLES` 行而没同步 i18n，**测试会红**。
+- **建议修法**: 若将来要把这 6 个码接到 HTTP 响应上，
+  **必须同时**补 `crates/platform-core/src/titles.rs` 的 6 行（ASCII 标题）
+  + 更新 `crates/platform-server/tests/i18n_titles.rs` 的行数钉死值。

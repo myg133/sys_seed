@@ -237,3 +237,74 @@ export DATABASE_URL_TEST="postgres://base:base@127.0.0.1:5432/base_test"
 3. 变异自证证据（F1、F2）；
 4. 偏离声明 / 未完成项；
 5. 已写入的文件（绝对路径）。
+
+---
+
+# 附录 A（BA 于 2026-11-20 14:05 追加）：F10 的判据订正 + D195
+
+> **F10 的原判据是 BA 写错的** —— D192 作废，由 **D194** 取代。
+> 详见 `BA/demands/REQ-014-audit/decisions.md` rev 5 的「rev 5」段。
+
+## A.1 为什么原判据不成立
+
+`TITLES`（`crates/platform-core/src/titles.rs`）**混装**两类键：
+**78 个错误码**（`UPPER_SNAKE`）+ **6 个组织事件码**（`org.*`）= 84；
+i18n `error.*` 词库 = 那 78 个 + **6 个当前不进 HTTP 响应体**的码 = 84。
+
+**两个 84 是数字巧合，集合差 6↔6。** 两侧的差集**都是有意**的：
+- `TITLES` 的 6 个 `org.*` 是**组织事件码**（`titles.rs` 模块注释明写
+  「组织事件码沿用既有 `org.*` 形式」）；前端无 org 命名空间，也不消费它们；
+- i18n 多出的 6 个（`CONFIG_MISSING_REQUIRED` / `CONFIG_INVALID_VALUE` /
+  `CONFIG_FORBIDDEN_COMBINATION` / `INVALID_CONFIG_KEY` / `INVALID_IDENTIFIER` /
+  `IO_ERROR`）**当前不进 HTTP 响应体** → 它们在 `TITLES` 缺席是**正确的**。
+
+→ **集合相等永远不成立**，「==」这条断言**不要写**。
+
+## A.2 F10 的正确做法（钉死）
+
+在 `crates/platform-server/tests/i18n_titles.rs` 里新增断言，判据 = D125 的真实不变量
+「**每个会进响应体的错误码，`TITLES` 与 i18n 都要登记**」：
+
+1. **（已有，保留）** `titles_cover_every_code` —— `TITLES` ⊇ `all_codes()`；
+2. **（新增）** `all_codes()` 里**除组织事件码外**的每个码，i18n 词库都有 `error.<code>` 条目；
+   - 组织事件码从哪来是**已知的**：该测试文件里 `all_codes()` 已经显式列了
+     `platform_org::notify::OrgEventKind::ALL_CODES` 这一段 → 排除它即可，
+     **不要**用正则去猜「哪些是事件码」；
+3. **（新增）** `TITLES` 里的**错误码**（= `TITLES` 的键 ∩ 第 2 条的错误码全集）
+   都在 i18n 词库里。
+
+### A.2.1 三条断言合起来能抓住什么
+
+- i18n 少一个**后端码** → 断言 2 红；
+- i18n 把 A 换成 B（A 是后端码）→ 断言 2 红；
+- `TITLES` 有个码 i18n 没译 → 断言 3 红。
+
+### A.2.2 硬要求
+
+- ⚠️ 断言 2 与 3 必须**同时查 `en-US.json` 与 `zh-CN.json`** ——
+  只查英文的话，中文词库少一条就抓不到。
+- ⚠️ `platform-server` 已有 `serde_json` 依赖 → **不引新依赖**；
+  用 `env!("CARGO_MANIFEST_DIR")` 定位仓库根（`../../..`）再拼 `packages/i18n/src/locales/…`。
+- ⚠️ **不要**改 `TITLES`（`crates/platform-core/src/titles.rs`）——
+  那 6 个码**不该**补标题（见 A.1），补了就是「登记在骗人」的另一面。
+- ⚠️ **不要**改 `crates/platform-server/tests/i18n_titles.rs` 里
+  `the_title_table_has_the_pinned_number_of_rows` 的钉死值（仍是 84）——
+  `TITLES` 一行没加。
+
+## A.3 D195：`page` 模式下 `nextCursor` 的语义
+
+- **决策**：`page` 模式下**继续返回** `nextCursor`（F1 的修法对两种模式一视同仁）。
+  - 它在 `page` 模式下不是无意义的：它指向本页最后一行，配合默认排序时，
+    用它做游标翻页与 `page+1` 等价；
+  - 客户端若改用游标，必须回到**默认排序** —— 这条约束 D179 已经钉了
+    （游标 + 非默认 `sort` → 400）。
+- **不改代码**，只是把「C7 未定义 page 模式的 `nextCursor`」这件事**钉住**，
+  免得下一轮又当成 bug 改一遍。
+
+## A.4 本附录的其余确认（BA 已核实，不必再查）
+
+- 复验报告里的 **U-2「`TITLES` 确实少 6 个码」** → **不是缺陷**：
+  那 6 个码当前不进响应体，缺席是**正确的**（A.1）。→ 关闭，已记 **TD-038**。
+- **U-3「生产库的 `audit.page.defaultSize` 行需部署时跑一次幂等 upsert」** → **不成立**：
+  迁移 `20261120000400` 属于**本条未合并的功能分支**，**没有任何环境**应用过它
+  → 新部署跑的就是 `'20'::jsonb`。→ 关闭。
