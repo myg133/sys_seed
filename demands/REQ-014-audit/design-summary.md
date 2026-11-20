@@ -3,7 +3,7 @@
 - **需求编号**: REQ-014
 - **状态**: rev 1（2026-11-20）
 - **对应验收标准**: [acceptance.md](acceptance.md)（13 条）
-- **决策依据**: [decisions.md](decisions.md)（D130~D143）
+- **决策依据**: [decisions.md](decisions.md)（D130~D144）
 - **更新时间**: 2026-11-20 09:25
 
 > 本文只写**实现依据**：现状盘点、数据模型、端点、规范化、代码落点。
@@ -302,8 +302,28 @@ YYYY-MM-DDTHH:MM:SS.ffffffZ
 - 小数部分**恰好 6 位**（微秒），不足**补 0**（`.100000` 而不是 `.1`）；
 - 结尾是**字面量大写 `Z`** —— 不是 `+00:00`、不是 `+0000`、不是 `z`。
 
-**DB 侧**用 `to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`。
-**Rust 侧**用 `time` crate 的 format description 产生**同一串**。
+**DB 侧**用 `to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`
+（Postgres 17.12 实测：微秒 456789 → `2026-11-20T01:02:03.456789Z`；
+微秒为 0 → `2026-11-20T01:02:03.000000Z`，**恒 6 位** ✓）。
+
+**Rust 侧必须手工拼装**（D144）：
+
+```rust
+format!(
+    "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:06}Z",
+    dt.year(), dt.month() as u8, dt.day(),
+    dt.hour(), dt.minute(), dt.second(),
+    dt.millisecond() * 1000 + dt.microsecond() % 1000,
+)
+```
+
+- 🔑 **禁止** `time::format_description::well_known::Rfc3339`：
+  它在微秒为 0 时**整个省略小数部分** → 违反「恰好 6 位」。
+- 🔑 **禁止**为此开启 `time` 的 `macros` / `parsing` feature：
+  根 `Cargo.toml:49` 只开了 `formatting`，且该行注释明确
+  「避免拉进 proc-macro 编译链：低配机编译开销敏感」。
+- Dev 必须写一条测试，断言 Rust 侧输出与 DB 侧 `to_char` 输出**逐字节相同**
+  （含微秒为 0 的边界）。
 
 > ⚠️ 两边不一致 → 链校验永远失败 → **「实现有 bug」与「规范不一致」无法区分** → 假绿。
 > 测试会**独立实现**这个格式（用 `time` crate，不调用生产代码）→ 不一致时测试**红**，
