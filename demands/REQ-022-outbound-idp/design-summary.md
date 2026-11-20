@@ -1,7 +1,7 @@
 # 设计摘要：出站 IdP 与单点登出（REQ-022）
 
 - **需求编号**: REQ-022
-- **状态**: rev 1（2026-11-20 —— BA 规格阶段）
+- **状态**: rev 2（2026-11-20 —— BA 规格阶段；rev 2 同步 QA 挑刺 39 条的裁决 D221~D256）
 - **配套**: [demand.md](demand.md) / [acceptance.md](acceptance.md) / [decisions.md](decisions.md)
 - **基线代码**: `develop` @ `310e4d3`
 
@@ -53,6 +53,12 @@
 
 ## 2. 数据模型（5 张表）
 
+> ⚠️ **rev 2（D227）**：4 张带 `tenant_id` 的表的 **RLS policy 由
+> `cargo xtask tenant-policies` 生成**（manifest 的 `tenantScoped` 段是**唯一来源**，
+> `crates/platform-db/src/scopes.rs:5`）→ 顺带进平台的 RLS 自检
+> （`crates/xtask/src/cli.rs:114-133`）。**不重复 `platform-audit` 的缺口**
+> —— 它的 4 张表是**手写** policy，因此**不在**平台自检范围内。
+
 ### 2.1 `platform_oauth_client` —— 平台级（**无 `tenant_id`，不启用 RLS**）
 
 | 列 | 类型 | 说明 |
@@ -75,7 +81,6 @@
   本地开发允许 `http`）→ 出站 URL **只**能取自这里 → 无 SSRF 入口（D220）。
 
 ### 2.2 `platform_oauth_grant` —— 同意记录 / 撤销依据 / 登出定位（**一表三用**）
-
 | 列 | 说明 |
 |---|---|
 | `id` / `tenant_id` / `client_id` / `user_id` | |
@@ -251,14 +256,32 @@ POST /api/oauth/introspect      Authorization: Basic …      Body: token=…
 ```
 POST /api/oauth/logout   (Bearer)
 1. 撤销该用户全部 grant            → platform_oauth_grant.status = revoked
-2. 作废全部会话                    → IamStore::revoke_all_refresh_tokens
+2. 作废全部 refresh token          → IamStore::revoke_all_refresh_tokens
                                     （crates/platform-iam/src/store.rs:765）
+   ⚠️ **只作废 refresh token** —— 已签发的**登录 access token** 是自包含 JWT
+   （crates/platform-iam/src/jwt.rs:143-166 验签不查库）
+   → **最长延迟一个 iam.accessTokenTtl 秒**才失效（D229 / TD-043）
+   → 而 **OAuth 令牌**由 platform_oauth_token 表决定 → 撤销 grant 后**立即**失效
 3. 收集有 backchannel_logout_uri 的 client → 并发 POST logout_token
    （**失败只记日志**，超时 5 秒，不影响登出结果）
 4. 收集有 frontchannel_logout_uri 的 client → 返回 frontChannel 数组
 5. 埋审计 oauth.logout.executed
-→ 200 { loggedOut: {…}, frontChannel: [{clientId, logoutUrl}] }
+→ 200 { loggedOut: {…}, frontChannel: [{clientId, logoutUrl, logoutToken}] }
 ```
+
+**rev 2 的两处修正**：
+
+- **D225（front-channel 的形态）**：后端返回 **JSON 数组**（如上），
+  **前端**（`apps/shell/src/pages/OAuthLogout.svelte`）负责渲染 iframe：
+  - iframe 数量**恰好** = `frontChannel` 数组长度；
+  - `src` = `{logoutUrl}` + `?logout_token={logoutToken}`；
+  - `sandbox` **含** `allow-scripts`、**不含** `allow-same-origin`。
+  - ⚠️ **不是**后端直接返回 HTML —— 平台的会话是 Bearer，
+    登出必须带 `Authorization` 头 → 只能由前端 `fetch` 发起 →
+    浏览器**导航**无法发起 `POST`（D203 的直接推论）。
+- **D230（`sid` 的取值）**：`sid` = **触发登出的这次请求所使用的会话 ID**
+  （即当前 access token 的 `sid`）—— **一个**登出请求 = **一个** `logout_token`；
+  「作废全部会话」是**平台侧**的动作，**不**意味着发多个 `logout_token`。
 
 `logout_token` payload：
 
@@ -267,7 +290,7 @@ POST /api/oauth/logout   (Bearer)
   "iss": "<平台 issuer>",
   "aud": "<client_id>",
   "sub": "<用户 id>",
-  "sid": "<会话 id>",
+  "sid": "<触发登出的会话 id>",
   "events": { "http://schemas.openid.net/event/backchannel-logout": {} },
   "iat": 1700000000,
   "jti": "…"
@@ -320,20 +343,25 @@ POST /api/oauth/logout   (Bearer)
 
 ## 6. 错误码
 
-### 6.1 平台码（10 个，`crates/platform-oauth/src/error.rs`）
+### 6.1 平台码（**9 个**，`crates/platform-oauth/src/error.rs`）
 
 | 码 | HTTP | 何时 |
 |---|---|---|
 | `OAUTH_CLIENT_NOT_FOUND` | 404 | 管理端点查不到 client |
-| `OAUTH_CLIENT_DISABLED` | 403 | client 已停用 |
+| `OAUTH_CLIENT_DISABLED` | 403 | client 已停用（preview 阶段，D249） |
 | `OAUTH_CLIENT_EXPIRED` | 403 | client 已过期 |
-| `OAUTH_CLIENT_SECRET_INVALID` | 401 | 管理端点改 secret 时旧 secret 错 |
 | `OAUTH_INVALID_REQUEST` | 400 | 参数缺失 / 非法（含缺 `code_challenge`） |
 | `OAUTH_INVALID_REDIRECT_URI` | 400 | 回调地址不在白名单 |
 | `OAUTH_INVALID_SCOPE` | 400 | scope 为空 / 格式非法 / 通配未注册 |
 | `OAUTH_UNSUPPORTED_CODE_CHALLENGE_METHOD` | 400 | `code_challenge_method` 不是 `S256` |
-| `OAUTH_TICKET_INVALID` | 400 | consent ticket 验签失败 / 过期 |
+| `OAUTH_TICKET_INVALID` | 400 | consent ticket 验签失败 / 过期 / 被篡改 |
 | `OAUTH_GRANT_NOT_FOUND` | 404 | 授权记录不存在 |
+
+> ⚠️ **rev 2（D226）**：原 10 个码里的 **`OAUTH_CLIENT_SECRET_INVALID` 已删** ——
+> 它在 22 条 AC 里一次都没出现，也**没有触发点**
+> （D200 决定 secret 不允许自选、只显示一次，而端点清单里**没有**「轮换 secret」端点）
+> → 一个**永远不可能出现**的码却要在 i18n 词库占一条、在 `TITLES` 占一行 = **死登记**。
+> 将来做「轮换 secret」端点时再按 D213 的 8 处补上。
 
 - **8 处登记点**（D213）：常量 / enum 变体 / `code()` / `status()` / `detail()` /
   `params()` / `ALL_CODES` / 测试的两个数组；
@@ -341,6 +369,10 @@ POST /api/oauth/logout   (Bearer)
   `packages/i18n/src/locales/{zh-CN,en-US}.json` 的 `error.<CODE>`、
   `crates/platform-server/tests/i18n_titles.rs:59` 的 `all_codes()` **加一行**、
   同文件 `:156-165` 的**行数断言**同步加常量。
+- ⚠️ **`TITLES` 行数 = 93**（58 + 21 + 5 + **9**）——
+  **8 个 `oauth.*` 审计事件码不进 `TITLES`**（D223：进了会让 `i18n_titles.rs` 的
+  三个既有断言必红，且事件码不进响应体 → 没有「面向用户的标题」这回事）。
+  事件码改为 `crates/platform-oauth/src/events.rs` 里的**内部常量** + 单测覆盖。
 
 ### 6.2 协议码（小写，见 acceptance.md §全局约定）
 
@@ -355,7 +387,7 @@ RFC 6749 §4.1.2.1 + RFC 8628 §3.5 + RFC 7662 §2.3 的并集。
 
 | 键 | 类型 | scope | 默认 | 说明 |
 |---|---|---|---|---|
-| `oauth.frontendBaseUrl` | `string` | `platform` | `""` | 授权页 / 同意页的前端基址 |
+| `oauth.frontendBaseUrl` | `string` | `platform` | `""` | 授权页 / 同意页的前端基址；**空 = 用 `{issuer}`**（D222） |
 | `oauth.accessTokenTtlSeconds` | `number` | `platform` | `3600` | **撤销延迟上界**（D210） |
 | `oauth.authorizationCodeTtlSeconds` | `number` | `platform` | `60` | |
 | `oauth.deviceCodeTtlSeconds` | `number` | `platform` | `600` | |
@@ -367,6 +399,10 @@ RFC 6749 §4.1.2.1 + RFC 8628 §3.5 + RFC 7662 §2.3 的并集。
   （范式见 `migrations/20261120000400_audit_config_seed.up.sql`）。
 - ⚠️ `ConfigKey::parse` 要求每段 **lowerCamelCase**
   （`crates/platform-core/src/config.rs:118-128`）→ `frontendBaseUrl` ✓
+- ⚠️ **rev 2（D222）**：`oauth.frontendBaseUrl` 与 `{issuer}` **在 E2E 里不相等**
+  （`https://e2e.base` vs `http://127.0.0.1:8080`）→
+  一切「授权页 / 设备码页」的 URL 都用符号 **`{授权页基址}`**
+  （= `oauth.frontendBaseUrl`，**未配置时回退 `{issuer}`**），**不得**直接用 `{issuer}`。
 
 ---
 
@@ -391,18 +427,32 @@ RFC 6749 §4.1.2.1 + RFC 8628 §3.5 + RFC 7662 §2.3 的并集。
   "menus": [
     { "label": "授权管理", "icon": "key", "route": "/oauth/grants", "perm": "oauth:grant:read" }
   ],
+  "tenantScoped": {
+    "tables": ["platform_oauth_grant", "platform_oauth_code",
+               "platform_oauth_device_code", "platform_oauth_token"],
+    "column": "tenant_id"
+  },
   "dependencies": [],
   "config": { … §7 的 5 个键 … }
 }
 ```
 
-- **种子迁移**：`migrations/20261120000500_oauth_permission_seed.up.sql`
+- ⚠️ **rev 2（D227）**：加了 **`tenantScoped`** 段 →
+  4 张表的 RLS policy 由 `cargo xtask tenant-policies` **生成**
+  （命名自动是 `<table>_tenant_isolation`，`crates/platform-db/src/rls.rs:36`）
+  → 顺带进平台的 RLS 自检（`crates/xtask/src/cli.rs:114-133`）。
+  `platform_oauth_client` **不**列入（平台级表，无 `tenant_id`、不启用 RLS）。
+- **种子迁移**：`migrations/20261120000600_oauth_permission_seed.up.sql`
   —— `source` 必须逐字等于 `'crates/platform-oauth/manifest.json'`
   （`crates/platform-rbac/src/registry.rs` 的 `collect_manifest_permissions` 拼法）。
 - **启动对账**：`crates/platform-rbac/src/registry.rs:198` `require_consistent`
   → 不一致 = **进程起不来**（`crates/platform-server/src/main.rs:954` 调用）。
 - **C-5 合规**：每个权限点都要有**字面量** `require_permission("oauth:…")` 调用点
   （`crates/platform-core/src/extension/permission.rs:273`）。
+- **真 C-5 命令**（D240）：`cargo test -p platform-oauth --test contract_c5`
+  —— **该测试文件必须由本需求新增**（范式见 `crates/platform-audit/tests/contract_c5.rs:24-64`）。
+  ⚠️ `cargo xtask capabilities --check` **不做** C-5，且**基线上就是红的**
+  （`crates/xtask/src/catalog.rs:147-149` 仍写「待 REQ-014」→ **TD-044**，本轮顺带还）。
 
 ---
 
@@ -413,11 +463,26 @@ RFC 6749 §4.1.2.1 + RFC 8628 §3.5 + RFC 7662 §2.3 的并集。
 | `apps/shell/src/pages/OAuthAuthorize.svelte` | `apps/shell/src/pages/Audit.svelte`（`$props` / `$state` / `$derived` / `$effect`） |
 | `apps/shell/src/pages/OAuthDevice.svelte` | 同上 |
 | `apps/shell/src/pages/OAuthGrants.svelte` | 同上（列表 + 撤销按钮） |
+| `apps/shell/src/pages/OAuthLogout.svelte` | 同上（**渲染 front-channel iframe**，D225） |
 | `apps/shell/src/lib/oauth-api.ts` | `apps/shell/src/lib/audit-api.ts`（纯函数 + 常量 + 白名单） |
-| `apps/shell/src/lib/routes.ts` | 加 3 条路由（`createRoutes`，`:68-111`） |
+| `apps/shell/src/lib/routes.ts` | 加 4 条路由（`createRoutes`，`:68-111`） |
+| ⚠️ **`apps/shell/src/pages/Login.svelte`** | **改动**：支持 `?return_to=` 登录后回跳（D221） |
+| ⚠️ **`apps/shell/src/App.svelte`** | **改动**：登录后走 `return_to`（D221） |
 
+- ⚠️ **rev 2（D221）—— 未登录回跳**：
+  - `/oauth/authorize` 登记为**公开路由**（**不设** `requiresAuth`），
+    照 `apps/shell/src/lib/routes.ts:70-76` 的 `SSO_CALLBACK_ROUTE_PATH` 范式；
+  - 页面自己读 `window.location.search` 取全部授权参数；
+  - 未登录 → 渲染「登录并继续」→ 把**完整 URL**（`pathname + search`）编码进
+    `?return_to=` → 跳 `/login?return_to=…`；
+  - `Login.svelte` 登录成功后 `location.replace(return_to)`；
+    **没有** `return_to` 时保持现行为（跳首页）。
+  - **不动** `apps/shell/src/lib/router.ts` —— 改它要动 REQ-011 已交付的路由核心
+    （`resolve()` 用带 query 的字符串 `match()` 会失败，`router.ts:204-207`）。
+  - ⚠️ 改 `Login.svelte` / `App.svelte` 会影响 REQ-011 的既有前端用例 → **棒 2 必须跑前端全量回归**。
 - i18n 键：`packages/i18n/src/locales/{zh-CN,en-US}.json` 新增
-  `oauth.*` 命名空间 + 10 个 `error.OAUTH_*`。
+  `oauth.*` 命名空间 + **9 个** `error.OAUTH_*`（D226）。
+  ⚠️ **整个 `packages/i18n/**` 归棒 2**（D256 —— 两个棒都改同一文件 = 并行冲突）。
 - 组件用**本地** `apps/shell/src/components/`（`Button` / `Input` / `Table` / `Card` / `Dialog`）。
 
 ---
@@ -458,18 +523,46 @@ authorize          ensure_permission  verify_permission  permission_check
 
 | 层 | 位置 | 备注 |
 |---|---|---|
-| 单元 | `crates/platform-oauth/src/**` 的 `mod tests` | scope 交集、PKCE 校验、client 认证 |
+| 单元 | `crates/platform-oauth/src/**` 的 `mod tests` | scope 交集、PKCE 校验、client 认证、事件码常量 |
 | 集成 | `crates/platform-oauth/tests/*.rs` | 真库（`DATABASE_URL_TEST`）+ 真 HTTP（axum `oneshot`） |
-| 跨栈 | `crates/platform-server/tests/i18n_titles.rs` | 错误码 / TITLES / i18n |
-| 契约 | `cargo xtask capabilities --check` | manifest ↔ 源码 |
+| 契约 | `crates/platform-oauth/tests/contract_c5.rs` | **真 C-5 命令**（D240）；范式见 `crates/platform-audit/tests/contract_c5.rs:24-64` |
+| 跨栈 | `crates/platform-server/tests/i18n_titles.rs` | 错误码 / TITLES（**行数 = 93**）/ i18n |
+| 能力索引 | `cargo xtask capabilities`（**重新生成**，不是 `--check`） | `capabilities/` 仍 **14 个文件**；`permissions.json` 的 `total == 32`（D240） |
+| RLS | `cargo xtask tenant-policies --check` | 4 张表的 policy 由 manifest 的 `tenantScoped` 生成（D227） |
 | 前端单测 | `apps/shell/test/oauth*.test.ts` | `svelte/server` 的 `render` |
 | E2E | `e2e/oauth.spec.ts` | Playwright；夹具由 `scripts/seed-e2e.sh` 播种 |
 
-**夹具**（`scripts/seed-e2e.sh` 要加）：
-- 用户 `e2e-user-oauth@example.com`（持 `rbac:role:read`）
-- 一个 `confidential` client（`allowedScopes` = `["rbac:role:read"]`）
-- 一个 `public` client
-- 一个 **mock 接收端**（进程内 HTTP server，供 back-channel logout 用）
+**夹具**（`scripts/seed-e2e.sh` 要加，D236 —— **全部**是脚本的产出物，AC 前置必须写明）：
+
+| 夹具 | 说明 |
+|---|---|
+| `u-perm-oauth@example.com`（`tenant-a`） | OAuth 管理员：持 `oauth:client:read/write/delete` + `oauth:grant:read/revoke` |
+| `e2e-user-oauth@example.com`（`tenant-a`） | 普通用户：持 `rbac:role:read` |
+| `u-perm-other@example.com`（**`tenant-b`**） | 跨租户用例（D236 / S-34） |
+| `client-A`（confidential） | `allowedScopes = ["rbac:role:read"]`；配 `backchannel_logout_uri` + `frontchannel_logout_uri` |
+| `client-B`（confidential） | **不**配 front-channel URI（验收集逻辑按非空过滤） |
+| `public-client`（public） | 无 secret |
+
+- client 的 `client_secret_hash` 由脚本按 **`digest_base64url`** 口径写入，
+  **明文 secret 由脚本打印到 stdout** → E2E 从 stdout / 夹具文件读；
+- 脚本的「强断言」段必须**自证**这些账号与 client **存在且绑定正确**。
+
+**mock 接收端**（D237 —— **独立进程**，不是「进程内」）：
+
+- 新增 `scripts/mock-logout-receiver.sh`：监听 `127.0.0.1:$MOCK_PORT`，
+  把收到的 `logout_token` **写到文件** `target/mock-logout-received.jsonl`，
+  行为由 `MOCK_MODE=ok|timeout|500` 环境变量控制（默认 `ok`）；
+- `scripts/seed-e2e.sh` 读 `$MOCK_PORT`，把
+  `backchannel_logout_uri = 'http://127.0.0.1:' || $MOCK_PORT || '/logout'` 写进 client 行
+  → **夹具顺序钉死**：先起 mock → 再播种；
+- ⚠️ **不要**在 E2E 进程里 mock HTTP —— 那会把「出站真的发出去了」这件事 mock 掉
+  （dev-guide §9.13）。
+
+**E2E 私钥落盘**（D238）：
+
+- `scripts/e2e-server.sh:65-70` 改成「生成后**写入** `target/e2e-jwt-private.pem` 并 `export`」；
+- 权限 **0600**、**不入 Git**、**每次运行覆盖**；
+- E2E 用它**自己签**一个 `scope` 更大的 consent ticket → 确认被拒（D238 的核心判据）。
 
 > ⚠️ **E2E 必须从干净库跑**（REQ-014 F11 教训）：`scripts/e2e-server.sh` **不能从零建库**
 > （TD-039）→ 清理后必须手工补 3 步（`deploy/seed/02-app-role.sql` +
@@ -479,23 +572,36 @@ authorize          ensure_permission  verify_permission  permission_check
 
 ## 13. 迁移与文件清单
 
-| 文件 | 动作 |
-|---|---|
-| `Cargo.toml` | `members` 加 `crates/platform-oauth`；`[workspace.dependencies]` 加一行 |
-| `Cargo.lock` | 同步（REQ-021 的教训：**必须**入锁） |
-| `crates/platform-oauth/` | 新 crate：`Cargo.toml` / `manifest.json` / `src/{lib,error,model,store,service,http,client_auth,pkce,ticket,logout,outbound}.rs` |
-| `crates/platform-iam/src/jwt.rs` | 加 `sign_claims<T>`（D109 #1） |
-| `crates/platform-iam/src/service.rs` | 加 `keys()` getter（D109 #1） |
-| `crates/platform-server/src/main.rs` | 装配（§10） |
-| `crates/platform-core/src/titles.rs` | 加 10 条 ASCII 标题 |
-| `crates/platform-server/tests/i18n_titles.rs` | `all_codes()` 加一行 + 行数断言 |
-| `packages/i18n/src/locales/{zh-CN,en-US}.json` | 加 `error.OAUTH_*` + `oauth.*` |
-| `apps/shell/src/{pages,lib}/` | 3 个页面 + 1 个 api 模块 + 3 条路由 |
-| `migrations/20261120000500_oauth_schema.up/down.sql` | 5 张表 + RLS policy + 索引 |
-| `migrations/20261120000600_oauth_permission_seed.up/down.sql` | 6 个权限点 |
-| `migrations/20261120000700_oauth_config_seed.up/down.sql` | 5 个配置键 |
-| `scripts/seed-e2e.sh` | 加 OAuth 夹具 |
-| `e2e/oauth.spec.ts` | E2E |
+| 文件 | 棒 | 动作 |
+|---|---|---|
+| `Cargo.toml` | 1 | `members` 加 `crates/platform-oauth`；`[workspace.dependencies]` 加一行 |
+| `Cargo.lock` | 1 | 同步（REQ-021 的教训：**必须**入锁） |
+| `crates/platform-oauth/` | 1 | 新 crate：`Cargo.toml` / `manifest.json` / `src/{lib,error,events,model,store,service,http,client_auth,pkce,ticket,logout,outbound,sensitive}.rs` |
+| `crates/platform-oauth/tests/contract_c5.rs` | 1 | **C-5 真命令**（D240） |
+| `crates/platform-iam/src/jwt.rs` | 1 | 加 `sign_claims<T>`（D109 #1） |
+| `crates/platform-iam/src/service.rs` | 1 | 加 `keys()` getter（D109 #1） |
+| `crates/platform-server/src/main.rs` | 1 | 装配（§10） |
+| `crates/platform-core/src/titles.rs` | 1 | 加 **9** 条 ASCII 标题 |
+| `crates/platform-server/tests/i18n_titles.rs` | 1 | `all_codes()` 加一行 + 行数断言改 **93** |
+| `crates/xtask/src/catalog.rs` | 1 | 修过期文案「待 REQ-014」（**TD-044**，D240） |
+| `packages/i18n/src/locales/{zh-CN,en-US}.json` | **2** | 加 `error.OAUTH_*`（**9** 个）+ `oauth.*`（D256） |
+| `packages/i18n/test/i18n.test.ts` | **2** | 加本需求的 9 个码的登记断言 |
+| `apps/shell/src/pages/OAuth{Authorize,Device,Grants,Logout}.svelte` | **2** | 4 个页面 |
+| `apps/shell/src/pages/Login.svelte` | **2** | **改**：支持 `?return_to=`（D221） |
+| `apps/shell/src/App.svelte` | **2** | **改**：登录后走 `return_to`（D221） |
+| `apps/shell/src/lib/oauth-api.ts` | **2** | API 层 |
+| `apps/shell/src/lib/routes.ts` | **2** | 加 4 条路由 |
+| `migrations/20261120000500_oauth_schema.up/down.sql` | 1 | 5 张表 + 索引（**RLS 由 xtask 生成**，D227） |
+| `migrations/20261120000600_oauth_permission_seed.up/down.sql` | 1 | 6 个权限点 |
+| `migrations/20261120000700_oauth_config_seed.up/down.sql` | 1 | 5 个配置键 |
+| `scripts/seed-e2e.sh` | 1 | 加 OAuth 夹具（D236） |
+| `scripts/mock-logout-receiver.sh` | 1 | **新增**（D237） |
+| `scripts/e2e-server.sh` | 1 | 私钥落盘（D238） |
+| `e2e/oauth.spec.ts` | 1 | E2E |
+
+> ⚠️ **棒 1 ∥ 棒 2 的文件集严格不相交**（D256）→
+> `packages/i18n/**` 与 `apps/shell/**` 归**棒 2**；其余归**棒 1**；
+> `Cargo.toml` / `Cargo.lock` 只归棒 1。
 
 ---
 
@@ -511,3 +617,7 @@ authorize          ensure_permission  verify_permission  permission_check
 | R6 | back-channel 出站 HTTP **超时**拖慢登出 | 超时 5 秒 + 并发投递 + **失败不影响登出** |
 | R7 | 改 `platform-iam` 会碰到 REQ-013 的回归 | 改动**只有 2 个新增方法**，不改 `AccessClaims`；全量回归把关 |
 | R8 | 契约 v3 升版要同步 `docs/contracts/` 快照 | `scripts/sync-contracts.sh --sync`（既有脚本） |
+| **R9** | **未登录回跳丢 query** —— 平台的 `intendedPath` 只有 pathname | **D221**：公开路由 + 登录页 `return_to`；**不动** `router.ts` |
+| **R10** | **改 `Login.svelte` / `App.svelte` 会影响 REQ-011 的既有前端用例** | 棒 2 必须跑**前端全量回归**；QA 用例已覆盖回跳路径 |
+| **R11** | **登出不杀已签发的登录 access token** | **D229** 显式写明现状 + **TD-043**；本轮**不**补实现 |
+| **R12** | **`xtask capabilities --check` 基线就是红的** | **D240** + **TD-044**；本轮顺带还 `catalog.rs` 的过期文案 |

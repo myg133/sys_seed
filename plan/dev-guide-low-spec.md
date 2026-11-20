@@ -707,6 +707,54 @@ REQ-013 的 51 条里，**阻塞 14 条全落在前三档** —— 这类问题*
   5. 跨栈断言写「**包含**」不写「**相等**」，并**逐 locale** 检查 ——
      两侧**数字相等**完全可能是**两个不同集合**（REQ-014：两侧都是 84，集合差 6↔6）。
 
+### 9.14 ★ 测试节奏：**开发期增量测试 → 终版集中全量 + E2E**
+
+> **2026-11-20 用户明确要求。** 低配机（8 线程 / 7.7G）上，
+> 「每改一行就跑一遍全量」是**浪费**（一次全量 = 12 个 crate 串行，几十分钟），
+> 而「只在最后跑全量」会**太晚**发现跨 crate 的破坏。分成两段才对。
+
+#### 阶段一：开发期 —— **增量测试**
+
+| 场景 | 跑什么 |
+|---|---|
+| 改了 `crates/platform-oauth/**` | `cargo test -p platform-oauth --all-targets -- --test-threads=1` |
+| 改了 `crates/platform-iam/**` | `cargo test -p platform-iam --all-targets -- --test-threads=1` |
+| 改了 `crates/platform-core/**` | `cargo test -p platform-core --all-targets -- --test-threads=1`（**错误码改动会在这里红**） |
+| 改了 `apps/shell/**` | `pnpm --filter @base/shell test` |
+| 改了 `packages/i18n/**` | `pnpm --filter @base/i18n test` |
+| 改了迁移 / manifest | `cargo xtask capabilities --check` + `cargo xtask tenant-policies --check` |
+| 改了 `crates/platform-server/src/main.rs`（装配） | `cargo test -p platform-server --all-targets -- --test-threads=1` |
+
+- **只跑「被改动的 crate + 它的直接依赖方」**，不跑无关 crate。
+- ⚠️ 增量绿**不等于**全量绿 → **绝不能**据此说「需求完成」。
+- 增量测试**必须带** `--all-targets`、**只能有一个 `--`**、**串行**
+  （§9.8 的三条硬约束在增量阶段**同样**适用）。
+- ⚠️ 增量阶段**不跑 E2E** —— E2E 要起服务、播种夹具、跑浏览器，
+  在低配机上是最贵的一档，且夹具往往还没准备好。
+
+#### 阶段二：终版 —— **集中全量 + E2E，一次跑完**
+
+在**代码冻结之后**、**合并之前**，集中跑一次：
+
+| # | 跑什么 | 口径 |
+|---|---|---|
+| 1 | **全量 Rust 回归** | **12 个有测试的 crate 逐个跑**（§9.8 的清单，**要数 workspace 成员别手抄**）；`--all-targets` + `-- --test-threads=1` + `--include-ignored` |
+| 2 | **前端全量** | `pnpm --filter @base/shell test` + `pnpm --filter @base/i18n test` + `pnpm --filter @base/sdk test`（sdk 需先 `pnpm -r build`） |
+| 3 | **类型检查** | `svelte-check` 0 error |
+| 4 | **能力索引** | `cargo xtask capabilities --check` **必须绿**（红 = 索引过期） |
+| 5 | **E2E** | `npx playwright test e2e/` —— **必须从干净库跑**（§9.9 / TD-039 的 3 步补建），**0 skipped** |
+| 6 | **契约检查** | `cargo test -p platform-contracts --all-targets` + `aw.py contract check` |
+
+#### 三条硬规矩
+
+1. **全量只跑一次** —— 在「修复轮结束、代码冻结」之后跑。
+   修复轮**过程中**只跑增量；**不要**每修一处就跑一次全量。
+2. **全量的数字要自己算** —— 用 `grep -E '^test result' | awk` 汇总，
+   **不要**抄 Dev 报告里的数字（REQ-014 的 BA 终验就是这么做的）。
+3. **全量绿 ≠ 需求通过** —— 全量只证明「**没弄坏别的**」；
+   「需求本身做到了」由 AC 的**专项判据**（含 §9.13 的敏感度证据）负责。
+   E2E 还要单独看 **0 skipped**（skip ≠ 已验证，D193）。
+
 ### 经验
 
 - **子 Agent 的工作产物不会丢，但进程会死** —— 派 Agent 时让它**小步提交**，

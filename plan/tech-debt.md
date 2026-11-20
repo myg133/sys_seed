@@ -702,3 +702,53 @@ Sprint 3 复盘的第 2 条教训：**修漏洞会制造新漏洞** —— 但�
 - **建议修法**: 抽到 `platform-core`（或独立的 `platform-http`），
   统一暴露「`get_json` / `post_form` / 超时 / TLS 根证书」，
   两个调用方共用；改动时**必须**同时跑 REQ-013 与 REQ-022 的回归。
+
+## TD-043: 登出**只**作废 refresh token —— 已签发的登录 access token 仍有效到过期
+
+- **发现于**: REQ-022 规格阶段（QA 挑刺 S-25，**安全缺口**）
+- **证据**:
+  - `crates/platform-iam/src/store.rs:754` `revoke_family` 与 `:765` `revoke_all_refresh_tokens`
+    —— 两者**只** UPDATE `platform_iam_refresh_token`；
+  - `crates/platform-iam/src/jwt.rs:143-166` `JwtKeySet::verify` —— 验签 + `exp`，
+    **不查库**（access token 是自包含 JWT）。
+- **问题**：用户点「退出登录」后，别人拿他的 access token **在 `exp` 之前仍能调所有业务端点**。
+  REQ-022 的 D211 原本写「作废**全部会话**」，实现上只作废了 refresh token ——
+  **措辞与实现不符**，且**没有任何 AC 覆盖**「登出后旧 access token 立即失效」。
+- **本轮的决定**（D229）：**显式写明现状**，不假装实现了「立即失效」。
+  - OAuth 侧的撤销是**另一套**：由 `platform_oauth_token` 表的状态决定 → **立即**生效；
+  - 登录侧的撤销：只作废 refresh token → **最长延迟一个 `iam.accessTokenTtl` 秒**。
+  → 这条差别必须写进 REQ-022 的 AC-S-149（否则两边的「撤销」会被混为一谈）。
+- **为什么本轮不修**：让 access token 立即失效 = 在**验签后查一次会话状态**
+  （或引入 `sid` 黑名单）→ 给**所有**业务端点的每次请求加一次查库 →
+  **性能与架构改动**，属于 REQ-007 的范畴，不是本需求能顺带塞进去的补丁。
+- **影响面**: 私有化部署里「退出登录」不是强制的；令牌泄露后的暴露窗口 = access token TTL。
+- **建议修法**:
+  1. 引入 `sid` 黑名单（登出时把 `sid` 写进一张短 TTL 的表），认证中间件在验签后查一次；
+  2. 或把 access token TTL 压到足够短（如 5~10 分钟）+ 依赖 refresh token 续期；
+  3. 两者都**要重新评估高频接口的延迟预算**（低配机）。
+
+## TD-044: `cargo xtask capabilities --check` **基线就是红的** —— `catalog.rs` 的文案没跟上 REQ-014
+
+- **发现于**: REQ-022 规格阶段（QA 挑刺 S-13，**实测**）
+- **证据**:
+  ```
+  $ ./target/debug/xtask capabilities --check --root .../code
+  能力索引校验失败：错误码 E_CAPABILITIES_OUTDATED
+    ✗ 内容不一致：capabilities/index.json
+    修复方式：运行 `cargo xtask capabilities` 重新生成
+  EXIT=1
+  ```
+  - 根因：`crates/xtask/src/catalog.rs:147-149` 的 `audit_sink` 条目仍写着
+    「审计只到事件声明面，落库与查询**待 REQ-014**」—— **REQ-014 已合并**
+    （`develop` @ `310e4d3`）→ `capabilities/index.json` 因此过期。
+- **影响面**: 任何把 `cargo xtask capabilities --check` 当判据的 AC **一上来就是红的**
+  → 极易被当成「环境问题」放过（QA 明确提醒了这一点）。
+  另注：该命令**不做 C-5**（`crates/xtask/src/capabilities.rs` 只比对索引产物与磁盘）
+  → **它根本不是 C-5 的判据**。
+- **本轮的决定**（D240）: REQ-022 **顺带还**这笔债（改 `catalog.rs` 的文案 + 重新生成索引），
+  并把 AC-S-153 的判据**拆成两条**：
+  - 1a = `cargo xtask capabilities` **重新生成** + 断言 `capabilities/` 仍 **14 个文件**
+    + `permissions.json` 的 `total == 32`；
+  - 1b = **真 C-5 命令** `cargo test -p platform-oauth --test contract_c5`。
+- **建议修法**: 本轮还完后，把「`capabilities/` 与源码一致」纳入**每次改 manifest 后的必跑项**；
+  长期可考虑让 `xtask capabilities --check` 在 CI 里作为**硬闸门**。

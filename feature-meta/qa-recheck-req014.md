@@ -635,7 +635,7 @@ unique total collected: 19    duplicates: 0
 |---|---|---|---|
 | **V-01** | **SSO 登录审计**（`iam.sso.login.succeeded`，AC-S-127 步骤 3） | 本机无已配置的 OIDC/LDAP provider；仓库里也没有任何该码的真库用例（`grep` 0 命中） | SSO 侧登录审计**完全无判据**（= L-02） |
 | **V-02** | **D157：审计写失败 → 拒绝登录 503** | 未做 sink 故障注入（需锁表 / 撤权限 / 断连接） | 代码路径存在，**未跑通**（= L-03 / U-02） |
-| **V-03** | `config.flag.write` 的事件码与 `before`/`after` 形状（AC-S-136 表内一行） | F5 只覆盖 `config.entries.write`；flag 写需特殊权限 | 该事件形状**未核**（= L-03 / U-05） |
+| **V-03** | `config.flag.write` 的事件码与 `before`/`after` 形状（**D163 的事件码表**内一行；埋点范围见 D136 第 3 类「配置写入」） | F5 只覆盖 `config.entries.write`；flag 写需特殊权限 | 该事件形状**未核**（= L-03 / U-05） |
 | **V-04** | 5 个 `AUDIT_*` 中文文案的**语义**校对 | 只验了键存在 + 非空（`locale_error_codes` 的 blank 检查） | 文案质量**未人工核对**（= L-03 / U-07） |
 | **V-05** | `platform_audit_chain_state` 的**跨租户 RLS** | 该表只被两个特权函数读写，未构造租户上下文场景 | 风险低，**未验**（= L-03 / U-09） |
 | **V-06** | **生产/既有环境的 `audit.page.defaultSize` 行** | 我只有 `base_test` 访问权；迁移已进 `_sqlx_migrations` 不会重跑 | 既有环境若已有该行，需手工跑一次幂等 `platform_config_upsert(…,'20'::jsonb)`（= Dev D-2；**本条不阻塞**：迁移属本功能分支，无环境应用过 —— 见附录 A.4） |

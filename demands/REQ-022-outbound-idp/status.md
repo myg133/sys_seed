@@ -1,8 +1,8 @@
 # 状态：REQ-022 出站 IdP 与单点登出
 
-- **状态**: **规格已就绪**（BA 规格阶段完成；**待 QA 挑刺**）
+- **状态**: **规格已定稿**（rev 2 —— QA 挑刺 39 条已逐条裁决；**待认领开工**）
 - **更新者**: myg133-ba-1
-- **更新时间**: 2026-11-20 23:58
+- **更新时间**: 2026-11-21 00:10
 
 ## 状态历史
 
@@ -11,6 +11,7 @@
 | 2026-11-19 23:58 | — | 草稿 | myg133-ba-1 | 从 REQ-013 拆出。用户裁定「拆两棒，本轮先做入站」→ 出站部分独立成 REQ-022，承接父 AC-006 |
 | 2026-11-20 22:00 | 草稿 | **规格进行中** | myg133-ba-1 | **开工前实测完成**（可行性 / 依赖 / 来源核实）+ **用户裁定范围**（全做，拆小任务，可并行） |
 | 2026-11-20 23:58 | 规格进行中 | **规格已就绪** | myg133-ba-1 | **规格四件套定稿**（demand rev2 / acceptance 22 条写实 / decisions D196~D220 / design-summary）+ **契约升 v3** + **REQ-016 按 D109 改写** + 技术债 +2 |
+| 2026-11-21 00:10 | 规格已就绪 | **规格已定稿** | myg133-ba-1 | **QA 挑刺 39 条**（阻塞 10 / 高 19 / 中 10）**全部接受** → `acceptance.md` **rev 2** + `decisions.md` **rev 2**（**D221~D256**）+ design-summary rev 2 + 技术债 +2（**TD-043 / TD-044**） |
 
 ---
 
@@ -99,17 +100,26 @@
 
 ## 7. 下一步（下一棒照此做）
 
-1. **QA 子 Agent 挑刺 + 写用例**（**必须先于 Dev**）：
-   - 挑验收标准的毛病（重点：22 条 AC 的可判定性、两套错误标识的边界、
-     免登语义、`prompt=none` 的四种结果、D209 的射程）；
-   - 产出用例集 `BA/demands/REQ-022-outbound-idp/test-cases/`。
-2. **BA 逐条裁决** → `acceptance.md` rev 2 + `decisions.md` rev 2。
-3. **认领 REQ-022** → 建 `feature-REQ-022` worktree → **棒 1 ∥ 棒 2 并行**（子 Agent）：
-   - 棒 1（后端）：`crates/platform-oauth/**` + `migrations/**` + `platform-iam` 的 2 个新增方法
-     + `platform-server` 装配 + `platform-core/titles.rs` + `i18n_titles.rs`
-   - 棒 2（前端）：`apps/shell/**` + `packages/i18n/**`
-   - 棒 3：E2E 夹具 + 用例（`e2e/**`、`scripts/seed-e2e.sh`）
-4. **Pre-merge 复验 → 修复轮 → 独立复核 → BA 终验 → 合并 develop + 回收 worktree + 复盘**
+1. **认领 REQ-022** → 建 `feature-REQ-022` worktree（`aw.py claim take REQ-022`）→
+   写**棒 1 / 棒 2 两张 Dev 任务卡**（文件集严格不相交，见 D256）→
+   **棒 1 ∥ 棒 2 并行**（子 Agent）：
+   - **棒 1（后端）**：`crates/platform-oauth/**` + `crates/platform-iam/src/{jwt,service}.rs`
+     + `crates/platform-server/src/{main.rs,tests/i18n_titles.rs}`
+     + `crates/platform-core/src/titles.rs` + `crates/xtask/src/catalog.rs`
+     + `migrations/**` + `scripts/{seed-e2e.sh,mock-logout-receiver.sh,e2e-server.sh}`
+     + `e2e/oauth.spec.ts` + `Cargo.toml` / `Cargo.lock`
+   - **棒 2（前端）**：`apps/shell/**`（含 `Login.svelte` / `App.svelte` 的 `return_to` 改动）
+     + `packages/i18n/**`
+   - ⚠️ **两棒靠约定字符串耦合**，任务卡必须写死三处：
+     ① **9 个**错误码的精确清单（码 + ASCII 标题 + 中文文案）；
+     ② 前端路由 `/oauth/authorize` / `/oauth/device` / `/oauth/grants` / `/oauth/logout`；
+     ③ `manifest.json` 的 `menus[].route` 与前端路由**逐字相同**。
+2. **测试节奏**（dev-guide **§9.14**，2026-11-20 用户明确要求）：
+   - **开发期**：**增量测试**（只跑被改动的 crate + 直接依赖方，不跑 E2E）；
+   - **终版**（代码冻结后、合并前）：**集中全量 + E2E 一次跑完**
+     （12 crate 逐个 + 前端三包 + `svelte-check` + `capabilities --check`
+     + Playwright **0 skipped**）。
+3. **Pre-merge 复验 → 修复轮 → 独立复核 → BA 终验 → 合并 develop + 回收 worktree + 复盘**
 
 ## 8. 阻塞项
 
@@ -120,12 +130,14 @@
 | 文件 | 状态 |
 |---|---|
 | [demand.md](demand.md) | ✅ **rev 2**（范围按用户裁定全做 + D109 跨需求改动声明） |
-| [acceptance.md](acceptance.md) | ✅ **rev 1**（22 条写实，AC-S-134~155） |
-| [decisions.md](decisions.md) | ✅ **rev 1**（D196~D220，25 条） |
-| [design-summary.md](design-summary.md) | ✅ **rev 1**（5 张表 / 端点清单 / 时序 / file:line 落点 / 错误码 / 配置项 / 风险） |
+| [acceptance.md](acceptance.md) | ✅ **rev 2**（22 条写实，AC-S-134~155；**QA 39 条挑刺已逐条裁决修完**） |
+| [decisions.md](decisions.md) | ✅ **rev 2**（D196~D220 + **rev 2 的 D221~D256**，共 **61 条**） |
+| [design-summary.md](design-summary.md) | ✅ **rev 2**（5 张表 / 端点清单 / 5 条时序 / file:line 落点 / **9** 个平台错误码 / 5 个配置项 / **12** 条风险） |
 | [status.md](status.md) | ✅ 本文件 |
-| `test-cases/` | ⏳ **待 QA 产出** |
-| `BA/contracts/api-conventions/v3.md` | ✅ 本轮已建 |
+| [test-cases/](test-cases/index.md) | ✅ **QA 产出 131 条**（TC-022-001~131，编号连续；22/22 AC 覆盖） |
+| [../../feature-meta/qa-req022-spec-review.md](../../feature-meta/qa-req022-spec-review.md) | ✅ **QA 挑刺 39 条**（阻塞 10 / 高 19 / 中 10） |
+| `BA/contracts/api-conventions/v3.md` | ✅ 本轮已建（C1 + C14） |
+| `BA/plan/dev-guide-low-spec.md` §9.14 | ✅ **测试节奏**：增量 → 终版集中全量 + E2E（2026-11-20 用户要求） |
 
 ---
 

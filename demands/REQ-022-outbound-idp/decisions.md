@@ -526,6 +526,626 @@
 
 ---
 
-## rev 2 待填
+## rev 2（2026-11-20 23:50）：QA 挑刺 39 条的**逐条裁决**
 
-QA 挑刺后逐条裁决追加。**本节的每一条都必须写明：挑刺编号 → 裁决 → 改了哪个文件。**
+- **挑刺报告**: [../../feature-meta/qa-req022-spec-review.md](../../feature-meta/qa-req022-spec-review.md)
+  （**39 条**：阻塞 10 / 高 19 / 中 10；22/22 AC 全部有问题）
+- **用例集**: [test-cases/index.md](test-cases/index.md)（**131 条**，TC-022-001~131，编号连续）
+- **裁决**: **39 条全部接受**（无一驳回）→ 产出 `acceptance.md` **rev 2** +
+  本节 D221~D256（**36 条**新决策）
+
+> ⚠️ **本轮的方法**：QA 的每条结论都带 `file:line` 或可复跑的实测输出，
+> BA 逐条**打开源码复核**后接受（不是「照单全收」—— 见 §rev 2 裁决总览的「复核」列）。
+> 其中 **S-02** 与 BA 在 QA 运行期间**独立**发现的问题（`status.md` §10.2 BA-01）
+> **完全一致** → 两次独立取证同一结论，这条判据的置信度最高。
+
+### rev 2 裁决总览
+
+| 挑刺 | 档位 | 级别 | 裁决 | 落点 |
+|---|---|---|---|---|
+| S-01 | 物理不可达 | 阻塞 | ✅ 接受 | D235（AC-S-137 步骤 4 改用 `page.route` 拦截） |
+| S-02 | 物理不可达 | 阻塞 | ✅ 接受 | **D221**（公开路由 + 登录页 `return_to`） |
+| S-03 | 不可判定 | 阻塞 | ✅ 接受 | D223（`TITLES` 行数 = **93**，逐字写出） |
+| S-04 | 口径不一致 | 阻塞 | ✅ 接受 | **D223**（事件码**不进** `TITLES`） |
+| S-05 | 不可判定 | 阻塞 | ✅ 接受 | D224（钉死 `UNAUTHENTICATED`，删「二者都接受」） |
+| S-06 | 物理不可达 | 阻塞 | ✅ 接受 | D236（夹具账号与 client 全部由 `seed-e2e.sh` 播种） |
+| S-07 | 物理不可达 | 阻塞 | ✅ 接受 | D237（mock 接收端 = 独立脚本 + 落盘 + `MOCK_MODE`） |
+| S-08 | 物理不可达 | 阻塞 | ✅ 接受 | D238（E2E 私钥落盘 `target/e2e-jwt-private.pem`） |
+| S-09 | 不可判定 | 阻塞 | ✅ 接受 | D239（PKCE 失败点 = **preview**） |
+| S-10 | 不可判定 | 阻塞 | ✅ 接受 | D224（步骤 3 改写 + 补 3.5） |
+| S-11 | 口径不一致 | 高 | ✅ 接受 | **D222**（统一 `{授权页基址}` 符号） |
+| S-12 | 口径不一致 | 高 | ✅ 接受 | D222 |
+| S-13 | 口径不一致 | 高 | ✅ 接受 | D240（判据拆 1a/1b；先还 `catalog.rs` 的债） |
+| S-14 | 口径不一致 | 高 | ✅ 接受 | D241（改成三条可判断言） |
+| S-15 | 不可判定 | 高 | ✅ 接受 | D242（拆成路径 5） |
+| S-16 | 口径不一致 | 高 | ✅ 接受 | **D228**（摘要统一 `digest_base64url`） |
+| S-17 | 不可执行 | 高 | ✅ 接受 | D243（运行期真值断言 + 可调用的扫描函数） |
+| S-18 | 不可判定 | 高 | ✅ 接受 | D244（401 + `{"error":"invalid_client"}`） |
+| S-19 | 口径不一致 | 高 | ✅ 接受 | D245（前置限定 grant 类型 + 补变体） |
+| S-20 | 口径不一致 | 高 | ✅ 接受 | **D225**（Front-Channel = **HTML + iframe**） |
+| S-21 | 不可判定 | 高 | ✅ 接受 | D246（`verification_uri` / `user_code` / `slow_down` 全补） |
+| S-22 | 口径不一致 | 高 | ✅ 接受 | **D227**（manifest 加 `tenantScoped` 段） |
+| S-23 | 口径不一致 | 高 | ✅ 接受 | D247（补写侧 `WITH CHECK` 判据） |
+| S-24 | 不可判定 | 高 | ✅ 接受 | D230（`sid` = 触发登出的会话 ID） |
+| S-25 | 安全缺口 | 高 | ✅ 接受 | **D229**（显式写明现状 + **TD-043**） |
+| S-26 | 口径不一致 | 中 | ✅ 接受 | D248（改成有区分力的版本） |
+| S-27 | 口径不一致 | 高 | ✅ 接受 | D249（拆 preview / token 两条） |
+| S-28 | 口径不一致 | 高 | ✅ 接受 | **D226**（删掉死码 → 平台码 **9** 个） |
+| S-29 | 表述 | 中 | ✅ 接受 | D250（「恰好等于」+ 顺序钉死） |
+| S-30 | 不可判定 | 中 | ✅ 接受 | D251（两条可判断言） |
+| S-31 | 不可判定 | 中 | ✅ 接受 | D252（TTL 判据逐列写死） |
+| S-32 | 表述 | 中 | ✅ 接受 | D253（按 `code_hash` 查 + `information_schema`） |
+| S-33 | 口径不一致 | 中 | ✅ 接受 | D254（补「两枚令牌」判据） |
+| S-34 | 物理不可达 | 中 | ✅ 接受 | D236（`seed-e2e.sh` 加 `tenant-b` 账号） |
+| S-35 | 不可判定 | 中 | ✅ 接受 | D243 |
+| S-36 | 口径不一致 | 中 | ✅ 接受 | D232（迁移文件名统一） |
+| S-37 | 口径不一致 | 高 | ✅ 接受 | D231（`client_credentials` = 两重交集） |
+| S-38 | 口径不一致 | 中 | ✅ 接受 | D234（**201**） |
+| S-39 | 口径不一致 | 高 | ✅ 接受 | D233（`consent_required` 只在授权页 query） |
+
+---
+
+## D221: 授权页走**公开路由** + 登录页 `return_to`（**不动 `router.ts`**）
+
+- **问题**（S-02 + BA-01，两处独立发现）：平台的守卫重定向**丢掉 query**：
+  - `apps/shell/src/lib/router.ts:261` `const intendedPath = path;` —— 只有 pathname；
+  - `apps/shell/src/lib/router.ts:232` `const keepsQuery = path === environment.location.pathname;`
+    → 跳 `/login` 时 path 变了 → `suffix = ''` → **query 被抹掉**；
+  - `apps/shell/src/App.svelte:122` 登录后跳回 `intendedPath` → **原 query 已丢**。
+  - 全仓 `grep "return_to\|returnTo"` 在 `apps/shell` / `packages/auth` / `packages/sdk` 里**零命中**。
+- **决定**（采纳 QA 的选项 A）：
+  1. `/oauth/authorize` 登记为**公开路由**（**不设** `requiresAuth`），
+     照 `apps/shell/src/lib/routes.ts:70-76` 的 `SSO_CALLBACK_ROUTE_PATH` 范式；
+  2. 页面自己读 `window.location.search` 取全部授权参数；
+  3. 未登录 → 渲染「登录并继续」→ 把**完整 URL**（`pathname + search`）编码进
+     `?return_to=` → 跳 `/login?return_to=…`；
+  4. **改 `apps/shell/src/pages/Login.svelte`**：登录成功后
+     `location.replace(return_to)`；**没有** `return_to` 时保持现行为（跳首页）。
+  5. ⚠️ `Login.svelte` 与 `App.svelte` **不在** design §13 的原文件清单里 → **补进去**（棒 2 的文件集）。
+- **为什么不改 `router.ts`**：`resolve()` 用带 query 的字符串去 `match()` 会匹配失败
+  （`router.ts:204-207`）→ 要改就得让 `resolve` 先剥 query →
+  牵动 REQ-011 已交付的路由核心，**风险远大于收益**。
+- **代价**：改 `Login.svelte` 会影响 REQ-011 的既有前端用例 → 棒 2 必须跑前端全量回归。
+- **判定**：AC-S-137 / AC-S-148 必须覆盖「未登录 → 登录 → **参数还在**」这条路径。
+
+## D222: 统一用 **`{授权页基址}`**；`oauth.frontendBaseUrl` 未配置时回退 `{issuer}`
+
+- **问题**（S-11 / S-12）：AC 内部对「授权页基址」有**两种写法**
+  （AC-S-134 写 `{issuer}`，AC-S-137/148 写 `{平台}`）；
+  而 E2E 里 `BASE_JWT_ISSUER=https://e2e.base`（`scripts/e2e-server.sh:72`）
+  与真实服务地址 `http://127.0.0.1:8080`（`playwright.config.ts:12`）**不等**。
+- **决定**：
+  1. 全仓统一符号 **`{授权页基址}`**，定义 = 「`oauth.frontendBaseUrl` 的值；
+     **未配置（非空）时回退到 `{issuer}`**」；
+  2. `oauth.frontendBaseUrl` 的**默认值 = `""`**，语义明确为「**空 = 用 issuer**」；
+  3. 元数据里的 `authorization_endpoint` = **`{授权页基址}` + `/oauth/authorize`**；
+     `verification_uri` = **`{授权页基址}` + `/oauth/device`**；
+  4. AC-S-134 的断言改成「`authorization_endpoint` 的 **host+port** == `{授权页基址}` 的 host+port
+     （或未配置时 == `BASE_JWT_ISSUER` 的 host+port）」，**不钉死** `{issuer}`。
+- **为什么保留 `oauth.frontendBaseUrl` 这个配置**：私有化部署里前端与 issuer 常常不同主机。
+
+## D223: 审计**事件码不进 `TITLES`**；平台错误码 **9** 个；`TITLES` 行数 = **93**
+
+- **问题**（S-04 + S-03）：
+  - D215 说 8 个 `oauth.*` 事件码进 `TITLES` → 但 `crates/platform-server/tests/i18n_titles.rs`
+    的**三个**既有断言会**必红**：
+    ① `:285-300` 命名空间断言（键必须 `UPPER_SNAKE` 或 `org.` 前缀）；
+    ② `:276-282` + `:357-405` 错误码 ↔ locale（只排除来源标签 `platform-org::notify`）；
+    ③ `:190-202` 孤儿标题（每个 `TITLES` 键都要被某条 `ALL_CODES` 认领）。
+  - 且 AC-S-152 只写「本需求新增数」→ **不可判定**。
+- **决定**（采纳 QA 的选项 A —— 改动最小）：
+  1. **8 个 `oauth.*` 事件码不进 `TITLES`**，也**不进** i18n 的 `error.*`
+     （事件码**不进响应体** → 没有「面向用户的标题」这回事）。
+     → 删掉 D215 的「走 `TITLES` 末尾那一段」，改为
+     「事件码是 `platform-oauth` **内部常量**（`crates/platform-oauth/src/events.rs`），
+     由**单测**覆盖其取值与用法」。
+  2. **平台错误码 = 9 个**（见 D226，删掉死码 `OAUTH_CLIENT_SECRET_INVALID`）。
+  3. **`TITLES` 行数 = 84 + 9 = 93** ——
+     `crates/platform-server/tests/i18n_titles.rs` 的断言改成
+     `BASELINE_ROWS_BEFORE_REQ_013(58) + REQ_013_NEW_CODES(21) + REQ_014_NEW_CODES(5)
+     + REQ_022_NEW_CODES(9)` = **93**，AC 里**逐字写出 93**。
+- **为什么不选「事件码进 TITLES」**：那要改 REQ-021 已交付的**跨栈测试契约**
+  （三处断言 + 一个新的来源标签白名单）→ 跨需求改动，且**换不来任何用户可见收益**
+  （事件码不出现在任何响应体里）。
+- **代价**：事件码没有跨栈的「登记完备性」检查 → 由 `platform-oauth` 自己的单测承担。
+
+## D224: AC-S-151 钉死 **`UNAUTHENTICATED`**；步骤 3 改写 + 补 3.5
+
+- **问题**（S-05 + S-10）：
+  - 「`UNAUTHENTICATED` 或协议错误 `invalid_token`——**二者都接受**」→ **不可判定**；
+  - 且 `invalid_token` **不在**契约 C14 §14.2 的协议码集合里（它来自 RFC 6750，本契约未登记）；
+  - AC-S-151 步骤 3 调的是 `/api/oauth/introspect`（**协议端点**，走 **client 认证**）→
+    那个 OAuth 令牌**从头到尾没被当成令牌解析** → **判据与标题对不上**。
+- **决定**：
+  1. AC-S-151 步骤 1、2、3 的期望统一为
+     **401 + `code` 逐字等于 `UNAUTHENTICATED`** + `Content-Type: application/json`
+     + 响应体**不含** `error` 键（不是协议错误体）；
+  2. 步骤 3 改为「用该 OAuth 令牌调 **`GET /api/rbac/me/permissions`**（**同一个**端点，步骤 1 已在用）」；
+  3. **新增步骤 3.5**：「用该 OAuth 令牌调 `POST /api/oauth/introspect`，
+     但**带** client-A 的合法 `client_secret_basic` 认证、`token` 参数填该 OAuth 令牌
+     → **200** + `active == true`」
+     → 证明该令牌**只**在 OAuth 协议端点上有效，**业务端点拒它**。
+- **依据**（QA 实测）：OAuth 令牌的 `aud` = `client_id` ≠ 平台 audience
+  → `validate_aud` 必然失败（`crates/platform-iam/src/jwt.rs:154-159`）；
+  **且** `AccessClaims.sid` 是必填字段而 OAuth 令牌没有 `sid` → 反序列化也失败
+  → **双重拒绝**，不会误放行。
+
+## D225: Front-Channel Logout = **HTML + iframe**（不是 JSON 数组）
+
+- **问题**（S-20）：AC-S-150 说「响应体里 `frontChannel` **数组**」，
+  design §4.5 说「返回 **HTML**，内含 iframe」→ **判据不可能同时成立**。
+- **决定**（采纳 QA 的选项 A）：
+  1. `POST /api/oauth/logout` 返回 **`Content-Type: text/html`** 的页面，
+     内含**恰好 1 个** `<iframe>`（每个有 `frontchannel_logout_uri` 的 client 一个），
+     其 `src` **逐字等于** `{client_uri}` + `?logout_token=<JWT>`；
+  2. 每个 iframe **必须**带 `sandbox` 属性：**至少** `allow-scripts`，
+     且**不含** `allow-same-origin`；
+  3. 响应**必须**带 `X-Frame-Options: DENY`（或 CSP `frame-ancestors 'none'`）；
+  4. **前端**另提供一个「登出完成」页来渲染这个 HTML？—— **不**：
+     后端返回的 HTML 由**浏览器直接导航**到（`POST` 的响应体不能直接导航）→
+     → **前端**改为 `GET /api/oauth/logout`？**不**。
+     → **裁定**：登出由**前端页面**发起 `POST`，后端返回 JSON
+     `{ loggedOut: {...}, frontChannel: [{ clientId, logoutUrl, logoutToken }] }`，
+     **前端**负责渲染 iframe 页面（`apps/shell/src/pages/OAuthLogout.svelte`）。
+  5. ⚠️ 修正 D225 的第 1 点：**最终形态 = 后端 JSON + 前端渲染 iframe**
+     （因为浏览器导航无法发起 POST，而 OAuth 令牌需要 Bearer 头）。
+     AC-S-150 的判据落在**前端渲染后的 DOM**（`apps/shell/test/` 或 E2E）：
+     - iframe 数量**恰好 1**；
+     - `src` **逐字等于** `client-A.frontchannel_logout_uri` + `?logout_token=…`；
+     - `sandbox` 属性含 `allow-scripts` 且**不含** `allow-same-origin`；
+     - `client-B` **不在**其中。
+  6. **后端侧**补一条可判：登出响应体**不含** `client-B` 的 `logoutUrl`。
+- **为什么不是纯 HTML**：前端 SPA 的会话是 Bearer → 登出必须带 `Authorization` 头 →
+  只能由前端 `fetch` 发起 → 后端回 JSON → 前端渲染 iframe。**这是 D203 的直接推论。**
+
+## D226: 删掉死码 `OAUTH_CLIENT_SECRET_INVALID` → 平台错误码 **9** 个
+
+- **问题**（S-28）：该码在 22 条 AC 里**一次都没出现**，也**没有触发点**
+  （D200 决定 secret 不允许自选、只显示一次，而端点清单里**没有**「轮换 secret」端点）
+  → 一个**永远不可能出现**的码，却要在 i18n 词库占一条、在 `TITLES` 占一行。
+- **决定**：**删掉**。平台错误码清单变成 **9 个**：
+  `OAUTH_CLIENT_NOT_FOUND` / `OAUTH_CLIENT_DISABLED` / `OAUTH_CLIENT_EXPIRED` /
+  `OAUTH_INVALID_REQUEST` / `OAUTH_INVALID_REDIRECT_URI` / `OAUTH_INVALID_SCOPE` /
+  `OAUTH_UNSUPPORTED_CODE_CHALLENGE_METHOD` / `OAUTH_TICKET_INVALID` /
+  `OAUTH_GRANT_NOT_FOUND`
+- **什么时候再加回来**：将来做「轮换 secret」端点时，按 D213 的 8 处登记流程补上。
+
+## D227: manifest 加 **`tenantScoped`** 段 → RLS policy 由 `xtask tenant-policies` 生成
+
+- **问题**（S-22）：平台有**两条**并存的做法，REQ-022 的 design **一条都没选**：
+  - `crates/platform-db/src/scopes.rs:5` 明写「RLS 策略的**唯一来源**是 manifest 的 `tenantScoped` 段」
+    （`:91-93` 没该段的 manifest **被跳过**）；
+  - `cargo xtask tenant-policies --check`（`crates/xtask/src/cli.rs:114-133`）靠这份声明逐表校验；
+  - REQ-022 的 manifest 模板**没有** `tenantScoped` → 4 张表**不在**平台自检范围内
+    → **漏建 policy 不会被发现**。
+- **决定**（采纳 QA 的推荐）：
+  1. `crates/platform-oauth/manifest.json` 加：
+     ```json
+     "tenantScoped": {
+       "tables": ["platform_oauth_grant", "platform_oauth_code",
+                  "platform_oauth_device_code", "platform_oauth_token"],
+       "column": "tenant_id"
+     }
+     ```
+  2. policy 由 `cargo xtask tenant-policies` 生成，命名自动是 `<table>_tenant_isolation`
+     （`crates/platform-db/src/rls.rs:36` `POLICY_SUFFIX`）→ 与仓里现有 **31 张**表完全一致（实测）。
+  3. `platform_oauth_client` **不**列入（平台级表，无 `tenant_id`，不启用 RLS）。
+  4. AC-S-155 补：「`cargo xtask tenant-policies --check` 退出码 **0**，
+     且 `pg_policies` 里这 4 张表各有 **1** 条 `<table>_tenant_isolation` policy」。
+- **对比先例**：`platform-audit` 走的是**手写**路径（manifest 无 `tenantScoped`，
+  policy 手写在 `migrations/20261120000200_audit.up.sql:146-182`）→ 它的表**不在**平台自检里。
+  → REQ-022 **不重复这个缺口**。
+
+## D228: 摘要编码统一 **`digest_base64url`**（base64url 无填充）
+
+- **问题**（S-16）：仓里现成**两个**摘要函数：`digest_base64url`（`crypto.rs:56`，
+  base64url 无填充）与 `digest_hex`（`crypto.rs:63`，小写 hex）。
+  AC-S-136 钉了 base64url，AC-S-139 / AC-S-142 只写「SHA-256 摘要」→ **口径不一致**。
+- **决定**：本需求所有「只存摘要」的列一律用 **`digest_base64url`** 口径
+  （SHA-256 原始 32 字节 → **base64url 无填充**，43 字符）。
+  受影响列：`client_secret_hash` / `code_hash` / `device_code_hash` / `user_code_hash`。
+  → 写进 acceptance.md 的 §全局约定，测试侧独立复算时按此口径。
+
+## D229: 全局登出**不**作废已签发的登录 access token —— 显式写明 + **TD-043**
+
+- **问题**（S-25，**安全缺口**）：D211 说全局登出要「作废**全部会话**」，
+  但实现引用的是 `revoke_family` / `revoke_all_refresh_tokens`
+  （`crates/platform-iam/src/store.rs:754` / `:765`）→ 两者**只** UPDATE
+  `platform_iam_refresh_token`。而 access token 是**自包含 JWT**
+  （`crates/platform-iam/src/jwt.rs:143-166` 验签**不查库**）
+  → **登出后，旧的登录 access token 在 `exp` 之前仍然能调所有业务端点**。
+- **决定**（采纳 QA 的选项 B —— **本轮不补实现，但必须明写**）：
+  1. D211 的「作废全部会话」**精确化**为「**作废全部 refresh token**（使会话无法续期）」
+     —— **不含**「已签发的 access token 立即失效」；
+  2. AC-S-149 / AC-S-150 **显式写明**：登出后，已签发的登录 access token
+     **最长延迟一个 `iam.accessTokenTtl` 秒**才失效；
+  3. **OAuth 令牌**不受影响 —— 它由 `platform_oauth_token` 表的状态决定，
+     **撤销 grant 后立即 `active=false`**（这是 OAuth 侧与登录侧的关键差别，
+     必须在 AC 里说清楚，否则两边的「撤销」语义会被混为一谈）；
+  4. 记 **技术债 TD-043**：「登出不杀已签发的 access token」。
+- **为什么本轮不补实现**：让 access token 立即失效需要「验签后查会话状态」——
+  给**所有**业务端点的每次请求加一次查库 → **性能与架构改动**，属于 REQ-007 的范畴，
+  不是本需求能顺带塞进去的。**显式写明现状**比默认沉默更诚实。
+
+## D230: `logout_token` 的 `sid` = **触发登出的这次请求的会话 ID**
+
+- **问题**（S-24）：D211 写了 `sid`，但没说全局登出（作废全部会话）时 `sid` 取哪个。
+  平台是**一表多行**的多会话模型（`platform_iam_session` 实测 **277 行**）。
+- **决定**：
+  1. `sid` = **触发登出的这次请求所使用的会话 ID**
+     （即当前 access token 的 `sid`）—— **一个**登出请求 = **一个** `logout_token`；
+  2. AC-S-149 写死：「`logout_token` 的 `sid` **逐字等于** 触发登出的登录令牌的 `sid`」；
+  3. 「作废全部会话」是**平台侧**的动作（`revoke_all_refresh_tokens`），
+     **不**意味着要发多个 `logout_token`。
+
+## D231: `client_credentials` 的 scope = **两重**交集（无用户维）
+
+- **问题**（S-37）：D201 的「三重交集」在 `client_credentials` grant 下
+  「用户自身的有效权限点」这一维**不存在** → 公式**没有定义** → 实现者可任选。
+- **决定**：
+  - `client_credentials` grant **没有用户** → 第三维**不适用** →
+    授予的 scope = **请求 scope ∩ `client.allowed_scopes`**（**两重**）；
+  - 交集为空 → `invalid_scope`（400，协议错误）。
+  - AC-S-141 补一条判据：请求 `scope=sandbox:demo:write`（**不在** `allowedScopes` 里）
+    → **400 + `{"error":"invalid_scope"}`**。
+
+## D232: 迁移文件名统一为 **schema 0500 / permission_seed 0600 / config_seed 0700**
+
+- **问题**（S-36）：design §8 说权限点种子是 `…0500_oauth_permission_seed`，
+  §13 说是 `…0600_oauth_permission_seed` 且 `…0500` 已经是 schema → 两处矛盾。
+- **决定**（只保留 §13 的一套，三处一致）：
+  - `migrations/20261120000500_oauth_schema.up.sql` / `.down.sql`
+  - `migrations/20261120000600_oauth_permission_seed.up.sql` / `.down.sql`
+  - `migrations/20261120000700_oauth_config_seed.up.sql` / `.down.sql`
+- **依据**：`migrations/` 现有最大编号 = `20261120000400_audit_config_seed` → 新迁移从 `…0500` 起。
+
+## D233: `consent_required` / `login_required` 只出现在**授权页的 query**；preview 返 200 + `needsConsent`
+
+- **问题**（S-39）：「返回 `consent_required`」没说端点、没说形状。
+  `preview` 按 C14 §14.4 是**平台自有端点** → 错误体应是 Problem Details；
+  但 `consent_required` 是**协议码**（小写）→ 两边都有依据 → 契约没覆盖这个组合。
+- **决定**：
+  1. `preview` 在 `prompt=none` 且 grant 不覆盖 scope 时 → **200 + `needsConsent == true`**
+     （**不是错误**）→ 前端渲染同意页；
+  2. `login_required` / `consent_required` 两个**协议码**只出现在**授权页的 query**
+     （前端把状态透出到 URL），**不是** preview 的错误体；
+  3. preview 的**错误**（参数非法、client 不可用）才用 Problem Details + `OAUTH_*`；
+  4. AC-S-148 步骤 4 的断言改成「页面显示同意页 + URL query 里 `error=consent_required`
+     + `platform_oauth_code` 行数 **== 0**」。
+
+## D234: `POST /api/oauth/clients` 返回 **201**（不是 200）
+
+- **问题**（S-38）：「**201**（或 200）」→ 两个取值都算过 → 不可判定。
+- **决定**：**201 CREATED**。依据：平台的创建类端点**一律 201**
+  （`crates/platform-iam/src/http.rs:586`、`crates/platform-rbac/src/http.rs:590`、
+  `crates/platform-org/src/http.rs:406` 与 `:624`）。
+
+## D235: 第三方回调用 **`page.route` 拦截**后读 `page.url()` 的 query
+
+- **问题**（S-01）：`redirect_uri` = `https://client.example/cb` —— **该主机不存在**。
+  design §4.1 写明「`redirectTo` 由**前端**执行跳转（`location.href`）」→
+  浏览器真的导航过去 → Playwright 里 DNS 失败会抛导航错误，**地址栏停留在跳转前**
+  → 「读地址栏的 `code=`」**不可达**。
+- **决定**：
+  1. E2E 先 `page.route('https://client.example/**', route =>
+  route.fulfill({ status: 200, contentType: 'text/html', body: '<html>ok</html>' }))`；
+  2. 走完授权流程后读 `page.url()`；
+  3. 断言 `new URL(page.url()).searchParams.get('code')` **非空**，
+     `…get('state')` **逐字等于** `xyz`。
+  4. AC 里**显式写明这一步**（否则 Dev 会写成 `page.goto('https://client.example/cb')` → 必红）。
+- **先例**：`code/e2e/sso.spec.ts:43-50` 已有**跨源拦截范式**。
+
+## D236: 夹具账号与 client **全部**由 `scripts/seed-e2e.sh` 播种
+
+- **问题**（S-06 + S-34）：
+  - `scripts/seed-e2e.sh` 只建 `tenant-a` 的 **4** 个账号，**没有任何 `oauth:*`** 权限点
+    → AC-S-135/136 的前置「管理员账号持有 `oauth:client:write`」**不可达**；
+  - `tenant-b` 的用户**根本不存在** → AC-S-147 步骤 5 与 AC-S-155 的前置**不可达**。
+- **决定**：
+  1. `scripts/seed-e2e.sh` 新增：
+     - `tenant-a` 的 **OAuth 管理员账号** `u-perm-oauth@example.com`，
+       持 `oauth:client:read` / `oauth:client:write` / `oauth:client:delete`
+       / `oauth:grant:read` / `oauth:grant:revoke`；
+     - `tenant-a` 的**普通用户** `u-perm-oauth@example.com`（持 `rbac:role:read`）；
+     - **`tenant-b`** 的账号 `u-perm-other@example.com`（持 `rbac:role:read`）；
+     - **三个夹具 client**：`client-A`（confidential，`allowedScopes=['rbac:role:read']`）、
+       `client-B`（confidential）、`public-client`（public）；
+  2. client 的 `client_secret_hash` 由脚本按 **`digest_base64url`** 口径写入，
+     **明文 secret 由脚本打印到 stdout** → E2E 从 stdout / 夹具文件读；
+  3. 脚本的「强断言」段必须**自证**这些账号与 client **存在且绑定正确**
+     （与现有脚本「强断言 ②」的写法同款）；
+  4. AC 的前置**一律写成「由 `scripts/seed-e2e.sh` 播种」**，不再写「环境里已有」。
+
+## D237: back-channel mock 接收端 = **独立脚本 + 文件落盘 + `MOCK_MODE` 开关**
+
+- **问题**（S-07）：「**进程内** mock 接收端」—— 平台的 E2E 服务是**独立进程**
+  （`scripts/e2e-server.sh:88` `exec cargo run … base -- serve`）；
+  「进程内」只能指「**测试进程内**起一个监听端口」→ **端口是动态的** →
+  client 表里的 `backchannel_logout_uri` 必须等 mock 起来之后才知道 → **夹具顺序**未规定；
+  且仓里**没有**任何 mock HTTP server 的现成范式。
+- **决定**：
+  1. 新增 `scripts/mock-logout-receiver.sh`：监听 `127.0.0.1:$MOCK_PORT`，
+     把收到的 `logout_token` **写到文件** `target/mock-logout-received.jsonl`，
+     行为由 `MOCK_MODE=ok|timeout|500` 环境变量控制（默认 `ok`）；
+  2. `scripts/seed-e2e.sh` 读 `$MOCK_PORT`，把
+     `backchannel_logout_uri = 'http://127.0.0.1:' || $MOCK_PORT || '/logout'`
+     写进 client 行 → **夹具顺序钉死**：先起 mock → 再播种；
+  3. AC 的步骤 2 改为「读 mock 落盘的文件（`target/mock-logout-received.jsonl` 的最后一行）」
+     —— **不要**在 E2E 进程里 mock HTTP（那会把「出站真的发出去了」这件事 mock 掉）；
+  4. AC 的步骤 4/5 改为「用 `MOCK_MODE=timeout` / `500` **重启** mock 后再触发登出」。
+- **为什么必须独立进程**：出站 HTTP 的**真实性**是本条 AC 的全部价值；
+  在 E2E 进程内 mock HTTP = 把被测逻辑本身 mock 掉（dev-guide §9.13）。
+
+## D238: E2E 的 JWT 私钥**落盘**到 `target/e2e-jwt-private.pem`
+
+- **问题**（S-08）：要证明 D204 的「用户所见 = 实际授予」，
+  测试必须造出「**签名有效、scope 更大**」的票据 → 需要**测试侧自己持私钥**。
+  而 `scripts/e2e-server.sh:65-73` 的私钥是现场生成 + `export`，**不落盘**，
+  且 Playwright 是**另一个进程**（`playwright.config.ts:43-46`）→ E2E 读不到。
+  → 只做 base64 重编码的话，签名必失 → `OAUTH_TICKET_INVALID` → **判据恒真**
+  （只证明「验签在工作」，证明不了「scope 不能被放大」）。
+- **决定**（采纳 QA 的选项 A）：
+  1. `scripts/e2e-server.sh:65-70` 改成「生成后**写入** `target/e2e-jwt-private.pem`
+     并 `export`」；
+  2. 文件权限 **0600**、**不入 Git**（`target/` 已被 `.gitignore` 忽略）、**每次运行覆盖**；
+  3. E2E 用它**自己签**一个 `typ="oauth_consent_ticket"`、`scope` **比 preview 返回的更大**的票据
+     → 调 confirm → 必须 **400 + `OAUTH_TICKET_INVALID`**。
+- **安全说明**：这是**测试环境的临时密钥**，只落在 `target/` 下；
+  生产密钥仍**只从环境注入**（`crates/platform-iam/src/jwt.rs:4-7` 的约定不变）。
+
+## D239: PKCE 的失败点在 **`preview`**（不是 confirm）
+
+- **问题**（S-09）：按 D203，参数校验在 `preview`，code 在 `confirm` 才签
+  → AC 的「**签发 code 这一步**就失败」在实现上**不成立**；
+  Dev 若照字面在 confirm 里判 → 用户在同意页点「允许」才炸 → **把参数错误推迟到了交互之后**。
+- **决定**：
+  - 路径 1（缺 `code_challenge`）：调 `preview` → **400** + Problem Details，
+    `code == "OAUTH_INVALID_REQUEST"`，`status == 400`，`Content-Type: application/json`，
+    响应体**不含** `ticket` 键；→ **不得**调用 `confirm`、**不得**产生任何授权码行；
+  - 路径 2（`plain`）：同 preview → **400** + `code == "OAUTH_UNSUPPORTED_CODE_CHALLENGE_METHOD"`；
+  - 路径 3（verifier 不匹配）：**先** preview 成功（拿 ticket）**再** confirm 时传错的
+    `code_verifier` → **400** + `{"error":"invalid_grant"}`（**协议错误体**，
+    因为 `/api/oauth/token` 是协议端点）。
+
+## D240: 契约检查判据拆 **1a / 1b**；先还 `xtask catalog.rs` 的过期文案
+
+- **问题**（S-13）：
+  1. `cargo xtask capabilities --check` **在基线上就已经是红的**
+     （实测退出码 1，`E_CAPABILITIES_OUTDATED`）——
+     根因：`crates/xtask/src/catalog.rs:147-149` 仍写
+     「`audit_sink`：审计只到事件声明面，落库与查询**待 REQ-014**」（REQ-014 已合并）；
+  2. 它**不做 C-5**（`crates/xtask/src/capabilities.rs` 只比对索引产物与磁盘）；
+  3. 「14 个文件」**不会变**（新增 crate **不新增** `capabilities/` 下的文件），
+     变的是 `permissions.json` 的 `total`（26 → 32）。
+- **决定**：
+  1. AC-S-153 步骤 1 拆成两条：
+     - **1a**：`cargo xtask capabilities` **重新生成** → 断言 `capabilities/` 下**恰好 14 个文件**
+       （**不增不减**），`capabilities/permissions.json` 的 `total == 32`
+       （26 + 6 个 `oauth:*`），且含 6 个 `oauth:*` 权限点**逐字**；
+     - **1b**：**C-5 判据换成真命令** `cargo test -p platform-oauth --test contract_c5`
+       （**该测试文件必须由本需求新增**，补进 design §13 的文件清单；
+       范式见 `crates/platform-audit/tests/contract_c5.rs:24-64`）；
+  2. 步骤 3/4 的「再跑 C-5」也**逐字写出这条命令**；
+  3. **本需求必须先还 `catalog.rs` 的过期文案**（否则 1a 第一步就红）→
+     记 **技术债 TD-044**（REQ-014 的遗留，本轮顺带还）。
+
+## D241: 通配不可生效的判据改成**三条可判断言**
+
+- **问题**（S-14）：AC-S-140 的「二者必须能区分开」**做不到** ——
+  原因 A「不是注册过的权限点」与原因 B「通配被禁用」**同时成立**
+  （`PermissionProvider::effective_permissions` 返回的是**已展开通配**的集合，
+  `crates/platform-rbac/src/entity.rs:232` 的 `expand()` 返回注册表里的**具体码**
+  → 用户的有效权限点集合里**永远**没有 `rbac:role:*`）
+  → AC 给的区分方法在**两种实现下都通过** → **无区分力**。
+- **决定**：删掉那句不可判的断言，改成三条**可判**的：
+  1. 测试侧查表：`SELECT count(*) FROM platform_permission WHERE code = 'rbac:role:*'` **== 0**；
+  2. 用户有效权限点集合里**不含**任何含 `*` 的码
+     （`GET /api/rbac/me/permissions` 的返回集合 `NOT LIKE '%*%'`）；
+  3. **真正的对照**：把 `rbac:role:*` **登记进 `platform_permission`**
+     （管理员直连 INSERT，仅本用例夹具）→ 重跑路径 4 → **仍然** 400 `invalid_scope`
+     → 这才证明「令牌 scope 层面通配**一律**不生效」，而**不是**因为「它没注册」。
+  4. AC 里必须**显式写明**「测试要往 `platform_permission` 插一行」，
+     否则会被判为越权造数。
+
+## D242: 「不回溯扩大」拆成**路径 5**
+
+- **问题**（S-15）：AC-S-140 的额外断言「路径 2 的令牌不含 `rbac:role:write`」
+  —— 路径 2 的预期是 **400**，**根本没有签发任何令牌** → **断言没有对象** → 假绿。
+- **决定**：拆成路径 5：
+  1. 用户**只有** `rbac:role:read` → 请求 `scope=rbac:role:read` → 交换**成功** → 令牌 A
+     （`scope == "rbac:role:read"`）；
+  2. 管理员给该用户**追加** `rbac:role:write`
+     （`platform_role_permission` + bump `platform_permission_epoch`）；
+  3. **重放**令牌 A（**不**重新交换）→ 内省 → `scope` **仍然逐字等于** `rbac:role:read`，
+     **不含** `rbac:role:write`；
+  4. 另发一枚令牌 B（同一 scope 集 `rbac:role:read rbac:role:write`）
+     → 令牌 B 的 scope **含** `write`
+     → 证明「授予**新**令牌会拿到新权限，但**旧**令牌不被回溯扩大」。
+- **关键**：第 3 步**不**能重新交换（重新交换会拿到新 scope → **测不到**「不回溯」）。
+
+## D243: 敏感值扫描 = **Rust 侧可单独调用的 `pub fn`** + 运行期真值断言 + 阳性对照
+
+- **问题**（S-17 + S-35）：「全仓扫描明文」**没有可实现的宿主与口径**
+  （Rust 源码里根本不会出现运行时生成的明文 secret → 「扫源码」必然 0 命中
+  —— 这正是 REQ-014 挑刺 S-08 踩过的坑）；
+  「在临时副本里塞一个明文」也没定塞在哪、扫描器怎么实现。
+- **决定**：
+  1. **运行期断言（主判据）**：用真后端跑一遍
+     `POST /api/oauth/clients` → 拿到明文 secret →
+     `GET /api/oauth/clients`、`GET /api/oauth/clients/{id}`、
+     `POST /api/oauth/token` 的**响应体**、`GET /api/audit/events` 的**全表文本**
+     → **逐字**不含该明文（**用真值断言**，不是「没看到某个键」）；
+  2. **静态扫描（辅判据，必须带阳性对照）**：
+     - **宿主** = Rust 侧一个**可单独调用**的 `pub fn`
+       （放 `crates/platform-oauth/src/`），输入 = 审计行的
+       `action` / `object_type` / `object_id` / `before` / `after` 文本，
+       输出 = 命中的敏感键列表；
+     - **扫描面** = 审计表的**全部文本列**（不只 `before`/`after`）；
+     - **阳性对照** = 管理员直连往审计表插一条**含假 secret** 的行
+       （如 `before = '{"client_secret":"POSITIVE-CONTROL"}'`）→ 扫描器**必须命中**该行；
+       删掉该行后 → 扫描器**必须不命中**；
+     - **敏感键集合**列全（至少）：`client_secret` / `code` / `code_verifier` /
+       `device_code` / `user_code` / `access_token` / `refresh_token` /
+       `logout_token` / `authorization` / `password`。
+- **为什么静态扫描只能是辅判据**：它证明「代码里没有把 secret 塞进响应的写法」，
+  **证明不了**「运行时没泄漏」→ 主判据必须是**运行期的真值断言**。
+
+## D244: 内省的认证失败 = **401 + `{"error":"invalid_client"}`**；令牌不属于本 client = **200 + `{"active":false}`**
+
+- **问题**（S-18）：AC-S-143 步骤 5（public client）与步骤 6（无认证）
+  在 D207 的口径下**都**是「client 认证失败」→ **都 401** → **无区分力**；
+  且 AC 只写「401」，没写**错误体形状** —— `/introspect` 是 C14 的**协议端点**
+  → 错误体应是 `{"error":"invalid_client"}`，**不是** Problem Details。
+- **决定**：
+  1. 步骤 5、6 的期望：**401** + 响应体**逐字**等于 `{"error":"invalid_client"}`
+     （**不得**含 `type` / `title` / `status` / `instance` / `code` / `trace_id`）；
+  2. **新增步骤 5.5**：「public client 用 `client_secret_basic` 认证（secret 为**空串**）
+     → 同样 **401 + `invalid_client`**」→ 三条都是 401，
+     但**必须都是 `invalid_client`**（不是 `OAUTH_*` 平台码）→ 这才是 D208 的可判形态；
+  3. 内省的**认证失败**与**令牌不属于本 client**要分开：
+     后者是 **200 + `{"active":false}`**（步骤 2），**不是** 401。
+
+## D245: AC-S-145 前置限定 grant 类型 + 补 `client_credentials` 变体
+
+- **问题**（S-19）：AC-S-145 要求 payload 的 `sub` **齐全**，
+  AC-S-141 要求 `client_credentials` 令牌的 `sub` **键不存在**
+  → AC-S-145 的前置没说是哪种 grant → 两条 AC 可能直接矛盾。
+- **决定**：
+  1. AC-S-145 前置改成：「`client-A` 持有一枚**由 `authorization_code` grant 签发**的有效令牌」；
+  2. **新增**一条补充判据：把同一套断言对 **`client_credentials`** 令牌再跑一遍，
+     期望 `sub` **键不存在**、其余 claims 齐全（与 AC-S-141 一致）。
+
+## D246: 设备码补 **`verification_uri` / `user_code` 格式 / `slow_down` / 列覆盖**
+
+- **问题**（S-21）：`verification_uri` **指向哪没定**；
+  RFC 8628 §6.1 的 `user_code`（**8 个字符**、base20 字符集 `BCDFGHJKLMNPQRSTVWXZ`）
+  与 §3.5 的 **`slow_down`**（轮询快于 `interval` → 返回 `slow_down` 并把间隔 **+5 秒**）
+  **完全没覆盖**；design §2.4 的 `poll_interval_seconds` / `last_polled_at` 两列也**没有任何 AC 覆盖**。
+- **决定**：
+  1. `verification_uri` **逐字等于** `{授权页基址}/oauth/device`（与 D222 的符号统一）；
+     `verification_uri_complete` **逐字等于**
+     `{授权页基址}/oauth/device?user_code=<urlencoded user_code>`；
+  2. `user_code` 长度 **== 8**，且**逐字符** ∈ `BCDFGHJKLMNPQRSTVWXZ`（base20）；
+  3. **限流**：拿到令牌前**连续轮询 2 次**（间隔 < `interval`）→
+     第二次返回 **400 + `{"error":"slow_down"}`**；
+     且设备码行的 `poll_interval_seconds` **被更新为** `interval + 5`；
+  4. **列覆盖**：`last_polled_at` 在轮询后**非空**且**递增**。
+
+## D247: RLS 补**写侧 `WITH CHECK`** 判据
+
+- **问题**（S-23）：AC-S-155 的 RLS 判据**只覆盖读侧** →
+  **写侧漏写**（`WITH CHECK` 缺失 → 应用层能往表里写别的租户的行：
+  写得进去、读不出来 → **静默的写侧泄漏**）**没有任何 AC 覆盖**。
+- **决定**：AC-S-155 补一条：
+  > 以 `base_app` 角色，在**单个事务内** `set_config('app.tenant_id','tenant-a')` 后
+  > `INSERT` 一行 `tenant_id = 'tenant-b'` → **失败**（RLS 的 `WITH CHECK` 拒绝）；
+  > 同一事务内 `INSERT` 一行 `tenant_id = 'tenant-a'` → **成功**。
+
+- 并在 AC 里写明「`platform_oauth_client` **不参与**本条
+  （平台级表，无 `tenant_id`、不启用 RLS）」。
+- **依据**：`crates/platform-db/src/rls.rs:138-146`（既有 policy 全是
+  `USING … WITH CHECK …` 成对）+ `migrations/20261118000200_tenant_isolation.up.sql:11-13`
+  （「没有它，应用层可以往表里写入别的租户的行」）。
+
+## D248: AC-S-150 步骤 2 改成**有区分力**的版本
+
+- **问题**（S-26）：步骤 1 是**全局**登出 → 步骤 2 的「两个 client 的授权都被撤销」
+  是步骤 1 的**定义**，**不是独立判据** → **没有区分力**（不可能不成立）。
+- **决定**：改成：
+  > 「步骤 2：**`client-B`（未配 front-channel URI）的 grant 也**被撤销
+  > → 这证明 front-channel 配置**只影响通知方式**，**不影响撤销范围**；
+  > 且 `client-B` **不在** `frontChannel` 数组里
+  > → 证明收集逻辑按 `frontchannel_logout_uri` **非空**过滤。」
+
+## D249: disabled client 的拒绝点**拆两条**（preview 403 平台码 / token 401 协议码）
+
+- **问题**（S-27）：AC-S-135 步骤 5 说「用该 client 走一次授权码交换 → 401 + `invalid_client`」，
+  但按 design `OAUTH_CLIENT_DISABLED` = **403**，
+  且 disabled 的 client 在 **preview** 阶段就该被拒 → **根本走不到令牌交换**；
+  两套错误标识在同一个端点族里混用。
+- **决定**：步骤 5 拆成两条，各钉死端点与错误体：
+  1. **preview 阶段**：`POST /api/oauth/authorize/preview`（用已 disabled 的 client）→
+     **403** + Problem Details，`code == "OAUTH_CLIENT_DISABLED"`（**平台话**，preview 是平台端点）；
+  2. **token 阶段**：`POST /api/oauth/token`（client 认证用 disabled 的 client）→
+     **401** + `{"error":"invalid_client"}`（**协议话**，token 是协议端点）。
+- **顺带钉死**：两套错误标识在同一端点族里的分工就此明确，与 C14 §14.2 一致。
+
+## D250: 「恰好包含」→「恰好等于」+ **顺序钉死**
+
+- **问题**（S-29）：AC-S-134 同一条里别的字段用「**恰好** `[...]`」，
+  唯独 `grant_types_supported` 用「**恰好包含**」→ 自造词，语义歧义。
+- **决定**：「`grant_types_supported` **恰好**等于
+  `["authorization_code","client_credentials","urn:ietf:params:oauth:grant-type:device_code"]`
+  （**逐元素比对，顺序也钉死**；**不含** `refresh_token`，D217）」。
+
+## D251: `error_description` 判据改成**两条可判断言**
+
+- **问题**（S-30）：「不含『哪一步错了』的细节以外的信息」→ 句义歧义
+  且「哪一步错了」**没有定义** → 不可机械判定。
+- **决定**：改成两条：
+  1. `error_description` **不含** `code_verifier` / `code_challenge` / `client_secret` / `code`
+     的**明文**（逐个子串断言 `NOT contains`）；
+  2. `error_description` **不含任何 CJK 字符**（契约 C14 §14.2）。
+
+## D252: TTL 补充判据**逐列写死**
+
+- **问题**（S-31）：授权码行有 **9 个绑定列** → 直插一行时每个值都得对，
+  否则交换会**先卡在绑定校验上**而不是卡在 TTL 上 → **判据失真**。
+- **决定**：补充判据逐列写死：
+  > 以 `base` 直连 `INSERT` 一行 `platform_oauth_code`：
+  > `tenant_id='tenant-a'`、`client_id=<client-A>`、`user_id=<u>`、
+  > `code_hash=<base64url(SHA256('ttl-expired-code'))>`、
+  > `redirect_uri='https://client.example/cb'`、`scope='rbac:role:read'`、
+  > `code_challenge=<S256(verifier)>`、`code_challenge_method='S256'`、
+  > `expires_at = now() - interval '90 seconds'` →
+  > 交换返回 **400 + `{"error":"invalid_grant"}`；
+  > 同一批值、只把 `expires_at` 改成 `now() + interval '30 seconds'` → 交换**成功**（200）。
+  > → 两条断言**只在 `expires_at` 上不同**，其它列逐字相同 → 才证明判的是 TTL。
+
+## D253: 授权码行数判据按 **`code_hash`** 查 + `information_schema`
+
+- **问题**（S-32）：「查授权码表的行数」是整表还是该 code？
+  若是整表，其它用例 / 其它租户的行会污染判据（REQ-014 的「干净起点」教训）；
+  且 design §2.3 的列清单里**没有** `consumed_at` → 「不是置一个 `consumed_at` 标记」
+  这个否定断言**没有对象**。
+- **决定**：
+  - 步骤 4 改为「`SELECT count(*) FROM platform_oauth_code
+    WHERE code_hash = <base64url(SHA256(code))>` → **恰好 0**」；
+  - 补一条「该表的列集合里**不含** `consumed_at` / `used_at`」
+    （查 `information_schema.columns`）。
+
+## D254: grant 级撤销补「**两枚令牌**」判据
+
+- **问题**（S-33）：D210 的核心语义是「**grant 级**撤销」，
+  但 AC-S-144 只验**一枚**令牌、AC-S-147 也只验一枚
+  → 实现成「只撤销那一枚令牌」也能过 → **grant 级语义没被验收**。
+- **决定**：AC-S-147 补一条：
+  > **先签发 2 枚**令牌（同一 grant）→ 撤销 grant → **两枚**都 `active == false`
+  > （并断言 `platform_oauth_token` 里这两行状态都是 `revoked`）。
+
+## D255: 修 `qa-recheck-req014.md:638` 引用了**不存在的** `AC-S-136`（笔误）
+
+- **发现**：BA 自查（`status.md` §10.3）—— `BA/feature-meta/qa-recheck-req014.md:638`
+  写着「`config.flag.write` 的事件码与 `before`/`after` 形状（**AC-S-136 表内一行**）」，
+  但 REQ-014 的 AC 是 `AC-S-022` + `AC-S-122~133`，**没有 136**。
+- **决定**：改为引用**真实存在**的 AC（该行对应的是 REQ-014 的**审计埋点**那一条），
+  并在 REQ-022 的这次提交里一并修掉 —— **一处指向不存在 AC 的引用会误导后来人**。
+  （本条是 BA 自查发现的，不在 QA 的 39 条里。）
+
+## D256: 棒 1 ∥ 棒 2 的文件集划分（`packages/i18n/**` 归棒 2）
+
+- **发现**：BA 自查（`status.md` §10.5）—— `packages/i18n/src/locales/*.json`
+  **两个棒都要改**（棒 1 要加 9 个 `error.OAUTH_*`；棒 2 要加 `oauth.*` 的界面文案）
+  → **同文件 = 并行冲突**。
+- **决定**：
+  1. **整个 `packages/i18n/**` 归棒 2**；
+  2. 棒 1 把 **9 个错误码的精确清单**（码 + ASCII 标题 + 中文文案）写进**任务卡**，
+     由棒 2 一并写进词库（**棒 2 必须在棒 1 的错误码清单定稿后写**，
+     清单本身在任务卡里就是定稿的 → 无需等待）；
+  3. `crates/platform-core/src/titles.rs` 与
+     `crates/platform-server/tests/i18n_titles.rs` 仍归**棒 1**（后端侧）；
+  4. 两侧靠**约定字符串**耦合，任务卡必须写死三处：
+     ① 9 个错误码的精确清单；② 前端路由路径
+     `/oauth/authorize` / `/oauth/device` / `/oauth/grants`；
+     ③ `manifest.json` 的 `menus[].route` 与前端路由**逐字相同**。
+
