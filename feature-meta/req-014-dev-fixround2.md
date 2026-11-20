@@ -373,3 +373,179 @@ impl SsoAuditRecorder for PlatformSinkSsoRecorder {
 
 **未改动**（确认）：`F1~F10` 的任何实现、`BA/demands/`、`BA/plan/`、
 `req-014-dev-fixround-f10.md`。`git status --short` 无 MUTATION 残留。
+
+---
+
+# 附录 B 微修（B1~B3，2026-11-20 18:10 追加）
+
+> 依据：`BA/feature-meta/req014-fixround2-brief.md` 附录 B（聚焦复核 PASS-WITH-RISK，
+> 0 阻塞 / 0 高 / 0 中 / 3 低）。本节**只**记录 B1~B3，不改动上面 §1~§9 的原文。
+> 工作区未提交改动（修复轮 1 + 2 的成果）**未回退、未重写**。
+
+## B-1. B1~B3 逐条：改了什么
+
+| # | 文件:行 | 改动 | 为什么 |
+|---|---|---|---|
+| **B1** | `crates/platform-iam/tests/sso_login_audit.rs:331-337` | 失败分支新增 `assert_eq!(event.user_agent.as_deref(), Some(USER_AGENT), "失败事件的 \`userAgent\` 也必须逐字透传")` | 复核 L-01：成功分支有 UA 断言、失败分支**漏了** → 把 UA 置 `""` 用例仍绿。AC-S-127 步骤 3 的 ip/userAgent 口径**不分成功/失败** |
+| B1（附带） | 同文件 `:282-291` | 订正失败用例的 doc：「失败载荷只带 provider/code/ip」说的是 `SsoAuditPayload` 的白名单（`sso/audit.rs:28`），本用例断言的是 `AuditEvent`（`login_event` → `AuditSink`），两者别混 | 那段 doc 正是「漏断言」的合理化借口；只补断言不订正 doc 会留下同一处误导 |
+| **B2** | `crates/platform-config/tests/config_real_db.rs:1837` | 用例名 `the_audit_page_default_size_is_the_same_everywhere` → `the_audit_page_default_size_matches_the_contract_in_manifest_and_db` | 复核 L-02：doc 已改成「实际覆盖两处（manifest + DB）」，名字仍说「三处一样」→ 名字在骗人。**只改名**：断言逻辑与 doc 一字未动 |
+| **B3** | `crates/platform-server/tests/audit_chain_real_db.rs:302-415`（用例 `a_config_flag_write_really_lands_in_the_audit_table`，定义在 `:325`） | 新增 flag 写入的**真库落表**用例：`ConfigService::new` + `with_audit_sink(PgAuditSink)` → `write_flag("newInvoice", …)` 两次 → 查 `platform_audit_log` | 复核 V-03：D163 的两个配置事件码里，`config.entries.write` 已有真库判据，`config.flag.write` **只有 mock sink 形状断言**。代码两条码都在发（`config/src/service.rs:462` / `:547`）→ 不是缺陷，是**判据缺失** |
+
+B3 的断言口径（D163）与既有 config 用例同款：
+
+| 字段 | 期望 | 本用例取值 |
+|---|---|---|
+| `action` | `config.flag.write` | 两次都断（事件码是字面量，引用常量会让「常量被改错」两边同时错） |
+| `object_type` | `config_flag` | ✔ |
+| `object_id` | **flag 名**（区别于 `config.entries.write` 的「作用域」） | `newInvoice` |
+| `before` / `after` | 该租户层「flag 名 → 值」的映射 | 首次 `{"newInvoice": null}` → `{"newInvoice": false}`；第二次 `{"newInvoice": false}` → `{"newInvoice": true}` |
+
+`before` 用 `null` 而不是「省略键」，是 `layer_values` 的既有口径
+（`platform-config/src/service.rs:183-204`：该层没有这个键 → `Value::Null`），
+与既有 `a_config_write_really_lands_in_the_audit_table` 的 `{"title": null}` 一致。
+
+## B-2. 实测数字（自己用 awk 算，不引用旧报告）
+
+命令（串行、逐 crate）：
+
+```bash
+cargo test -p <crate> --all-targets -- --test-threads=1 --include-ignored \
+  | grep -E '^test result' | awk '{p+=$4; f+=$6; i+=$8} END {printf "passed=%d failed=%d ignored=%d\n", p, f, i}'
+```
+
+| crate | passed | failed | ignored | 相对基线 930 |
+|---|---|---|---|---|
+| platform-core | 153 | 0 | 0 | — |
+| platform-db | 46 | 0 | 0 | — |
+| platform-iam | 180 | 0 | 0 | —（B1 是补断言，不是补用例） |
+| platform-org | 93 | 0 | 0 | — |
+| platform-rbac | 83 | 0 | 0 | — |
+| platform-config | 89 | 0 | 0 | —（B2 只改名） |
+| platform-schema | 20 | 0 | 0 | — |
+| platform-server | **129** | 0 | 0 | **+1（B3）** |
+| platform-audit | 54 | 0 | 0 | — |
+| sandbox | 33 | 0 | 0 | — |
+| xtask | 51 | 0 | 0 | — |
+| **合计** | **931** | **0** | **0** | **+1（预期 931）** |
+
+⚠️ 环境事实：第 11 个 crate 的**包名是 `sandbox`**（`modules/sandbox/backend/Cargo.toml:2`），
+不是任务卡写的 `platform-sandbox` —— 用 `-p platform-sandbox` 会得到
+`error: package ID specification did not match any packages`（rc=101，0 条 test result）。
+换成 `-p sandbox` 后 33 passed / 0 failed / 0 ignored，总数才回到 931。
+
+### E2E（干净库）
+
+**怎么确认库是干净的**：跑之前我**先把库清到 0 行**——不是靠假设：
+
+```sql
+-- 清理前：all=5 / tenant-a=5 / fixture=0（这 5 行是 platform-audit 用例的
+--         demo.item.page0..4 残留，会把 tenant-a 顶到 16 行，不再是文档口径的 11）
+DELETE FROM platform_audit_log WHERE tenant_id='tenant-a';        -- DELETE 5
+DELETE FROM platform_audit_chain_state WHERE tenant_id='tenant-a'; -- DELETE 1
+-- 清理后：all=0 / tenant-a=0 / fixture=0
+```
+
+然后 `npx playwright test e2e/`（`webServer` 会先 `vite build` + `e2e-server.sh`；
+后者跑迁移并 `seed-e2e.sh` 幂等播 11 条夹具 → 起点 tenant-a=11 < 默认 limit 20）：
+
+```text
+Running 35 tests using 1 worker
+...
+  35 passed (45.4s)
+```
+
+→ **35 passed / 0 failed / 0 skipped**。跑完后库累积为
+`all=33 / tenant-a=32 / e2e_fixture=11`（登录等真实事件会写审计表，属正常累积）。
+
+## B-3. 自证证据（红绿由被断言的那一行决定）
+
+### B1 —— 失败分支 UA 置空 → 用例必须红
+
+```text
+# 基线 sha256（改前）
+8ea4e3ff18f369d2be0a36845a647a6fd5747c2941fe4ec5e8cd421e76769c28  crates/platform-iam/src/service.rs
+# 变异：:981  &meta.user_agent → ""
+# 变异后 sha256
+67f78b559255229e5de967cbeac25f181f10508d977e1c726b1e97f358f1f327
+
+test a_failed_sso_login_produces_exactly_one_sso_failure_event ... FAILED
+thread '...' panicked at crates/platform-iam/tests/sso_login_audit.rs:333:5:
+assertion `left == right` failed: 失败事件的 `userAgent` 也必须逐字透传
+  left: Some("")
+ right: Some("audit-test-agent")
+test result: FAILED. 1 passed; 1 failed; 0 ignored
+```
+
+还原（`cp` 回备份 + `touch`）后：
+
+```text
+crates/platform-iam/src/service.rs: 成功      # sha256sum -c 逐字节相同
+```
+
+### B3 —— flag 埋点改码 → 新用例必须红
+
+```text
+# 基线 sha256（改前）
+9cfd68f0e0f9c1a8788d51ad8514cd635aee904133e6715687993cec2cc80c3a  crates/platform-config/src/service.rs
+# 变异：:546  "config.flag.write" → "config.flag.wrote"
+
+test a_config_flag_write_really_lands_in_the_audit_table ... FAILED
+thread '...' panicked at crates/platform-server/tests/audit_chain_real_db.rs:368:5:
+assertion `left == right` failed: 事件码（D163）
+  left: "config.flag.wrote"
+ right: "config.flag.write"
+test result: FAILED. 4 passed; 1 failed; 0 ignored
+```
+
+关键：**只有 flag 用例红**，同文件的 `a_config_write_really_lands_in_the_audit_table`
+（entries）仍然绿 → 新断言确实只盯 `config.flag.write`，不是顺带被 entries 顶绿的。
+
+还原后 `sha256sum -c` → `crates/platform-config/src/service.rs: 成功`。
+两个变异文件均已 `touch`（避免 cargo 复用陈旧二进制），最终 `sha256sum -c` 双双成功。
+
+### B2 —— 改名，无需自证
+
+改名后 `cargo test -p platform-config` 89 passed / 0 failed；
+`git grep the_audit_page_default_size_is_the_same_everywhere` 在源码里 **0 命中**
+（仅历史 QA 报告引用旧名，未改）。
+
+## B-4. 其他验证
+
+- `cargo clippy --workspace --all-targets` → **rc=0**，**2 条存量 warning**
+  （`platform-iam` lib 的 `large size difference between variants` /
+  `very complex type used`；lib test 报 2 条重复）→ **新增 0**。
+- `cargo fmt --all --check` → 红 11 个**存量**文件（TD-017 基线：
+  platform-contracts 3 / platform-schema 3 / platform-server 3 / sandbox 3 个文件口径），
+  我改的三个文件 **0 处 diff**（单文件 `rustfmt --check` 退出码 0）。
+
+## B-5. 偏离声明
+
+| # | 与任务卡不一致处 | 理由 |
+|---|---|---|
+| **DB-1** | B1 **附带订正了失败用例的 doc**（`sso_login_audit.rs:282-291`） | 那段 doc（「失败载荷只带 provider / code / ip」）把 `SsoAuditPayload` 的白名单与本用例断言的 `AuditEvent` 混为一谈，正是漏 UA 断言的合理化来源。任务卡要求「只补断言」；不改 doc 会留下**新的**注释-代码不一致（上一轮 M-01 被罚的正是这个模式）。断言逻辑未动 |
+| DB-2 | 第 11 个 crate 用 `-p sandbox` 而非任务卡写的 `platform-sandbox` | 包名事实如此（`modules/sandbox/backend/Cargo.toml:2`）。按卡上的名字会 rc=101、0 用例，报告若照抄就是**少跑一个 crate 还看不出来** |
+| DB-3 | E2E 前**删了 5 行 `demo.item.*` 残留 + 1 行链状态** | 任务卡说「测试库现在处于干净起点（11/11/11）」；我跑完 11 个 crate 后实测是 `all=5 / tenant-a=5`，已不再是那个起点。为让 E2E 结果可复现，按任务卡允许的「清干净后重播 seed」口径恢复成 0 行起点（不是拿脏库充数，也不是改 seed 条数） |
+
+## B-6. 未完成 / 未验证项（如实）
+
+| # | 项 | 状态 | 说明 |
+|---|---|---|---|
+| B-U1 | 前端单测（`@base/shell` ≥206 / `@base/i18n` 43 / `@base/sdk` 38）、`pnpm -r build`、`svelte-check` | **本轮未跑** | 附录 B.3 的必跑清单只有逐 crate + E2E + clippy/fmt；B1~B3 均不触碰前端。上一轮已跑过，本轮无前端改动 |
+| B-U2 | `config.flag.write` 的 `rollout_percent` 分支（派生键 `flags.<F>.rolloutPercent`）真库落表 | **未单测** | B3 只覆盖 `enabled`（D163 的形状断言主体）。派生键同走一次 `write_scoped` + 一条审计事件，但「`after` 同时含 flag 与 rollout 两个键」的形状**没有**机械判据 |
+| B-U3 | 生产/既有库的迁移落表 | 未同步 | 沿用 §8 U-6（迁移已进 `_sqlx_migrations` 不重跑，部署时需幂等 `platform_config_upsert`） |
+
+## B-7. 本节写入的文件
+
+**代码（feature worktree，未提交）**
+
+1. `/home/myg133/Projects/system_seed/feature-REQ-014/crates/platform-iam/tests/sso_login_audit.rs`（B1：+断言 +doc 订正）
+2. `/home/myg133/Projects/system_seed/feature-REQ-014/crates/platform-config/tests/config_real_db.rs`（B2：仅用例名）
+3. `/home/myg133/Projects/system_seed/feature-REQ-014/crates/platform-server/tests/audit_chain_real_db.rs`（B3：新增 1 条真库用例）
+
+**报告**
+
+4. `/home/myg133/Projects/system_seed/BA/feature-meta/req-014-dev-fixround2.md`（**本节为追加**，§1~§9 原文未改）
+
+**未改动**（确认）：`crates/platform-iam/src/service.rs`、`crates/platform-config/src/service.rs`
+（两个变异均已还原，`sha256sum -c` 逐字节成功）、F1~F14 的既有实现、
+`BA/demands/`、`BA/plan/`、`e2e/`。

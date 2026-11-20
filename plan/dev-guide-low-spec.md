@@ -587,7 +587,8 @@ fn scanner_detects_injected_chinese() {
 ```bash
 # 必须这样（--all-targets 不能省，否则 lib 里的测试一个都不跑、退出码仍 0）
 for c in platform-core platform-config platform-iam platform-rbac platform-org \
-         platform-db platform-schema platform-server sandbox; do
+         platform-db platform-schema platform-server platform-audit \
+         platform-contracts sandbox xtask; do
   cargo test -p "$c" --all-targets -- --test-threads=2 --include-ignored
 done
 ```
@@ -595,12 +596,33 @@ done
 - `cargo test --workspace` **在本仓必失败** → 必须逐 crate
 - `cargo test` 只能有**一个** `--`（双 `--` → 0 passed 却 exit 0）
 - `--include-ignored` 是 test-binary flag，必须在 `--` **之后**
+- ⚠️ **清单要自己数，别手抄**（REQ-014 的教训）：
+  - workspace 共 **13** 个成员，其中 `platform-contracts-macros` 是 proc-macro（**无测试**）
+    → **12 个有测试的 crate**。REQ-014 整个周期都写「11 crate」，**漏了 `platform-contracts`** ——
+    而它有 `tests/c6_schema_projection.rs`（**C6 错误响应契约**），
+    偏偏那个需求就在改错误响应。
+    → 每次开工前用 `sed -n '/^\[workspace\]/,/^\[/p' Cargo.toml` 数一遍。
+- ⚠️ **包名 ≠ 目录名**：`modules/sandbox` 的包名是 `sandbox`。
+  写成 `-p platform-sandbox` → `cargo test` 直接 **rc=101、0 条 result** ——
+  **看起来像「这个 crate 没测试」，实际是整个 crate 没跑**。
 
 ### 9.9 测试资产要当交付物维护
 
 - 夹具必须**独立、幂等、可复现**（D101）
 - E2E 的 `skip` **只允许「被测系统未就绪」**；夹具 / 授权不对必须 **fail**（D108）
 - 播种脚本要**自证授权**，不只自证「用户数」——「脚本成功」≠「夹具可用」
+- ⚠️ **skip ≠ 已验证**（**D193**，REQ-014 的教训）：
+  REQ-014 的 Dev 报「E2E 30 passed / 5 skipped / 0 failed」，
+  那 5 条 skip **正好包含**审计页的关键用例 → 两个阻塞级缺陷**在交付时完全没被发现**。
+  → 报告必须把「真跑通过」与「skip」**分开列**；
+  **处于 skip 状态的功能不得计入「已验证」**；交付前必须让系统就绪后**真跑一遍**。
+- ⚠️ **E2E 必须在「干净起点」上跑**（REQ-014 的教训）：
+  「全绿」可能是**脏库**给的 —— REQ-014 的 E2E 在脏库（累积 42 条）上全绿，
+  在干净库（夹具 11 条 < 默认 limit 20）上**必然失败**（一条用例偷偷依赖「记录数 > 20」）。
+  → 报告要写明**起点状态**（如 `tenant-a = 11`）；
+  依赖数据量的断言**要么自造数据、要么显式把阈值调小**。
+- ⚠️ **修复的证据是「没有它就会红」**，不是「跑出来是绿的」：
+  修复后要附**负向对照**（把修复撤掉 → 同一前提下复现失败 → 还原）。
 
 ### 9.10 依赖预算
 
@@ -664,6 +686,26 @@ QA / 复核者的报告要按**可判定性**分级，不能只按「严重程�
 REQ-013 的 51 条里，**阻塞 14 条全落在前三档** —— 这类问题**不会自己暴露**，
 因为「按错的规格实现 + 按错的规格验收」是自洽的。
 
+### 9.13 ★ 判据（断言）必须与实现**同批交付**，并附**敏感度证据**
+
+**这条来自 REQ-014 的两条阻塞级缺陷。**
+
+- **现象**：REQ-014 的 B-01（`nextCursor` 恒 null）与 B-02（过滤拼出非法 SQL），
+  **代码缺陷本身只有 2 行**；真正的问题是
+  **仓库里没有任何一条断言能抓到它们** ——
+  `crates/platform-audit/tests/` 里 `filter[` **零命中**，`nextCursor` 只在前端 vitest 的
+  **mock** 里出现过。
+  → 「按错的规格实现 + 按错的规格验收」是**自洽闭环**：谁都不会报错。
+- **规矩**：
+  1. **实现与它的判据必须同一批交付**。只交实现不交判据 = 缺陷没修，只是没被发现。
+  2. 判据要打在**真界面上**（真库 / 真 HTTP），不是 mock 后面 ——
+     mock 只能证明「事件被构造出来了」，不能证明「它真的落库了」。
+  3. **交付时附敏感度证据**：把实现改坏 → 对应断言变红 → 还原后逐字节相同。
+     只有「跑出来是绿的」**不算**证据。
+  4. **反向变异**（把某处改坏而断言**仍绿**）能挖出**覆盖缺口** ——
+     REQ-014 的反向变异就挖出了「失败分支没断言 `user_agent`」。
+  5. 跨栈断言写「**包含**」不写「**相等**」，并**逐 locale** 检查 ——
+     两侧**数字相等**完全可能是**两个不同集合**（REQ-014：两侧都是 84，集合差 6↔6）。
 
 ### 经验
 
