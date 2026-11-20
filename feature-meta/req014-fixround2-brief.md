@@ -199,3 +199,87 @@ export DATABASE_URL_TEST="postgres://base:base@127.0.0.1:5432/base_test"
 3. F12 自证证据；
 4. 偏离声明 / 未完成项；
 5. 已写入的文件（绝对路径）。
+
+---
+
+# 附录 B（BA 于 2026-11-20 17:20 追加）：第 2 轮**聚焦复核**后的微修（B1~B3）
+
+> 聚焦复核结论：**PASS-WITH-RISK**（阻塞 0 / 高 0 / 中 0 / 低 3）
+> —— 干净库 E2E 已钉死：从零重建（起点 `tenant-a=11 < limit 20`）→ **35 passed / 0 failed / 0 skipped**；
+> **同一干净库**删掉 F11 补的那行 → **1 failed / 5 passed**（按钮 disabled 超时）→ 红绿由这一行决定。
+> 报告：`BA/feature-meta/qa-recheck2-req014.md`。
+
+## B.1 本轮要做的 3 件事（都很小）
+
+### B1 —— F14 的**失败分支**没断言 `user_agent`（复核 L-01）
+
+- **证据**：把 `crates/platform-iam/src/service.rs` 失败分支的 `user_agent` 置 `""`
+  → `crates/platform-iam/tests/sso_login_audit.rs` 的用例 2 **仍然通过** → 该分支对 UA 是盲的。
+  （成功分支**有**断言 → 这是**漏了一条**，不是设计如此。）
+- **钉死的改法**：在 `sso_login_audit.rs` 的失败分支用例里补一条 `user_agent` 断言
+  （与成功分支同款：`assert_eq!(event.user_agent.as_deref(), Some(USER_AGENT), …)`）。
+- **必须自证**：把失败分支的 UA 置 `""` → **用例必须红** → 还原 + sha256 逐字节相同。
+
+### B2 —— 用例名与 doc 不一致（复核 L-02）
+
+- **现象**：`crates/platform-config/tests/config_real_db.rs` 的用例名仍是
+  `the_audit_page_default_size_is_the_same_everywhere`（「三处一样」），
+  但第 2 轮已把 doc 改成「**实际覆盖两处**（manifest + DB）」→ **名字在骗人**。
+- **钉死的改法**：**只改用例名**，改成与 doc 一致的说法
+  （例如 `the_audit_page_default_size_matches_the_contract_in_manifest_and_db`）。
+  ⚠️ **不要**改断言逻辑、**不要**改 doc（doc 已准确）。
+
+### B3 —— `config.flag.write` 的**真库落表**没有判据（复核 V-03，BA 追加）
+
+- **背景**：D163 钉了两个配置事件码：
+  | 事件码 | object_type | 形状 |
+  |---|---|---|
+  | `config.entries.write` | `config_entry` | 变更前 / 变更后 |
+  | `config.flag.write` | `config_flag` | 变更前 / 变更后 |
+- **现状**：
+  - `config.entries.write` → 第 2 轮的 F5 用例
+    （`crates/platform-server/tests/audit_chain_real_db.rs` 的
+    `a_config_write_really_lands_in_the_audit_table`）**已验真库落表**；
+  - `config.flag.write` → **只有** `crates/platform-config/tests/audit_events.rs` 的
+    **mock sink** 形状断言，**真库落表无判据**；
+  - 代码里两个码**都真的在发**（`crates/platform-config/src/service.rs:462` / `:547`），
+    形状与 D163 一致 —— 所以这**不是缺陷**，是**判据缺失**。
+- **钉死的改法**：在 `crates/platform-server/tests/audit_chain_real_db.rs` 里
+  **照着已有的 config 用例**再加一条 flag 写入的真库用例：
+  走**生产**的 `ConfigService`（`with_audit_sink` 注入真 `PgAuditSink`）
+  → 写一个 flag → 查 `platform_audit_log` → 断言
+  事件码 == `config.flag.write`、`object_type` == `config_flag`、
+  `before` / `after` 形状符合 D163。
+  ⚠️ **照抄已有用例的结构**（同文件、同 fixture、同断言风格），
+  **不要**另造一套。
+- **必须自证**：把 flag 写入的埋点**去掉 / 改成别的码** → 新用例必须红 → 还原 + sha256 逐字节相同。
+
+## B.2 硬约束（不变）
+
+- ❌ **不许**改 F1~F14 的任何既有实现（只做上面 3 件事）。
+- ❌ **不许**为了让测试变绿而放宽断言 / 改阈值 / 跳过用例。
+- ❌ **不许** `git commit`；❌ **不许**改 `BA/demands/`、`BA/plan/`。
+- ✅ **允许写**：feature worktree 里 B1~B3 涉及的文件 +
+  `BA/feature-meta/req-014-dev-fixround2.md`（**追加**一节「附录 B 微修」，**不要**改原文）。
+
+## B.3 必须跑的验证
+
+1. `cargo test -p platform-iam --all-targets -- --test-threads=1 --include-ignored`（B1）
+2. `cargo test -p platform-config --all-targets -- --test-threads=1 --include-ignored`（B2）
+3. `cargo test -p platform-server --all-targets -- --test-threads=1 --include-ignored`（B3）
+4. **逐 crate 全量**（11 个，串行）→ 0 failed / 0 ignored；数字**自己用 awk 算**。
+   聚焦复核实测基线：**930**（core 153 / db 46 / iam 180 / org 93 / rbac 83 / config 89 /
+   schema 20 / server 128 / audit 54 / sandbox 33 / xtask 51）
+   → 你加了用例，总数应**上升**（B3 +1 → **931**）；若**下降** → 有用例被误删，必须查清。
+5. **E2E**：`npx playwright test e2e/` → 全绿且 **0 skipped**。
+   ⚠️ 测试库现在处于**干净起点**（`all=11 / tenant-a=11 / fixture=11`）→ 直接跑即可；
+   跑完库会累积（正常）。
+6. `cargo clippy --workspace --all-targets` → 新增 0；`cargo fmt --all --check` → 与基线新增 0 处。
+
+## B.4 回报格式
+
+1. B1~B3 逐条：改了什么 + `file:line`；
+2. 实测数字（逐 crate + E2E）；
+3. 三处自证证据（UA 置空 → 红 / 埋点去掉 → 红 / —— B2 是改名无需自证）；
+4. 偏离声明 / 未完成项（如实写）；
+5. 已写入的文件（绝对路径）。
