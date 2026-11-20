@@ -18,16 +18,17 @@
 > （`91d8e09` → `a0a8d7a` → `400cefa`），Rust 303/303（连跑 8 轮全绿）、前端 23/23、E2E 1/1。
 > 复盘见 [sprint-02-retro.md](../sprint/sprint-02-retro.md)（34 个 QA 问题的归因）。
 >
-> **当前迭代：Sprint 4（SDK 与二次开发面）** —— REQ-011（前端 SDK）、REQ-012（元数据驱动渲染）、
-> **REQ-021（国际化与本地化）均已完成**
-> （REQ-011 @ `b38715f`：12 条 AC、两轮独立复核 PASS、后端 550 / 前端 151 / E2E 11；
-> REQ-012 @ `88b7ca3`：12 条 AC、独立复核 PASS、后端 618 / 前端 240 / E2E 17 **且 0 skipped**；
-> REQ-021 @ `59486d0`：12 条 AC、独立复核 PASS、后端 **642** / 前端 **208** / E2E **20 且 0 skipped**）。
-> 三棒的复盘：[sprint-04-retro.md](../sprint/sprint-04-retro.md)、[req-012-retro.md](../sprint/req-012-retro.md)、
+> **当前迭代：Sprint 5（身份闭环与出站 IdP）** —— REQ-013（SSO 入站）、REQ-014（审计日志）
+> **均已完成**，**REQ-022（出站 IdP 与单点登出）进行中**（规格已就绪，D196~D220）。
+> Sprint 4（SDK 与二次开发面）已收官 —— REQ-011 @ `b38715f`（12 条 AC、两轮独立复核 PASS、
+> 后端 550 / 前端 151 / E2E 11）、REQ-012 @ `88b7ca3`（12 条 AC、独立复核 PASS、后端 618 /
+> 前端 240 / E2E 17 **且 0 skipped**）、REQ-021 @ `59486d0`（12 条 AC、独立复核 PASS、
+> 后端 **642** / 前端 **208** / E2E **20 且 0 skipped**）。
+> 复盘：[sprint-04-retro.md](../sprint/sprint-04-retro.md)、[req-012-retro.md](../sprint/req-012-retro.md)、
 > [req-021-retro.md](../sprint/req-021-retro.md)。
 > **REQ-013（SSO 入站）已完成** —— `develop` @ `0683115`。6 棒验证链（QA 挑刺 51 → Pre-merge FAIL → 修复 →
 > 独立复核发现「只修一半」→ 修复轮2 → BA 终验）。后端 760 passed（基线 642，+118）。
-> 出站 IdP 拆到 **REQ-022** 待做。SAML 因树里无 XML 库**不予交付**（用户裁定）。
+> 出站 IdP 拆到 **REQ-022**（Sprint 5，进行中）。SAML 因树里无 XML 库**不予交付**（用户裁定）。
 > 复盘见 [req-013-retro.md](../sprint/req-013-retro.md)。
 > **REQ-014（审计日志）已完成** —— `develop` @ `310e4d3`（85 文件 / +14162 / -264）。
 > **13 条 AC**（AC-S-022 + AC-S-122~133），裁决 **D130~D195**（66 条）。
