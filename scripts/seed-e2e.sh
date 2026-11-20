@@ -114,16 +114,42 @@ fi
 # 所以参数与线上配置不同也照常登录。
 E2E_PASSWORD_PHC='$argon2id$v=19$m=16384,t=2,p=1$ZTJlLWZpeHR1cmUtc2FsdC0wMDAx$uNSbspROt/aqSXp9tqUGUw4ahUfIUB6pVuY+YFGqltQ'
 
+# --- OAuth 夹具的 client secret（REQ-022 / D236）------------------------------
+#
+# ⚠️ **明文**是**固定值**：E2E（另一个进程）要用它换令牌 → 必须能从 stdout
+# 或夹具文件读到 → 不能每次随机。
+#
+# ⚠️ 库里**只存摘要**：`digest_base64url(明文)` = SHA-256 的**原始 32 字节**
+# → base64url **无填充** → **43 字符**（D228）—— **不是** hex。
+digest_base64url() {
+  printf '%s' "$1" | openssl dgst -sha256 -binary | base64 | tr -d '\n=' | tr '+/' '-_'
+}
+
+OAUTH_CLIENT_A_SECRET='e2e-oauth-client-a-secret'
+OAUTH_CLIENT_B_SECRET='e2e-oauth-client-b-secret'
+OAUTH_CLIENT_A_HASH="$(digest_base64url "$OAUTH_CLIENT_A_SECRET")"
+OAUTH_CLIENT_B_HASH="$(digest_base64url "$OAUTH_CLIENT_B_SECRET")"
+
+# back-channel 登出回调：回环地址的 **http**（生产必须 https；回环是唯一例外）。
+#
+# ⚠️ **夹具顺序钉死**（D237 §2）：**先起 mock → 再播种** —— 这个 URI 里含
+# `$MOCK_PORT` → 端口必须已经定下来（`scripts/mock-logout-receiver.sh` 监听它）。
+MOCK_PORT="${MOCK_PORT:-19999}"
+OAUTH_BACKCHANNEL_URI="http://127.0.0.1:${MOCK_PORT}/logout"
+
 # --- 播种 ---------------------------------------------------------------------
 #
 # 用户清单（E2E 需要哪些，这里就写哪些）：
 #
 # | 用户 | 权限点 | 用途 |
 # |---|---|---|
-# | u-perm-read@example.com  | rbac:role:read + sandbox:demo:read  | 只读 → 能读列表、不能写；看不到 `secret` 字段 |
+# | u-perm-read@example.com  | rbac:role:read + sandbox:demo:read + oauth:grant:read + oauth:grant:revoke | 只读 → 能读列表、不能写；看不到 `secret` 字段 |
 # | u-perm-write@example.com | rbac:role:read + rbac:role:write + sandbox:demo:read + sandbox:demo:write + sandbox:demo:secret | 写用户 → 深链可达、CRUD 可跑、能看到 `secret` 字段 |
 # | u-perm-none@example.com  | （无）                              | fail closed |
 # | u-perm-audit@example.com | audit:events:read                   | 审计页的数据用例（REQ-014 / AC-S-132） |
+# | u-perm-oauth@example.com | oauth:client:read/write/delete + oauth:grant:read/revoke | **OAuth 管理员**（REQ-022 / D236） |
+# | e2e-user-oauth@example.com | rbac:role:read                   | **OAuth 普通用户**（REQ-022 / D236）：授权流程的主体 |
+# | u-perm-other@example.com（**tenant-b**） | rbac:role:read + oauth:grant:read + oauth:grant:revoke | **跨租户对照**（REQ-022 / D236 / TC-022-088） |
 #
 # `sandbox:demo:*` 是 REQ-012 的权限点（`sandbox` 模块的两个实体共用）。
 # **漏授就会让 `e2e/schema-driven.spec.ts` 的列表请求 403**，而按 D108，
@@ -139,7 +165,10 @@ E2E_PASSWORD_PHC='$argon2id$v=19$m=16384,t=2,p=1$ZTJlLWZpeHR1cmUtc2FsdC0wMDAx$uN
 # 也让「用户数不翻倍」这件事一眼可查。**同名既有行除外** —— 冲突时沿用它的 id
 # （见文件头的说明），所以下面的绑定 / 核对都按实际 id 查，不写死这些常量。
 echo "播种 E2E 夹具（tenant-a，管理员连接）…"
-run_sql -v phc="$E2E_PASSWORD_PHC" <<'SQL'
+run_sql -v phc="$E2E_PASSWORD_PHC" \
+         -v secret_a="$OAUTH_CLIENT_A_HASH" \
+         -v secret_b="$OAUTH_CLIENT_B_HASH" \
+         -v backchannel="$OAUTH_BACKCHANNEL_URI" <<'SQL'
 BEGIN;
 
 -- 1) 账号：存在则修好登录必需字段（邮箱单域名 / 密码 / 状态 / 锁定状态）。
@@ -148,7 +177,11 @@ VALUES
     ('e2e-user-perm-read',  'tenant-a', 'u-perm-read@example.com',  'u-perm-read@example.com',  :'phc', 'active'),
     ('e2e-user-perm-write', 'tenant-a', 'u-perm-write@example.com', 'u-perm-write@example.com', :'phc', 'active'),
     ('e2e-user-perm-none',  'tenant-a', 'u-perm-none@example.com',  'u-perm-none@example.com',  :'phc', 'active'),
-    ('e2e-user-perm-audit', 'tenant-a', 'u-perm-audit@example.com', 'u-perm-audit@example.com', :'phc', 'active')
+    ('e2e-user-perm-audit', 'tenant-a', 'u-perm-audit@example.com', 'u-perm-audit@example.com', :'phc', 'active'),
+    -- REQ-022（D236）：OAuth 管理员 + 普通用户（tenant-a）+ 跨租户对照（tenant-b）。
+    ('e2e-user-oauth',       'tenant-a', 'u-perm-oauth@example.com',   'u-perm-oauth@example.com',   :'phc', 'active'),
+    ('e2e-user-oauth-plain', 'tenant-a', 'e2e-user-oauth@example.com', 'e2e-user-oauth@example.com', :'phc', 'active'),
+    ('e2e-user-other',       'tenant-b', 'u-perm-other@example.com',   'u-perm-other@example.com',   :'phc', 'active')
 ON CONFLICT (tenant_id, username) DO UPDATE SET
     email            = EXCLUDED.email,
     password_hash    = EXCLUDED.password_hash,
@@ -162,28 +195,55 @@ INSERT INTO platform_role (tenant_id, id, code, name, data_scope, builtin)
 VALUES
     ('tenant-a', 'e2e-role-read',  'e2e-role-read',  'E2E 只读角色',   'ALL', FALSE),
     ('tenant-a', 'e2e-role-write', 'e2e-role-write', 'E2E 读写角色',   'ALL', FALSE),
-    ('tenant-a', 'e2e-role-audit', 'e2e-role-audit', 'E2E 审计角色',   'ALL', FALSE)
+    ('tenant-a', 'e2e-role-audit', 'e2e-role-audit', 'E2E 审计角色',   'ALL', FALSE),
+    -- REQ-022（D236）。
+    ('tenant-a', 'e2e-role-oauth',      'e2e-role-oauth',      'E2E OAuth 管理员角色',   'ALL', FALSE),
+    ('tenant-a', 'e2e-role-oauth-user', 'e2e-role-oauth-user', 'E2E OAuth 普通用户角色', 'ALL', FALSE),
+    ('tenant-b', 'e2e-role-other',      'e2e-role-other',      'E2E 跨租户对照角色',     'ALL', FALSE)
 ON CONFLICT (tenant_id, id) DO UPDATE SET
     code       = EXCLUDED.code,
     name       = EXCLUDED.name,
     data_scope = EXCLUDED.data_scope,
     builtin    = FALSE;
 
--- 3) 授权：先清空这三个角色的授权再按清单写回（收敛，不积累历史垃圾）。
+-- 3) 授权：先清空这些角色的授权再按清单写回（收敛，不积累历史垃圾）。
+--
+--    ⚠️ `tenant-b` 要**自己**的角色：`platform_role` / `platform_role_permission`
+--    / `platform_user_role` 都**按租户**隔离 → 租户 b 的授权不能复用租户 a 的。
 DELETE FROM platform_role_permission
  WHERE tenant_id = 'tenant-a'
-   AND role_id IN ('e2e-role-read', 'e2e-role-write', 'e2e-role-audit');
+   AND role_id IN ('e2e-role-read', 'e2e-role-write', 'e2e-role-audit',
+                   'e2e-role-oauth', 'e2e-role-oauth-user');
+
+DELETE FROM platform_role_permission
+ WHERE tenant_id = 'tenant-b'
+   AND role_id = 'e2e-role-other';
 
 INSERT INTO platform_role_permission (tenant_id, role_id, permission_code, data_scope)
 VALUES
+    -- ⚠️ `e2e-role-read` 多了两个 OAuth 权限点（REQ-022 / TC-022-084~087）：
+    -- 「我的授权」页要用**只读用户**也能看 / 撤**自己**的授权记录。
     ('tenant-a', 'e2e-role-read',  'rbac:role:read',     NULL),
     ('tenant-a', 'e2e-role-read',  'sandbox:demo:read',  NULL),
+    ('tenant-a', 'e2e-role-read',  'oauth:grant:read',   NULL),
+    ('tenant-a', 'e2e-role-read',  'oauth:grant:revoke', NULL),
     ('tenant-a', 'e2e-role-write', 'rbac:role:read',     NULL),
     ('tenant-a', 'e2e-role-write', 'rbac:role:write',    NULL),
     ('tenant-a', 'e2e-role-write', 'sandbox:demo:read',  NULL),
     ('tenant-a', 'e2e-role-write', 'sandbox:demo:write', NULL),
     ('tenant-a', 'e2e-role-write', 'sandbox:demo:secret', NULL),
-    ('tenant-a', 'e2e-role-audit', 'audit:events:read',  NULL)
+    ('tenant-a', 'e2e-role-audit', 'audit:events:read',  NULL),
+    -- REQ-022（D236）：OAuth 管理员 5 个 + 普通用户 1 个。
+    ('tenant-a', 'e2e-role-oauth',      'oauth:client:read',   NULL),
+    ('tenant-a', 'e2e-role-oauth',      'oauth:client:write',  NULL),
+    ('tenant-a', 'e2e-role-oauth',      'oauth:client:delete', NULL),
+    ('tenant-a', 'e2e-role-oauth',      'oauth:grant:read',    NULL),
+    ('tenant-a', 'e2e-role-oauth',      'oauth:grant:revoke',  NULL),
+    ('tenant-a', 'e2e-role-oauth-user', 'rbac:role:read',      NULL),
+    -- 跨租户对照（tenant-b）：能读 / 撤**自己**的授权记录 → 但**看不到** tenant-a 的。
+    ('tenant-b', 'e2e-role-other',      'rbac:role:read',      NULL),
+    ('tenant-b', 'e2e-role-other',      'oauth:grant:read',    NULL),
+    ('tenant-b', 'e2e-role-other',      'oauth:grant:revoke',  NULL)
 ON CONFLICT (tenant_id, role_id, permission_code) DO NOTHING;
 
 -- 4) 绑定：**用查出来的实际 id**（第 1 步的 upsert 只把同名既有行「修好登录字段」，
@@ -194,7 +254,15 @@ DELETE FROM platform_user_role
    AND user_id IN (
        SELECT id FROM platform_iam_user
         WHERE tenant_id = 'tenant-a'
-          AND username IN ('u-perm-read@example.com', 'u-perm-write@example.com', 'u-perm-none@example.com', 'u-perm-audit@example.com')
+          AND username IN ('u-perm-read@example.com', 'u-perm-write@example.com', 'u-perm-none@example.com', 'u-perm-audit@example.com',
+                           'u-perm-oauth@example.com', 'e2e-user-oauth@example.com')
+   );
+
+DELETE FROM platform_user_role
+ WHERE tenant_id = 'tenant-b'
+   AND user_id IN (
+       SELECT id FROM platform_iam_user
+        WHERE tenant_id = 'tenant-b' AND username = 'u-perm-other@example.com'
    );
 
 INSERT INTO platform_user_role (tenant_id, user_id, role_id)
@@ -203,14 +271,30 @@ SELECT 'tenant-a', u.id, r.role_id
   JOIN (VALUES
         ('u-perm-read@example.com',  'e2e-role-read'),
         ('u-perm-write@example.com', 'e2e-role-write'),
-        ('u-perm-audit@example.com', 'e2e-role-audit')
+        ('u-perm-audit@example.com', 'e2e-role-audit'),
+        ('u-perm-oauth@example.com', 'e2e-role-oauth'),
+        ('e2e-user-oauth@example.com', 'e2e-role-oauth-user')
        ) AS r(username, role_id) ON r.username = u.username
  WHERE u.tenant_id = 'tenant-a'
+ON CONFLICT (tenant_id, user_id, role_id) DO NOTHING;
+
+INSERT INTO platform_user_role (tenant_id, user_id, role_id)
+SELECT 'tenant-b', u.id, 'e2e-role-other'
+  FROM platform_iam_user u
+ WHERE u.tenant_id = 'tenant-b' AND u.username = 'u-perm-other@example.com'
 ON CONFLICT (tenant_id, user_id, role_id) DO NOTHING;
 
 -- 5) 权限缓存 epoch +1：任何授权 / 绑定写操作都要打失效信号。
 INSERT INTO platform_permission_epoch (tenant_id, epoch)
 VALUES ('tenant-a', 1)
+ON CONFLICT (tenant_id) DO UPDATE SET
+    epoch      = platform_permission_epoch.epoch + 1,
+    updated_at = now();
+
+-- ⚠️ **tenant-b 也要 bump**（REQ-022 / D236）：它是**另一个租户**的缓存信号
+-- → 只 bump tenant-a 的话，tenant-b 的用户拿到的还是旧权限集。
+INSERT INTO platform_permission_epoch (tenant_id, epoch)
+VALUES ('tenant-b', 1)
 ON CONFLICT (tenant_id) DO UPDATE SET
     epoch      = platform_permission_epoch.epoch + 1,
     updated_at = now();
@@ -318,6 +402,51 @@ BEGIN
 END
 $$;
 
+-- 9) REQ-022 的 OAuth client 夹具（D236）。
+--
+--    ⚠️ `platform_oauth_client` 是**平台级**表（**无** `tenant_id`、**不启用**
+--    RLS，D219）→ 所有租户共享同一批 client。
+--
+--    ⚠️ `client_secret_hash` = `digest_base64url(明文)`（43 字符的 base64url
+--    无填充摘要）—— 由脚本用 `openssl` + `base64` **独立算**，**不是** hex（D228）。
+--
+--    ⚠️ `backchannel_logout_uri` 含 `$MOCK_PORT` → **先起 mock → 再播种**。
+INSERT INTO platform_oauth_client (
+    client_id, client_secret_hash, client_type, name, redirect_uris,
+    allowed_grant_types, allowed_scopes, backchannel_logout_uri,
+    frontchannel_logout_uri, status, created_at
+)
+VALUES
+    ('client-A', :'secret_a', 'confidential', 'E2E 应用 A',
+     ARRAY['https://client.example/cb'],
+     ARRAY['authorization_code', 'client_credentials', 'urn:ietf:params:oauth:grant-type:device_code'],
+     ARRAY['rbac:role:read'],
+     :'backchannel', 'https://client.example/front', 'active', now()),
+    -- ⚠️ client-B **不**配 front-channel URI（AC-S-150：front-channel 列表
+    -- 只含**配了**的 client）。
+    ('client-B', :'secret_b', 'confidential', 'E2E 应用 B',
+     ARRAY['https://client.example/cb'],
+     ARRAY['client_credentials'],
+     ARRAY['rbac:role:read'],
+     :'backchannel', NULL, 'active', now()),
+    -- ⚠️ public client **没有** secret（`client_secret_hash` 为 NULL）→
+    -- 只能用 `client_id`（`none` 方式）认证（AC-S-143 步骤 5）。
+    ('public-client', NULL, 'public', 'E2E 公开应用',
+     ARRAY['https://client.example/cb'],
+     ARRAY['authorization_code'],
+     ARRAY['rbac:role:read'],
+     NULL, NULL, 'active', now())
+ON CONFLICT (client_id) DO UPDATE SET
+    client_secret_hash      = EXCLUDED.client_secret_hash,
+    client_type             = EXCLUDED.client_type,
+    name                    = EXCLUDED.name,
+    redirect_uris           = EXCLUDED.redirect_uris,
+    allowed_grant_types     = EXCLUDED.allowed_grant_types,
+    allowed_scopes          = EXCLUDED.allowed_scopes,
+    backchannel_logout_uri  = EXCLUDED.backchannel_logout_uri,
+    frontchannel_logout_uri = EXCLUDED.frontchannel_logout_uri,
+    status                  = 'active';
+
 COMMIT;
 SQL
 
@@ -351,14 +480,17 @@ SQL
 
 # 强断言：四个用户各 **恰好 1 行**（不翻倍），权限点数目符合清单。
 bad="$(printf '%s\n' \
-  "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username IN ('u-perm-read@example.com', 'u-perm-write@example.com', 'u-perm-none@example.com', 'u-perm-audit@example.com');" \
+  "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username IN ('u-perm-read@example.com', 'u-perm-write@example.com', 'u-perm-none@example.com', 'u-perm-audit@example.com', 'u-perm-oauth@example.com', 'e2e-user-oauth@example.com');" \
   "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username = 'u-perm-read@example.com';" \
   "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username = 'u-perm-write@example.com';" \
   "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username = 'u-perm-none@example.com';" \
   "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username = 'u-perm-audit@example.com';" \
+  "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username = 'u-perm-oauth@example.com';" \
+  "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username = 'e2e-user-oauth@example.com';" \
+  "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-b' AND username = 'u-perm-other@example.com';" \
   | run_sql -tA | tr '\n' ' ')"
-if [ "$bad" != '4 1 1 1 1 ' ]; then
-  echo "✗ 夹具核对失败：期望 '4 1 1 1 1'，实际 '$bad'" >&2
+if [ "$bad" != '6 1 1 1 1 1 1 1 ' ]; then
+  echo "✗ 夹具核对失败：期望 '6 1 1 1 1 1 1 1'，实际 '$bad'" >&2
   exit 1
 fi
 
@@ -377,9 +509,12 @@ grants="$(printf '%s\n' \
   "SELECT count(*) FROM platform_role_permission p JOIN platform_user_role r ON r.tenant_id = p.tenant_id AND r.role_id = p.role_id JOIN platform_iam_user u ON u.tenant_id = r.tenant_id AND u.id = r.user_id WHERE u.tenant_id = 'tenant-a' AND u.username = 'u-perm-write@example.com';" \
   "SELECT count(*) FROM platform_role_permission p JOIN platform_user_role r ON r.tenant_id = p.tenant_id AND r.role_id = p.role_id JOIN platform_iam_user u ON u.tenant_id = r.tenant_id AND u.id = r.user_id WHERE u.tenant_id = 'tenant-a' AND u.username = 'u-perm-none@example.com';" \
   "SELECT count(*) FROM platform_role_permission p JOIN platform_user_role r ON r.tenant_id = p.tenant_id AND r.role_id = p.role_id JOIN platform_iam_user u ON u.tenant_id = r.tenant_id AND u.id = r.user_id WHERE u.tenant_id = 'tenant-a' AND u.username = 'u-perm-audit@example.com';" \
+  "SELECT count(*) FROM platform_role_permission p JOIN platform_user_role r ON r.tenant_id = p.tenant_id AND r.role_id = p.role_id JOIN platform_iam_user u ON u.tenant_id = r.tenant_id AND u.id = r.user_id WHERE u.tenant_id = 'tenant-a' AND u.username = 'u-perm-oauth@example.com';" \
+  "SELECT count(*) FROM platform_role_permission p JOIN platform_user_role r ON r.tenant_id = p.tenant_id AND r.role_id = p.role_id JOIN platform_iam_user u ON u.tenant_id = r.tenant_id AND u.id = r.user_id WHERE u.tenant_id = 'tenant-a' AND u.username = 'e2e-user-oauth@example.com';" \
+  "SELECT count(*) FROM platform_role_permission p JOIN platform_user_role r ON r.tenant_id = p.tenant_id AND r.role_id = p.role_id JOIN platform_iam_user u ON u.tenant_id = r.tenant_id AND u.id = r.user_id WHERE u.tenant_id = 'tenant-b' AND u.username = 'u-perm-other@example.com';" \
   | run_sql -tA | tr '\n' ' ')"
-if [ "$grants" != '2 5 0 1 ' ]; then
-  echo "✗ 夹具授权核对失败：期望 read=2 / write=5 / none=0 / audit=1，实际 '$grants'" >&2
+if [ "$grants" != '4 5 0 1 5 1 3 ' ]; then
+  echo "✗ 夹具授权核对失败：期望 read=4 / write=5 / none=0 / audit=1 / oauth=5 / oauth-user=1 / other=3，实际 '$grants'" >&2
   echo "  （REQ-012 的 E2E 需要 sandbox:demo:read/write/secret；REQ-014 的需要 audit:events:read；漏授会让用例 403。）" >&2
   exit 1
 fi
@@ -409,6 +544,51 @@ if [ "${audit_fixture:-0}" -lt 11 ]; then
   exit 1
 fi
 
-echo "✓ E2E 夹具就绪：u-perm-read / u-perm-write / u-perm-none / u-perm-audit（tenant-a，密码 Tr0ub4dor&3xKq）"
-echo "  授权：read=2 / write=5 / none=0 / audit=1 个权限点（含 sandbox:demo:* 与 audit:events:read）"
+# 强断言 ⑤：REQ-022 的 OAuth 夹具**存在且绑定正确**（D236 §3）。
+#
+# 「脚本成功」不等于「夹具可用」—— client 没建 / URI 写错 / secret 摘要口径不对
+# → E2E 才红，而那时看的是「前端坏了」的错误码。
+#
+# ⚠️ 逐项断：
+# - 三个 client 各**恰好 1 行**；
+# - `client-A`：confidential + back-channel URI **就是** `$MOCK_PORT` 那个
+#   + front-channel URI 非空 + 摘要**恰好 43 字符**（base64url 无填充）；
+# - `client-B`：confidential + **没有** front-channel URI（AC-S-150）；
+# - `public-client`：public + **没有** secret（`client_secret_hash IS NULL`）。
+oauth_clients="$(printf '%s\n' \
+  "SELECT count(*) FROM platform_oauth_client WHERE client_id IN ('client-A', 'client-B', 'public-client');" \
+  "SELECT count(*) FROM platform_oauth_client WHERE client_id = 'client-A' AND client_type = 'confidential' AND backchannel_logout_uri = '$OAUTH_BACKCHANNEL_URI' AND frontchannel_logout_uri IS NOT NULL AND length(client_secret_hash) = 43;" \
+  "SELECT count(*) FROM platform_oauth_client WHERE client_id = 'client-B' AND client_type = 'confidential' AND frontchannel_logout_uri IS NULL AND length(client_secret_hash) = 43;" \
+  "SELECT count(*) FROM platform_oauth_client WHERE client_id = 'public-client' AND client_type = 'public' AND client_secret_hash IS NULL;" \
+  | run_sql -tA | tr '\n' ' ')"
+if [ "$oauth_clients" != '3 1 1 1 ' ]; then
+  echo "✗ OAuth 夹具核对失败：期望 '3 1 1 1'（三个 client / client-A / client-B / public-client），实际 '$oauth_clients'" >&2
+  echo "  （client-A 的 back-channel URI 应为 $OAUTH_BACKCHANNEL_URI —— 夹具顺序要求**先起 mock**再播种。）" >&2
+  exit 1
+fi
+
+# 明文 secret：**打印到 stdout**（D236 §2）→ E2E 从 stdout / 夹具文件读。
+#
+# ⚠️ 同时写一份**夹具文件**（`target/` 下、**不入 Git**）：E2E 是**另一个进程**
+# → 读不到本脚本的 stdout。
+echo "✓ E2E 夹具就绪：u-perm-read / u-perm-write / u-perm-none / u-perm-audit / u-perm-oauth / e2e-user-oauth（tenant-a）+ u-perm-other（tenant-b）"
+echo "  授权：read=4 / write=5 / none=0 / audit=1 / oauth=5 / oauth-user=1 / other=3 个权限点"
 echo "  审计夹具：$audit_fixture 条（object_type = e2e_fixture）"
+echo "  OAuth client：client-A / client-B / public-client（back-channel → $OAUTH_BACKCHANNEL_URI）"
+echo "  OAuth client 明文 secret（只此一次，库里只存摘要）："
+echo "    client-A    = $OAUTH_CLIENT_A_SECRET"
+echo "    client-B    = $OAUTH_CLIENT_B_SECRET"
+echo "    public-client = （无 secret，public 类型）"
+
+# 夹具文件：给 E2E 读（`target/` 已被 .gitignore 忽略 → 不入库）。
+mkdir -p target
+cat > target/e2e-oauth-clients.json <<JSON
+{
+  "backchannelLogoutUri": "$OAUTH_BACKCHANNEL_URI",
+  "clients": [
+    { "clientId": "client-A", "clientSecret": "$OAUTH_CLIENT_A_SECRET", "clientType": "confidential" },
+    { "clientId": "client-B", "clientSecret": "$OAUTH_CLIENT_B_SECRET", "clientType": "confidential" },
+    { "clientId": "public-client", "clientSecret": null, "clientType": "public" }
+  ]
+}
+JSON

@@ -305,6 +305,15 @@ async fn serve() -> Result<(), Failure> {
     let mut sso_iam: Option<Arc<platform_iam::service::IamService>> = None;
     let mut config_checker: Arc<dyn PermissionChecker> = Arc::new(DenyAllPermissions);
     let mut config_permissions: Arc<dyn PermissionRefresher> = Arc::new(DenyAllPermissions);
+    // 出站 IdP（REQ-022）的装配依赖（IAM / RBAC 就绪后才拿得到）。
+    //
+    // ⚠️ **没有 IAM 就不装配** —— OAuth 令牌与登录令牌共用密钥集，
+    //    没有 IAM 就没有可签发的密钥 → 不提供 `/api/oauth/*`。
+    let mut oauth_iam: Option<(
+        Arc<platform_iam::service::IamService>,
+        Arc<platform_rbac::RbacChecker>,
+        Arc<platform_rbac::RbacService>,
+    )> = None;
 
     // 审计 sink（REQ-014 D150）：**平台构造** sink → 以 `Arc<dyn AuditSink>`
     // **向下注入**各业务模块。
@@ -363,6 +372,27 @@ async fn serve() -> Result<(), Failure> {
         if !rbac_state.service.with_audit_sink(audit_sink.clone()) {
             tracing::warn!("审计 sink 已经注入过：保留先装好的实现");
         }
+
+        // 出站 IdP（REQ-022）：`/api/oauth/*` + `/.well-known/oauth-authorization-server`。
+        //
+        // **依赖 IAM**：OAuth 令牌与登录令牌**共用同一套 ES256 密钥集**（D198）→
+        // 所以 IAM 没配 → 不提供 `/api/oauth/*`（与 `/api/org/*` 同款口径）。
+        //
+        // ⚠️ 装配**放在这里**（IAM 分支内），但**路由挂载**要等配置服务就绪
+        //    （OAuth 的运行期配置读 `platform_config`）→ 见下面 `build_oauth_state`。
+        //
+        // 依赖的三件套：
+        //
+        // | 依赖 | 实现 | 用途 |
+        // |------|------|------|
+        // | `IamService` | 平台既有 | 验登录令牌 + 签发 OAuth 令牌（同一套密钥） |
+        // | `PermissionProvider` | `RbacService` | scope 三重交集里的「用户有效权限点」 |
+        // | `PermissionChecker` | `RbacChecker` | 鉴权层判定 6 个 `oauth:*` 权限点 |
+        oauth_iam = Some((
+            iam_state.service.clone(),
+            rbac_state.checker.clone(),
+            rbac_state.service.clone(),
+        ));
 
         // 审计查询（REQ-014）：`/api/audit/*`。
         //
@@ -493,6 +523,37 @@ async fn serve() -> Result<(), Failure> {
     });
     let app = app.merge(platform_config::http::router(config_state));
     tracing::info!("配置与品牌已启用：/api/config/*、/api/feature-flags/*");
+
+    // 出站 IdP（REQ-022）：`/api/oauth/*` + `/.well-known/oauth-authorization-server`。
+    //
+    // ⚠️ **装配顺序**：OAuth 的运行期配置读 `platform_config` → 必须等配置服务就绪
+    //    （上面刚建好）才能装。
+    //
+    // ⚠️ **IAM 没配 → 不提供 `/api/oauth/*`**（与 `/api/org/*` 同款口径）：
+    //    OAuth 令牌与登录令牌**共用同一套 ES256 密钥集**（D198）→ 没有 IAM
+    //    就没有可签发的密钥，也没有可验的登录会话。
+    let app = if let Some((iam, checker, permissions)) = oauth_iam {
+        let oauth_state = build_oauth_state(
+            &config,
+            iam,
+            config_service.clone(),
+            audit_sink.clone(),
+            checker,
+            permissions,
+        )
+        .await?;
+        let app = app
+            .nest(
+                "/api/oauth",
+                platform_oauth::http::router(oauth_state.clone()),
+            )
+            .merge(platform_oauth::http::metadata_router(oauth_state.clone()));
+        tracing::info!("出站 IdP 已启用：/api/oauth/*、/.well-known/oauth-authorization-server");
+        app
+    } else {
+        tracing::warn!("未配置 IAM：平台不提供 /api/oauth/*（OAuth 令牌与登录令牌共用密钥集）");
+        app
+    };
 
     // SSO 入站（REQ-013）：把「配置源」等后设槽接到 IAM 服务上。
     //
@@ -677,6 +738,132 @@ async fn build_rbac_state(
         checker,
         tokens: Arc::new(platform_rbac::http::IamTokenVerifier::new(iam)),
     }))
+}
+
+/// 构建出站 IdP 的状态（数据访问 + 服务 + 配置源）。
+///
+/// # 依赖注入的六件套
+///
+/// | 依赖 | 实现 | 用途 |
+/// |------|------|------|
+/// | `OAuthStore` | `platform-db` 的租户作用域入口 | 5 张表的数据访问 |
+/// | `IamService` | 平台既有 | 验登录令牌 + **签发** OAuth 令牌（同一套 ES256 密钥集，D198） |
+/// | `OAuthConfigSource` | [`PlatformOAuthConfigSource`] | 运行期配置（**每请求读**） |
+/// | `PermissionProvider` | `RbacService` | scope 三重交集里的「用户有效权限点」 |
+/// | `AuditSink` | 平台 sink | 8 个 `oauth.*` 审计事件码 |
+/// | `OutboundClient` | `platform-oauth` 自带 | back-channel 登出投递（**独立实现**，D220） |
+async fn build_oauth_state(
+    config: &DeployConfig,
+    iam: Arc<platform_iam::service::IamService>,
+    config_service: Arc<platform_config::ConfigService>,
+    audit_sink: Arc<dyn platform_core::extension::audit::AuditSink>,
+    checker: Arc<platform_rbac::RbacChecker>,
+    permissions: Arc<platform_rbac::RbacService>,
+) -> Result<Arc<platform_oauth::http::OAuthState>, Failure> {
+    // 数据访问走 `platform-db` 的租户作用域入口（**不得**直连池）。
+    let tenant_db =
+        platform_db::TenantDb::connect(&config.database_url, platform_db::DbOptions::default())
+            .await
+            .map_err(|err| Failure::Runtime(format!("数据库连接串非法：{err}")))?;
+
+    let service = Arc::new(platform_oauth::service::OAuthService::new(
+        Arc::new(platform_oauth::store::OAuthStore::new(tenant_db)),
+        iam,
+        Arc::new(PlatformOAuthConfigSource::new(config_service)),
+        permissions,
+        audit_sink,
+        // 出站 client 构造失败时**降级成永远不可达**（登出不得因此起不来，D211）。
+        Arc::new(platform_oauth::outbound::OutboundClient::default()),
+    ));
+
+    // ⚠️ `refresher` 与 `checker` 是**同一个** `RbacChecker`（它同时实现两个 trait）——
+    // 少了 `refresher`，用户第一次打受保护的端点必然 403（见 `OAuthState::refresher` 的注释）。
+    let refresher: Arc<dyn platform_core::extension::permission::PermissionRefresher> =
+        checker.clone();
+
+    Ok(Arc::new(platform_oauth::http::OAuthState {
+        service,
+        checker: checker as Arc<dyn PermissionChecker>,
+        refresher,
+    }))
+}
+
+/// 出站 IdP 的**配置源**（每请求读 `platform_config`）。
+///
+/// # 为什么是「每请求读」而不是「装配时读一次」
+///
+/// 装配时读一次 = **配置改了永远不生效**（除非重启）→ 用户改了
+/// `oauth.accessTokenTtlSeconds` 却看不到变化 → 这类「改了没反应」最难查。
+/// → 每请求读；`ConfigService` 自带 epoch 失效的缓存 → 读的开销可控。
+///
+/// # 读不到怎么办
+///
+/// **返回 `Err`**（fail closed），**不得**降级成默认值 ——
+/// 「读不出来就用默认」会让「配置改了不生效」变成一件看不见的事。
+struct PlatformOAuthConfigSource {
+    /// 平台配置服务。
+    config: Arc<platform_config::ConfigService>,
+}
+
+impl PlatformOAuthConfigSource {
+    /// 包一个平台配置服务。
+    fn new(config: Arc<platform_config::ConfigService>) -> Self {
+        Self { config }
+    }
+}
+
+impl platform_oauth::config::OAuthConfigSource for PlatformOAuthConfigSource {
+    fn read<'a>(
+        &'a self,
+        ctx: &'a RequestContext,
+    ) -> platform_oauth::config::OAuthBoxFuture<
+        'a,
+        Result<platform_oauth::config::OAuthSettings, platform_oauth::config::OAuthConfigError>,
+    > {
+        Box::pin(async move {
+            let keys: Vec<String> = platform_oauth::config::CONFIG_KEYS
+                .iter()
+                .map(|key| key.to_string())
+                .collect();
+            let entries = self
+                .config
+                .read_platform_entries(ctx, &keys)
+                .await
+                .map_err(|_| platform_oauth::config::OAuthConfigError)?;
+            let mut settings = platform_oauth::config::OAuthSettings::default();
+            for entry in entries {
+                match entry.key.as_str() {
+                    platform_oauth::config::CONFIG_KEY_FRONTEND_BASE_URL => {
+                        if let Some(value) = entry.value.as_str() {
+                            settings.frontend_base_url = value.to_string();
+                        }
+                    }
+                    platform_oauth::config::CONFIG_KEY_ACCESS_TOKEN_TTL => {
+                        if let Some(value) = entry.value.as_i64() {
+                            settings.access_token_ttl_seconds = value;
+                        }
+                    }
+                    platform_oauth::config::CONFIG_KEY_AUTHORIZATION_CODE_TTL => {
+                        if let Some(value) = entry.value.as_i64() {
+                            settings.authorization_code_ttl_seconds = value;
+                        }
+                    }
+                    platform_oauth::config::CONFIG_KEY_DEVICE_CODE_TTL => {
+                        if let Some(value) = entry.value.as_i64() {
+                            settings.device_code_ttl_seconds = value;
+                        }
+                    }
+                    platform_oauth::config::CONFIG_KEY_DEVICE_CODE_POLL_INTERVAL => {
+                        if let Some(value) = entry.value.as_i64() {
+                            settings.device_code_poll_interval_seconds = value;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(settings)
+        })
+    }
 }
 
 /// 构造配置服务（注册表来自 manifest 根目录，数据访问只走 `platform-db`）。

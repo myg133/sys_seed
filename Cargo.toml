@@ -8,6 +8,7 @@ members = [
     "crates/platform-contracts-macros",
     "crates/platform-db",
     "crates/platform-iam",
+    "crates/platform-oauth",
     "crates/platform-org",
     "crates/platform-rbac",
     "crates/platform-schema",
@@ -31,6 +32,7 @@ platform-contracts = { path = "crates/platform-contracts" }
 platform-contracts-macros = { path = "crates/platform-contracts-macros" }
 platform-db = { path = "crates/platform-db" }
 platform-iam = { path = "crates/platform-iam" }
+platform-oauth = { path = "crates/platform-oauth" }
 platform-org = { path = "crates/platform-org" }
 platform-rbac = { path = "crates/platform-rbac" }
 platform-schema = { path = "crates/platform-schema" }

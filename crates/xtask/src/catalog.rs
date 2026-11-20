@@ -68,6 +68,10 @@ pub const ALREADY_PROVIDED: &[ProvidedCapability] = &[
         summary: "Auditable + AuditEventSpec 提供审计事件声明面，平台据此自动埋点，勿自建审计表",
     },
     ProvidedCapability {
+        key: "audit_sink",
+        summary: "platform-audit 提供审计落库与查询（PgAuditSink 写哈希链、GET /api/audit/events 查询、/api/audit/verify 链校验与归档）；模块用 core 的 AuditSink 埋点，勿自建审计表或自写哈希链",
+    },
+    ProvidedCapability {
         key: "notification_sender",
         summary: "NotificationSender + NotificationMessage/DeliveryResult 提供通知投递接缝，勿自建消息中心",
     },
@@ -142,10 +146,6 @@ pub const NOT_YET_PROVIDED: &[ProvidedCapability] = &[
     ProvidedCapability {
         key: "crud_scaffolding",
         summary: "平台没有通用 CRUD/分页脚手架（模块的仓储要自己实现），但数据访问必须走 platform-db 的租户作用域入口",
-    },
-    ProvidedCapability {
-        key: "audit_sink",
-        summary: "审计只到事件声明面，落库与查询待 REQ-014",
     },
     ProvidedCapability {
         key: "notification_dispatch",

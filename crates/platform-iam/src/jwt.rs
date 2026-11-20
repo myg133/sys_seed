@@ -127,7 +127,37 @@ impl JwtKeySet {
     }
 
     /// 签发 access token（**用当前密钥**）。
+    ///
+    /// # 实现说明
+    ///
+    /// 本方法**内部转调** [`Self::sign_claims`] —— 签出来的令牌**逐字节相同**
+    /// （同一个 header、同一个密钥、同一个编码）。
     pub fn sign(&self, claims: &AccessClaims) -> Result<String, IamError> {
+        self.sign_claims(claims)
+    }
+
+    /// 签发**任意**声明的令牌（**用当前密钥**）。
+    ///
+    /// # 为什么需要它（REQ-022 D109 #1）
+    ///
+    /// 登录令牌与 OAuth 令牌**共用同一套 ES256 密钥集**（第三方用平台 JWKS
+    /// 自行验签，D198），但两者的 claim 集合**不同**：
+    ///
+    /// | | 登录令牌 | OAuth 令牌 |
+    /// |---|---|---|
+    /// | `aud` | 平台 audience | **client_id** |
+    /// | `sub` | 必有 | `client_credentials` 时**省略该键** |
+    /// | `sid` | 必有 | 无 |
+    /// | `scope` / `grant_type` / `tid` | 无 | 有 |
+    ///
+    /// `sign` 被**特化**到 `AccessClaims` → OAuth 侧无法复用 →
+    /// 于是这里提供泛型版本。
+    ///
+    /// # ⚠️ 泛型只放宽了「claim 的形状」，**没有**放宽别的
+    ///
+    /// 密钥、算法（恒为 ES256）、`kid` 与错误语义都**不变** ——
+    /// OAuth 令牌因此与登录令牌**同键同算法**，第三方验签路径一致。
+    pub fn sign_claims<T: Serialize>(&self, claims: &T) -> Result<String, IamError> {
         let mut header = Header::new(SIGNING_ALGORITHM);
         header.kid = Some(self.current.kid.clone());
         encode(&header, claims, &self.current.encoding).map_err(|err| IamError::Internal {

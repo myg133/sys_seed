@@ -1,0 +1,49 @@
+[package]
+name = "platform-oauth"
+description = "出站 IdP：OAuth2 授权服务器（授权码 + PKCE / Client Credentials / 设备码）与单点登出（REQ-022）"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# 平台核心：请求上下文 / 统一错误体 / 鉴权入口 / 权限点 trait
+platform-core.workspace = true
+# 数据访问：租户作用域入口（`TenantDb` / `TenantQuery`）—— RLS 兜底
+platform-db.workspace = true
+# 认证：验登录 access token + 复用同一套 ES256 密钥集签发 OAuth 令牌
+platform-iam.workspace = true
+# HTTP 层：路由与中间件
+axum.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+time.workspace = true
+# 高熵值摘要（SHA-256 → base64url 无填充，D228）
+sha2.workspace = true
+base64.workspace = true
+# 随机数：client_secret / 授权码 / 设备码的熵源
+rand.workspace = true
+# JWT：签发与验签（ES256）。与平台登录令牌同一套密钥集。
+jsonwebtoken.workspace = true
+# 出站 HTTP（back-channel logout）：**独立实现**（D220），只换 connector，不引 reqwest。
+hyper.workspace = true
+hyper-util.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+bytes.workspace = true
+hyper-rustls.workspace = true
+rustls.workspace = true
+
+[dev-dependencies]
+# 测试要驱动 axum 路由（`ServiceExt::oneshot`），不连网络。
+tower.workspace = true
+http-body-util.workspace = true
+# 真实库集成测试要直连（管理员连接 + 应用角色连接）。
+sqlx.workspace = true
+# C-5 契约扫描入口（`check_c5_for` / `scan_auth_calls`）—— 真 C-5 命令的依赖。
+platform-contracts.workspace = true

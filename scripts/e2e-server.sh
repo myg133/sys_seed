@@ -67,6 +67,20 @@ if [ -z "${BASE_JWT_PRIVATE_KEY:-}" ]; then
   BASE_JWT_PRIVATE_KEY="$(openssl ecparam -name prime256v1 -genkey -noout 2>/dev/null \
     | openssl pkcs8 -topk8 -nocrypt)"
   export BASE_JWT_PRIVATE_KEY
+
+  # ⚠️ **落盘**（REQ-022 / D238）：E2E 要证明 D204 的「用户所见 = 实际授予」，
+  # 就得**自己签**一个 scope 更大的票据 → 需要**测试侧持有私钥**。
+  # 而 Playwright 是**另一个进程**（`playwright.config.ts` 的 webServer）→
+  # 读不到这里的 `export` → **只 export 不落盘 = 判据恒真**
+  # （只证明「验签在工作」，证明不了「scope 不能被放大」）。
+  #
+  # - 权限 **0600**；- **不入 Git**（`target/` 已被 `.gitignore` 忽略）；
+  # - **每次运行覆盖**。
+  JWT_KEY_FILE="${BASE_JWT_KEY_FILE:-target/e2e-jwt-private.pem}"
+  mkdir -p "$(dirname "$JWT_KEY_FILE")"
+  printf '%s\n' "$BASE_JWT_PRIVATE_KEY" > "$JWT_KEY_FILE"
+  chmod 600 "$JWT_KEY_FILE"
+  echo "  JWT 私钥已落盘：$JWT_KEY_FILE（0600，不入库，每次运行覆盖）"
 fi
 export BASE_JWT_KID="${BASE_JWT_KID:-e2e-kid}"
 export BASE_JWT_ISSUER="${BASE_JWT_ISSUER:-https://e2e.base}"
@@ -81,8 +95,51 @@ fi
 echo "迁移（管理员连接）…"
 DATABASE_URL="$ADMIN_URL" cargo run -q -p platform-server --bin base -- migrate up
 
+# ---------------------------------------------------------------------------
+# back-channel 登出的 **mock 接收端**（REQ-022 / D237）
+# ---------------------------------------------------------------------------
+#
+# ⚠️ **夹具顺序钉死**：**先起 mock → 再播种**（D237 §2）——
+# `platform_oauth_client.backchannel_logout_uri` 里含 `$MOCK_PORT` →
+# 端口必须**先**定下来，播种才知道往哪写。
+#
+# ⚠️ **必须是独立进程**（D237）：出站 HTTP 的**真实性**是 AC-S-149 的全部价值
+# → 在 E2E 进程里 mock HTTP = 把被测逻辑本身 mock 掉（dev-guide §9.13）。
+MOCK_PORT="${MOCK_PORT:-19999}"
+export MOCK_PORT
+export MOCK_LOG_FILE="${MOCK_LOG_FILE:-target/mock-logout-received.jsonl}"
+
+echo "启动 back-channel 登出 mock（127.0.0.1:${MOCK_PORT}）…"
+./scripts/mock-logout-receiver.sh &
+MOCK_PID=$!
+
+# 等它**真的在监听**（否则第一次登出打到一个还没起来的端口 → 误判成「没投递」）。
+mock_ready=0
+for _ in $(seq 1 50); do
+  if curl -sf -o /dev/null --max-time 1 "http://127.0.0.1:${MOCK_PORT}/"; then
+    mock_ready=1
+    break
+  fi
+  sleep 0.1
+done
+if [ "$mock_ready" -ne 1 ]; then
+  echo "✗ back-channel 登出 mock 没能在 127.0.0.1:${MOCK_PORT} 上监听。" >&2
+  kill "$MOCK_PID" 2>/dev/null || true
+  exit 1
+fi
+
 echo "播种 E2E 夹具（显式、幂等；D101）…"
 DATABASE_URL_TEST="$ADMIN_URL" ./scripts/seed-e2e.sh
 
 echo "启动 base serve（同源，静态目录 ${BASE_STATIC_DIR}）…"
-DATABASE_URL="$APP_URL" exec cargo run -q -p platform-server --bin base -- serve
+DATABASE_URL="$APP_URL" cargo run -q -p platform-server --bin base -- serve &
+SERVER_PID=$!
+
+# 退出时把 mock 一起收掉（否则端口一直被占着，下一轮起不来）。
+cleanup() {
+  kill "$MOCK_PID" 2>/dev/null || true
+  kill "$SERVER_PID" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+wait "$SERVER_PID"

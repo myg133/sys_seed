@@ -36,7 +36,7 @@
 -->
 <script lang="ts">
   import { ApiError, type ApiClient } from '@base/sdk';
-  import { onDestroy } from 'svelte';
+  import { onDestroy, untrack } from 'svelte';
 
   import Button from '../components/Button.svelte';
   import Input from '../components/Input.svelte';
@@ -45,6 +45,7 @@
   import { TENANT_REQUIRED, type AppAuth } from '../lib/api';
   import { createValueSetter } from '../lib/handlers';
   import { errorMessageKey, i18nRuntime, toMessageParams } from '../lib/i18n';
+  import { browserEnv, readReturnTo } from '../lib/oauth-api';
   import {
     PROVIDER_FETCH_DEBOUNCE_MS,
     listProviders,
@@ -61,10 +62,31 @@
     readonly client: ApiClient;
     /** 登录成功后的回调（外壳据此跳转）。 */
     readonly onLoggedIn: () => void;
+    /**
+     * 当前地址的查询串（**单测可注入**；缺省 = 读浏览器地址栏）。
+     *
+     * 存在是为了让「有 `return_to` 时渲染提示」这条**可断言**。
+     */
+    readonly search?: string;
   }
 
   const props: LoginProps = $props();
   const i18n = i18nRuntime();
+
+  /**
+   * 登录后的回跳目标（REQ-022 / D221）。
+   *
+   * 授权页 / 设备码页是**公开路由** → 未登录时由**页面自己**把**完整 URL**
+   * （`pathname + search`）编码进 `?return_to=` 交给本页。
+   *
+   * ⚠️ `readReturnTo` 会**校验**它（必须是以单个 `/` 开头的站内相对路径；
+   * `//evil.com` / `https://evil.com` 一律拒绝）—— 这是**开放重定向**的防线。
+   * 不合格 → `undefined` → 登录后**保持现行为**（跳首页 / `intendedPath`）。
+   *
+   * 本页**不**改登录流程本身（租户 / 账号 / 密码 / SSO 入口都照旧）；
+   * 登录成功后仍调 `props.onLoggedIn()`，由 `App.svelte` 决定跳哪儿。
+   */
+  const returnTo = untrack(() => readReturnTo(props.search ?? browserEnv().search));
 
   let tenantId = $state('');
   let username = $state('');
@@ -261,6 +283,12 @@
   }}
 >
   <h2>{$i18n.t('common.login')}</h2>
+  {#if returnTo !== undefined}
+    <!-- 有 `?return_to=` → 告诉用户登录后会回到原页面（授权页 / 设备码页）。 -->
+    <p class="base-login-hint" data-testid="login-return-hint">
+      {$i18n.t('oauth.loginReturnHint')}
+    </p>
+  {/if}
   <Input
     label={$i18n.t('common.tenant')}
     name="tenant"

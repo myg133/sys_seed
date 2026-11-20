@@ -545,6 +545,20 @@ impl IamService {
         self.keys.jwks()
     }
 
+    /// 密钥集（**只读**）。
+    ///
+    /// # 为什么需要它（REQ-022 D109 #1）
+    ///
+    /// `keys` 字段是**私有**的 → 外部 crate 拿不到它 →
+    /// OAuth 授权服务器（`platform-oauth`）就**无法**用同一套 ES256 密钥签发
+    /// OAuth 令牌（第三方要用平台 JWKS 自行验签，D198 / AC-S-145）。
+    ///
+    /// 只给**只读**引用：调用方拿不到私钥材料之外的东西，
+    /// 也**不能**替换密钥集（那会让「登录令牌与 OAuth 令牌同键」这条不变量失效）。
+    pub fn keys(&self) -> &JwtKeySet {
+        &self.keys
+    }
+
     /// 数据访问（供 HTTP 层做幂等键等编排）。
     pub fn store(&self) -> &IamStore {
         &self.store

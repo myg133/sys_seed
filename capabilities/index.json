@@ -1,6 +1,7 @@
 {
   "already_provided": {
     "audit_declaration": "Auditable + AuditEventSpec 提供审计事件声明面，平台据此自动埋点，勿自建审计表",
+    "audit_sink": "platform-audit 提供审计落库与查询（PgAuditSink 写哈希链、GET /api/audit/events 查询、/api/audit/verify 链校验与归档）；模块用 core 的 AuditSink 埋点，勿自建审计表或自写哈希链",
     "auth_state": "@base/auth 的 isAuthenticated()/tenantId() 提供登录态形状，勿另造登录态模型",
     "config": "ConfigScope/ConfigResolver（platform-capability，不是扩展点）/AppConfig + manifest 的 config 段提供三层配置与 Feature Flag（4 个权限点 config:entry:write / config:flag:write / config:platform:write / config:platform:read），勿自建配置读取",
     "contract_suite": "#[platform_module_contract] 自动生成 C-1~C-6 六项契约测试（C-5：已登记权限点必须有鉴权调用点；C-6：声明了字段级权限的模块必须有 SchemaProjector::project 调用点），勿自写重复的契约检查",
@@ -35,7 +36,7 @@
       "traits": 5
     },
     "permissions.json": {
-      "total": 26
+      "total": 32
     },
     "schema/entity.schema.json": {},
     "schema/manifest.schema.json": {},
@@ -72,7 +73,6 @@
   },
   "generated_by": "cargo xtask capabilities",
   "not_yet_provided": {
-    "audit_sink": "审计只到事件声明面，落库与查询待 REQ-014",
     "crud_scaffolding": "平台没有通用 CRUD/分页脚手架（模块的仓储要自己实现），但数据访问必须走 platform-db 的租户作用域入口",
     "http_api_layer": "HTTP 接口层尚未就绪（REQ-011/012 补），capabilities/api.json 目前为空",
     "notification_dispatch": "通知只到 trait，通道投递与模板待 REQ-015",
@@ -84,5 +84,5 @@
     ],
     "version": "0.1.0"
   },
-  "source_fingerprint": "fnv1a64:151a608feeb65855"
+  "source_fingerprint": "fnv1a64:30e66d3080bac504"
 }

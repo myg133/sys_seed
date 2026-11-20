@@ -1682,6 +1682,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "platform-oauth"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "base64",
+ "bytes",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-rustls",
+ "hyper-util",
+ "jsonwebtoken",
+ "platform-contracts",
+ "platform-core",
+ "platform-db",
+ "platform-iam",
+ "rand",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sqlx",
+ "thiserror 2.0.21",
+ "time",
+ "tokio",
+ "tower",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "platform-org"
 version = "0.1.0"
 dependencies = [
@@ -1757,6 +1788,7 @@ dependencies = [
  "platform-core",
  "platform-db",
  "platform-iam",
+ "platform-oauth",
  "platform-org",
  "platform-rbac",
  "platform-schema",
