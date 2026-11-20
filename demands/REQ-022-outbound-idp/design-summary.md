@@ -1,7 +1,9 @@
 # 设计摘要：出站 IdP 与单点登出（REQ-022）
 
 - **需求编号**: REQ-022
-- **状态**: rev 3（2026-11-21 —— rev 3 = 写 Dev 任务卡时发现的**两个并行耦合缺口**补记：
+- **状态**: rev 4（2026-11-21 —— rev 4 = **实现复核**发现的权限口径冲突：
+  D259 `route_layer` 不能叠加 + 「我的授权」端点的权限点与数据范围；
+  rev 3 = 写 Dev 任务卡时发现的两个并行耦合缺口补记：
   D257 设备码「用户批准」端点补缺 + D258 跨栈 JSON 字段名钉死；
   rev 2 同步 QA 挑刺 39 条的裁决 D221~D256）
 - **配套**: [demand.md](demand.md) / [acceptance.md](acceptance.md) / [decisions.md](decisions.md)
@@ -173,6 +175,16 @@
 > → **`TITLES` 行数仍是 93**（D223 / AC-S-152 不动）。
 > 字段名逐字见 [decisions.md](decisions.md) **D258**（平台端点 camelCase /
 > 协议端点用 RFC 的 snake_case，**两套不混**）。
+>
+> ⚠️ **rev 4（D259）—— 本表是权限点的**唯一权威**：
+> **每个端点只挂它自己那一个权限点**。
+> ⚠️ axum 的 `Router::route_layer` **多次调用是叠加的**（不是后者覆盖前者）
+> → 把多个 `route_layer` 叠在同一个 router 上会让权限要求变成 **AND**
+> （`GET /api/oauth/clients` 会要求 read + write + delete 全有）→ **必须**用
+> `MethodRouter::route_layer` 按 method 分别挂。
+> ⚠️ **数据范围永远限定在当前用户**：
+> `GET /api/oauth/grants` 只返回自己的；`POST /api/oauth/grants/revoke` 只能撤自己的
+> —— **即使调用者持有 `oauth:grant:revoke` 也不行**（D259 / TD-045）。
 
 > ⚠️ 契约 C2「业务 API 路径形式」针对**业务模块**；平台自身端点沿用既有的
 > `/api/<module>/<resource>` 形态（对照 `/api/audit/events`）。

@@ -752,3 +752,31 @@ Sprint 3 复盘的第 2 条教训：**修漏洞会制造新漏洞** —— 但�
   - 1b = **真 C-5 命令** `cargo test -p platform-oauth --test contract_c5`。
 - **建议修法**: 本轮还完后，把「`capabilities/` 与源码一致」纳入**每次改 manifest 后的必跑项**；
   长期可考虑让 `xtask capabilities --check` 在 CI 里作为**硬闸门**。
+
+---
+
+## TD-045: 「我的授权」两个端点**要权限点**，普通用户也得被发这两个权限点
+
+- **发现于**: REQ-022 实现复核（BA 在棒 1 的 `http.rs` 上做跨栈对账时，D259）
+- **证据**:
+  - `BA/demands/REQ-022-outbound-idp/design-summary.md` §3.2：
+    `GET /api/oauth/grants` 要 `oauth:grant:read`、
+    `POST /api/oauth/grants/revoke` 要 `oauth:grant:revoke`；
+  - 用例 TC-022-084 ~ TC-022-088 用的却是**只持 `rbac:role:read`** 的
+    `u-perm-read@example.com` 与 `u-perm-other@example.com`
+    （`BA/demands/REQ-022-outbound-idp/test-cases/consent-grant.md:171-233`）。
+- **影响面**: 要么这两个端点对普通用户**全关**（「我的授权」页没法用），
+  要么**给所有用户都发** `oauth:grant:read` + `oauth:grant:revoke`
+  → 权限点从「能力门禁」退化成「人人都有」，
+  **真正起作用的其实是数据范围**（只限当前用户）。
+- **本轮的决定**（D259）: 走后者 —— 夹具给普通用户也发这两个权限点，
+  并**硬性要求数据范围永远限定在当前用户**
+  （即使持有 `oauth:grant:revoke` 也不能撤别人的）。
+- **为什么现在不改成「自助端点不要权限点」**:
+  那样 `oauth:grant:read` / `oauth:grant:revoke` 就**没有字面量调用点**
+  → **C-5 报「已登记但无鉴权调用点」→ AC-S-153 红**；
+  要走这条路必须新增「管理他人授权」的端点 → **扩大本需求范围**。
+- **建议修法**（后续 REQ）: 引入**管理视角**的授权端点
+  （如 `GET /api/oauth/clients/{client_id}/grants`，要 `oauth:grant:read`），
+  把 `oauth:grant:read` / `oauth:grant:revoke` 挂到那里；
+  「我的授权」两个端点则去掉权限点、只靠数据范围（当前用户）自证。

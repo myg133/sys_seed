@@ -1235,3 +1235,70 @@
   - ⚠️ 前端把 `login_required` / `consent_required` 透出到**授权页的 URL query**
     （D233）→ 棒 2 用 `history.replaceState`，**不重新导航**。
 
+---
+
+## rev 4（2026-11-21）：**实现复核**发现的一处权限口径冲突（1 条）
+
+> **背景**：棒 2（前端）交付后，BA 在棒 1 的 `http.rs` 上做跨栈线协议对账时发现。
+> 这**不是** QA 挑刺能挑出来的问题 —— 它只在「把两侧实现放在一起看」时才显形。
+
+## D259: `route_layer` **不能叠加**；「我的授权」的两个端点**保留权限点**，但夹具要给普通用户发
+
+### 问题 1：axum 的 `Router::route_layer` 是**叠加**语义
+
+棒 1 的初版把三个权限点叠在同一个 router 上：
+
+```rust
+.route_layer(authz::require_client_read())
+.route_layer(authz::require_client_write())
+.route_layer(authz::require_client_delete());
+```
+
+axum 的 `Router::route_layer` **多次调用会叠加**（不是「后者覆盖前者」），
+而 `PermissionLayer` 缺权限点即 **403 `INSUFFICIENT_PERMISSION`**
+（`crates/platform-core/src/extension/permission.rs`）
+→ `GET /api/oauth/clients` 实际要求**同时**持 read + write + delete 三个权限点。
+
+### 问题 2：用例 TC-022-084~088 用的是**只持 `rbac:role:read`** 的普通账号
+
+`u-perm-read@example.com`（tenant-a）与 `u-perm-other@example.com`（tenant-b）
+调 `GET /api/oauth/grants` / `POST /api/oauth/grants/revoke`
+→ 而 design §3.2 要求 `oauth:grant:read` / `oauth:grant:revoke`
+→ **403**。⚠️ TC-022-088 尤其失真：期望「**空数组**」，403 会让判据变成「没权限」而不是「不泄露」。
+
+### 决定
+
+1. **权限点按端点逐个挂，不叠加** —— **design §3.2 的逐端点表是唯一权威**：
+   | 端点 | 权限点（只这一个） |
+   |---|---|
+   | `GET /api/oauth/clients` | `oauth:client:read` |
+   | `POST /api/oauth/clients` | `oauth:client:write` |
+   | `GET /api/oauth/clients/{client_id}` | `oauth:client:read` |
+   | `PATCH /api/oauth/clients/{client_id}` | `oauth:client:write` |
+   | `DELETE /api/oauth/clients/{client_id}` | `oauth:client:delete` |
+   | `GET /api/oauth/grants` | `oauth:grant:read` |
+   | `POST /api/oauth/grants/revoke` | `oauth:grant:revoke` |
+
+   修法用 axum 0.8.9 的 **`MethodRouter::route_layer`**（加在单个 method 上），
+   或拆成多个 router 再 `merge`（同 path 不同 method 可合并）。
+   ⚠️ **`authenticate`（`Router::layer`，外层）与权限层（`route_layer`，内层）的顺序不变** ——
+   先验会话注入上下文、再判权限。
+2. **design §3.2 的权限点表不变**（`oauth:grant:read` / `oauth:grant:revoke` 保留）
+   → C-5 的 6 个权限点仍有字面量调用点（AC-S-153 不受影响）。
+3. **夹具补权限点**：`scripts/seed-e2e.sh` 要给
+   `u-perm-read@example.com`（既有夹具，**在既有绑定上加**）与
+   `u-perm-other@example.com`（tenant-b，**新建**）各加
+   `oauth:grant:read` + `oauth:grant:revoke`。
+4. ⚠️ **数据范围永远限定在当前用户**（**安全硬要求**）：
+   - `GET /api/oauth/grants` → **只返回当前用户自己的**；
+   - `POST /api/oauth/grants/revoke` → **只能撤当前用户自己的**，
+     **即使调用者持有 `oauth:grant:revoke` 也不行** ——
+     因为第 3 条让普通用户也持这个权限点，不限定范围就是**越权**。
+   依据：AC-S-147 步骤 5「返回空数组（不泄露其它租户的授权存在性）」。
+
+> **为什么不给「我的授权」端点去掉权限点**（路 A）：
+> 语义上更干净（自助服务），但 `oauth:grant:read` / `oauth:grant:revoke`
+> 就没有了字面量调用点 → **C-5 报「已登记但无鉴权调用点」→ AC-S-153 红**。
+> 要走这条路必须新增「管理他人授权」的端点（扩大本需求范围）→ **本轮不做**。
+> → 记为技术债 **TD-045**（见下）。
+
