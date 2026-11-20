@@ -86,7 +86,10 @@
   2. 在 `t-other` 写入 1 条；
   3. 按租户分别取出记录，按 `created_at` 升序；
   4. **独立**用 `sha256` 复算每条的 `hash`（复算方式见
-     [design-summary.md](design-summary.md) §4 规范化定义）。
+     [design-summary.md](design-summary.md) §4）——
+     复算时**直接使用列里存的那段 `before`/`after` 文本**，
+     **不得**把 JSON 解析回去再重新序列化（那是「验证生产代码的拷贝」，
+     且会因序列化实现差异假红）。
 - **预期结果**:
   - `t-audit` 第 1 条的 `prev_hash` == **genesis**（64 个字符 `0`）；
   - `t-audit` 第 2 条的 `prev_hash` == 第 1 条的 `hash`；

@@ -3,7 +3,7 @@
 - **需求编号**: REQ-014
 - **状态**: rev 1（2026-11-20）
 - **对应验收标准**: [acceptance.md](acceptance.md)（13 条）
-- **决策依据**: [decisions.md](decisions.md)（D130~D140）
+- **决策依据**: [decisions.md](decisions.md)（D130~D143）
 - **更新时间**: 2026-11-20 09:25
 
 > 本文只写**实现依据**：现状盘点、数据模型、端点、规范化、代码落点。
@@ -152,13 +152,20 @@ pub trait AuditSink: Send + Sync {
 | `action` | `TEXT NOT NULL` | 动作名 |
 | `object_type` | `TEXT NOT NULL` | 对象类型 |
 | `object_id` | `TEXT` | 对象 ID |
-| `before` | `JSONB` | 变更前；无则 `NULL` |
-| `after` | `JSONB` | 变更后；无则 `NULL` |
+| `before` | `TEXT` | 变更前；**规范化 JSON 文本**；无则 `NULL`（D141） |
+| `after` | `TEXT` | 变更后；**规范化 JSON 文本**；无则 `NULL`（D141） |
 | `ip` | `TEXT NOT NULL DEFAULT ''` | 来源 IP；取不到落**空串**（AC-S-122 要求不得缺列） |
 | `user_agent` | `TEXT NOT NULL DEFAULT ''` | 设备 |
-| `created_at` | `TIMESTAMPTZ NOT NULL DEFAULT now()` | UTC |
+| `created_at` | `TIMESTAMPTZ NOT NULL` | UTC；由 DB 的 `clock_timestamp()` 生成，同租户严格递增（D143） |
 | `prev_hash` | `TEXT NOT NULL` | 上一条的 `hash`；本租户首条为 genesis |
 | `hash` | `TEXT NOT NULL` | 本条哈希 |
+
+> 🔑 **为什么 `before`/`after` 是 `TEXT` 而不是 `JSONB`**（D141）：
+> 哈希覆盖的是**存进列里的那段文本**。校验方读回该文本直接参与哈希 →
+> **不需要重新实现 JSON 序列化规则** → 测试与生产在「哈希公式 + 链连接」上真独立。
+> 若用 `JSONB`，校验方必须重新序列化一次，而「键序 / 数字表示 / Unicode 转义」
+> 差一个字节就会让**「链校验失败」与「实现有 bug」无法区分** → 假绿。
+> 代价：按内容检索要写 `before::jsonb`（记入 tech-debt）。
 
 - **索引**：`(tenant_id, created_at DESC)`、`(tenant_id, actor_id, created_at DESC)`、
   `(tenant_id, action, created_at DESC)`、`(tenant_id, object_type, object_id, created_at DESC)`
@@ -209,23 +216,31 @@ REVOKE UPDATE, DELETE ON platform_audit_archive FROM base_platform_app;
 CREATE OR REPLACE FUNCTION platform_audit_append(
     p_tenant_id TEXT, p_actor_id TEXT, p_action TEXT,
     p_object_type TEXT, p_object_id TEXT,
-    p_before JSONB, p_after JSONB,
+    p_before TEXT, p_after TEXT,
     p_ip TEXT, p_user_agent TEXT
 ) RETURNS TEXT
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$ ... $$;
 ```
 
 - `SET search_path = public` 是 **SECURITY DEFINER 的必需防护**（同文件 `:118` 的注释）。
-- 函数内部**自己**算 `prev_hash`（读本租户最后一条）与 `hash` —— 
+- `p_before` / `p_after` 入参是 **TEXT**（已规范化的 JSON 文本或 `NULL`），
+  **函数内部不做 JSON 处理** → 哈希覆盖的就是**存进列里的那段文本**（D141）。
+- 函数内部**自己**算 `prev_hash`（读本租户最后一条）与 `hash` ——
   **哈希计算必须在数据库内完成**，否则并发写入会算出同一个 `prev_hash` → 链分叉。
 - 函数内部做**敏感键拒绝**（D134）→ 拒绝时 `RAISE EXCEPTION`，应用层映射成错误码。
+  🔑 敏感键检查作用在**入参文本**上：需要能识别 JSON 文本里的敏感键
+  （可用 Postgres 的 `jsonb_path_exists` 或 `jsonb_each_text`；**不得**把值原样回显到错误信息里）。
+- 函数内部做 **JSON 规范化**（D142 的 §4.2.2 规则）—— 规范化在**写入侧**发生，
+  保证存进去的文本形态稳定。
+- 函数内部取 `created_at`：**先锁同租户最后一条，再取 `clock_timestamp()`**（D143）。
 - 返回新记录的 `id`。
 
 > 🔑 **为什么 `prev_hash` 必须由数据库算**：
 > 应用层「先查最后一条 → 再插入」在并发下有两个请求读到**同一条**最后一条，
 > 两条新记录会拿到**相同**的 `prev_hash` → 链分叉 → 校验必然失败。
-> 用 `SELECT ... ORDER BY created_at DESC, id DESC LIMIT 1` 在**同一事务内**
-> 加 `FOR UPDATE` 锁，或用表锁。
+> 函数内用 `SELECT ... ORDER BY created_at DESC, id DESC LIMIT 1 FOR UPDATE`
+> 锁住上一条，或用表级 `LOCK`。**具体手法 Dev 定，但必须能解释并发下的正确性**
+> （见 design-summary §12 开工前必答项 1）。
 
 ### 3.6 归档通道：`SECURITY DEFINER` 函数
 
@@ -265,32 +280,74 @@ hash      = hex(sha256(canonical))
 ```
 
 - `len(f)` 是**字节长度**（`str::len()`），不是字符数；
-- `prev_hash` 按**文本**（hex 字符串）的前 **64 个字节**参与拼接；
+- `prev_hash` 按**文本**（hex 字符串）的 **64 个字节**参与拼接；
 - 各字段的取值：
   | 字段 | 取值 |
   |---|---|
   | `tenant_id` | 原文本 |
-  | `actor_id` | 无则**空字符串** |
+  | `actor_id` | 无则**空字符串**（零字节） |
   | `action` / `object_type` | 原文本 |
-  | `object_id` | 无则**空字符串** |
-  | `before` / `after` | **已规范化的 JSON 文本**；无则**空字符串**（不是 `"null"`、不是 `"{}"`） |
+  | `object_id` | 无则**空字符串**（零字节） |
+  | `before` / `after` | **存进列里的那段规范化 JSON 文本**；`NULL` 时用**空字符串**（零字节，不是 `"null"`、不是 `"{}"`） |
   | `ip` / `user_agent` | 原文本（无则空串） |
-  | `created_at` | **UTC、RFC3339、微秒精度**，如 `2026-11-20T01:02:03.456789Z` |
+  | `created_at` | **UTC、RFC3339、微秒精度**，精确格式见 §4.2.1 |
 
-### 4.3 JSON 规范化
+### 4.2.1 时间戳文本的**精确格式**（D142 —— 逐字节钉死）
 
-`before` / `after` 在落库前统一成**键排序 + 紧凑输出**的 JSON 文本。
+```
+YYYY-MM-DDTHH:MM:SS.ffffffZ
+```
+
+- 年 **4 位**；月 / 日 / 时 / 分 / 秒**各 2 位、零填充**（`03` 而非 `3`）；
+- 小数部分**恰好 6 位**（微秒），不足**补 0**（`.100000` 而不是 `.1`）；
+- 结尾是**字面量大写 `Z`** —— 不是 `+00:00`、不是 `+0000`、不是 `z`。
+
+**DB 侧**用 `to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`。
+**Rust 侧**用 `time` crate 的 format description 产生**同一串**。
+
+> ⚠️ 两边不一致 → 链校验永远失败 → **「实现有 bug」与「规范不一致」无法区分** → 假绿。
+> 测试会**独立实现**这个格式（用 `time` crate，不调用生产代码）→ 不一致时测试**红**，
+> 这是**正确的**（真阳性）。
+
+### 4.2.2 JSON 规范文本的**精确格式**（D142 —— 逐字节钉死）
+
+写入时把 `before` / `after` 的 JSON 规范化成：
+
+- 对象的键按 **UTF-8 字节序升序**排序，**递归**到每一层；
+- **无任何多余空白**（紧凑）；
+- 非 ASCII 字符**不转义**（按 UTF-8 原样输出）——
+  🔑 **禁止** `\uXXXX` 转义非 ASCII；
+- 控制字符用 JSON 标准短转义（`\n` `\t` `\r` `\b` `\f`），其余控制字符用 `\u00XX`；
+- 字符串里的 `"` 与 `\` 必须转义。
+
+> 🔑 **校验方不需要重新实现这套规则**（D141）：它读回**列里存的那段文本**直接参与哈希。
+> 这套规则只影响**写入侧**产出的文本形态 —— 它**必须稳定**（否则同一条记录的
+> `hash` 与它的内容对不上），但**校验方不依赖它**。
+>
+> ⚠️ 因此：**测试不要**「把 `before` 解析回 JSON 再重新序列化再哈希」——
+> 那是**测试验证生产代码的拷贝**（流程强制项 7），且会因序列化实现差异假红。
+> 正确做法：**读回列里的 TEXT，直接哈希**。
+
+### 4.3 JSON 规范化（写入侧）
 
 - 🔑 **不得依赖 `serde_json` 的 `Map` 迭代序**：
   `serde_json` 默认 `Map` 是 `BTreeMap`（键有序 ✅），
   但若任一 crate 打开了 `preserve_order` feature，就变成 `IndexMap`（插入序 ❌）→
-  **哈希不可复现**。
-- → 必须**自己实现**规范化（递归按键排序后紧凑序列化），并**写测试锁住**：
+  **同一份 JSON 两次规范化产出不同文本** → 哈希不可复现。
+- → 必须**自己实现**规范化（递归按键排序后紧凑输出），并**写测试锁住**：
   `{"b":1,"a":2}` 与 `{"a":2,"b":1}` 必须产出**同一段文本**。
 
 ### 4.4 genesis
 
 本租户**第一条**记录的 `prev_hash` = **64 个字符 `0`**（不是空串，不是 `NULL`）。
+
+### 4.5 `created_at` 的单调性（D143）
+
+- 写入函数内**先取同租户最后一条并加锁**，**再取 `clock_timestamp()`**
+  → 同租户 `created_at` **严格递增** → 校验方按 `created_at ASC` 排序即等于插入顺序。
+- 🔑 **不用 `now()`** —— `now()` 是**事务开始**时间，同一事务里的多条审计会拿到
+  **同一时刻**，链的时间序就废了（批量导入场景真实存在）。
+- 校验方排序用 `ORDER BY created_at ASC, id ASC`（`id` 作 tiebreaker 兜底）。
 
 ---
 
