@@ -638,7 +638,104 @@ apps/shell/src/lib/i18n.ts（或对应文案表）（+ 审计页文案）
 
 ---
 
-## 14. 低配机注意事项（8 线程 / 7.7G）
+## 14. 与既有机制的接缝（**Dev 必读 —— 漏一处就起不来**）
+
+> 本节全部是**实测**的既有约束，不是我「记得」的。dev-guide §9.11。
+
+### 15.1 权限点**三处必须齐**（D27：不齐 → 进程起不来）
+
+新增的 3 个权限点必须同时出现在：
+
+| # | 位置 | 要求 | 实测依据 |
+|---|---|---|---|
+| 1 | `crates/platform-audit/manifest.json` 的 `permissions[]` | 字段是 `code` / `name` / **`type`**（⚠️ **不是 `kind`**） | `crates/platform-org/manifest.json` 的实际字段 |
+| 2 | 权限点种子迁移的 **3 条 INSERT** | `source` 列**必须**是 `'crates/platform-audit/manifest.json'` | `crates/platform-rbac/src/registry.rs:140` 用 `format!("{dir_name}/{name}/manifest.json")` 拼出来 → `crates/platform-audit/manifest.json` |
+| 3 | 代码里的 `require_permission("…")` **字面量**调用点 | 参数**必须是字符串字面量** | `crates/platform-contracts/src/authz_scan.rs`：调用点参数不是字面量 → **fail closed** |
+
+- 漏 1 → 库里有权限点、manifest 里没有 → **启动对账失败**；
+- 漏 2 → manifest 里有、库里没有 → **启动对账失败**；
+- 漏 3 → 「登记了却不执行 = 假权限」→ **C-5 契约测试失败**。
+
+### 15.2 路由鉴权的既有写法
+
+照 `crates/platform-rbac/src/http.rs:451`：
+
+```rust
+.route_layer(require_permission("audit:events:read"));   // ← 必须是字面量
+```
+
+- 权限点 `audit:events:read` 被两个路由用（`/events` 与 `/events/{id}`）→
+  可以用**一个** `route_layer` 覆盖一组路由（既有 `rbac:role:read` 就是这么用的）。
+- 🔑 **鉴权入口必须唯一**：`crates/platform-core/src/extension/permission.rs`。
+  **自己写一个 `check_permission()` 会被 C-5 扫描判失败**（`authz_scan.rs` 的
+  `AUTH_ENTRY_ALIASES`）。
+
+### 15.3 manifest 的字段集
+
+`crates/platform-audit/manifest.json` 会被 `Manifest::parse_checked` 校验
+（`crates/xtask/src/capabilities.rs:241`、`crates/platform-rbac/src/registry.rs:130`）。
+照 `crates/platform-org/manifest.json` 的字段集写：
+
+```json
+{
+  "id": "audit",
+  "name": "审计日志",
+  "version": "0.1.0",
+  "enabled": true,
+  "permissions": [
+    { "code": "audit:events:read",  "name": "查看审计日志", "type": "menu" },
+    { "code": "audit:verify:run",   "name": "校验审计链",   "type": "button" },
+    { "code": "audit:archive:run",  "name": "触发审计归档", "type": "button" }
+  ],
+  "menus": [
+    { "label": "审计日志", "icon": "file-search", "route": "/admin/audit", "perm": "audit:events:read" }
+  ],
+  "dependencies": [],
+  "tenantScoped": { "tables": [], "column": "tenant_id" },
+  "config": {}
+}
+```
+
+- `menus` 段是**前端审计页的入口声明**（前端按 manifest 渲染菜单）。
+- ⚠️ `tenantScoped.tables` **留空**（见 15.5）。
+
+### 15.4 `capabilities/permissions.json` 是**生成物**
+
+- `cargo xtask capabilities` 会重扫 `modules/` + `crates/` 的 manifest
+  （`crates/xtask/src/capabilities.rs:230`）→ 新 crate 的 3 个权限点**会自动进去**。
+- 🔑 **新增 manifest 后必须重跑 `cargo xtask capabilities`**，
+  否则 `cargo xtask capabilities --check` **会红**（生成物与源码不一致）。
+- 文件**数量仍是 14**（文件名没变），变的是 `permissions.json` 的**内容**。
+
+### 15.5 RLS policy 的两条路（Dev 必须选一条并说明）
+
+| 路线 | 做法 | 取舍 |
+|---|---|---|
+| **A. 声明式** | 把审计表写进 `crates/platform-audit/manifest.json` 的 `tenantScoped.tables`，让 `cargo xtask tenant-policies` 生成 policy（`crates/platform-db/src/rls.rs:143`） | 与既有机制一致、**不手写 policy**；但要确认生成器产出的 policy 形态与 D132 要求一致 |
+| **B. 手写** | 在迁移里手写 `CREATE POLICY`（照 `migrations/20261118000200_tenant_isolation.up.sql:32`） | 形态完全可控；但**绕过了** manifest 声明，与既有机制不一致 |
+
+- ⚠️ **两条路不能都做** → 会重复建 policy。
+- 本文件的 §3.3 给的是路线 B 的写法；**Dev 若选路线 A，必须确认**
+  `tenantScoped` 生成的 policy 与 §3.3 逐字等价（`USING` + `WITH CHECK` + `current_setting('app.tenant_id', true)`）。
+- ⚠️ 注意 `platform-org` 的 `tenantScoped.tables` 里写的是**逻辑表名**（`org_node`），
+  不是物理表名（`platform_org_node`）—— Dev 必须确认生成器认哪种。
+
+---
+
+## 15. 本轮已替 Dev 实测掉的事实（不必重跑）
+
+| 事实 | 结论 | 怎么验的 |
+|---|---|---|
+| 应用连接角色 `base_app` 是 `base_platform_app` 的**组成员** | `REVOKE UPDATE, DELETE ... FROM base_platform_app` **对 `base_app` 生效** → AC-S-123 **可达** | `pg_auth_members` 查询 + `has_table_privilege('base_app', ...)` = t/t/t |
+| `base_app` 不是表 owner（owner 是 `base`），且 `rolbypassrls = false` | REVOKE 有效；**RLS 对它生效** → AC-S-126 **可达** | `pg_class.relowner` + `pg_roles.rolbypassrls` |
+| `base` 是超管 + `BYPASSRLS` | 应用连接**必须**用 `base_app`（超管 `base` 会被 `require_isolation` 拒绝，且绕过 RLS） | `pg_roles` 查询 |
+| Postgres `to_char(…, 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')` | 微秒 456789 → `…03.456789Z`；微秒 0 → `…03.000000Z`（**恒 6 位**） | Postgres 17.12 实测 |
+| `time` crate 只开了 `formatting` | `format_description!` 宏与 `format_description::parse()` **都不可用** → 必须手工拼装（D144） | 根 `Cargo.toml:49` |
+| `sha2 = "0.10"` 已在树里（`platform-config` / `platform-iam` / `platform-server` 在用） | 本轮**零新增第三方依赖** ✓ | 根 `Cargo.toml:80` |
+
+---
+
+## 16. 低配机注意事项（8 线程 / 7.7G）
 
 - `.cargo/config.toml` 已固定 `jobs = 3` —— **不要**覆盖。
 - 新增 crate 会增加一次编译。`platform-audit` 只依赖 core/db，**编译成本低**。
