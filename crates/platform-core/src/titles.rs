@@ -164,6 +164,21 @@ pub const TITLES: &[(&str, &str)] = &[
     // -- platform-core::money（REQ-021）-------------------------------------
     ("MONEY_OVERFLOW", "Money Overflow"),
     ("FX_RATE_NOT_FOUND", "FX Rate Not Found"),
+    // -- platform-oauth（REQ-022，9 个）-------------------------------------
+    // ⚠️ **只有** 9 个：8 个 `oauth.*` 审计**事件码不进本表**（D223）——
+    //    事件码不进响应体 → 没有「面向用户的标题」这回事。
+    ("OAUTH_CLIENT_NOT_FOUND", "OAuth Client Not Found"),
+    ("OAUTH_CLIENT_DISABLED", "OAuth Client Disabled"),
+    ("OAUTH_CLIENT_EXPIRED", "OAuth Client Expired"),
+    ("OAUTH_INVALID_REQUEST", "Invalid OAuth Request"),
+    ("OAUTH_INVALID_REDIRECT_URI", "Invalid Redirect URI"),
+    ("OAUTH_INVALID_SCOPE", "Invalid OAuth Scope"),
+    (
+        "OAUTH_UNSUPPORTED_CODE_CHALLENGE_METHOD",
+        "Unsupported Code Challenge Method",
+    ),
+    ("OAUTH_TICKET_INVALID", "OAuth Consent Ticket Invalid"),
+    ("OAUTH_GRANT_NOT_FOUND", "OAuth Grant Not Found"),
     // -- platform-org 的通知标题（事件码，不是 HTTP 错误码）------------------
     ("org.member-added", "Organization Membership Added"),
     ("org.member-removed", "Organization Membership Removed"),

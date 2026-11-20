@@ -50,9 +50,10 @@ describe('语言包与键体系（AC-S-091）', () => {
     expect(isRegisteredLocale('ja-JP')).toBe(false);
   });
 
-  it('键格式 <domain>.<KEY>，domain 是四值枚举，错误键是大写 + 下划线', () => {
+  it('键格式 <domain>.<KEY>，domain 是五值枚举，错误键是大写 + 下划线', () => {
     const catalog = readCatalog(BASE_LOCALE);
-    const domains = new Set(['error', 'common', 'schema', 'nav']);
+    // `oauth` 是 REQ-022 新增的 domain（出站 OAuth 的界面文案）。
+    const domains = new Set(['error', 'common', 'schema', 'nav', 'oauth']);
     for (const key of Object.keys(catalog)) {
       const [domain, name] = key.split('.');
       expect(domains.has(domain ?? ''), `非法 domain: ${key}`).toBe(true);
@@ -184,6 +185,17 @@ describe('语言包与键体系（AC-S-091）', () => {
       'AUDIT_EVENT_NOT_FOUND',
       'AUDIT_INVALID_FILTER',
       'AUDIT_SINK_UNAVAILABLE',
+      // REQ-022（出站 IdP 与单点登出）新增的 9 个码，见 decisions.md D226 / D258
+      // ⚠️ **恰好 9 个**：没有第 10 个（设备码查不到也是 OAUTH_INVALID_REQUEST，D257）。
+      'OAUTH_CLIENT_NOT_FOUND',
+      'OAUTH_CLIENT_DISABLED',
+      'OAUTH_CLIENT_EXPIRED',
+      'OAUTH_INVALID_REQUEST',
+      'OAUTH_INVALID_REDIRECT_URI',
+      'OAUTH_INVALID_SCOPE',
+      'OAUTH_UNSUPPORTED_CODE_CHALLENGE_METHOD',
+      'OAUTH_TICKET_INVALID',
+      'OAUTH_GRANT_NOT_FOUND',
     ];
     for (const code of codes) {
       expect(catalog[`error.${code}`], `缺少键 error.${code}`).toBeTypeOf('string');
@@ -192,6 +204,38 @@ describe('语言包与键体系（AC-S-091）', () => {
     expect(Object.keys(catalog).filter((key) => key.startsWith('error.'))).toHaveLength(
       codes.length,
     );
+  });
+
+  it('REQ-022 的 9 个 OAuth 码在**两个 locale** 里各自齐全（AC-S-152 步骤 3）', () => {
+    const oauthCodes = [
+      'OAUTH_CLIENT_NOT_FOUND',
+      'OAUTH_CLIENT_DISABLED',
+      'OAUTH_CLIENT_EXPIRED',
+      'OAUTH_INVALID_REQUEST',
+      'OAUTH_INVALID_REDIRECT_URI',
+      'OAUTH_INVALID_SCOPE',
+      'OAUTH_UNSUPPORTED_CODE_CHALLENGE_METHOD',
+      'OAUTH_TICKET_INVALID',
+      'OAUTH_GRANT_NOT_FOUND',
+    ];
+    for (const code of catalogFiles()) {
+      const catalog = readCatalog(code);
+      for (const one of oauthCodes) {
+        expect(catalog[`error.${one}`], `缺少键 error.${one}（${code}）`).toBeTypeOf('string');
+      }
+    }
+  });
+
+  it('`oauth.*` 界面文案：两个 locale 的键集合**一致**（REQ-022）', () => {
+    const zh = Object.keys(readCatalog('zh-CN'))
+      .filter((key) => key.startsWith('oauth.'))
+      .sort();
+    const en = Object.keys(readCatalog('en-US'))
+      .filter((key) => key.startsWith('oauth.'))
+      .sort();
+    expect(en).toEqual(zh);
+    // 4 条路由标题 + 同意页 / 设备码页 / 授权列表页 / 登出页的文案。
+    expect(zh.length).toBeGreaterThanOrEqual(30);
   });
 });
 

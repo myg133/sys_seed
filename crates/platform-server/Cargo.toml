@@ -32,6 +32,8 @@ platform-config.workspace = true
 platform-schema.workspace = true
 # 审计（REQ-014）：/api/audit/* 路由 + PgAuditSink 的装配点
 platform-audit.workspace = true
+# 出站 IdP 与单点登出（REQ-022）：/api/oauth/* 路由 + 元数据端点
+platform-oauth.workspace = true
 # 审计记录的时间戳格式化（UTC、微秒 6 位 —— D142 / D144）
 time.workspace = true
 # 业务模块装配（REQ-012 D103）：编译期注册的模块必须在**装配层**被链接进来，

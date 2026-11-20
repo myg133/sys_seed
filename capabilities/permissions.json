@@ -86,6 +86,42 @@
       ]
     },
     {
+      "manifest": "crates/platform-oauth/manifest.json",
+      "module": "oauth",
+      "permissions": [
+        {
+          "code": "oauth:client:read",
+          "name": "查看 OAuth 客户端",
+          "type": "menu"
+        },
+        {
+          "code": "oauth:client:write",
+          "name": "管理 OAuth 客户端",
+          "type": "button"
+        },
+        {
+          "code": "oauth:client:delete",
+          "name": "删除 OAuth 客户端",
+          "type": "button"
+        },
+        {
+          "code": "oauth:grant:read",
+          "name": "查看授权记录",
+          "type": "menu"
+        },
+        {
+          "code": "oauth:grant:revoke",
+          "name": "撤销授权",
+          "type": "button"
+        },
+        {
+          "code": "oauth:token:introspect",
+          "name": "内省令牌",
+          "type": "button"
+        }
+      ]
+    },
+    {
       "manifest": "crates/platform-org/manifest.json",
       "module": "org",
       "permissions": [
@@ -163,5 +199,5 @@
       ]
     }
   ],
-  "total": 26
+  "total": 32
 }

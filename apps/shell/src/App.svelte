@@ -23,6 +23,14 @@
   import { AUTH_CONTEXT_KEY } from './lib/auth-context';
   import type { AuditLoadResult } from './lib/audit-api';
   import { i18nRuntime } from './lib/i18n';
+  import {
+    OAUTH_AUTHORIZE_ROUTE_PATH,
+    OAUTH_DEVICE_ROUTE_PATH,
+    OAUTH_GRANTS_ROUTE_PATH,
+    OAUTH_LOGOUT_ROUTE_PATH,
+    resolveLoginRedirect,
+    type OAuthGrantsLoadResult,
+  } from './lib/oauth-api';
   import { createRouter, initialResolution } from './lib/router';
   import { createRoutes, AUDIT_ROUTE_PATH, SCHEMA_ROUTE_PATH, toRoles } from './lib/routes';
   import { SSO_CALLBACK_ROUTE_PATH } from './lib/sso-api';
@@ -34,6 +42,10 @@
   import Forbidden from './pages/Forbidden.svelte';
   import Home from './pages/Home.svelte';
   import Login from './pages/Login.svelte';
+  import OAuthAuthorize from './pages/OAuthAuthorize.svelte';
+  import OAuthDevice from './pages/OAuthDevice.svelte';
+  import OAuthGrants from './pages/OAuthGrants.svelte';
+  import OAuthLogout from './pages/OAuthLogout.svelte';
   import ProtectedRoles from './pages/ProtectedRoles.svelte';
   import SchemaPage from './pages/SchemaPage.svelte';
   import SsoCallback from './pages/SsoCallback.svelte';
@@ -49,6 +61,8 @@
   let roles = $state(toRoles(undefined));
   /** 审计页首屏（由路由的 `load` 取；`undefined` = 还没取到）。 */
   let audit = $state<AuditLoadResult | undefined>(undefined);
+  /** 「我的授权」页首屏（由路由的 `load` 取；`undefined` = 还没取到）。 */
+  let oauthGrants = $state<OAuthGrantsLoadResult | undefined>(undefined);
   let resolution = $state(initialResolution(window.location.pathname));
 
   const routes = createRoutes(
@@ -58,6 +72,9 @@
     },
     (result) => {
       audit = result;
+    },
+    (result) => {
+      oauthGrants = result;
     },
   );
 
@@ -117,9 +134,31 @@
     }
   }
 
+  /**
+   * 登录成功后的落点。
+   *
+   * # `?return_to=` 优先（REQ-022 / D221）
+   *
+   * 平台的 `intendedPath` **只有 pathname**（`router.ts:261`）→ 未登录回跳会
+   * **丢掉全部 query**（授权参数 / `user_code`）→ 授权页与设备码页改成
+   * **公开路由**，由页面自己把**完整 URL**（`pathname + search`）编码进
+   * `?return_to=` 交给登录页。
+   *
+   * - `readReturnTo` 会**校验** `return_to`（站内相对路径；不合格 → `undefined`）
+   *   —— 这是**开放重定向**的防线，不是可选优化；
+   * - 用 **`location.replace`**（不是 `href`）→ 回跳地址**不进浏览器历史**
+   *   （与 SSO 回调的 `?ticket=` 同一款理由：安全约束 §8）；
+   * - 没有 `return_to` → **保持现行为**（跳 `intendedPath` / 首页）。
+   */
   function handleLoggedIn() {
     authState = auth.state;
-    router.navigate(resolution.intendedPath ?? '/');
+    const redirect = resolveLoginRedirect(window.location.search, resolution.intendedPath);
+    if (redirect.kind === 'replace') {
+      // 整页跳转 → query 一个不丢。页面会在新文档里自己加载 i18n 上下文。
+      window.location.replace(redirect.url);
+      return;
+    }
+    router.navigate(redirect.path);
     // 登录后才拿得到租户级配置（`/api/i18n/context` 需认证）。
     void loadI18nContext();
   }
@@ -184,6 +223,25 @@
 {:else if resolution.path === SSO_CALLBACK_ROUTE_PATH}
   <!-- P4：回调交接页（公开路由）。ticket 只在这里被消费一次。 -->
   <SsoCallback {auth} onLoggedIn={handleSsoLoggedIn} onBackToLogin={handleBackToLogin} />
+{:else if resolution.path === OAUTH_AUTHORIZE_ROUTE_PATH}
+  <!--
+    REQ-022：授权页 / 同意页（**公开路由**，D221）。
+    未登录由**页面自己**处理（渲染「登录并继续」）→ 守卫不参与。
+  -->
+  <OAuthAuthorize {client} authenticated={authState.authenticated} />
+{:else if resolution.path === OAUTH_DEVICE_ROUTE_PATH}
+  <!-- REQ-022：设备码批准页（**公开路由**，D221；query 里带 `user_code`）。 -->
+  <OAuthDevice {client} authenticated={authState.authenticated} />
+{:else if resolution.path === OAUTH_LOGOUT_ROUTE_PATH}
+  <!-- REQ-022：登出页（**公开路由**；front-channel 的 iframe 由前端渲染）。 -->
+  <OAuthLogout {client} />
+{:else if resolution.path === OAUTH_GRANTS_ROUTE_PATH && resolution.allowed}
+  <!--
+    REQ-022：「我的授权」页：`resolution.allowed` 是**硬要求** ——
+    守卫不放行时**路由的 `load` 不会被调用**、页面也不渲染
+    → `GET /api/oauth/grants` 的请求计数为 **0**。
+  -->
+  <OAuthGrants {client} initial={oauthGrants} />
 {:else if resolution.path === '/403'}
   <Forbidden onback={() => router.navigate('/')} />
 {:else if resolution.path === AUDIT_ROUTE_PATH && resolution.allowed}

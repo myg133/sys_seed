@@ -215,7 +215,7 @@ bun run dev
 ## 已有能力
 
 **先查 `capabilities/index.json`，别重写。** 下表与索引的 `already_provided` 段
-**内容完全一致**（27 条，key 与说明逐条相同）；**行的顺序不同** ——
+**内容完全一致**（28 条，key 与说明逐条相同）；**行的顺序不同** ——
 下表按「后端接缝 → 前端包」的语义序，索引按字典序输出。
 机器守卫 `cargo test -p xtask` 的 `agents_doc_matches_catalog` 比对的是下表与能力目录
 （同序），不覆盖索引的排序。
@@ -232,6 +232,7 @@ bun run dev
 | `schema_metadata` | platform-schema 提供 GET /api/schema/<module>/<entity> 元数据接口（已认证即可读；无权字段在元数据里就被剔除，不是 hidden 标记），前端据此渲染，勿自造元数据接口或另立形状 |
 | `schema_projector` | SchemaProjector::project 是字段级权限的唯一序列化入口（白名单语义：元数据未声明的字段默认不输出，列表要逐条投影、信封不动），返回实体的 handler 必须经它，勿直接 Json(entity) |
 | `audit_declaration` | Auditable + AuditEventSpec 提供审计事件声明面，平台据此自动埋点，勿自建审计表 |
+| `audit_sink` | platform-audit 提供审计落库与查询（PgAuditSink 写哈希链、GET /api/audit/events 查询、/api/audit/verify 链校验与归档）；模块用 core 的 AuditSink 埋点，勿自建审计表或自写哈希链 |
 | `notification_sender` | NotificationSender + NotificationMessage/DeliveryResult 提供通知投递接缝，勿自建消息中心 |
 | `workflow_handler` | WorkflowHandler + TransitionEvent 提供工作流接入接缝，勿自建流程引擎 |
 | `transaction_boundary` | TransactionalWrite + WriteBoundary 提供写边界声明，跨表写必须显式开平台事务（C-4 判定依据） |
@@ -251,14 +252,13 @@ bun run dev
 
 ## 尚未提供
 
-**别当成已有。** 下表与索引的 `not_yet_provided` 段**内容完全一致**（5 条，
+**别当成已有。** 下表与索引的 `not_yet_provided` 段**内容完全一致**（4 条，
 key 与说明逐条相同）；行的顺序同样与索引不同（语义序 vs 字典序）。
 
 | 能力 | 说明 |
 |---|---|
 | `http_api_layer` | HTTP 接口层尚未就绪（REQ-011/012 补），capabilities/api.json 目前为空 |
 | `crud_scaffolding` | 平台没有通用 CRUD/分页脚手架（模块的仓储要自己实现），但数据访问必须走 platform-db 的租户作用域入口 |
-| `audit_sink` | 审计只到事件声明面，落库与查询待 REQ-014 |
 | `notification_dispatch` | 通知只到 trait，通道投递与模板待 REQ-015 |
 | `workflow_engine` | 工作流只到 trait，流程定义与实例待 REQ-017 |
 
