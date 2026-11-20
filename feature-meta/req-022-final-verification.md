@@ -412,14 +412,14 @@ P3 第 1 轮是 **41 passed / 2 failed**。逐条查根因：
 | **143** | 内省只内省自己的 | `oauth_http.rs:2030` | 别人令牌断 `body == json!({"active": false})`**整字段比对**；401 `{"error":"invalid_client"}` 逐字 | ✅ |
 | **144** | 撤销后立即失效 | `oauth_http.rs:2193` | 含「别的 client 撤销 → 200 但令牌仍 active」 | ✅ |
 | **145** | ES256 + **自行验签** | `oauth_http.rs:2280` + helper `:188-246` | **独立验签**（**不调** `platform_oauth::keys`）；`Valid` / **`ExpiredButSigned`** / `BadSignature` **三种结果分开断** | ✅ |
-| **146** | 同意页 + **用户所见 = 实际授予** | `oauth_http.rs:2723` + P0-3 段 + `ticket::tests` | **`preview.scopes` 真算交集**（方案 A）；自签更大 scope → 交换 **400 `invalid_scope` + 令牌表 0 行**；`a_login_token_is_not_a_ticket` | ✅ |
-| **147** | 我的授权 + 令牌立即失效 | `oauth_http.rs:2812` | **两枚**令牌都 `active=false` + 库里两行 `revoked`；跨租户**空数组**（不是 403） | ✅ |
+| **146** | 同意页 + **用户所见 = 实际授予** | **`oauth_http.rs:589` `fn the_consent_page_shows_exactly_what_will_be_granted`**（核心断言 **`:630`** `body["scopes"] == json!(["rbac:role:read"])`）+ P0-3 段 + `ticket::tests` | `preview.scopes` **只含交集**（用户只有 read、请求 read+write → 断言恰为 `[read]`）；自签更大 scope → 交换 **400 `invalid_scope` + 令牌表 0 行**；`a_login_token_is_not_a_ticket` | ✅ |
+| **147** | 我的授权 + 令牌立即失效 | `oauth_http.rs:2812` `fn a_user_sees_and_revokes_only_their_own_grants` + **`:2883` `fn revoking_a_grant_revokes_every_token_it_issued`** + **`:3051` `fn another_tenants_user_sees_an_empty_grant_list`** | **两枚**令牌都 `active=false` + 库里两行 `revoked`（`:2883`）；跨租户**空数组**不是 403（`:3051`） | ✅ |
 | **148** | 免登 | `oauth_http.rs:3142` | `prompt=none` + 覆盖 → 直发；不覆盖 → `needsConsent=true` **且 code 表 0 行**（**本轮补**） | ✅ |
 | **149** | Back-Channel Logout | `oauth_http.rs:3626` + `:3478-3560` | payload 解析：`iss`/`aud`/`sub`/**`sid` 逐字等于登录令牌 sid**/`jti`/`iat`/**`events` 含 backchannel 键**/**不含 `nonce`**；**timeout 与 500 后登出仍 200**；失败日志含 **`clientId`**（BA 本轮修） | ✅ |
 | **150** | Front-Channel + 按应用登出 | `oauth_http.rs:3626` + `oauth-logout.test.ts` | `frontChannel` **恰好 1 条**；iframe 数量/`src`/**`sandbox` 含 `allow-scripts` 不含 `allow-same-origin`** | ✅ |
 | **151** | 业务端点**默认拒绝** | **`oauth_real_stack.rs:398-423`**（新建真装配） | **真端点** `GET /api/rbac/me/permissions` + `GET /api/audit/events` → **401 `UNAUTHENTICATED`**、**不含 `error` 键**；**阳性对照**（正常登录令牌同一端点**成功**）；introspect 该令牌 → 200 `active=true` | ✅ |
 | **152** | 错误码 8 处 + 「包含」 | `error::tests` 7 条 + `i18n_titles` 9 个用例 | `TITLES.len() == 93`（公式常量）；逐 locale 覆盖；**「包含」不「相等」** | ✅ |
-| **153** | 权限点三处齐 + C-5 | `contract_c5.rs`（2 passed）+ `capabilities --check`（14 文件）+ `tenant-policies --check` | 6 个权限点**恰好**；`total == 32` | ✅ |
+| **153** | 权限点三处齐 + C-5 | `contract_c5.rs`（**2 passed**：`every_oauth_permission_has_an_authorization_call_site` + `the_oauth_manifest_is_valid`）+ `capabilities --check`（14 文件一致）+ `tenant-policies --check` | 6 个权限点**恰好**（`contract_c5` 断 `scan.codes.len() == 3` 式的**恰好**语义）；⚠️ **`total == 32` 无测试断言**（它只是 `capabilities/permissions.json` 里由 `xtask` 生成的一个数值 —— 见 §9.7 的风险项）；⚠️ **步骤 3/4 的 C-5 阳性对照未跑**（要临时改 `src/` 与 manifest，超出只读复核与自动化范围） | ⚠️ **通过（有 2 处未验，已记为风险）** |
 | **154** | 审计**落库** + 哈希链 | **`oauth_real_stack.rs:156, 664, 707`** | 5 个事件码落 `platform_audit_log`；**`ChainVerifier::verify` → `ok == true`**；从表里扫敏感值**带阳性对照** | ✅ |
 | **155** | 跨租户不可见 | `tenant_isolation.rs:134` | 读侧双租户 + 写侧 `WITH CHECK`；**policy 命名 + 恰好 1 条**（本轮补）；client 表平台级 | ✅ |
 
