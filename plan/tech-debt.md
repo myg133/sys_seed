@@ -655,3 +655,50 @@ Sprint 3 复盘的第 2 条教训：**修漏洞会制造新漏洞** —— 但�
   把 SSO 那条用例改成「真库 + 查 `platform_audit_log`」——
   与 `crates/platform-server/tests/audit_chain_real_db.rs` 里 org / config 的做法一致
   （把断言放在**同时能看到两个 crate** 的装配层也行）。
+
+## TD-041: OAuth 令牌**不能**访问底座业务 API（默认拒绝，opt-in 机制未实现）
+
+- **发现于**: REQ-022 规格阶段（D209）
+- **证据**: `crates/platform-core/src/extension/permission.rs:178` `effective_scope` ——
+  RBAC 的数据范围（`ScopeFilter`）是**按用户**算的；
+  `crates/platform-core/src/extension/permission.rs:366` `authorize()` ——
+  鉴权判定只问「有没有这个权限点」，**不问**「这个身份是谁」。
+- **问题**: 若让 OAuth 令牌访问底座业务端点，scope checker 只能回答
+  「令牌里有没有 `rbac:role:read`」→ **数据范围无处可依**
+  （返回 `ScopeFilter::All` = 持令牌者可读**全租户**数据 → 越权）。
+  要做对，必须让 scope checker **继承授权用户的数据范围**，
+  再叠加**显式 opt-in**（哪些端点接受 OAuth 令牌）。
+- **本轮的决定**: 底座业务端点**一律不接受**第三方 OAuth 令牌（默认拒绝，fail closed）。
+  第三方应用验证令牌走两条路：**验签 JWKS**（离线，撤销最长延迟一个 TTL）
+  或**调内省端点**（实时）。
+- **为什么本轮不修**: 要做对需要三件事 —— ① scope checker ② 数据范围按授权用户继承
+  ③ 显式 opt-in 登记机制（且要动契约或加注册表）。
+  这三项**互相耦合**，单独做一半 = 越权。属于**新需求**规模，不是本轮能塞进去的补丁。
+- **影响面**: 第三方应用**不能**用一枚令牌访问底座业务 API；
+  需要「一个令牌走天下」的场景要等后续需求。
+- **建议修法**: 另起需求，落三件事：
+  1. `platform-core` 加「令牌主体」概念（不只是 `user_id` + `tenant_id`，
+     还有「**以谁的身份**」）；
+  2. scope checker 的 `effective_scope` **代理到授权用户的 RBAC 判定**；
+  3. 显式 opt-in 登记（建议放 `platform-oauth` 的 manifest 或独立注册表，
+     **不要**放租户级配置 —— 租户管理员不该能决定「哪些端点接受外部令牌」）。
+
+## TD-042: 出站 HTTP client 有**两份**（`platform-iam` 的 OIDC one + `platform-oauth` 的）
+
+- **发现于**: REQ-022 规格阶段（D220）
+- **证据**:
+  - `crates/platform-iam/src/sso/oidc.rs:88` `OidcHttpClient` ——
+    带 **discovery + JWKS 缓存**，是**入站**专用（拉 IdP 的 metadata / JWKS）；
+  - REQ-022 需要的是「**POST 一个 form 到任意 URL**」（back-channel logout），
+    两者语义不同。
+- **本轮的决定**: `platform-oauth` **内部独立实现**一个最小出站 client
+  （`hyper` + `hyper-util` + `hyper-rustls`，**零新增依赖**），
+  **不改** `platform-iam` 的 OIDC client —— 不碰 REQ-013 已交付的代码。
+- **为什么本轮不修**: 抽公共 client 要改 `platform-iam` 的**已交付**实现
+  （REQ-013 回归风险），而收益只是省掉几十行重复代码；
+  低配机上「少编译一个 crate」反而更重要。
+- **影响面**: TLS 配置、超时策略、连接池参数在两处**各自**演进，
+  将来可能出现「入站能连、出站连不上」的不一致。
+- **建议修法**: 抽到 `platform-core`（或独立的 `platform-http`），
+  统一暴露「`get_json` / `post_form` / 超时 / TLS 根证书」，
+  两个调用方共用；改动时**必须**同时跑 REQ-013 与 REQ-022 的回归。
