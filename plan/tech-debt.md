@@ -1002,3 +1002,42 @@ Sprint 3 复盘的第 2 条教训：**修漏洞会制造新漏洞** —— 但�
 - **要做需要什么**: 一个真实/可复现的 465 端点 + 一条对应用例
   （假服务器需在 `accept` 后**立即**握手，不回 `220`）。
 - **优先级**: P3
+
+---
+
+## TD-056: REQ-015 的**前端两个页面未做**（模板管理 / 投递记录）
+
+- **发现于**: REQ-015 终版（前端封装已完成，页面未做）
+- **现状**: `notify-api.ts`（含 27 条单测）已就绪，10 个端点都有封装；
+  但 **`NotifyTemplates.svelte` 与 `NotifyDeliveries.svelte` 两个页面没做**。
+- **为什么没做**（**不是时间不够，是壳层的结构限制**）：
+  - `RouteDefinition` **无 component 字段**（`apps/shell/src/lib/router.ts:41-62`）；
+  - `createRouter` **捕获数组引用**（`router.ts:156` `const { routes } = options`）；
+  - `Router` **无 `addRoute` / `setRoutes`**（`router.ts:113`）；
+  - 页面渲染是**逐路径硬编码**（`App.svelte:221-266`，**10 个** `{:else if}`）。
+  → 加两个页面必须改壳层（新路由 + 新分支），这是**跨需求改动**（D109）。
+- **影响**（明码）:
+  - AC-S-167~173 的**判据**全部是 API 层，已在 19 条真库集成测试里验过 → **判据达成**；
+  - 但「管理员能在界面上维护模板 / 重投死信」这个**用户可用性**目标**未达成**。
+- **要做需要什么**: 与 **TD-048** 一并解决 —— 即 `RouteDefinition` 加 `component`、
+  `App.svelte` 改按 `route.component` 查表渲染。改完之后两个页面只是两个 `.svelte` 文件。
+- **优先级**: P1（功能可达但不可用；比 TD-048 更具体，可作为 TD-048 的第一个落地案例）
+
+---
+
+## TD-057: 租户级 **locale 偏好没有存储位**
+
+- **发现于**: REQ-015 实现（`PlatformNotifyConfigSource::tenant_default_locale`）
+- **现状**: `notification` 的 locale 三级回退是「用户 locale → **租户默认** → 失败」（D294），
+  但「租户默认 locale」**没有存储位置** ——
+  `platform-config` 的 `FALLBACK_LOCALES`（`crates/platform-config/src/registry.rs:44`）
+  只是**常量** `&["zh-CN"]`，没有租户级覆盖。
+- **当前实现**: `platform-server/src/main.rs` 的 `PlatformNotifyConfigSource::tenant_default_locale`
+  **固定返回 `zh-CN`**（已在该函数上标 `TODO(TD-057)`）。
+- **影响**: 非中文租户的通知**一律回退到中文** ——
+  除非他们为 `zh-CN` 也维护一份模板（那就等于「模板里写两遍」）。
+- **要做需要什么**:
+  1. 一个租户级配置键（如 `platform.defaultLocale`，`scope: tenant`）；
+  2. `platform-config` 支持读**租户级**条目（现在 `read_platform_entries` 只读平台级）；
+  3. 通知的 `tenant_default_locale` 改读它。
+- **优先级**: P2（中文租户不受影响；多语言租户的主路径会退化）

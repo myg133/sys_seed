@@ -366,6 +366,10 @@ QUIT                   → 221
 ⚠️ **5 个**配置项**全部** `"scope": "platform"` 且是 `ConfigSpec` **对象**
 （REQ-016 的 S-01 / S-02 两条教训）。
 ⚠️ **SMTP 的 5 个环境变量不进 manifest**（`ConfigSpec` 无 `Secret` 类型，D306）。
+⚠️ **键名必须是 lowerCamelCase**（契约 C9）：`ConfigKey::parse` 要求**每一段**
+「小写字母开头 + 只含 ASCII 字母数字」（`crates/platform-core/src/config.rs:213`
+的 `is_lower_camel_case`）→ **段内带 `_` 会让服务起不来**。
+本需求 5 个键已逐段核对合规。
 
 ### 权限点总数
 
