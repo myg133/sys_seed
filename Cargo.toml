@@ -6,6 +6,7 @@ members = [
     "crates/platform-config",
     "crates/platform-contracts",
     "crates/platform-contracts-macros",
+    "crates/platform-app",
     "crates/platform-db",
     "crates/platform-iam",
     "crates/platform-oauth",
@@ -26,6 +27,7 @@ publish = false
 
 [workspace.dependencies]
 platform-core = { path = "crates/platform-core" }
+platform-app = { path = "crates/platform-app" }
 platform-audit = { path = "crates/platform-audit" }
 platform-config = { path = "crates/platform-config" }
 platform-contracts = { path = "crates/platform-contracts" }

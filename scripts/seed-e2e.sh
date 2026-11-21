@@ -147,6 +147,7 @@ OAUTH_BACKCHANNEL_URI="http://127.0.0.1:${MOCK_PORT}/logout"
 # | u-perm-write@example.com | rbac:role:read + rbac:role:write + sandbox:demo:read + sandbox:demo:write + sandbox:demo:secret | 写用户 → 深链可达、CRUD 可跑、能看到 `secret` 字段 |
 # | u-perm-none@example.com  | （无）                              | fail closed |
 # | u-perm-audit@example.com | audit:events:read                   | 审计页的数据用例（REQ-014 / AC-S-132） |
+# | u-perm-app@example.com   | app:registry:read/write/delete      | **应用管理员**（REQ-016 / AC-S-156 前置） |
 # | u-perm-oauth@example.com | oauth:client:read/write/delete + oauth:grant:read/revoke | **OAuth 管理员**（REQ-022 / D236） |
 # | e2e-user-oauth@example.com | rbac:role:read                   | **OAuth 普通用户**（REQ-022 / D236）：授权流程的主体 |
 # | u-perm-other@example.com（**tenant-b**） | rbac:role:read + oauth:grant:read + oauth:grant:revoke | **跨租户对照**（REQ-022 / D236 / TC-022-088） |
@@ -179,6 +180,8 @@ VALUES
     ('e2e-user-perm-none',  'tenant-a', 'u-perm-none@example.com',  'u-perm-none@example.com',  :'phc', 'active'),
     ('e2e-user-perm-audit', 'tenant-a', 'u-perm-audit@example.com', 'u-perm-audit@example.com', :'phc', 'active'),
     -- REQ-022（D236）：OAuth 管理员 + 普通用户（tenant-a）+ 跨租户对照（tenant-b）。
+    -- REQ-016：应用注册表管理员（AC-S-156 的前置账号）。
+    ('e2e-user-app',         'tenant-a', 'u-perm-app@example.com',     'u-perm-app@example.com',     :'phc', 'active'),
     ('e2e-user-oauth',       'tenant-a', 'u-perm-oauth@example.com',   'u-perm-oauth@example.com',   :'phc', 'active'),
     ('e2e-user-oauth-plain', 'tenant-a', 'e2e-user-oauth@example.com', 'e2e-user-oauth@example.com', :'phc', 'active'),
     ('e2e-user-other',       'tenant-b', 'u-perm-other@example.com',   'u-perm-other@example.com',   :'phc', 'active')
@@ -196,6 +199,8 @@ VALUES
     ('tenant-a', 'e2e-role-read',  'e2e-role-read',  'E2E 只读角色',   'ALL', FALSE),
     ('tenant-a', 'e2e-role-write', 'e2e-role-write', 'E2E 读写角色',   'ALL', FALSE),
     ('tenant-a', 'e2e-role-audit', 'e2e-role-audit', 'E2E 审计角色',   'ALL', FALSE),
+    -- REQ-016（D271）：应用注册表管理员（3 个 app:* 权限点）。
+    ('tenant-a', 'e2e-role-app',        'e2e-role-app',        'E2E 应用管理员角色',     'ALL', FALSE),
     -- REQ-022（D236）。
     ('tenant-a', 'e2e-role-oauth',      'e2e-role-oauth',      'E2E OAuth 管理员角色',   'ALL', FALSE),
     ('tenant-a', 'e2e-role-oauth-user', 'e2e-role-oauth-user', 'E2E OAuth 普通用户角色', 'ALL', FALSE),
@@ -213,7 +218,7 @@ ON CONFLICT (tenant_id, id) DO UPDATE SET
 DELETE FROM platform_role_permission
  WHERE tenant_id = 'tenant-a'
    AND role_id IN ('e2e-role-read', 'e2e-role-write', 'e2e-role-audit',
-                   'e2e-role-oauth', 'e2e-role-oauth-user');
+                   'e2e-role-oauth', 'e2e-role-oauth-user', 'e2e-role-app');
 
 DELETE FROM platform_role_permission
  WHERE tenant_id = 'tenant-b'
@@ -233,6 +238,10 @@ VALUES
     ('tenant-a', 'e2e-role-write', 'sandbox:demo:write', NULL),
     ('tenant-a', 'e2e-role-write', 'sandbox:demo:secret', NULL),
     ('tenant-a', 'e2e-role-audit', 'audit:events:read',  NULL),
+    -- REQ-016（D271）：3 个 app:* 权限点（**恰好 3 个** —— 工作台 / 导航不进权限点）。
+    ('tenant-a', 'e2e-role-app',   'app:registry:read',   NULL),
+    ('tenant-a', 'e2e-role-app',   'app:registry:write',  NULL),
+    ('tenant-a', 'e2e-role-app',   'app:registry:delete', NULL),
     -- REQ-022（D236）：OAuth 管理员 5 个 + 普通用户 1 个。
     ('tenant-a', 'e2e-role-oauth',      'oauth:client:read',   NULL),
     ('tenant-a', 'e2e-role-oauth',      'oauth:client:write',  NULL),
@@ -255,7 +264,7 @@ DELETE FROM platform_user_role
        SELECT id FROM platform_iam_user
         WHERE tenant_id = 'tenant-a'
           AND username IN ('u-perm-read@example.com', 'u-perm-write@example.com', 'u-perm-none@example.com', 'u-perm-audit@example.com',
-                           'u-perm-oauth@example.com', 'e2e-user-oauth@example.com')
+                           'u-perm-app@example.com', 'u-perm-oauth@example.com', 'e2e-user-oauth@example.com')
    );
 
 DELETE FROM platform_user_role
@@ -272,6 +281,7 @@ SELECT 'tenant-a', u.id, r.role_id
         ('u-perm-read@example.com',  'e2e-role-read'),
         ('u-perm-write@example.com', 'e2e-role-write'),
         ('u-perm-audit@example.com', 'e2e-role-audit'),
+        ('u-perm-app@example.com',   'e2e-role-app'),
         ('u-perm-oauth@example.com', 'e2e-role-oauth'),
         ('e2e-user-oauth@example.com', 'e2e-role-oauth-user')
        ) AS r(username, role_id) ON r.username = u.username
@@ -447,6 +457,68 @@ ON CONFLICT (client_id) DO UPDATE SET
     frontchannel_logout_uri = EXCLUDED.frontchannel_logout_uri,
     status                  = 'active';
 
+-- 8) 应用接入（REQ-016）：tenant-a 的 5 个应用（AC-S-160 的分组/排序/隐藏判据）
+--    + tenant-b 的 1 个应用（AC-S-157 的跨租户对照）。
+--
+--    ⚠️ **每个应用用自己的一次性 client**（`client-app-<x>`）：
+--    `UNIQUE (tenant_id, client_id)` 规定**同一租户不能用一个 client 接两个应用** →
+--    复用 `client-A`（下面 AC-S-156 / 159 / 162 还要拿它建应用）会直接撞唯一索引。
+--    这也让本脚本可以反复执行（幂等）。
+--
+--    ⚠️ **client 必须先存在**（`ON DELETE CASCADE` 的 FK，D264）。
+--
+--    ⚠️ **工作台不按 `launch_url` 过滤**（D279）：这里都给了入口，便于导航用例；
+--    工作台用例不依赖它。
+--
+--    ⚠️ 这里用**裸连接**（脚本跑在管理员角色上）→ RLS 不挡写入（表 owner / 超管）。
+INSERT INTO platform_oauth_client
+    (client_id, client_secret_hash, client_type, name, redirect_uris,
+     allowed_grant_types, allowed_scopes, status, created_at)
+VALUES
+    ('client-app-a',     NULL, 'public', 'E2E 应用 A 的 client',
+     ARRAY['https://client.example/cb'], ARRAY['authorization_code'], ARRAY['rbac:role:read'], 'active', now()),
+    ('client-app-b',     NULL, 'public', 'E2E 应用 B 的 client',
+     ARRAY['https://client.example/cb'], ARRAY['authorization_code'], ARRAY['rbac:role:read'], 'active', now()),
+    ('client-app-c',     NULL, 'public', 'E2E 应用 C 的 client',
+     ARRAY['https://client.example/cb'], ARRAY['authorization_code'], ARRAY['rbac:role:read'], 'active', now()),
+    ('client-app-d',     NULL, 'public', 'E2E 应用 D 的 client',
+     ARRAY['https://client.example/cb'], ARRAY['authorization_code'], ARRAY['rbac:role:read'], 'active', now()),
+    ('client-app-e',     NULL, 'public', 'E2E 应用 E 的 client',
+     ARRAY['https://client.example/cb'], ARRAY['authorization_code'], ARRAY['rbac:role:read'], 'active', now()),
+    ('client-app-other', NULL, 'public', 'B 租户应用的 client',
+     ARRAY['https://client.example/cb'], ARRAY['authorization_code'], ARRAY['rbac:role:read'], 'active', now())
+ON CONFLICT (client_id) DO UPDATE SET status = 'active';
+
+INSERT INTO platform_app
+    (id, tenant_id, client_id, display_name, description, category, icon_url,
+     launch_url, sort_order, status, created_at, created_by)
+VALUES
+    -- tenant-a：AC-S-160 步骤 3 的**钉死期望**——finance 组 B(10)→A(20)；
+    -- general 组 C 与 D 的 sortOrder 都 0 → 按 displayName 升序（C → D）。
+    -- ⚠️ **id 与 displayName 的顺序刻意相反**（C 叫 "e2e-app-z"、D 叫 "e2e-app-d0"）：
+    --    让「按 id 兜底排序」的实现得到 D → C（错），只有按 displayName 才是 C → D（对）。
+    ('e2e-app-a',   'tenant-a', 'client-app-a', 'E2E 差旅报销',  'AC-S-160 的 A', 'finance', NULL,
+     'https://a.example/',  20, 'active', now(), 'seed-e2e'),
+    ('e2e-app-b',   'tenant-a', 'client-app-b', 'E2E 费用申请',  'AC-S-160 的 B', 'finance', NULL,
+     'https://b.example/',  10, 'active', now(), 'seed-e2e'),
+    ('e2e-app-z',   'tenant-a', 'client-app-c', 'E2E C 应用',    'AC-S-160 的 C', 'general', NULL,
+     'https://c.example/',   0, 'active', now(), 'seed-e2e'),
+    ('e2e-app-d0',  'tenant-a', 'client-app-d', 'E2E D 应用',    'AC-S-160 的 D', 'general', NULL,
+     'https://d.example/',   0, 'active', now(), 'seed-e2e'),
+    -- E 是 **hidden**（AC-S-160 步骤 3：不在任何组里）。
+    ('e2e-app-e',   'tenant-a', 'client-app-e', 'E2E E 应用',    'AC-S-160 的 E（hidden）', 'general', NULL,
+     'https://e.example/',   0, 'hidden', now(), 'seed-e2e'),
+    -- tenant-b：跨租户对照（AC-S-157）。
+    ('e2e-app-other', 'tenant-b', 'client-app-other', 'B 租户的应用', 'AC-S-157 的跨租户对照', 'general', NULL,
+     'https://other.example/', 0, 'active', now(), 'seed-e2e')
+ON CONFLICT (id) DO UPDATE SET
+    client_id    = EXCLUDED.client_id,
+    display_name = EXCLUDED.display_name,
+    category     = EXCLUDED.category,
+    launch_url   = EXCLUDED.launch_url,
+    sort_order   = EXCLUDED.sort_order,
+    status       = EXCLUDED.status;
+
 COMMIT;
 SQL
 
@@ -480,17 +552,18 @@ SQL
 
 # 强断言：四个用户各 **恰好 1 行**（不翻倍），权限点数目符合清单。
 bad="$(printf '%s\n' \
-  "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username IN ('u-perm-read@example.com', 'u-perm-write@example.com', 'u-perm-none@example.com', 'u-perm-audit@example.com', 'u-perm-oauth@example.com', 'e2e-user-oauth@example.com');" \
+  "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username IN ('u-perm-read@example.com', 'u-perm-write@example.com', 'u-perm-none@example.com', 'u-perm-audit@example.com', 'u-perm-app@example.com', 'u-perm-oauth@example.com', 'e2e-user-oauth@example.com');" \
   "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username = 'u-perm-read@example.com';" \
   "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username = 'u-perm-write@example.com';" \
   "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username = 'u-perm-none@example.com';" \
   "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username = 'u-perm-audit@example.com';" \
+  "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username = 'u-perm-app@example.com';" \
   "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username = 'u-perm-oauth@example.com';" \
   "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username = 'e2e-user-oauth@example.com';" \
   "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-b' AND username = 'u-perm-other@example.com';" \
   | run_sql -tA | tr '\n' ' ')"
-if [ "$bad" != '6 1 1 1 1 1 1 1 ' ]; then
-  echo "✗ 夹具核对失败：期望 '6 1 1 1 1 1 1 1'，实际 '$bad'" >&2
+if [ "$bad" != '7 1 1 1 1 1 1 1 1 ' ]; then
+  echo "✗ 夹具核对失败：期望 '7 1 1 1 1 1 1 1 1'，实际 '$bad'" >&2
   exit 1
 fi
 
@@ -509,12 +582,13 @@ grants="$(printf '%s\n' \
   "SELECT count(*) FROM platform_role_permission p JOIN platform_user_role r ON r.tenant_id = p.tenant_id AND r.role_id = p.role_id JOIN platform_iam_user u ON u.tenant_id = r.tenant_id AND u.id = r.user_id WHERE u.tenant_id = 'tenant-a' AND u.username = 'u-perm-write@example.com';" \
   "SELECT count(*) FROM platform_role_permission p JOIN platform_user_role r ON r.tenant_id = p.tenant_id AND r.role_id = p.role_id JOIN platform_iam_user u ON u.tenant_id = r.tenant_id AND u.id = r.user_id WHERE u.tenant_id = 'tenant-a' AND u.username = 'u-perm-none@example.com';" \
   "SELECT count(*) FROM platform_role_permission p JOIN platform_user_role r ON r.tenant_id = p.tenant_id AND r.role_id = p.role_id JOIN platform_iam_user u ON u.tenant_id = r.tenant_id AND u.id = r.user_id WHERE u.tenant_id = 'tenant-a' AND u.username = 'u-perm-audit@example.com';" \
+  "SELECT count(*) FROM platform_role_permission p JOIN platform_user_role r ON r.tenant_id = p.tenant_id AND r.role_id = p.role_id JOIN platform_iam_user u ON u.tenant_id = r.tenant_id AND u.id = r.user_id WHERE u.tenant_id = 'tenant-a' AND u.username = 'u-perm-app@example.com';" \
   "SELECT count(*) FROM platform_role_permission p JOIN platform_user_role r ON r.tenant_id = p.tenant_id AND r.role_id = p.role_id JOIN platform_iam_user u ON u.tenant_id = r.tenant_id AND u.id = r.user_id WHERE u.tenant_id = 'tenant-a' AND u.username = 'u-perm-oauth@example.com';" \
   "SELECT count(*) FROM platform_role_permission p JOIN platform_user_role r ON r.tenant_id = p.tenant_id AND r.role_id = p.role_id JOIN platform_iam_user u ON u.tenant_id = r.tenant_id AND u.id = r.user_id WHERE u.tenant_id = 'tenant-a' AND u.username = 'e2e-user-oauth@example.com';" \
   "SELECT count(*) FROM platform_role_permission p JOIN platform_user_role r ON r.tenant_id = p.tenant_id AND r.role_id = p.role_id JOIN platform_iam_user u ON u.tenant_id = r.tenant_id AND u.id = r.user_id WHERE u.tenant_id = 'tenant-b' AND u.username = 'u-perm-other@example.com';" \
   | run_sql -tA | tr '\n' ' ')"
-if [ "$grants" != '4 5 0 1 5 1 3 ' ]; then
-  echo "✗ 夹具授权核对失败：期望 read=4 / write=5 / none=0 / audit=1 / oauth=5 / oauth-user=1 / other=3，实际 '$grants'" >&2
+if [ "$grants" != '4 5 0 1 3 5 1 3 ' ]; then
+  echo "✗ 夹具授权核对失败：期望 read=4 / write=5 / none=0 / audit=1 / app=3 / oauth=5 / oauth-user=1 / other=3，实际 '$grants'" >&2
   echo "  （REQ-012 的 E2E 需要 sandbox:demo:read/write/secret；REQ-014 的需要 audit:events:read；漏授会让用例 403。）" >&2
   exit 1
 fi

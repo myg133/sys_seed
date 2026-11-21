@@ -1,0 +1,39 @@
+{
+  "id": "app",
+  "name": "应用接入",
+  "version": "0.1.0",
+  "enabled": true,
+  "permissions": [
+    { "code": "app:registry:read", "name": "查看应用注册表", "type": "menu" },
+    { "code": "app:registry:write", "name": "管理应用注册表", "type": "button" },
+    { "code": "app:registry:delete", "name": "删除应用", "type": "button" }
+  ],
+  "menus": [
+    { "label": "工作台", "icon": "grid", "route": "/workbench" }
+  ],
+  "tenantScoped": {
+    "tables": ["platform_app", "platform_app_access"],
+    "column": "tenant_id"
+  },
+  "dependencies": [],
+  "config": {
+    "app.recentCount": {
+      "type": "number",
+      "default": 6,
+      "scope": "platform",
+      "label": "最近访问与常用应用各取前 N 条"
+    },
+    "app.workspace.maxApps": {
+      "type": "number",
+      "default": 60,
+      "scope": "platform",
+      "label": "工作台最多展示的应用数"
+    },
+    "app.icon.allowHttp": {
+      "type": "boolean",
+      "default": false,
+      "scope": "platform",
+      "label": "URL 是否允许 http（仅本地开发）"
+    }
+  }
+}

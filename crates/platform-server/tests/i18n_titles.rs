@@ -88,6 +88,11 @@ fn all_codes() -> Vec<(&'static str, &'static str)> {
     for code in platform_oauth::error::ALL_CODES {
         codes.push(("platform-oauth", code));
     }
+    // 应用接入（REQ-016）：6 个平台错误码。
+    // ⚠️ 3 个 `app.*` 审计**事件码不进这里**（D223 同款）—— 事件码不是 HTTP 错误码。
+    for code in platform_app::error::ALL_CODES {
+        codes.push(("platform-app", code));
+    }
     // 组织事件码（通知标题，不是 HTTP 错误码）—— 同一个 `TITLES` 表。
     for code in platform_org::notify::OrgEventKind::ALL_CODES {
         codes.push(("platform-org::notify", code));
@@ -160,17 +165,25 @@ fn titles_cover_every_code() {
 ///
 /// REQ-022（出站 IdP）再加 **9** 个码（`OAUTH_*`）→ 84 + 9 = **93**。
 ///
+/// REQ-016（应用接入）再加 **6** 个码（`APP_*`）→ 93 + 6 = **99**。
+///
 /// ⚠️ **不是** 102：8 个 `oauth.*` 审计**事件码不进 `TITLES`**（D223）——
 /// 进了会让本文件的三个既有断言必红，且事件码不进响应体。
+/// 同理 3 个 `app.*` 审计事件码也不进（D223 同款）。
 #[test]
 fn the_title_table_has_the_pinned_number_of_rows() {
     const BASELINE_ROWS_BEFORE_REQ_013: usize = 58;
     const REQ_013_NEW_CODES: usize = 21;
     const REQ_014_NEW_CODES: usize = 5;
     const REQ_022_NEW_CODES: usize = 9;
+    const REQ_016_NEW_CODES: usize = 6;
     assert_eq!(
         TITLES.len(),
-        BASELINE_ROWS_BEFORE_REQ_013 + REQ_013_NEW_CODES + REQ_014_NEW_CODES + REQ_022_NEW_CODES,
+        BASELINE_ROWS_BEFORE_REQ_013
+            + REQ_013_NEW_CODES
+            + REQ_014_NEW_CODES
+            + REQ_022_NEW_CODES
+            + REQ_016_NEW_CODES,
         "TITLES 行数变了：新增错误码必须同时登记标题（D125）"
     );
 }
