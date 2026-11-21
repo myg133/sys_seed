@@ -1,12 +1,33 @@
 # REQ-016 终版验收报告（BA 亲跑）
 
+> ## ✅ 独立复核结论：**PASS-WITH-RISK**（`req-016-independent-review.md`，44.6 KB）
+>
+> **核心指标**：**11 行判据里 0 行**是「指到的位置根本没有那个断言」（REQ-022 那轮是 **13 行**）。
+> 复核原话：「**BA 这次的方法论（§9.15 / §9.15.1）在源码层面是真的落地了 —— 这不是「看起来有」，是「打开就有」。**」
+>
+> **但复核抓到 1 个我漏掉的真实缺口 + 3 条 FINDING，已全部处置**：
+>
+> | # | 内容 | 处置 |
+> |---|---|---|
+> | **FINDING-1** | **`description` 全链路零覆盖** —— AC-156 要求「字段逐字回读」，但 11 行全绿 / 76+136+54+345 全绿 / E2E 6/6 全绿，**把这个用户可见字段改坏也测不出来** | ✅ **已补断言 + 变异验证**（把 `body.description.clone()` → `None` → 立刻红，报 `"description":null`） |
+> | **FINDING-2** | acceptance 的 AC-164 **自相矛盾**：写「三段式」却列两段式 `app.registered`；`object_type` 写 `app` 与已交付的 `oauth_client` 冲突 | ✅ 已修 → `app.registry.*` + `platform_app`，acceptance **rev 5** |
+> | **FINDING-3** | 复核期间**并发写 + 并发清库** → 数字与行号不可复现 | ✅ **冻结后重跑**：76 / 136 / 54 / 345 / 45 / 14 文件 / E2E 50 —— **全部一致** |
+> | **FINDING-4** | 我修的 `scan_dir`（跳过 `tests/`）有**残余风险**：若有人把生产代码写进 `tests/` 会漏 | ✅ 已写进 TD-053，并给更彻底的方案（显式豁免标记 `// audit-guard:allow`） |
+>
+> **复核最想提醒的一句**（值得记住）：
+> > **「判据存在」≠「判据覆盖了 AC 要求的全部字段」。**
+> > 下一轮不要只检查「判据是否存在」，还要检查**「AC 列出的每一个字段 / 每一个分支，是否都有对应的断言」**
+> > —— 这正是「有测试」和「测到位」的差别。
+
+
 - **需求**: REQ-016 应用接入与应用注册表（父需求 REQ-001）
 - **需求来源**: 用户原话**「9. 预留应用接入能力」**（2026-11-17）；与 REQ-022 同源（REQ-022 承 IdP 侧，本需求承应用侧）
 - **worktree**: `feature-REQ-016`（分支 `feature/REQ-016`，基线 `develop@aa5b305`）
 - **规格**: `acceptance.md` **rev 4**（**11 条 AC**）/ `decisions.md` **D262~D290** / `design-summary.md` **rev 2**
 - **执行**: 2026-11-21 20:59 ~ 21:12
 - **方法**: **每条判定都指到 `file:line` 的 `assert!` + 函数名**（`dev-guide §9.15 / §9.15.1`）
-- **结论**: **11 / 11 通过**；Rust 全量 **1177 passed / 0 failed / 0 ignored**；前端 **426**；E2E **50 passed / 0 skipped**
+- **结论**: **11 / 11 通过**（独立复核 **PASS-WITH-RISK**）；Rust 全量 **1177 passed / 0 failed / 0 ignored**；前端 **426**；E2E **50 passed / 0 skipped**
+- **冻结后重跑（FINDING-3）**：`platform-app` 76 / `platform-server` 136 / `platform-audit` 54 / shell 345 / i18n 45 / capabilities 14 文件 / E2E 50 —— **与首跑逐项一致**
 
 ---
 
@@ -55,7 +76,7 @@
 | platform-server | **136** | +5（`app_real_stack.rs`） |
 | xtask | 51 | |
 | sandbox | 33 | |
-| **合计** | **1177** | **0 failed / 0 ignored** |
+| **合计** | **1177** | **0 failed / 0 ignored**（**冻结后重跑复现**） |
 
 **聚合命令（我自己跑的）**：
 ```bash

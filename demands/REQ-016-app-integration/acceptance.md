@@ -2,7 +2,7 @@
 
 - **需求编号**: REQ-016
 - **父需求**: REQ-001
-- **状态**: **rev 4**（2026-11-21 —— QA 挑刺 39 条全部接受后的裁决已落地：**D276~D285**）
+- **状态**: **rev 5**（2026-11-21 —— 独立复核 FINDING-1/2 的修正：补 `description` 回读断言 + 修 AC-164 事件码口径）
 - **对应验收标准**: **11 条**（AC-S-024（既有）+ **AC-S-156 ~ AC-S-165**）
   + **1 个「明确不做」清单**（AC-S-163.b，**不是 AC**，是防止后人以为漏了的说明）
 - **决策依据**: [decisions.md](decisions.md) **rev 2（D262~D285）**
@@ -385,11 +385,16 @@ rev 2 只有 **1 条 AC**（AC-S-024），而 `demand.md` 列了 **4 项功能�
   2. 查 `platform_audit_log`（`tenant-a`）；
   3. 查每条记录的字段集（契约 C12）。
 - **预期结果**:
-  - 至少产生这 **3** 个事件码（D215 同款命名规范：三段式 `app.*`）：
-    `app.registered` / `app.updated` / `app.deleted`；
+  - 至少产生这 **3** 个事件码（D215 同款命名规范：**三段式** `app.registry.*`
+    —— ⚠️ **rev 5 修正**：原文写「三段式」却列了两段式的 `app.registered`，
+    **自相矛盾**；已按已交付的 `oauth.client.registered` 口径统一为三段式，
+    并与用例集 `TC-016-053/054` 一致（独立复核 FINDING-2）：
+    `app.registry.registered` / `app.registry.updated` / `app.registry.deleted`；
   - 每条含 `actor_id` / `action` / `object_type` / `object_id` / `ip` / `user_agent` /
     `created_at` / `prev_hash` / `hash`（契约 C12 的固定字段集）；
-  - `object_type` **恰好**是 `app`；
+  - `object_type` **恰好**是 `platform_app`（⚠️ **rev 5 修正**：原文写 `app`
+    —— 与已交付的 `oauth_client` 口径冲突；`object_type` 用**表名语义**，
+    见 `platform-oauth` 的 `oauth_client`）；
   - `object_id` 是该应用的 `appId`；
   - **哈希链自洽**：`ChainVerifier::verify(tenant-a)` → `ok == true`。
 - **类型**: 安全
