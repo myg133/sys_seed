@@ -43,21 +43,34 @@ rev 2 只有 **1 条 AC**（AC-S-024），而 `demand.md` 列了 **4 项功能�
 | 静态扫描 | 必须带**阳性对照**（否则「0 命中」不可信） | dev-guide §9.2 |
 | 判据落点 | 报告必须指到 `file:line` 的 `assert!`，且**同时给函数名** | **dev-guide §9.15 / §9.15.1** |
 
-### 本需求的平台错误码（**8 个**）
+### 本需求的平台错误码（**6 个**）
 
-| 码 | HTTP | 何时 |
-|---|---|---|
-| `APP_NOT_FOUND` | 404 | 应用不存在 |
-| `APP_DUPLICATED` | 409 | 同租户内 `client_id` 或 `display_name` 重复 |
-| `APP_CLIENT_INVALID` | 400 | 引用的 client 不存在 / 已停用 / 已过期 |
-| `APP_LAUNCH_URL_INVALID` | 400 | `launch_url` 的 scheme 非法（非 `https`，且未开 `app.icon.allowHttp`） |
-| `APP_ICON_URL_INVALID` | 400 | `icon_url` 的 scheme 非法（同上） |
-| `APP_INVALID_REQUEST` | 400 | 参数缺失 / 类型错 |
-| `APP_REGISTRY_MISMATCH` | 500 | 启动对账失败（权限点 manifest ↔ DB 不一致） |
-| `APP_INVALID_SCOPE_PROJECTION` | 500 | 内部一致性错误：scope 投影与 client 表不符（**不该发生**，出现即 bug） |
+| 码 | HTTP | 何时 | 哪个 AC 触发它 |
+|---|---|---|---|
+| `APP_NOT_FOUND` | 404 | 应用不存在 | AC-S-156 步骤 6 |
+| `APP_DUPLICATED` | 409 | 同租户内 `client_id` 或 `display_name` 重复 | AC-S-156 **路径 2** |
+| `APP_CLIENT_INVALID` | 400 | 引用的 client 不存在 / 已停用 / 已过期 | AC-S-158 路径 1/2 |
+| `APP_LAUNCH_URL_INVALID` | 400 | `launch_url` 的 scheme 非法 | AC-S-156 **路径 3** |
+| `APP_ICON_URL_INVALID` | 400 | `icon_url` 的 scheme 非法 | AC-S-156 **路径 4** |
+| `APP_INVALID_REQUEST` | 400 | 缺必填字段 / 类型错 | AC-S-156 **路径 5** |
 
-⚠️ **`TITLES` 行数**：**93 → 101**（58 + 21 + 5 + 9 + **8**）。
-⚠️ 事件码（4 个 `app.*`）**不进 `TITLES`**（D223 同款口径）。
+> ⚠️ **rev 3 修正：错误码从 8 个**删到** 6 个**（删掉 `APP_REGISTRY_MISMATCH` 与
+> `APP_INVALID_SCOPE_PROJECTION`）。
+>
+> **理由与 REQ-022 的 D226 完全同款**：一个**没有任何 AC 会触发它**的码 = **死码**，
+> 却要在 i18n 词库占一条、在 `TITLES` 占一行。
+>
+> - **`APP_REGISTRY_MISMATCH`**：**启动对账失败时进程直接退出，根本没有 HTTP 响应**
+>   → 它不可能是 HTTP 码（AC-S-165 步骤 2 的判据是「**退出码非 0** + 日志列出缺失编码」，
+>   不是「返回某个码」）。**删除**。
+> - **`APP_INVALID_SCOPE_PROJECTION`**：scope 是**只读投影**（D266），
+>   应用表根本不存 scope → 这个「投影与 client 不符」的状态**构造不出来**。**删除**。
+>
+> → **规则（再次）**：**每个错误码必须有一个 AC 会真的触发它**，否则不许登记。
+> → `TITLES` 行数：**93 → 99**（58 + 21 + 5 + 9 + **6**），**不是 101**。
+>
+> ⚠️ 事件码（**3 个** `app.*`：`app.registered` / `app.updated` / `app.deleted`）
+> **不进 `TITLES`**（D223 同款口径）。
 
 ---
 
@@ -95,22 +108,42 @@ rev 2 只有 **1 条 AC**（AC-S-024），而 `demand.md` 列了 **4 项功能�
     **持 `app:registry:read` / `app:registry:write` / `app:registry:delete`**
     —— **由 `scripts/seed-e2e.sh` 播种**；
   - 已存在 `client-A`（REQ-022 的 client，`confidential`）。
-- **测试步骤**:
-  1. `POST /api/apps`，body 含 `clientId` / `displayName` / `description` / `category` /
+- **测试步骤**（**主路径 + 5 条独立路径**）:
+  1. （主）`POST /api/apps`，body 含 `clientId` / `displayName` / `description` / `category` /
      `iconUrl` / `launchUrl` / `sortOrder`；
-  2. 读响应；3. `GET /api/apps` 列出；4. `GET /api/apps/{appId}` 读单个；
-  5. `PATCH /api/apps/{appId}` 改 `displayName` 与 `sortOrder`；
-  6. `DELETE /api/apps/{appId}` 后再查；
-  7. **查 `platform_app` 的列集合**（`information_schema.columns`）。
+  2. （主）读响应；3. `GET /api/apps` 列出；4. `GET /api/apps/{appId}` 读单个；
+  5. （主）`PATCH /api/apps/{appId}` 改 `displayName` 与 `sortOrder`；
+  6. （主）`DELETE /api/apps/{appId}` 后再查；
+  7. （主）**查 `platform_app` 的列集合**（`information_schema.columns`）；
+  8. **路径 2（重复）**：用**同一个 `clientId`** 再 `POST` 一次 → 再改用**同一个 `displayName`**
+     但**另一个** `clientId` `POST` 一次；
+  9. **路径 3（`launch_url` 的 scheme）**：连打 **5 次** `POST`，`launchUrl` 依次为
+     `"not-a-url"` / `"javascript:alert(1)"` / `"data:text/html,<script>alert(1)</script>"` /
+     `"ftp://x.example/a"` / `"http://x.example/a"`（**默认配置**下 `app.icon.allowHttp = false`）；
+  10. **路径 4（`icon_url` 的 scheme）**：同路径 3 的 5 种取值，改成填 `iconUrl`；
+  11. **路径 5（缺必填）**：分别省略 `clientId` / `displayName` 各 `POST` 一次，
+      再传 `sortOrder: "abc"`（类型错）一次。
 - **预期结果**:
-  - 步骤 2：**201 CREATED**，含 `appId`（非空、唯一）、`clientId`、`displayName` …
+  - 步骤 2：**201 CREATED**，含 `appId`（非空、唯一）、`clientId`、`displayName` …；
   - 步骤 3/4：字段**逐字**回读一致；
   - 步骤 5：**200**，改后的值生效；
   - 步骤 6：`GET` 返回 **404** + `APP_NOT_FOUND`；
-  - 步骤 7：列集合**恰好**是 D265 那 11 列 ——
+  - 步骤 7：列集合**恰好**是 D265 那 **12** 列 ——
     ⚠️ **不含** `client_secret_hash` / `redirect_uris` / `allowed_grant_types` /
-    `allowed_scopes` / `backchannel_logout_uri` / `frontchannel_logout_uri`（**引用而非复制**）。
-- **类型**: 功能
+    `allowed_scopes` / `backchannel_logout_uri` / `frontchannel_logout_uri`（**引用而非复制**）；
+  - 步骤 8：**两次都是 409** + `APP_DUPLICATED`；
+  - 步骤 9：**5 次全部 400** + `APP_LAUNCH_URL_INVALID`
+    ⚠️ **`javascript:` 与 `data:` 必须被拒**（前者是脚本注入、后者可嵌 HTML → 打开即 XSS）
+    → 这条是**安全判据**，不是格式洁癖；
+  - 步骤 10：**5 次全部 400** + `APP_ICON_URL_INVALID`（同上）；
+  - 步骤 11：**3 次全部 400** + `APP_INVALID_REQUEST`。
+- **类型**: 功能 / 安全
+
+> ⚠️ **rev 3 补充说明**：步骤 8~11 是**为了让 4 个错误码都有触发点**而加的
+> （原先 8 个码里有 6 个没有任何 AC 会触发 = 死码，见 §全局约定 的修正说明）。
+> 其中**步骤 9 的 `javascript:` / `data:` 是安全判据** —— `launch_url` 由租户管理员填，
+> 但用户点击时是**整页跳转**（`kind="external"`，D269）→ 若允许 `javascript:`，
+> 等于给了租户管理员一个对**本租户所有用户**执行脚本的入口。
 
 ---
 

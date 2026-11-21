@@ -27,9 +27,9 @@
                    ▼                          ▼
    ┌───────────────────────────┐   ┌──────────────────────────┐
    │ platform-app（**新 crate**）│   │ platform-oauth（既有）    │
-   │  · 2 张表 + 8 个端点       │──▶│  · platform_oauth_client  │
+   │  · 2 张表 + 10 个端点      │──▶│  · platform_oauth_client  │
    │  · 3 个权限点              │只读│    （**引用**，不复制）     │
-   │  · 4 个审计事件码          │   │                          │
+   │  · 3 个审计事件码          │   │                          │
    └───────────┬───────────────┘   └──────────────────────────┘
                ▼
         platform-core / platform-db
@@ -98,7 +98,7 @@
 
 ---
 
-## 3. 端点清单（**8 个**，一律 Problem Details）
+## 3. 端点清单（**10 个**，一律 Problem Details）
 
 | 方法 | 路径 | 权限点 / 认证 | 作用 |
 |---|---|---|---|
@@ -113,7 +113,7 @@
 | `POST` | `/api/apps/{appId}/access` | **登录即可** | 记一次访问（UPSERT） |
 | `GET` | `/api/apps/navigation` | **登录即可** | **导航项**（module + app 合并，按权限点过滤） |
 
-> 实际 **10 个**（acceptance 写「8 个」是笔误 —— **以本表为准**，10 个）。
+> **共 10 个端点**（本表是唯一权威）。acceptance 的「完成定义对照」里若写 8 个 → 以本表为准。
 
 ### 3.1 跨栈 JSON 字段（**D258 同款，钉死**）
 
@@ -217,16 +217,20 @@ routes = [...createRoutes(client, …), ...routesFromNavigation(navigation.items
 
 ---
 
-## 5. 错误码（**8 个**）
+## 5. 错误码（**6 个**）
 
 见 [acceptance.md](acceptance.md) §全局约定 的表。登记按 **D213 的 8 处**：
 常量 / enum 变体 / `code()` / `status()` / `detail()` / `params()` / `ALL_CODES` / 测试的两个数组。
 
 **外加**：
-- `crates/platform-core/src/titles.rs` —— **+8** 条 ASCII 标题（**93 → 101**，已实测 93 是本轮基线）
-- `packages/i18n/src/locales/{zh-CN,en-US}.json` —— 8 个 `error.APP_*`
+- `crates/platform-core/src/titles.rs` —— **+6** 条 ASCII 标题（**93 → 99**，已实测 93 是本轮基线）
+- `packages/i18n/src/locales/{zh-CN,en-US}.json` —— 6 个 `error.APP_*`
 - `crates/platform-server/tests/i18n_titles.rs` —— `all_codes()` 加一行 +
-  `const REQ_016_NEW_CODES: usize = 8;`（断言 **101**）
+  `const REQ_016_NEW_CODES: usize = 6;`（断言 **99**）
+
+> ⚠️ **rev 3 修正**：从 8 个删到 6 个（删 `APP_REGISTRY_MISMATCH` / `APP_INVALID_SCOPE_PROJECTION`）。
+> **理由同 REQ-022 的 D226**：没有任何 AC 会触发它的码 = 死码。
+> 详见 [acceptance.md](acceptance.md) §全局约定 的修正说明。
 
 ---
 
