@@ -212,9 +212,7 @@ async fn setup() -> Fixture {
         admin: admin.clone(),
         service,
         state,
-        cleanup: Cleanup {
-            admin_url: url,
-        },
+        cleanup: Cleanup { admin_url: url },
     }
 }
 
@@ -275,13 +273,23 @@ impl Drop for Cleanup {
 /// 否则别处（以及本进程内）的缓存不失效、还留着旧值。
 async fn clear_i18n(pool: &sqlx::PgPool) {
     sqlx::query("DELETE FROM platform_config WHERE key = ANY($1)")
-        .bind(I18N_KEYS.iter().map(|key| key.to_string()).collect::<Vec<_>>())
+        .bind(
+            I18N_KEYS
+                .iter()
+                .map(|key| key.to_string())
+                .collect::<Vec<_>>(),
+        )
         .execute(pool)
         .await
         .expect("清理平台级 i18n 夹具应成功");
     sqlx::query("DELETE FROM platform_tenant_config WHERE tenant_id = $1 AND key = ANY($2)")
         .bind(TENANT)
-        .bind(I18N_KEYS.iter().map(|key| key.to_string()).collect::<Vec<_>>())
+        .bind(
+            I18N_KEYS
+                .iter()
+                .map(|key| key.to_string())
+                .collect::<Vec<_>>(),
+        )
         .execute(pool)
         .await
         .expect("清理租户级 i18n 夹具应成功");
@@ -431,7 +439,10 @@ async fn the_platform_layer_reaches_the_http_context_as_source_platform() {
     // 时区：平台层的 `America/New_York` 生效。
     assert_eq!(body["timezone"], "America/New_York", "平台级的时区必须生效");
     assert_eq!(body["sources"]["timezone"], "platform");
-    assert_ne!(body["timezone"], "Asia/Shanghai", "不能退回 manifest 默认值");
+    assert_ne!(
+        body["timezone"], "Asia/Shanghai",
+        "不能退回 manifest 默认值"
+    );
 
     // 币种：平台层的 `USD` 生效。
     assert_eq!(body["currency"], "USD", "平台级的币种必须生效");
@@ -475,7 +486,10 @@ async fn the_tenant_layer_wins_over_the_platform_layer_end_to_end() {
     assert_eq!(body["sources"]["locale"], "tenant");
     assert_ne!(body["locale"], "zh-CN", "不能取平台层的值");
 
-    assert_eq!(body["timezone"], "Europe/London", "租户层的时区必须压过平台层");
+    assert_eq!(
+        body["timezone"], "Europe/London",
+        "租户层的时区必须压过平台层"
+    );
     assert_eq!(body["sources"]["timezone"], "tenant");
     assert_ne!(body["timezone"], "America/New_York", "不能取平台层的值");
 

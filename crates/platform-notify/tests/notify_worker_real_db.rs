@@ -309,10 +309,7 @@ async fn five_failures_lead_to_dead_letter() {
     let reason = delivery_field(&fixture, &id, "last_error")
         .await
         .unwrap_or_default();
-    assert!(
-        reason.contains("550"),
-        "死信必须保留失败原因：{reason}"
-    );
+    assert!(reason.contains("550"), "死信必须保留失败原因：{reason}");
 }
 
 /// **AC-S-171 步骤 3/4**：配置**真的被读**（改 `maxAttempts=2` → 第 2 次就死信）。

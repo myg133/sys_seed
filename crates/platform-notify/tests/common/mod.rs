@@ -52,7 +52,8 @@ pub fn repo_root() -> PathBuf {
 }
 
 fn read_file(path: &Path) -> String {
-    std::fs::read_to_string(path).unwrap_or_else(|err| panic!("读取 {} 失败：{err}", path.display()))
+    std::fs::read_to_string(path)
+        .unwrap_or_else(|err| panic!("读取 {} 失败：{err}", path.display()))
 }
 
 /// 测试库地址：只允许 `base_test`。
@@ -203,7 +204,10 @@ impl StaticConfigSource {
 
     /// 改一个键（用例用）。
     pub fn set(&self, key: &str, value: i64) {
-        self.inner.lock().expect("锁").insert(key.to_string(), value);
+        self.inner
+            .lock()
+            .expect("锁")
+            .insert(key.to_string(), value);
     }
 }
 
@@ -385,7 +389,9 @@ impl Fixture {
 
     /// `tenant-a` 下某用户的上下文。
     pub fn ctx_user(&self, user_id: &str) -> RequestContext {
-        RequestContext::new().with_tenant(TENANT_A).with_user(user_id)
+        RequestContext::new()
+            .with_tenant(TENANT_A)
+            .with_user(user_id)
     }
 }
 

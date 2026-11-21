@@ -200,8 +200,14 @@ pub const TITLES: &[(&str, &str)] = &[
     // ⚠️ 4 个 `notify.*` 审计**事件码不进本表**（D223）—— 事件码不是 HTTP 错误码。
     //    与 `org.*` 的 6 行**不冲突**：那 6 个是「通知标题的文案来源」，
     //    由 `OrgEventKind::title()` 显式查表；`notify.*` 是审计的 `action`，没人查标题。
-    ("NOTIFY_TEMPLATE_NOT_FOUND", "Notification Template Not Found"),
-    ("NOTIFY_TEMPLATE_DUPLICATED", "Notification Template Duplicated"),
+    (
+        "NOTIFY_TEMPLATE_NOT_FOUND",
+        "Notification Template Not Found",
+    ),
+    (
+        "NOTIFY_TEMPLATE_DUPLICATED",
+        "Notification Template Duplicated",
+    ),
     (
         "NOTIFY_TEMPLATE_MISSING_VARIABLE",
         "Notification Template Missing Variable",
@@ -214,9 +220,18 @@ pub const TITLES: &[(&str, &str)] = &[
         "NOTIFY_CHANNEL_NOT_CONFIGURED",
         "Notification Channel Not Configured",
     ),
-    ("NOTIFY_CATEGORY_MANDATORY", "Notification Category Mandatory"),
-    ("NOTIFY_NOT_DEAD_LETTER", "Notification Delivery Not Dead Letter"),
-    ("NOTIFY_SENSITIVE_PAYLOAD", "Notification Payload Contains Sensitive Keys"),
+    (
+        "NOTIFY_CATEGORY_MANDATORY",
+        "Notification Category Mandatory",
+    ),
+    (
+        "NOTIFY_NOT_DEAD_LETTER",
+        "Notification Delivery Not Dead Letter",
+    ),
+    (
+        "NOTIFY_SENSITIVE_PAYLOAD",
+        "Notification Payload Contains Sensitive Keys",
+    ),
     // -- platform-org 的通知标题（事件码，不是 HTTP 错误码）------------------
     ("org.member-added", "Organization Membership Added"),
     ("org.member-removed", "Organization Membership Removed"),

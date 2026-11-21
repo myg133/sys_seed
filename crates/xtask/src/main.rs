@@ -51,10 +51,8 @@ fn run_notify(args: &xtask::cli::NotifyArgs) -> Result<ExitCode> {
     match &args.action {
         xtask::cli::NotifyAction::Worker(worker) => {
             let database_url = database_url_of(worker.database_url.clone())?;
-            let (service, registry) = runtime.block_on(xtask::notify::build_service(
-                &database_url,
-                &worker.tenant,
-            ))?;
+            let (service, registry) =
+                runtime.block_on(xtask::notify::build_service(&database_url, &worker.tenant))?;
             let ctx = platform_core::RequestContext::new().with_tenant(worker.tenant.clone());
             let outcomes = runtime.block_on(xtask::notify::run_rounds(
                 &service,

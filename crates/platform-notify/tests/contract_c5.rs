@@ -133,7 +133,9 @@ fn every_notify_config_key_is_platform_scoped() {
         .expect("manifest 应可读");
     let manifest =
         platform_core::extension::manifest::Manifest::parse_checked(&raw).expect("manifest 应合法");
-    let config = manifest.config.expect("manifest 必须声明 config 段（D304）");
+    let config = manifest
+        .config
+        .expect("manifest 必须声明 config 段（D304）");
 
     assert_eq!(config.len(), 5, "恰好 5 个配置键（D304 rev 2）");
     for key in [
@@ -143,7 +145,9 @@ fn every_notify_config_key_is_platform_scoped() {
         "notify.retryMaxSeconds",
         "notify.deliveringTimeoutSeconds",
     ] {
-        let spec = config.get(key).unwrap_or_else(|| panic!("缺少配置键 {key}"));
+        let spec = config
+            .get(key)
+            .unwrap_or_else(|| panic!("缺少配置键 {key}"));
         assert_eq!(
             spec.scope,
             ConfigScope::Platform,
@@ -239,9 +243,8 @@ fn the_server_test_registers_the_notify_error_codes() {
 #[test]
 fn the_pinned_row_count_includes_the_notify_codes() {
     let root = repo_root();
-    let source =
-        std::fs::read_to_string(root.join("crates/platform-server/tests/i18n_titles.rs"))
-            .expect("i18n_titles.rs 应可读");
+    let source = std::fs::read_to_string(root.join("crates/platform-server/tests/i18n_titles.rs"))
+        .expect("i18n_titles.rs 应可读");
 
     // 阳性对照：既有的 REQ_016 那行必须在。
     assert!(

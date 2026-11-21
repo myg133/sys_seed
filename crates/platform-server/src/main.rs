@@ -574,7 +574,6 @@ async fn serve() -> Result<(), Failure> {
         app
     };
 
-
     // 应用接入与应用注册表（REQ-016）：`/api/apps/*`。
     //
     // ⚠️ **装配顺序**：应用的运行期配置读 `platform_config`（每请求读）→
@@ -583,7 +582,14 @@ async fn serve() -> Result<(), Failure> {
     // ⚠️ **IAM 没配 → 不提供 `/api/apps/*`**（与 `/api/oauth/*` 同款口径）：
     //    应用注册表按「登录用户 / 租户」隔离，没有 IAM 就没有可验的登录会话。
     let app = if let Some((iam, checker)) = app_iam.clone() {
-        let app_state = build_app_state(&config, iam, config_service.clone(), audit_sink.clone(), checker).await?;
+        let app_state = build_app_state(
+            &config,
+            iam,
+            config_service.clone(),
+            audit_sink.clone(),
+            checker,
+        )
+        .await?;
         let app = app.nest("/api/apps", platform_app::http::router(app_state));
         tracing::info!("应用接入已启用：/api/apps/*（注册表 / 工作台 / 最近 / 导航）");
         app

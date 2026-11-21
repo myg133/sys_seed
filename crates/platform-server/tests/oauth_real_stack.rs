@@ -116,7 +116,8 @@ async fn world() -> World {
         .connect(&admin_url)
         .await
         .expect("管理员连接应当可建");
-    for scope in platform_db::collect_scopes(&repo_root()).expect("租户作用域声明应能收集") {
+    for scope in platform_db::collect_scopes(&repo_root()).expect("租户作用域声明应能收集")
+    {
         if scope
             .spec
             .tables
@@ -144,8 +145,7 @@ async fn world() -> World {
         RbacStore::new(tenant_db.clone()),
         ScopePolicy::default(),
     ));
-    let provider: Arc<dyn platform_core::extension::permission::PermissionProvider> =
-        rbac.clone();
+    let provider: Arc<dyn platform_core::extension::permission::PermissionProvider> = rbac.clone();
     assert!(
         iam.set_permission_provider(provider),
         "权限点提供者应当注入成功"
@@ -317,10 +317,7 @@ impl World {
     }
 
     /// 发一个请求 → (状态码, 头, 原始字节)。
-    async fn send(
-        &self,
-        request: Request<Body>,
-    ) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+    async fn send(&self, request: Request<Body>) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
         let response = self
             .router
             .clone()
@@ -349,9 +346,7 @@ impl World {
         if let Some(tenant) = tenant {
             builder = builder.header("x-tenant-id", tenant);
         }
-        let (status, headers, bytes) = self
-            .send(builder.body(Body::empty()).expect("请求"))
-            .await;
+        let (status, headers, bytes) = self.send(builder.body(Body::empty()).expect("请求")).await;
         let value = if bytes.is_empty() {
             Value::Null
         } else {
@@ -428,10 +423,7 @@ async fn an_oauth_token_is_rejected_by_the_business_endpoints() {
         "OAuth 令牌打审计端点必须 401：{body}"
     );
     assert_eq!(body["code"], "UNAUTHENTICATED");
-    assert!(
-        body.get("error").is_none(),
-        "不得用协议错误体：{body}"
-    );
+    assert!(body.get("error").is_none(), "不得用协议错误体：{body}");
 
     // 步骤 3：**同一个**端点再来一次（AC 特意写了两遍）。
     let (status, _, body) = world
@@ -575,10 +567,7 @@ async fn the_oauth_actions_land_in_the_audit_table_with_an_intact_chain() {
         )
         .await;
     let preview: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    let ticket = preview["ticket"]
-        .as_str()
-        .expect("应当有票据")
-        .to_string();
+    let ticket = preview["ticket"].as_str().expect("应当有票据").to_string();
     let (_, _, bytes) = world
         .send(
             Request::builder()
@@ -592,9 +581,7 @@ async fn the_oauth_actions_land_in_the_audit_table_with_an_intact_chain() {
         )
         .await;
     let confirmed: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-    let redirect = confirmed["redirectTo"]
-        .as_str()
-        .expect("应当有 redirectTo");
+    let redirect = confirmed["redirectTo"].as_str().expect("应当有 redirectTo");
     let code = redirect
         .split("code=")
         .nth(1)
@@ -658,7 +645,18 @@ async fn the_oauth_actions_land_in_the_audit_table_with_an_intact_chain() {
     assert_eq!(status, StatusCode::OK, "登出应当 200");
 
     // ---- 步骤 2：查**审计表**（不是内存 Vec）----
-    let rows: Vec<(String, Option<String>, String, Option<String>, String, String, String, String, String, String)> = sqlx::query_as(
+    let rows: Vec<(
+        String,
+        Option<String>,
+        String,
+        Option<String>,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+    )> = sqlx::query_as(
         "SELECT action, actor_id, object_type, object_id, ip, user_agent, \
                 created_at::text, prev_hash, hash, tenant_id \
          FROM platform_audit_log WHERE tenant_id = $1 ORDER BY created_at ASC, id ASC",
@@ -683,7 +681,19 @@ async fn the_oauth_actions_land_in_the_audit_table_with_an_intact_chain() {
     assert!(rows.len() >= 5, "至少 5 条审计行，实际 {} 条", rows.len());
 
     // ---- 步骤 2（续）：契约 C12 的固定字段集 ----
-    for (action, actor_id, object_type, object_id, ip, user_agent, created_at, prev_hash, hash, _) in &rows {
+    for (
+        action,
+        actor_id,
+        object_type,
+        object_id,
+        ip,
+        user_agent,
+        created_at,
+        prev_hash,
+        hash,
+        _,
+    ) in &rows
+    {
         assert!(!action.is_empty(), "action 不得为空");
         assert!(!object_type.is_empty(), "object_type 不得为空");
         assert!(!created_at.is_empty(), "created_at 不得为空");
@@ -712,11 +722,7 @@ async fn the_oauth_actions_land_in_the_audit_table_with_an_intact_chain() {
             .expect("应用角色连接"),
     );
     let report = verifier.verify(&ctx).await.expect("链校验应当能跑");
-    assert!(
-        report.ok,
-        "哈希链必须自洽（断裂：{:?}）",
-        report.broken
-    );
+    assert!(report.ok, "哈希链必须自洽（断裂：{:?}）", report.broken);
     assert!(
         report.checked >= rows.len(),
         "链校验必须真的检查了那些行（checked={} rows={}",
@@ -750,10 +756,7 @@ async fn the_oauth_actions_land_in_the_audit_table_with_an_intact_chain() {
 
     let real_rows = scan_rows(world.admin.clone(), tenant.clone()).await;
     let hits = hits_of(&real_rows);
-    assert!(
-        hits.is_empty(),
-        "真实审计数据不得命中敏感键：{hits:?}"
-    );
+    assert!(hits.is_empty(), "真实审计数据不得命中敏感键：{hits:?}");
 
     // ---- 步骤 4（阳性对照）：管理员直连插一条含假 secret 的行 ----
     let control_id = format!("audit-control-{}", uuid::Uuid::new_v4().simple());
@@ -793,7 +796,9 @@ async fn the_oauth_actions_land_in_the_audit_table_with_an_intact_chain() {
     // ---- 额外一面（AC-S-136 步骤 4）：审计表文本不得含 client 明文 secret ----
     let mut all_text: Vec<String> = Vec::new();
     for (action, object_type, object_id, before, after) in &after_delete {
-        all_text.push(format!("{action} {object_type} {object_id} {before} {after}"));
+        all_text.push(format!(
+            "{action} {object_type} {object_id} {before} {after}"
+        ));
     }
     // 也把新建 client 的明文 secret 加进来一起比对（它**不该**出现在审计表里）。
     let haystack = all_text.join("\n");

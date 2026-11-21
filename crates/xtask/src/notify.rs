@@ -31,8 +31,8 @@ use platform_notify::config::{NotifyConfig, NotifyConfigSource, SmtpConfig};
 use platform_notify::model::channel;
 use platform_notify::service::NotifyService;
 use platform_notify::store::NotifyStore;
-use platform_notify::worker::{TickStats, tick};
 use platform_notify::worker::PlatformChannel;
+use platform_notify::worker::{TickStats, tick};
 
 /// 一轮的结果（打印用）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -126,7 +126,10 @@ pub async fn run_rounds(
 /// 本命令不装配 `platform-config` 的 `ConfigSource`（那需要 epoch 缓存等一整套）——
 /// 用 `RetryPolicy::default()`（与 manifest 默认值逐字一致，`contract_c5` 钉死了）。
 /// 生产环境要读库里的配置时，由装配层注入真正的 `NotifyConfigSource`。
-pub async fn build_service(database_url: &str, tenant: &str) -> Result<(NotifyService, ChannelRegistry)> {
+pub async fn build_service(
+    database_url: &str,
+    tenant: &str,
+) -> Result<(NotifyService, ChannelRegistry)> {
     if tenant.trim().is_empty() {
         bail!("缺少租户 ID：投递记录是租户级的（D299），必须用 --tenant 指定");
     }
@@ -155,9 +158,9 @@ pub async fn build_service(database_url: &str, tenant: &str) -> Result<(NotifySe
             eprintln!("提示：Webhook 的出站 client 构造失败（{err}）→ webhook 通道将返回明确错误");
             registry.insert(
                 channel::WEBHOOK,
-                Arc::new(PlatformChannel::new(Arc::new(
-                    UnconfiguredSender::new(channel::WEBHOOK),
-                ))),
+                Arc::new(PlatformChannel::new(Arc::new(UnconfiguredSender::new(
+                    channel::WEBHOOK,
+                )))),
             );
         }
     }
@@ -176,9 +179,9 @@ pub async fn build_service(database_url: &str, tenant: &str) -> Result<(NotifySe
             );
             registry.insert(
                 channel::SMTP,
-                Arc::new(PlatformChannel::new(Arc::new(
-                    UnconfiguredSender::new(channel::SMTP),
-                ))),
+                Arc::new(PlatformChannel::new(Arc::new(UnconfiguredSender::new(
+                    channel::SMTP,
+                )))),
             );
         }
     }

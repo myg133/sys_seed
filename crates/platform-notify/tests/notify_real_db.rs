@@ -24,7 +24,7 @@ fn init_tracing() {
         .try_init();
 }
 use platform_notify::model::{category, status};
-use platform_notify::store::{TemplateUpdate, NewTemplate};
+use platform_notify::store::{NewTemplate, TemplateUpdate};
 
 /// **AC-S-023**：重投只重置死信那一条，**已成功的不重复投递**。
 ///
@@ -34,7 +34,15 @@ use platform_notify::store::{TemplateUpdate, NewTemplate};
 async fn resending_a_dead_letter_does_not_redeliver_the_delivered_one() {
     let fixture = setup().await;
     let ctx = fixture.ctx_a();
-    seed_template(&fixture, &ctx, "code", "in_app", "zh-CN", category::TRANSACTIONAL).await;
+    seed_template(
+        &fixture,
+        &ctx,
+        "code",
+        "in_app",
+        "zh-CN",
+        category::TRANSACTIONAL,
+    )
+    .await;
 
     let sender = CountingSender::new();
 
@@ -159,6 +167,46 @@ async fn resending_a_non_dead_letter_is_rejected_and_changes_nothing() {
     }
 }
 
+/// **AC-S-172 步骤 4**：重投一条**不存在**的记录 → 服务层报 `TemplateNotFound`
+/// （由 http 层翻成平台通用 **404 `NOT_FOUND`**）。
+///
+/// ⚠️ 本需求**不新增**「投递记录不存在」专用码（D303 的 8 个码每个都必须有 AC 触发它；
+/// 「记录不存在」是**防御性分支**，没有任何 AC 会走 → 加它就是死码，D226）。
+#[tokio::test]
+async fn resending_a_missing_delivery_reports_not_found() {
+    let fixture = setup().await;
+    let ctx = fixture.ctx_a();
+    let missing = uuid::Uuid::new_v4().to_string();
+
+    let err = fixture
+        .service
+        .resend_dead_letter(&ctx, &missing)
+        .await
+        .expect_err("不存在的记录必须报错");
+
+    // 服务层用 `TemplateNotFound` 作占位（http 层会换成通用 NOT_FOUND）。
+    // 这里钉两件事：① 必须是 404 族；② **不得**是 NOTIFY_NOT_DEAD_LETTER。
+    assert_eq!(
+        err.code(),
+        "NOTIFY_TEMPLATE_NOT_FOUND",
+        "服务层应以 404 族错误表示「记录不存在」（http 层翻成通用 NOT_FOUND）"
+    );
+    assert_ne!(
+        err.code(),
+        "NOTIFY_NOT_DEAD_LETTER",
+        "不存在 ≠ 不是死信 —— 两者必须区分开"
+    );
+
+    // 库里确实没有这一行（阳性对照：证明我们查的 id 真的是不存在的）。
+    let rows = fixture
+        .admin
+        .query_text(&format!(
+            "SELECT count(*)::text FROM platform_notify_delivery WHERE id = '{missing}'"
+        ))
+        .await;
+    assert_eq!(rows.first().map(String::as_str), Some("0"));
+}
+
 /// **AC-S-172 步骤 5**：并发两个重投 → **恰好 1 成功 1 失败**。
 ///
 /// ⚠️ 这条必须真并发：写成串行的话第一个已改成 `pending`，
@@ -181,7 +229,10 @@ async fn two_concurrent_resends_yield_exactly_one_success() {
         .expect("连接 2");
 
     let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
-    let make = |db: platform_db::TenantDb, barrier: std::sync::Arc<tokio::sync::Barrier>, ctx: platform_core::RequestContext, id: String| async move {
+    let make = |db: platform_db::TenantDb,
+                barrier: std::sync::Arc<tokio::sync::Barrier>,
+                ctx: platform_core::RequestContext,
+                id: String| async move {
         barrier.wait().await;
         let store = platform_notify::store::NotifyStore::new(db);
         store.resend_dead_letter(&ctx, &id).await
@@ -220,7 +271,11 @@ async fn the_locale_fallback_picks_the_right_row() {
             title_template: format!("{locale} 标题"),
             body_template: text.to_string(),
         };
-        fixture.service.create_template(&ctx, &new).await.expect("建模板");
+        fixture
+            .service
+            .create_template(&ctx, &new)
+            .await
+            .expect("建模板");
     }
 
     // 用户 locale = en-US → 取 en-US 那行。
@@ -266,7 +321,15 @@ async fn the_locale_fallback_picks_the_right_row() {
 async fn two_locales_of_the_same_template_coexist() {
     let fixture = setup().await;
     let ctx = fixture.ctx_a();
-    seed_template(&fixture, &ctx, "dup", "in_app", "zh-CN", category::TRANSACTIONAL).await;
+    seed_template(
+        &fixture,
+        &ctx,
+        "dup",
+        "in_app",
+        "zh-CN",
+        category::TRANSACTIONAL,
+    )
+    .await;
 
     // 同 code+channel，不同 locale → 必须成功（不是 409）。
     let other = NewTemplate {
@@ -395,7 +458,15 @@ async fn the_system_category_is_unaffected_and_unsubscribe_is_reversible() {
     let fixture = setup().await;
     let ctx = fixture.ctx_a();
     seed_template(&fixture, &ctx, "alert", "in_app", "zh-CN", category::SYSTEM).await;
-    seed_template(&fixture, &ctx, "promo", "in_app", "zh-CN", category::MARKETING).await;
+    seed_template(
+        &fixture,
+        &ctx,
+        "promo",
+        "in_app",
+        "zh-CN",
+        category::MARKETING,
+    )
+    .await;
 
     // 退订 marketing。
     fixture
@@ -425,7 +496,10 @@ async fn the_system_category_is_unaffected_and_unsubscribe_is_reversible() {
         )
         .await
         .expect("入队 system");
-    assert!(!system_outcome.opted_out, "system 类不该被 marketing 退订影响");
+    assert!(
+        !system_outcome.opted_out,
+        "system 类不该被 marketing 退订影响"
+    );
     assert_eq!(system_outcome.delivery.status, status::PENDING);
 
     // 重新订阅 marketing → 投递应成功（不 opt_out）。
@@ -544,14 +618,26 @@ async fn all_three_tables_are_protected_by_rls() {
     }
 
     // 应用角色连的是同一个库 —— 用 `service` 的 store 读（**RLS 生效**）。
-    let deliveries_a = fixture.service.list_deliveries(&fixture.ctx_a()).await.expect("读 delivery");
-    assert_eq!(deliveries_a.len(), 1, "tenant-a 只应看到自己的 1 条投递记录");
+    let deliveries_a = fixture
+        .service
+        .list_deliveries(&fixture.ctx_a())
+        .await
+        .expect("读 delivery");
+    assert_eq!(
+        deliveries_a.len(),
+        1,
+        "tenant-a 只应看到自己的 1 条投递记录"
+    );
     assert!(
         deliveries_a.iter().all(|row| row.tenant_id == TENANT_A),
         "tenantId 必须全部等于 tenant-a"
     );
 
-    let templates_a = fixture.service.list_templates(&fixture.ctx_a()).await.expect("读 template");
+    let templates_a = fixture
+        .service
+        .list_templates(&fixture.ctx_a())
+        .await
+        .expect("读 template");
     assert_eq!(templates_a.len(), 1, "tenant-a 只应看到自己的 1 个模板");
     assert!(
         templates_a.iter().all(|row| row.tenant_id == TENANT_A),
@@ -615,7 +701,15 @@ async fn the_delivery_table_has_exactly_the_eighteen_documented_columns() {
 async fn sensitive_payload_keys_are_rejected() {
     let fixture = setup().await;
     let ctx = fixture.ctx_a();
-    seed_template(&fixture, &ctx, "sec", "in_app", "zh-CN", category::TRANSACTIONAL).await;
+    seed_template(
+        &fixture,
+        &ctx,
+        "sec",
+        "in_app",
+        "zh-CN",
+        category::TRANSACTIONAL,
+    )
+    .await;
 
     for key in ["password", "clientSecret", "apiKey", "authorization"] {
         let mut payload = std::collections::BTreeMap::new();
