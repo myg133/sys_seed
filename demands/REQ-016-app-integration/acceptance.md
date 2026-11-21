@@ -2,51 +2,330 @@
 
 - **需求编号**: REQ-016
 - **父需求**: REQ-001
-- **状态**: rev 2（2026-11-20 —— 按 REQ-022 的 D210 改写 AC-S-024 的表述）
-- **更新时间**: 2026-11-20 23:58
+- **状态**: **rev 3**（2026-11-21 —— 补齐四件套：从 1 条 AC 扩到 **11 条**）
+- **对应验收标准**: **11 条**（AC-S-024（既有）+ **AC-S-156 ~ AC-S-165**）
+- **决策依据**: [decisions.md](decisions.md) rev 1（**D262~D274**）
+- **基线代码**: `develop` @ `aa5b305`
+- **更新时间**: 2026-11-21
 
 > 父需求的完整验收标准见 [REQ-001 acceptance.md](../REQ-001-platform-foundation/acceptance.md)。
 > 本文件只列出本子需求承担的部分。
 
-## 承接的父 AC
+## rev 3 变更摘要（**Dev 必读**）
 
-父 AC：AC-020、AC-021
+rev 2 只有 **1 条 AC**（AC-S-024），而 `demand.md` 列了 **4 项功能要求** →
+**1 条 AC 验收不了 4 项功能**。rev 3 补齐到 **11 条**。
 
-具体步骤见父需求 acceptance.md。
+**三个实测发现的缺口（在 `develop` @ `aa5b305` 上验的）**：
+
+1. **`manifest.json` 的 `menus[]` 有 schema 校验但没有任何 API 下发它**
+   （`crates/platform-core/src/extension/manifest.rs:120` `MenuSpec`；
+   `grep -rn "menus" crates/*/src/*.rs | grep -v manifest.rs` → 只有测试夹具里的 `"menus": []`）
+   → AC-S-162 是**从零建**的。
+2. **前端 `nav.ts` 是硬编码占位**，它自己的注释写着「**本期为占位数据，后续由应用注册表下发**」
+   → 本需求就是那个「后续」。
+3. **`platform_oauth_client` 没有「应用入口 URL」列**（只有 `redirect_uris` + 两个 logout URI）
+   → 必须新增 `platform_app.launch_url`（D269）。
+
+---
+
+## 全局约定
+
+| 项 | 约定 | 依据 |
+|---|---|---|
+| 应用连接角色 | **`base_app`**（`base_platform_app` 是 NOLOGIN 组角色，连不上） | D165 |
+| 造数 / 篡改连接 | **`base`**（表 owner + 超管） | — |
+| 库 | **`base_test`**（绝不写 `base_dev`） | dev-guide §9.8 |
+| `app.tenant_id` | **事务局部**；凡涉及租户上下文的查询**必须在单个事务内** `set_config` → 查询 | D148 |
+| 错误体 | **一律 Problem Details**（RFC 9457，契约 C6）—— 本需求**没有**协议端点 | 契约 C6 |
+| 字段名 | **camelCase**（契约 C13） | D167 |
+| 时间格式 | UTC、RFC3339、**微秒 6 位** | D142 |
+| 静态扫描 | 必须带**阳性对照**（否则「0 命中」不可信） | dev-guide §9.2 |
+| 判据落点 | 报告必须指到 `file:line` 的 `assert!`，且**同时给函数名** | **dev-guide §9.15 / §9.15.1** |
+
+### 本需求的平台错误码（**8 个**）
+
+| 码 | HTTP | 何时 |
+|---|---|---|
+| `APP_NOT_FOUND` | 404 | 应用不存在 |
+| `APP_DUPLICATED` | 409 | 同租户内 `client_id` 或 `display_name` 重复 |
+| `APP_CLIENT_INVALID` | 400 | 引用的 client 不存在 / 已停用 / 已过期 |
+| `APP_LAUNCH_URL_INVALID` | 400 | `launch_url` 的 scheme 非法（非 `https`，且未开 `app.icon.allowHttp`） |
+| `APP_ICON_URL_INVALID` | 400 | `icon_url` 的 scheme 非法（同上） |
+| `APP_INVALID_REQUEST` | 400 | 参数缺失 / 类型错 |
+| `APP_REGISTRY_MISMATCH` | 500 | 启动对账失败（权限点 manifest ↔ DB 不一致） |
+| `APP_INVALID_SCOPE_PROJECTION` | 500 | 内部一致性错误：scope 投影与 client 表不符（**不该发生**，出现即 bug） |
+
+⚠️ **`TITLES` 行数**：**93 → 101**（58 + 21 + 5 + 9 + **8**）。
+⚠️ 事件码（4 个 `app.*`）**不进 `TITLES`**（D223 同款口径）。
+
+---
 
 ## 本需求自有 AC
 
-### AC-S-024: 应用可撤销授权: 用户撤销后，该应用经**内省**校验的令牌**立即**失效
+---
 
-> ⚠️ **rev 2 改写（2026-11-20，REQ-022 的 D210）**：
-> rev 1 写的是「用户撤销后该应用的令牌**立即**失效」——
-> 这在「第三方应用只用 JWKS 验签」的模式下**做不到**：
-> 撤销信息不在 JWT 里，验签方**最长要等一个 access token TTL** 才知道。
-> 改成按**校验方式**分两档，两档都可机械判定。
+### AC-S-024: 应用可撤销授权：用户撤销后，该应用经**内省**校验的令牌**立即**失效
 
-- **前置条件**:
-  - `tenant-a` 下有用户，已对某个应用（REQ-022 的 `client-A`）授权；
-  - `client-A` 持有一枚由该授权签发的**有效** access token；
-  - 平台元数据可读（`oauth.accessTokenTtlSeconds` = 撤销延迟上界）。
+> ⚠️ **rev 2 已按 REQ-022 的 D210 改写**（原文见 rev 1）。本条**不变**，只在 rev 3 里补上
+> 「**REQ-022 已交付，本条现在是回归判据**」的说明。
+
+- **前置条件**: `tenant-a` 下有用户，已对 `client-A` 授权；`client-A` 持有一枚有效 access token；
+  平台元数据可读（`oauth.accessTokenTtlSeconds`）。
 - **测试步骤**:
-  1. 用户在「我的授权」页（REQ-022 交付）撤销该应用，或调
-     `POST /api/oauth/grants/revoke`；
-  2. **内省路径**：调 `POST /api/oauth/introspect` 校验那枚令牌；
-  3. **验签路径**：第三方应用用 JWKS 验签那枚令牌，读 `exp`；
-  4. 对照：读元数据里的 `access_token_expires_in`。
+  1. `POST /api/oauth/grants/revoke`（**REQ-022 的端点**）；
+  2. 内省那枚令牌：`POST /api/oauth/introspect`；
+  3. 第三方用 JWKS 验签那枚令牌，读 `exp`；
+  4. 读元数据里的 `access_token_expires_in`。
 - **预期结果**:
   - 步骤 2：`active = false` —— **立即失效**（不等待任何 TTL）；
-  - 步骤 3：签名**仍然有效**（签名本身没坏），
-    但 `exp` 距撤销时刻**不超过** `access_token_expires_in` 秒 → **最长延迟一个 TTL**；
-  - 步骤 4：`access_token_expires_in` 与步骤 3 的窗口**逐字一致**
-    （第三方据此知道自己的撤销延迟上界）。
+  - 步骤 3：签名**仍然有效**，但 `exp` 距撤销时刻**不超过** `access_token_expires_in` 秒；
+  - 步骤 4：`access_token_expires_in` 与步骤 3 的窗口**逐字一致**。
+- **类型**: 安全
+- **⚠️ 本条在 rev 3 里的定位**：REQ-022 的 AC-S-143 / 144 / 147 已验过同一件事。
+  本条是**跨需求的端到端回归判据** —— 在**应用注册表存在之后**再验一遍，
+  证明本需求**没有**破坏它。
+
+---
+
+### AC-S-156: 应用注册表可增删改查，且**引用**（不复制）client 的敏感字段
+
+- **前置条件**:
+  - `tenant-a` 下有管理员账号 `u-perm-app@example.com`，
+    **持 `app:registry:read` / `app:registry:write` / `app:registry:delete`**
+    —— **由 `scripts/seed-e2e.sh` 播种**；
+  - 已存在 `client-A`（REQ-022 的 client，`confidential`）。
+- **测试步骤**:
+  1. `POST /api/apps`，body 含 `clientId` / `displayName` / `description` / `category` /
+     `iconUrl` / `launchUrl` / `sortOrder`；
+  2. 读响应；3. `GET /api/apps` 列出；4. `GET /api/apps/{appId}` 读单个；
+  5. `PATCH /api/apps/{appId}` 改 `displayName` 与 `sortOrder`；
+  6. `DELETE /api/apps/{appId}` 后再查；
+  7. **查 `platform_app` 的列集合**（`information_schema.columns`）。
+- **预期结果**:
+  - 步骤 2：**201 CREATED**，含 `appId`（非空、唯一）、`clientId`、`displayName` …
+  - 步骤 3/4：字段**逐字**回读一致；
+  - 步骤 5：**200**，改后的值生效；
+  - 步骤 6：`GET` 返回 **404** + `APP_NOT_FOUND`；
+  - 步骤 7：列集合**恰好**是 D265 那 11 列 ——
+    ⚠️ **不含** `client_secret_hash` / `redirect_uris` / `allowed_grant_types` /
+    `allowed_scopes` / `backchannel_logout_uri` / `frontchannel_logout_uri`（**引用而非复制**）。
+- **类型**: 功能
+
+---
+
+### AC-S-157: 应用注册表**租户隔离**
+
+- **前置条件**: `tenant-a` 与 `tenant-b` 各有 1 个应用（**由 `scripts/seed-e2e.sh` 播种**）；
+  `crates/platform-app/manifest.json` 含 `tenantScoped` 段。
+- **测试步骤**:
+  1. 以 `tenant-a` 上下文查 `platform_app` 与 `platform_app_access`；
+  2. 以 `tenant-b` 上下文查同样两张表；
+  3. 以 `base`（超管）查全部行；
+  4. 以 `base_app` 角色（**不**手动 `set_config`）查 → 再在**单个事务内** `set_config` → 查；
+  5. **写侧**：以 `base_app`，单个事务内 `set_config('app.tenant_id','tenant-a')` 后
+     `INSERT` 一行 `tenant_id='tenant-b'` → 再 `INSERT` 一行 `tenant_id='tenant-a'`；
+  6. `cargo xtask tenant-policies --check`；查 `pg_policies`。
+- **预期结果**:
+  - 步骤 1/2：各自只看到自己租户的行；
+  - 步骤 3：能看到**两租户**的全部行（证明步骤 1/2 不是「表本来就空」）；
+  - 步骤 4：不 `set_config` → **0 行**；单事务内 `set_config('tenant-a')` → 有行；
+  - 步骤 5：插 `tenant-b` 的行 → **失败**（RLS 的 `WITH CHECK` 拒绝）；插 `tenant-a` → **成功**；
+  - 步骤 6：退出码 **0**，且 `pg_policies` 里这 **2 张表各 1 条** `<table>_tenant_isolation` policy。
 - **类型**: 安全
 
-## 与 REQ-022 的分工
+---
 
-| 判据 | 归属 |
+### AC-S-158: 应用**必须绑定存在且可用的** client；client 删除 → 应用**级联删除**
+
+- **前置条件**: `platform_app.client_id` 是外键，`ON DELETE CASCADE`（D264）。
+- **测试步骤**（**四条独立路径**）:
+  1. `POST /api/apps` 用一个**不存在**的 `clientId`；
+  2. 把 `client-A` 的 `status` 改成 `disabled`（REQ-022 的 `PATCH /api/oauth/clients/{id}`）→
+     再 `POST /api/apps` 绑定它；
+  3. 把 `client-A` 改回 `active` → 建一个应用 → `DELETE /api/oauth/clients/{client-A}`；
+  4. 查 `platform_app` 里步骤 3 那行。
+- **预期结果**:
+  - 路径 1：**400** + `APP_CLIENT_INVALID`；
+  - 路径 2：**400** + `APP_CLIENT_INVALID`（**停用的 client 不能接入**）；
+  - 路径 3：删除 client **成功**（**200/204**，且**不**因外键受阻）
+    → **证明没有改坏 REQ-022 的 AC-S-135 步骤 7**；
+  - 路径 4：该应用行**已被级联删除**（按 `appId` 查 `count == 0`）。
+- **类型**: 功能 / 安全
+
+---
+
+### AC-S-159: 应用级权限声明 = client `allowed_scopes` 的**只读投影**，不得超出
+
+- **前置条件**: `client-A` 的 `allowed_scopes` = `["rbac:role:read"]`（**取自 client 表**）。
+- **测试步骤**:
+  1. `GET /api/apps/{appId}`（绑定 `client-A`）→ 读 `scopes`；
+  2. 以 `base` 直连查 `platform_oauth_client.allowed_scopes`（`client-A`）；
+  3. 以 `base` 直连把 `client-A` 的 `allowed_scopes` 改成 `["rbac:role:read","rbac:role:write"]`；
+  4. 再 `GET /api/apps/{appId}` → 读 `scopes`；
+  5. 查 `platform_app` 的列集合里有没有 scope 相关的列。
+- **预期结果**:
+  - 步骤 1：`scopes` **逐字等于** `["rbac:role:read"]`；
+  - 步骤 4：`scopes` **跟着变成**两项 → **证明是投影不是拷贝**（若是拷贝，改了 client 它不会变）；
+  - 步骤 5：**没有** `scopes` / `allowed_scopes` 列（D266 / D270 的判据）。
+- **类型**: 安全
+
+---
+
+### AC-S-160: 工作台清单：`active` 过滤 + **确定性排序** + 分组
+
+- **前置条件**（**由 `scripts/seed-e2e.sh` 播种**，`tenant-a`）:
+  - 5 个应用：`A`(category=finance, sortOrder=20, active) /
+    `B`(category=finance, sortOrder=10, active) /
+    `C`(category=general, sortOrder=0, active) /
+    `D`(category=general, sortOrder=0, active) /
+    `E`(category=general, sortOrder=0, **status=hidden**)。
+- **测试步骤**:
+  1. `GET /api/apps/workspace`（用户会话）；
+  2. 连打 **3 次**，逐次比较 `groups` 的 JSON；
+  3. 读 `groups` 的结构与顺序；
+  4. 查配置 `app.workspace.maxApps` 的当前值；
+  5. 把 `app.workspace.maxApps` 改成 `2` → 再 `GET`。
+- **预期结果**:
+  - 步骤 1：**200**；
+  - 步骤 2：**3 次响应逐字节相同**（`serde_json` 序列化后比较字符串）→ **确定性排序**；
+  - 步骤 3：
+    - `groups` **恰好 2 组**：`finance` 在前、`general` 在后（category 字典序升序）；
+    - `finance` 组内顺序 **B → A**（`sortOrder` 10 < 20）；
+    - `general` 组内顺序 **C → D**（`sortOrder` 相同 → 按 `displayName` 升序）；
+    - **E 不在任何组里**（`status=hidden` 被过滤）；
+  - 步骤 5：应用总数**不超过 2**（`maxApps` 生效）。
+- **类型**: 功能
+
+---
+
+### AC-S-161: 常用应用 / 最近访问（UPSERT + **只返回在册且 active 的**）
+
+- **前置条件**: `tenant-a` 用户对 3 个 active 应用（`A`/`B`/`C`）有访问记录
+  （`app.recentCount` 默认 6）。
+- **测试步骤**:
+  1. `POST /api/apps/{A}/access` → `POST /api/apps/{B}/access` → `POST /api/apps/{A}/access`
+     （**A 访问两次**）；
+  2. `GET /api/apps/recent`；
+  3. `GET /api/apps/frequent`；
+  4. `POST /api/apps/{A}/access` 再打一次 → 查 `platform_app_access` 里 A 那行；
+  5. 把应用 `B` 的 `status` 改成 `hidden` → 再 `GET /api/apps/recent`；
+  6. 把 `app.recentCount` 改成 `1` → 再 `GET /api/apps/recent`。
+- **预期结果**:
+  - 步骤 2：`recent` 的**第一条是 A**（最后访问）；
+  - 步骤 3：`frequent` 的**第一条是 A**（`access_count = 2` 最大）；
+  - 步骤 4：A 那行 `access_count` **变成 3**（UPSERT 累加，**不是**插入新行）
+    → 且 `platform_app_access` 里 `(tenant_id,user_id,client_id)` 的行数**仍为 3**；
+  - 步骤 5：`B` **不在** `recent` 里（`hidden` 被过滤）；
+  - 步骤 6：`recent` 长度 **== 1**（配置生效）。
+- **类型**: 功能
+
+---
+
+### AC-S-162: 菜单下发 API：两类来源合并 + **按权限点过滤** + `kind` 区分
+
+- **前置条件**:
+  - `tenant-a` 下有一个绑定 `client-A`（`launch_url = "https://expense.example/app"`）的 active 应用；
+  - 平台模块的 `menus[]` 里至少有一个带 `perm` 的项（如 `audit` 的 `/admin/audit` + `audit:events:read`）；
+  - 两个账号：`u-perm-audit@example.com`（**持** `audit:events:read`）、
+    `u-perm-read@example.com`（**不持**）。
+- **测试步骤**:
+  1. 用 `u-perm-audit` 调 `GET /api/apps/navigation`；
+  2. 用 `u-perm-read` 调同一端点；
+  3. 读响应里每一项的 `source` / `kind` / `target`；
+  4. 查应用那项的 `target` 与 `platform_app.launch_url` 的关系；
+  5. 把应用的 `launch_url` 置空（`NULL`）→ 再调。
+- **预期结果**:
+  - 步骤 1：`items` 里**既有** `source="module"` 的项（含 `audit` 那条）、
+    **也有** `source="app"` 的项；
+  - 步骤 2：`source="module"` 里**没有** `audit` 那条（缺 `audit:events:read`）
+    → 但 `source="app"` 的项**仍在**（应用不是权限点）；
+  - 步骤 3：
+    - `module` 项：`kind == "internal"`、`target` 是**站内路径**（以 `/` 开头）；
+    - `app` 项：`kind == "external"`、`target` 是 `https://` 开头的**外部 URL**；
+  - 步骤 4：`target` **逐字等于** `launch_url`；
+  - 步骤 5：该应用**不出现在** `items` 里（没入口就不下发）。
+- **类型**: 功能 / 安全
+
+---
+
+### AC-S-163: 前端**运行时**路由注册表：新增应用**不改底座代码**
+
+- **前置条件**: `apps/shell/dist` 已构建；导航 API 可返回 `kind="internal"` 的项。
+- **测试步骤**:
+  1. 用 `git diff --stat` 对比本需求**前后** `apps/shell/src/lib/router.ts` 是否被改；
+  2. 单测 `routesFromNavigation(items)`：传入 2 个 `internal` 项 + 1 个 `external` 项；
+  3. 单测：传入 `kind="external"` 的项 → **不产生**路由；
+  4. **E2E**：登录后访问工作台 → 导航里出现应用项 → 点 `internal` 项 → 落到对应页面；
+  5. **E2E**：点 `external` 项 → 浏览器**整页跳转**到外部 URL（用 `page.route` 拦截验证）。
+- **预期结果**:
+  - 步骤 1：`router.ts` **零改动**（D270）；
+  - 步骤 2：`routesFromNavigation` 返回**2 条**路由，`path` 与 `target` 逐字相等；
+  - 步骤 3：`external` 项**不产生**路由（返回空数组）→ 这条是关键：
+    若把它也塞进 SPA 路由表，`resolve()` 会拿外部 URL 去 `match()` → 静默失败；
+  - 步骤 4：`internal` 项点击后 URL 变成对应站内路径，**页面标题**是该导航项的 `labelKey`；
+  - 步骤 5：`external` 项点击后 `page.url()` 变成外部 URL（被拦截的 200 页）。
+- **类型**: 功能 / 可维护性
+
+---
+
+### AC-S-164: 应用注册/修改/删除产生**审计记录**
+
+- **前置条件**: 审计 sink 已接真实库（`crates/platform-server/src/main.rs` 的装配路径，REQ-014 D150）。
+- **测试步骤**:
+  1. 走一遍：注册应用 → 修改 → 删除；
+  2. 查 `platform_audit_log`（`tenant-a`）；
+  3. 查每条记录的字段集（契约 C12）。
+- **预期结果**:
+  - 至少产生这 **3** 个事件码（D215 同款命名规范：三段式 `app.*`）：
+    `app.registered` / `app.updated` / `app.deleted`；
+  - 每条含 `actor_id` / `action` / `object_type` / `object_id` / `ip` / `user_agent` /
+    `created_at` / `prev_hash` / `hash`（契约 C12 的固定字段集）；
+  - `object_type` **恰好**是 `app`；
+  - `object_id` 是该应用的 `appId`；
+  - **哈希链自洽**：`ChainVerifier::verify(tenant-a)` → `ok == true`。
+- **类型**: 安全
+
+---
+
+### AC-S-165: 权限点三处齐、启动对账 **fail-fast**、C-5 在本 crate 上通过
+
+- **前置条件**: 本需求新增了 `crates/platform-app/manifest.json` 与权限点种子迁移。
+- **测试步骤**:
+  1a. `cargo xtask capabilities` **重新生成**；
+  1b. `cargo test -p platform-app --test contract_c5`（**该测试文件由本需求新增**）；
+  2. **只改 manifest、不加种子 INSERT**，起服务；
+  3. 把 manifest 里的某个权限点从代码的 `require_permission` 调用点**删掉**（改成非字面量），再跑 1b；
+  4. 在 `crates/platform-app/src/` 里放一个叫 `authorize` 的函数，再跑 1b。
+- **预期结果**:
+  - 步骤 1a：`capabilities/` 下**恰好 14 个文件**（**不增不减**）；
+    ⚠️ **实测依据**（`crates/xtask/src/capabilities.rs:57-79` 的 `generate`）：
+    生成器固定产出 8 个（`permissions` / `extension-points` / `schema/{manifest,metadata,entity}` /
+    `api` / `index`）+ 前端包各一个 `sdk/<pkg>.json`（**6 个**）= **14**。
+    **新增 Rust crate 只让 `permissions.json` 里多一个 module 条目，不新增文件**
+    （⚠️ 不要凭直觉写「新增 crate 就多一个文件」—— BA 在本轮写规格时差点这么写，实测纠正）；
+    且 `capabilities/permissions.json` 的 `total == 35`（32 + 3 个 `app:*`），
+    且 `modules` 里**新增**一个 `platform-app` 条目（`manifest` 字段 = `crates/platform-app/manifest.json`），
+    且含 `app:registry:read` / `app:registry:write` / `app:registry:delete` **逐字 3 条**；
+  - 步骤 1b：**通过**（真 C-5 命令）；
+  - 步骤 2：服务**起不来**（退出码非 0），日志**逐条**列出缺失的权限点编码与
+    来源 manifest 路径 `crates/platform-app/manifest.json`；
+  - 步骤 3：C-5 **失败**（已登记但无鉴权调用点）→ **阳性对照**；
+  - 步骤 4：C-5 **失败**（出现第二个鉴权入口）→ 证明命名禁区有效。
+- **类型**: 可维护性
+
+---
+
+## 完成定义对照
+
+| 能力 | AC |
 |---|---|
-| 授权同意动作、同意记录落库、撤销端点、令牌撤销、内省端点 | **REQ-022**（AC-S-143 / 144 / 146 / 147） |
-| 「我的授权」页（用户视角） | **REQ-022** |
-| 应用注册表的**业务属性**、工作台 / 应用市场 | **REQ-016** |
-| 本条 AC-S-024 | **REQ-016**（跨需求的**端到端**判据 —— 依赖 REQ-022 已交付） |
+| 应用注册表（增删改查 + 租户隔离 + 引用 client） | 156 / 157 |
+| 应用与 client 的生命周期绑定 | 158 |
+| 应用级权限声明（只读投影） | 159 |
+| 工作台 / 应用市场 | 160 / 161 |
+| 菜单下发（两类来源 + 按权限过滤） | 162 |
+| 前端运行时路由注册表 | 163 |
+| 审计埋点 | 164 |
+| 权限点 / C-5 / 启动对账 | 165 |
+| 撤销后令牌失效（回归） | 024 |
