@@ -916,3 +916,35 @@ Sprint 3 复盘的第 2 条教训：**修漏洞会制造新漏洞** —— 但�
 - **建议修法**: 后续 REQ 里把 `NAV_ITEMS` 彻底换成「导航 API 的下发结果」，
   `Home.svelte` 与 `Workbench.svelte` 合并成一个入口页；同步改 REQ-010 的 E2E。
 
+
+---
+
+## TD-053: REQ-022 修复轮引入的**守卫误报** —— `no_rust_source_writes_the_audit_table_directly` 在 `develop` 上一直是红的
+
+- **发现于**: REQ-016 终版全量（`cargo test -p platform-audit` 第一个 red）
+- **证据**:
+  ```
+  $ cargo test -p platform-audit --test audit_real_db no_rust_source_writes_the_audit_table_directly
+  crates/**/*.rs 里不得出现裸 INSERT：
+    [".../crates/platform-server/tests/oauth_real_stack.rs:761"]
+  test result: FAILED
+  ```
+  → 在 `develop` @ `aa5b305`（**已合并 REQ-022**）上跑**同样红** → **不是 REQ-016 引入的**。
+- **根因**（两个都要说清）:
+  1. **REQ-014 的守卫扫描口径太宽**：`scan_dir(&root.join("crates"), "rs", needle)`
+     无条件递归，**把 `tests/` 也算进来**；
+  2. **REQ-022 的阳性对照必须直插**：`oauth_real_stack.rs:757-770` 为验 AC-S-154 步骤 4
+     （「管理员直连插一条含假 secret 的审计行 → 扫描器必须命中」）
+     **必须**有 `INSERT INTO platform_audit_log` —— 那是 dev-guide §9.2 要求的**阳性对照**。
+  → **守卫**（生产代码不得绕过 sink）与**阳性对照**（测试必须直插）**直接冲突**。
+- **为什么 REQ-014 时没暴露**: 那时**没有任何测试**需要直插审计表 → 冲突不存在。
+- **BA 的失误（如实记）**: REQ-022 合并时我只抽验了 3 个 crate
+  （`platform-oauth` / `platform-server` / `xtask`），**漏了 `platform-audit`**
+  → 这个红灯**带着它合并进了 `develop`**，直到 REQ-016 的全量才发现。
+  ⚠️ **教训**：合并后验证**不能只抽验** —— 至少跑一遍受影响 crate 的**直接依赖方**。
+- **本轮已修**（D290）: `scan_dir` 加跳过 `tests/` / `benches/` / `examples/` / `target`，
+  并在函数文档里写清「为什么必须跳过」。
+- **修复的敏感度验证**（BA 亲跑）:
+  - 变异：往**生产代码** `crates/platform-audit/src/sink.rs` 塞一个裸 INSERT
+    → **仍然红**（报 `sink.rs:154`）→ 守卫**没有被削弱**；
+  - 还原：`sha256sum -c` 成功 / `grep -c MUTATION` = 0。

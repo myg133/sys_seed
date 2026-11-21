@@ -851,3 +851,55 @@ DELETE /api/apps/{appId}/launch-url    → 204，把 launch_url 置 NULL
 | 债号 | 内容 |
 |---|---|
 | **TD-052** | `Home.svelte` 的硬编码占位菜单（`NAV_ITEMS`，REQ-010）与工作台的真实导航**并存** → 需在后续 REQ 统一（要动 REQ-010 的 E2E，D109 显式声明） |
+
+---
+
+## D290: 修 REQ-014 的审计守卫**误报**（`scan_dir` 必须跳过 `tests/`）
+
+### 问题（REQ-016 终版全量发现，TD-053）
+
+`crates/platform-audit/tests/audit_real_db.rs` 的守卫
+`no_rust_source_writes_the_audit_table_directly` 在 **`develop` @ `aa5b305`**（**已合并 REQ-022**）上
+**一直是红的**：
+
+```
+crates/**/*.rs 里不得出现裸 INSERT：
+  [".../crates/platform-server/tests/oauth_real_stack.rs:761"]
+```
+
+### 根因（两个事实的冲突）
+
+| 事实 | 来源 |
+|---|---|
+| 守卫扫 `crates/` **全部 `.rs`**（含 `tests/`） | REQ-014 的 `scan_dir` 无条件递归 |
+| REQ-022 的阳性对照**必须**直插 `platform_audit_log` | `oauth_real_stack.rs:757-770`，为验 AC-S-154 步骤 4（dev-guide §9.2 要求「证明扫描器会命中」） |
+
+→ **守卫的意图**（生产代码不得绕过 sink）与**阳性对照**（测试必须直插）**直接冲突**。
+
+**为什么 REQ-014 时没暴露**：那时没有任何测试需要直插审计表。
+
+### 决定
+
+`scan_dir` **跳过** `tests/` / `benches/` / `examples/` / `target` 四个目录。
+
+### 为什么这是**正确的**修法（不是「为了变绿而放宽」）
+
+守卫要防的是「**生产代码**绕过 `AuditSink` 直写审计表」——
+`tests/` 里的直插**不构成**这个风险（它不进产物）。
+
+### 敏感度验证（BA 亲跑，必须有）
+
+| 操作 | 结果 |
+|---|---|
+| 修后跑守卫 | **1 passed** ✅ |
+| **变异**：往**生产代码** `crates/platform-audit/src/sink.rs` 塞裸 INSERT | **仍然红**（报 `sink.rs:154`）→ 守卫**未被削弱** ✅ |
+| 还原 | `sha256sum -c` 成功 / `grep -c MUTATION` = **0** ✅ |
+
+### ⚠️ 一次**我自己**的流程失误（记下来）
+
+REQ-022 合并时我只抽验了 **3 个 crate**（`platform-oauth` / `platform-server` / `xtask`），
+**漏了 `platform-audit`** → 这个红灯**带着合并进了 `develop`**。
+
+→ **规则**（dev-guide §9.14 的补充）：**合并后验证不能只抽验** ——
+至少跑一遍**被改动 crate 的直接依赖方**（REQ-022 改了 `platform-core`/`iam`/`server`，
+而 `platform-audit` 依赖 `platform-core` → 它**在影响面内**）。
