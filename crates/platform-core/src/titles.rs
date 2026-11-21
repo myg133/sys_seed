@@ -191,6 +191,32 @@ pub const TITLES: &[(&str, &str)] = &[
     ("APP_LAUNCH_URL_INVALID", "App Launch URL Invalid"),
     ("APP_ICON_URL_INVALID", "App Icon URL Invalid"),
     ("APP_INVALID_REQUEST", "Invalid App Request"),
+    // -- platform-notify（REQ-015，8 个错误码）-------------------------------
+    // ⚠️ 8 个码**逐个**都有 AC 会真的触发它（无死码，D303 / D226 同款口径）：
+    //    TEMPLATE_NOT_FOUND=AC-S-167 步10 / TEMPLATE_DUPLICATED=步9 /
+    //    TEMPLATE_MISSING_VARIABLE=步7 / TEMPLATE_INVALID_PLACEHOLDER=步6+11 /
+    //    CHANNEL_NOT_CONFIGURED=AC-S-166 步3+4 / CATEGORY_MANDATORY=AC-S-169 步5 /
+    //    NOT_DEAD_LETTER=AC-S-172 步2+3 / SENSITIVE_PAYLOAD=AC-S-173 步4。
+    // ⚠️ 4 个 `notify.*` 审计**事件码不进本表**（D223）—— 事件码不是 HTTP 错误码。
+    //    与 `org.*` 的 6 行**不冲突**：那 6 个是「通知标题的文案来源」，
+    //    由 `OrgEventKind::title()` 显式查表；`notify.*` 是审计的 `action`，没人查标题。
+    ("NOTIFY_TEMPLATE_NOT_FOUND", "Notification Template Not Found"),
+    ("NOTIFY_TEMPLATE_DUPLICATED", "Notification Template Duplicated"),
+    (
+        "NOTIFY_TEMPLATE_MISSING_VARIABLE",
+        "Notification Template Missing Variable",
+    ),
+    (
+        "NOTIFY_TEMPLATE_INVALID_PLACEHOLDER",
+        "Notification Template Invalid Placeholder",
+    ),
+    (
+        "NOTIFY_CHANNEL_NOT_CONFIGURED",
+        "Notification Channel Not Configured",
+    ),
+    ("NOTIFY_CATEGORY_MANDATORY", "Notification Category Mandatory"),
+    ("NOTIFY_NOT_DEAD_LETTER", "Notification Delivery Not Dead Letter"),
+    ("NOTIFY_SENSITIVE_PAYLOAD", "Notification Payload Contains Sensitive Keys"),
     // -- platform-org 的通知标题（事件码，不是 HTTP 错误码）------------------
     ("org.member-added", "Organization Membership Added"),
     ("org.member-removed", "Organization Membership Removed"),

@@ -227,5 +227,13 @@
   "app.deleteConfirm": "确定删除该应用？它引用的客户端不受影响。",
   "app.scopesTitle": "权限范围",
   "nav.appRegistry": "应用注册表",
-  "app.registryEdit": "编辑应用"
+  "app.registryEdit": "编辑应用",
+  "error.NOTIFY_TEMPLATE_NOT_FOUND": "通知模板不存在",
+  "error.NOTIFY_TEMPLATE_DUPLICATED": "同编码、通道、语言的模板已存在",
+  "error.NOTIFY_TEMPLATE_MISSING_VARIABLE": "通知模板缺少变量",
+  "error.NOTIFY_TEMPLATE_INVALID_PLACEHOLDER": "通知模板含非法占位符",
+  "error.NOTIFY_CHANNEL_NOT_CONFIGURED": "通知通道未配置",
+  "error.NOTIFY_CATEGORY_MANDATORY": "该通知类型不可退订",
+  "error.NOTIFY_NOT_DEAD_LETTER": "该投递不在死信状态",
+  "error.NOTIFY_SENSITIVE_PAYLOAD": "通知载荷含敏感字段"
 }

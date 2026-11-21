@@ -107,6 +107,27 @@
       ]
     },
     {
+      "manifest": "crates/platform-notify/manifest.json",
+      "module": "notify",
+      "permissions": [
+        {
+          "code": "notify:template:read",
+          "name": "查看通知模板",
+          "type": "menu"
+        },
+        {
+          "code": "notify:template:write",
+          "name": "维护通知模板",
+          "type": "button"
+        },
+        {
+          "code": "notify:delivery:read",
+          "name": "查看投递记录与重投死信",
+          "type": "menu"
+        }
+      ]
+    },
+    {
       "manifest": "crates/platform-oauth/manifest.json",
       "module": "oauth",
       "permissions": [
@@ -220,5 +241,5 @@
       ]
     }
   ],
-  "total": 35
+  "total": 38
 }

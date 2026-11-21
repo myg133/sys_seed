@@ -582,13 +582,31 @@ async fn serve() -> Result<(), Failure> {
     //
     // ⚠️ **IAM 没配 → 不提供 `/api/apps/*`**（与 `/api/oauth/*` 同款口径）：
     //    应用注册表按「登录用户 / 租户」隔离，没有 IAM 就没有可验的登录会话。
-    let app = if let Some((iam, checker)) = app_iam {
+    let app = if let Some((iam, checker)) = app_iam.clone() {
         let app_state = build_app_state(&config, iam, config_service.clone(), audit_sink.clone(), checker).await?;
         let app = app.nest("/api/apps", platform_app::http::router(app_state));
         tracing::info!("应用接入已启用：/api/apps/*（注册表 / 工作台 / 最近 / 导航）");
         app
     } else {
         tracing::warn!("未配置 IAM：平台不提供 /api/apps/*（应用注册表按登录用户隔离）");
+        app
+    };
+
+    // 通知系统（REQ-015）：`/api/notify/*`。
+    //
+    // ⚠️ **与 `/api/apps/*` 同款口径**：IAM 没配 → 不提供（通知模板按租户隔离，
+    //    没有 IAM 就没有可验的登录会话）。
+    //
+    // ⚠️ **SMTP 凭据走环境变量**（D306）：没配齐 → smtp 通道注册为「未配置」
+    //    （投递返回 `NOTIFY_CHANNEL_NOT_CONFIGURED`，**不是静默成功**）。
+    let app = if let Some((iam, checker)) = app_iam.clone() {
+        let notify_state =
+            build_notify_state(&config, iam, config_service.clone(), checker).await?;
+        let app = app.nest("/api/notify", platform_notify::http::router(notify_state));
+        tracing::info!("通知系统已启用：/api/notify/*（模板 / 投递记录 / 订阅偏好）");
+        app
+    } else {
+        tracing::warn!("未配置 IAM：平台不提供 /api/notify/*（通知模板按租户隔离）");
         app
     };
 
@@ -914,6 +932,104 @@ impl platform_oauth::config::OAuthConfigSource for PlatformOAuthConfigSource {
 /// | `AuditSink` | 平台 sink | 3 个 `app.*` 审计事件码 |
 /// | `TokenVerifier` | [`AppIamTokenVerifier`] | 验登录令牌 → 租户 + 用户 |
 /// | `PermissionChecker` / `PermissionRefresher` | `RbacChecker` | 3 个 `app:*` 权限点 + 导航过滤 |
+/// 装配通知系统（REQ-015）。
+async fn build_notify_state(
+    config: &DeployConfig,
+    iam: Arc<platform_iam::service::IamService>,
+    config_service: Arc<platform_config::ConfigService>,
+    checker: Arc<platform_rbac::RbacChecker>,
+) -> Result<Arc<platform_notify::http::NotifyState>, Failure> {
+    // 数据访问走 `platform-db` 的租户作用域入口（**不得**直连池）。
+    let tenant_db =
+        platform_db::TenantDb::connect(&config.database_url, platform_db::DbOptions::default())
+            .await
+            .map_err(|err| Failure::Runtime(format!("数据库连接串非法：{err}")))?;
+
+    let service = Arc::new(platform_notify::service::NotifyService::new(
+        platform_notify::store::NotifyStore::new(tenant_db),
+        platform_notify::config::NotifyConfig::new(Arc::new(PlatformNotifyConfigSource::new(
+            config_service,
+        ))),
+    ));
+
+    // ⚠️ `refresher` 与 `checker` 是**同一个** `RbacChecker`（它同时实现两个 trait）——
+    // 少了 `refresher`，用户第一次打受保护的端点必然 403（TD-047）。
+    let refresher: Arc<dyn PermissionRefresher> = checker.clone();
+
+    Ok(Arc::new(platform_notify::http::NotifyState {
+        service,
+        tokens: Arc::new(NotifyIamTokenVerifier::new(iam)),
+        checker: checker as Arc<dyn PermissionChecker>,
+        refresher,
+    }))
+}
+
+/// 通知系统的令牌校验（复用 IAM 的 access token 验签）。
+struct NotifyIamTokenVerifier {
+    /// IAM 服务。
+    inner: Arc<platform_iam::service::IamService>,
+}
+
+impl NotifyIamTokenVerifier {
+    fn new(inner: Arc<platform_iam::service::IamService>) -> Self {
+        Self { inner }
+    }
+}
+
+impl platform_notify::http::TokenVerifier for NotifyIamTokenVerifier {
+    fn verify(&self, token: &str) -> Option<platform_notify::http::VerifiedUser> {
+        let claims = self.inner.verify_access_token(token).ok()?;
+        Some(platform_notify::http::VerifiedUser {
+            user_id: claims.subject,
+            tenant_id: claims.tenant_id,
+        })
+    }
+}
+
+/// 通知系统的**配置源**（每请求读 `platform_config`，与 REQ-016 的 `PlatformAppConfigSource` 同款）。
+struct PlatformNotifyConfigSource {
+    /// 平台配置服务。
+    config: Arc<platform_config::ConfigService>,
+}
+
+impl PlatformNotifyConfigSource {
+    fn new(config: Arc<platform_config::ConfigService>) -> Self {
+        Self { config }
+    }
+
+    /// 读一个平台级配置项为 `i64`（`number` 型）。
+    async fn read_number(&self, ctx: &RequestContext, key: &str) -> Option<i64> {
+        let entries = self
+            .config
+            .read_platform_entries(ctx, &[key.to_string()])
+            .await
+            .ok()?;
+        entries
+            .into_iter()
+            .find(|entry| entry.key == key)
+            .and_then(|entry| entry.value.as_i64())
+    }
+}
+
+impl platform_notify::config::NotifyConfigSource for PlatformNotifyConfigSource {
+    fn read_platform<'a>(
+        &'a self,
+        ctx: &'a RequestContext,
+        key: &'a str,
+    ) -> platform_notify::config::NotifyBoxFuture<'a, Option<i64>> {
+        Box::pin(async move { self.read_number(ctx, key).await })
+    }
+
+    fn tenant_default_locale(
+        &self,
+        _ctx: &RequestContext,
+    ) -> platform_notify::config::NotifyBoxFuture<'_, String> {
+        // 与 `platform-config` 的 `FALLBACK_LOCALES` 一致（`registry.rs:44`）。
+        // TODO(TD-057)：租户级 locale 偏好还没有存储位；本轮固定基准语言。
+        Box::pin(async { "zh-CN".to_string() })
+    }
+}
+
 async fn build_app_state(
     config: &DeployConfig,
     iam: Arc<platform_iam::service::IamService>,

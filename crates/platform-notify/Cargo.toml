@@ -1,0 +1,53 @@
+[package]
+name = "platform-notify"
+description = "通知系统：通道抽象（站内信 / SMTP / Webhook）、受限模板、订阅偏好、异步投递与死信（REQ-015）"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# 平台核心：请求上下文 / 统一错误体 / `NotificationSender` trait / 敏感键扫描 / 标题表
+platform-core.workspace = true
+# 数据访问：租户作用域入口（`TenantDb` / `TenantTx` / `TenantQuery`）—— RLS 兜底
+platform-db.workspace = true
+# 运行期配置：读 `notify.*` 5 个配置项 + 默认 locale（D304 / D294）
+platform-config.workspace = true
+# HTTP 层：路由与中间件
+axum.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+# `NotificationSender::send` 的返回类型是 `anyhow::Result`（`notification.rs:8`）——
+# 这是 REQ-003 冻结的扩展点契约，**不改它**（D291）。
+anyhow.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+time.workspace = true
+# 高熵值摘要与编码：MIME base64 正文 + `AUTH LOGIN` 的凭据编码（D305）
+base64.workspace = true
+# 出站 HTTP（Webhook）：与 `platform-oauth` 的 `OutboundClient` 同款栈，但**自己写薄的**（D302）
+hyper.workspace = true
+hyper-util.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+bytes.workspace = true
+hyper-rustls.workspace = true
+rustls.workspace = true
+# 出站 SMTP 的 STARTTLS 客户端侧 TLS（D307：从 `platform-iam` 的 dev 依赖升为正式依赖）
+tokio-rustls.workspace = true
+# 根证书（D307：已在 Cargo.lock 里，由 `hyper-rustls` 的 `webpki-tokio` 传递引入，
+# 这里提为**直接依赖** —— 不新增 lock 条目）
+webpki-roots = "1"
+
+[dev-dependencies]
+# 让失败用例能看到真实的数据库错误（否则只剩 DATABASE_ERROR）
+tracing-subscriber.workspace = true
+# 测试要驱动 axum 路由（`ServiceExt::oneshot`），不连网络。
+tower.workspace = true
+# 真实库集成测试要直连（管理员连接 + 应用角色连接）。
+sqlx.workspace = true
+# C-5 契约扫描入口（`check_c5_for` / `scan_auth_calls`）—— 真 C-5 命令的依赖。
+platform-contracts.workspace = true

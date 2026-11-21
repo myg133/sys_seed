@@ -1,0 +1,55 @@
+{
+  "id": "notify",
+  "name": "通知",
+  "version": "0.1.0",
+  "enabled": true,
+  "permissions": [
+    { "code": "notify:template:read", "name": "查看通知模板", "type": "menu" },
+    { "code": "notify:template:write", "name": "维护通知模板", "type": "button" },
+    { "code": "notify:delivery:read", "name": "查看投递记录与重投死信", "type": "menu" }
+  ],
+  "menus": [
+    { "label": "通知", "icon": "bell", "route": "/notify" }
+  ],
+  "tenantScoped": {
+    "tables": [
+      "platform_notify_template",
+      "platform_notify_preference",
+      "platform_notify_delivery"
+    ],
+    "column": "tenant_id"
+  },
+  "dependencies": [],
+  "config": {
+    "notify.maxAttempts": {
+      "type": "number",
+      "default": 5,
+      "scope": "platform",
+      "label": "最多尝试次数（含首次）"
+    },
+    "notify.retryBaseSeconds": {
+      "type": "number",
+      "default": 30,
+      "scope": "platform",
+      "label": "第 1 次重试的延迟（秒）"
+    },
+    "notify.retryMultiplier": {
+      "type": "number",
+      "default": 2,
+      "scope": "platform",
+      "label": "退避倍数"
+    },
+    "notify.retryMaxSeconds": {
+      "type": "number",
+      "default": 3600,
+      "scope": "platform",
+      "label": "单次重试延迟上限（秒）"
+    },
+    "notify.deliveringTimeoutSeconds": {
+      "type": "number",
+      "default": 300,
+      "scope": "platform",
+      "label": "delivering 残留状态的回收阈值（秒）"
+    }
+  }
+}

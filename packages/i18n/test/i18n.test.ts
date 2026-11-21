@@ -206,6 +206,17 @@ describe('语言包与键体系（AC-S-091）', () => {
       'APP_LAUNCH_URL_INVALID',
       'APP_ICON_URL_INVALID',
       'APP_INVALID_REQUEST',
+      // REQ-015（通知系统）新增的 8 个码，见 acceptance.md §全局约定 / D303
+      // ⚠️ **恰好 8 个**：4 个 `notify.*` 审计事件码**不进**本清单
+      //    （D223 同款 —— 事件码不是 HTTP 错误码）。
+      'NOTIFY_TEMPLATE_NOT_FOUND',
+      'NOTIFY_TEMPLATE_DUPLICATED',
+      'NOTIFY_TEMPLATE_MISSING_VARIABLE',
+      'NOTIFY_TEMPLATE_INVALID_PLACEHOLDER',
+      'NOTIFY_CHANNEL_NOT_CONFIGURED',
+      'NOTIFY_CATEGORY_MANDATORY',
+      'NOTIFY_NOT_DEAD_LETTER',
+      'NOTIFY_SENSITIVE_PAYLOAD',
     ];
     for (const code of codes) {
       expect(catalog[`error.${code}`], `缺少键 error.${code}`).toBeTypeOf('string');
