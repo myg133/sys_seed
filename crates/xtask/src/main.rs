@@ -38,6 +38,45 @@ fn main() -> ExitCode {
             Ok(code) => code,
             Err(err) => fail(err),
         },
+        Command::Notify(args) => match run_notify(&args) {
+            Ok(code) => code,
+            Err(err) => fail(err),
+        },
+    }
+}
+
+/// 执行通知投递批处理（REQ-015 / D296）。
+fn run_notify(args: &xtask::cli::NotifyArgs) -> Result<ExitCode> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    match &args.action {
+        xtask::cli::NotifyAction::Worker(worker) => {
+            let database_url = database_url_of(worker.database_url.clone())?;
+            let (service, registry) =
+                runtime.block_on(xtask::notify::build_service(&database_url, &worker.tenant))?;
+            let ctx = platform_core::RequestContext::new().with_tenant(worker.tenant.clone());
+            let outcomes = runtime.block_on(xtask::notify::run_rounds(
+                &service,
+                &ctx,
+                &registry,
+                worker.batch,
+                worker.rounds,
+            ))?;
+            for (index, outcome) in outcomes.iter().enumerate() {
+                println!("  第 {} 轮：{}", index + 1, outcome.summary());
+            }
+            let total_claimed: usize = outcomes.iter().map(|o| o.claimed).sum();
+            println!(
+                "共 {} 轮，认领 {} 条{}",
+                outcomes.len(),
+                total_claimed,
+                if total_claimed == 0 {
+                    "（队列为空）"
+                } else {
+                    ""
+                }
+            );
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 

@@ -227,5 +227,13 @@
   "app.deleteConfirm": "Delete this application? The client it references is not affected.",
   "app.scopesTitle": "Scopes",
   "nav.appRegistry": "Application registry",
-  "app.registryEdit": "Edit application"
+  "app.registryEdit": "Edit application",
+  "error.NOTIFY_TEMPLATE_NOT_FOUND": "Notification template not found",
+  "error.NOTIFY_TEMPLATE_DUPLICATED": "A notification template with the same code, channel and locale already exists",
+  "error.NOTIFY_TEMPLATE_MISSING_VARIABLE": "Notification template is missing a variable",
+  "error.NOTIFY_TEMPLATE_INVALID_PLACEHOLDER": "Notification template contains an invalid placeholder",
+  "error.NOTIFY_CHANNEL_NOT_CONFIGURED": "Notification channel is not configured",
+  "error.NOTIFY_CATEGORY_MANDATORY": "This notification category cannot be unsubscribed",
+  "error.NOTIFY_NOT_DEAD_LETTER": "The delivery is not in the dead-letter state",
+  "error.NOTIFY_SENSITIVE_PAYLOAD": "Notification payload contains sensitive fields"
 }

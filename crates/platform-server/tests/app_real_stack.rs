@@ -145,16 +145,15 @@ async fn world() -> World {
         RbacStore::new(tenant_db.clone()),
         ScopePolicy::default(),
     ));
-    let provider: Arc<dyn platform_core::extension::permission::PermissionProvider> =
-        rbac.clone();
+    let provider: Arc<dyn platform_core::extension::permission::PermissionProvider> = rbac.clone();
     assert!(
         iam.set_permission_provider(provider),
         "权限点提供者应当注入成功"
     );
 
     // 3) **真**配置服务（走真库 + epoch 失效）。
-    let registry = platform_config::ConfigRegistry::from_manifest_root(&root)
-        .expect("配置注册表应能加载");
+    let registry =
+        platform_config::ConfigRegistry::from_manifest_root(&root).expect("配置注册表应能加载");
     let config_service = Arc::new(platform_config::ConfigService::new(
         tenant_db.clone(),
         Arc::new(registry),
@@ -221,9 +220,9 @@ async fn world() -> World {
             checker.clone() as Arc<dyn platform_core::extension::permission::PermissionChecker>,
             Arc::new(StackTokenVerifier::new(iam.clone())),
         )),
-        checker: checker.clone() as Arc<dyn platform_core::extension::permission::PermissionChecker>,
-        refresher: checker
-            as Arc<dyn platform_core::extension::permission::PermissionRefresher>,
+        checker: checker.clone()
+            as Arc<dyn platform_core::extension::permission::PermissionChecker>,
+        refresher: checker as Arc<dyn platform_core::extension::permission::PermissionRefresher>,
     });
     let router = axum::Router::new()
         .nest("/api/iam", platform_iam::http::router(iam_state))
@@ -587,7 +586,10 @@ async fn the_workspace_raw_json_order_is_pinned() {
 
     let groups = body["groups"].as_array().expect("必须有 groups 数组");
     assert_eq!(groups.len(), 2, "**恰好** 2 组：{body}");
-    assert_eq!(groups[0]["category"], "finance", "finance 在前（字典序升序）");
+    assert_eq!(
+        groups[0]["category"], "finance",
+        "finance 在前（字典序升序）"
+    );
     assert_eq!(groups[1]["category"], "general", "general 在后");
 
     // ⚠️ **数组顺序逐字**（JSON 对象无序，但数组有序）。
@@ -692,10 +694,20 @@ async fn recent_count_from_the_database_takes_effect_immediately() {
         .await;
     // 两条访问记录。
     world
-        .call("POST", &format!("/api/apps/{app_a}/access"), Some(&token), None)
+        .call(
+            "POST",
+            &format!("/api/apps/{app_a}/access"),
+            Some(&token),
+            None,
+        )
         .await;
     world
-        .call("POST", &format!("/api/apps/{app_b}/access"), Some(&token), None)
+        .call(
+            "POST",
+            &format!("/api/apps/{app_b}/access"),
+            Some(&token),
+            None,
+        )
         .await;
 
     // 默认上限 6 → 2 条。
@@ -722,7 +734,8 @@ async fn recent_count_from_the_database_takes_effect_immediately() {
     );
     // 且是**最后访问**的那条（B）。
     assert_eq!(
-        after[0]["appId"], app_b.as_str(),
+        after[0]["appId"],
+        app_b.as_str(),
         "应该是最后访问的 B（{app_b}）：{after}"
     );
 
@@ -796,12 +809,16 @@ async fn app_mutations_land_in_the_audit_log_with_an_intact_chain() {
         "必须恰好这 3 个事件码（三段式，D163）：{actions:?}"
     );
     for (_, object_type, object_id, ip, user_agent, actor_id) in &rows {
-        assert_eq!(object_type, "platform_app", "object_type 必须恰好是 platform_app");
-        assert_eq!(object_id.as_deref(), Some(app_id.as_str()), "object_id 必须是 appId");
-        assert!(
-            !actor_id.is_empty(),
-            "actor_id 必须非空（真实登录用户）"
+        assert_eq!(
+            object_type, "platform_app",
+            "object_type 必须恰好是 platform_app"
         );
+        assert_eq!(
+            object_id.as_deref(),
+            Some(app_id.as_str()),
+            "object_id 必须是 appId"
+        );
+        assert!(!actor_id.is_empty(), "actor_id 必须非空（真实登录用户）");
         // ip / user_agent 列 NOT NULL DEFAULT '' —— 这里不断言非空（请求没带那些头时是空串），
         // 只断言「列存在且不是 NULL」（由 schema 的 NOT NULL 保证）。
         let _ = (ip, user_agent);

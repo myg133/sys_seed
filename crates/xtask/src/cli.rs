@@ -25,6 +25,45 @@ pub enum Command {
     TenantPolicies(TenantPoliciesArgs),
     /// 审计链校验与归档（REQ-014）。
     Audit(AuditArgs),
+    /// 通知投递批处理（REQ-015 / D296）。
+    Notify(NotifyArgs),
+}
+
+/// `notify` 参数。
+///
+/// # ⚠️ 为什么 worker 是**显式命令**而不是 web 进程内的后台线程（D296）
+///
+/// 1. web 进程重启会丢正在投递的消息（进程内队列的本质缺陷）；
+/// 2. web 进程多实例时各自持有队列 → 投递**重复或遗漏**；
+/// 3. **测试可控**：E2E / 集成测试可以直接调一次 `tick()`，不用 `sleep` 等后台。
+#[derive(Debug, Args)]
+pub struct NotifyArgs {
+    #[command(subcommand)]
+    pub action: NotifyAction,
+}
+
+/// `notify` 的子动作。
+#[derive(Debug, Subcommand)]
+pub enum NotifyAction {
+    /// 跑**一轮**投递批处理（认领一批 → 逐个投递 → 写回结果）。
+    Worker(NotifyWorkerArgs),
+}
+
+/// `notify worker` 参数。
+#[derive(Debug, Args)]
+pub struct NotifyWorkerArgs {
+    /// 租户 ID（**必填** —— 投递记录是租户级的，D299）。
+    #[arg(long)]
+    pub tenant: String,
+    /// 这一批最多取多少条。
+    #[arg(long, default_value_t = 32)]
+    pub batch: i64,
+    /// 连续跑多少轮；`1` = 只跑一次（默认）。`0` = 一直跑到没有待投递。
+    #[arg(long, default_value_t = 1)]
+    pub rounds: u32,
+    /// 数据库连接串；默认取环境变量 `DATABASE_URL`。
+    #[arg(long)]
+    pub database_url: Option<String>,
 }
 
 /// `audit` 参数。

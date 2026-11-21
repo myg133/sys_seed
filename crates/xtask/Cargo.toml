@@ -19,6 +19,8 @@ platform-core.workspace = true
 platform-db.workspace = true
 # audit 子命令要复用平台审计的链校验 / 归档服务（REQ-014 AC-S-022 / AC-S-131）
 platform-audit.workspace = true
+# 通知投递批处理（REQ-015 / D296）：`xtask notify worker`
+platform-notify.workspace = true
 # 「列出全部租户」需要一条**不带租户上下文**的查询（RLS 下管理员连接才看得到行）
 sqlx.workspace = true
 # tenant-policies 子命令要连库（异步）

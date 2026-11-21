@@ -15,6 +15,7 @@ pub mod catalog;
 pub mod cli;
 pub mod deps;
 pub mod modules;
+pub mod notify;
 pub mod rustscan;
 pub mod scaffold;
 pub mod tenant_policies;

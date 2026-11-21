@@ -441,7 +441,10 @@ async fn tc021_096_the_platform_layer_is_used_when_the_tenant_has_not_configured
     // 时区：平台层的 `America/New_York` 生效。
     assert_eq!(body["timezone"], "America/New_York", "平台级的时区必须生效");
     assert_eq!(body["sources"]["timezone"], "platform");
-    assert_ne!(body["timezone"], "Asia/Shanghai", "不能退回 manifest 默认值");
+    assert_ne!(
+        body["timezone"], "Asia/Shanghai",
+        "不能退回 manifest 默认值"
+    );
 
     // 币种：平台层的 `USD` 生效。
     assert_eq!(body["currency"], "USD", "平台级的币种必须生效");
@@ -475,7 +478,10 @@ async fn tc021_097_the_tenant_layer_wins_over_the_platform_layer() {
     assert_eq!(body["sources"]["locale"], "tenant");
     assert_ne!(body["locale"], "en-US", "不能取平台层的值");
 
-    assert_eq!(body["timezone"], "Europe/London", "租户层的时区必须压过平台层");
+    assert_eq!(
+        body["timezone"], "Europe/London",
+        "租户层的时区必须压过平台层"
+    );
     assert_eq!(body["sources"]["timezone"], "tenant");
     assert_ne!(body["timezone"], "America/New_York", "不能取平台层的值");
 

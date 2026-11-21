@@ -93,6 +93,11 @@ fn all_codes() -> Vec<(&'static str, &'static str)> {
     for code in platform_app::error::ALL_CODES {
         codes.push(("platform-app", code));
     }
+    // 通知系统（REQ-015）：8 个平台错误码。
+    // ⚠️ 4 个 `notify.*` 审计**事件码不进这里**（D223 同款）—— 事件码不是 HTTP 错误码。
+    for code in platform_notify::error::ALL_CODES {
+        codes.push(("platform-notify", code));
+    }
     // 组织事件码（通知标题，不是 HTTP 错误码）—— 同一个 `TITLES` 表。
     for code in platform_org::notify::OrgEventKind::ALL_CODES {
         codes.push(("platform-org::notify", code));
@@ -177,13 +182,17 @@ fn the_title_table_has_the_pinned_number_of_rows() {
     const REQ_014_NEW_CODES: usize = 5;
     const REQ_022_NEW_CODES: usize = 9;
     const REQ_016_NEW_CODES: usize = 6;
+    // REQ-015（通知）再加 **8** 个码（`NOTIFY_*`）→ 99 + 8 = **107**。
+    // ⚠️ 4 个 `notify.*` 审计**事件码不进本表**（D223）—— 进了就是 111，本条必红。
+    const REQ_015_NEW_CODES: usize = 8;
     assert_eq!(
         TITLES.len(),
         BASELINE_ROWS_BEFORE_REQ_013
             + REQ_013_NEW_CODES
             + REQ_014_NEW_CODES
             + REQ_022_NEW_CODES
-            + REQ_016_NEW_CODES,
+            + REQ_016_NEW_CODES
+            + REQ_015_NEW_CODES,
         "TITLES 行数变了：新增错误码必须同时登记标题（D125）"
     );
 }

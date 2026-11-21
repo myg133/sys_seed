@@ -1398,13 +1398,7 @@ mod tests {
         .collect();
         assert_eq!(
             names,
-            vec![
-                "user",
-                "accept-language",
-                "tenant",
-                "platform",
-                "default"
-            ],
+            vec!["user", "accept-language", "tenant", "platform", "default"],
             "source 的取值集合必须是这 5 个"
         );
         assert_eq!(
