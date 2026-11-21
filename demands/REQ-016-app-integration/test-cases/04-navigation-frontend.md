@@ -21,9 +21,10 @@
 
 ### TC-016-046 launch_url 置空 → 该应用不出现〔AC 修正〕
 - **AC**: AC-S-162 步骤 5 ｜ P0 ｜ 集成 ｜ 状态迁移
-- **步骤**: 按 BA 拍板的清空手段（`PATCH {"launchUrl":null}` + `Option<Option<String>>` / 专用端点）把 `launch_url` 置 NULL → 再 `GET /api/apps/navigation`
+- **步骤**: **`DELETE /api/apps/{appId}/launch-url`**（专用端点，D283 已拍板）→ 期望 **204** → 再 `GET /api/apps/navigation`
 - **预期**: 该应用**不在** `items` 里；其它项不变
 - **〔AC 修正〕**: 原文没写清空手段，`Option<String>` 下 `null ≡ 缺省` → 步骤**执行不了**（S-08）
+  → **D283 定了专用端点** `DELETE /api/apps/{appId}/launch-url`（返回 204）
 
 ### TC-016-047 `perm` 缺省的 module 项总是下发〔AC 补充〕
 - **AC**: D269「`menus[].perm` 为 `null`（缺省）→ 总是下发」｜ P1 ｜ 集成 ｜ 判定表
@@ -33,8 +34,9 @@
 
 ### TC-016-048 routesFromNavigation：2 个 internal → 2 条路由、path 逐字等于 target
 - **AC**: AC-S-163 步骤 2 ｜ 功能 ｜ P0 ｜ **前端单测** ｜ 等价类
-- **步骤**: `routesFromNavigation([{kind:'internal',target:'/a',labelKey:'nav.a',…},{kind:'internal',target:'/b',labelKey:'nav.b',…}])`
-- **预期**: 返回长度 **2**；`[0].path=='/a'`、`[1].path=='/b'`；`title` 为对应 `labelKey`
+- **步骤**: `routesFromNavigation([{source:'module',kind:'internal',target:'/a',label:'A',…},{source:'module',kind:'internal',target:'/b',label:'B',…}])`
+- **预期**: 返回长度 **2**；`[0].path=='/a'` 且 `[0].title=='A'`；`[1].path=='/b'` 且 `[1].title=='B'`
+  （⚠️ `title` 用 **`label` 的文案**，不是翻译键 —— D284 / S-09：`MenuSpec` 里没有 `labelKey`）
 
 ### TC-016-049 external 项不产生路由
 - **AC**: AC-S-163 步骤 3 ｜ P0 ｜ 前端单测 ｜ 边界值
@@ -48,12 +50,17 @@
 - **⚠️ 前置**: 这条能否成立取决于 **S-03** 怎么解决 —— 若 BA 选「允许改 router.ts」，本条改为
   「`router.ts` 的**既有语义**不变：`createRouter` 的 4 个既有参数与 `resolve()` 行为不变」（并用 TC-016-048/049 兜住）
 
-### TC-016-051 E2E：internal 项点击落到对应页面，标题是翻译后的文案〔AC 修正〕
-- **AC**: AC-S-163 步骤 4 ｜ P0 ｜ E2E ｜ 场景
-- **前置**: `apps/shell/dist` 已构建；导航里有一个**只由导航产生**的 internal 项（不能用 `/admin/audit` —— 它本来就在 `routes.ts:143`）
-- **步骤**: 登录 → 打开工作台 → 点击该导航项
-- **预期**: `page.url()` 的 pathname == 该项 `target`；`document.title` == `t(labelKey)` 的**译文**（中文环境为「审计日志」这类）
-- **〔AC 修正〕**: ① 原文「标题是 labelKey」歧义（裸键 vs 译文，S-22）；② 必须用**新**路径才有区分力
+### TC-016-051 E2E：`external` 项点击 → **整页跳转**到 launch_url〔D278 重写〕
+- **AC**: AC-S-163 步骤 3 ｜ P0 ｜ E2E ｜ 场景
+- **前置**: `apps/shell/dist` 已构建；工作台里有一个 `kind="external"` 的应用（`launch_url = "https://x.example/"`）
+- **步骤**: `page.route('https://x.example/**', r => r.fulfill({status:200, body:'stub'}))`
+  → 登录 → 打开工作台 → 点击该应用项
+- **预期**: `page.url()` **逐字等于** `https://x.example/`；且**没有**触发 SPA 内部导航
+  （用 `page.evaluate` 记录 `history.pushState` 调用次数 → **0**，证明是整页跳转）
+- **〔AC 修正〕**: 原文要求「点击 `internal` 项 → **落到对应页面**」——
+  `RouteDefinition` 无组件槽、`App.svelte` 硬编码 if/else → **做不到**（S-03）
+  → **D278 降级为「`external` 走整页跳」**，本条即该降级后的判据。
+  「落到 SPA 内新页面」**明确不做**（AC-S-163.b / TD-048）
 
 ### TC-016-052 E2E：external 项整页跳转
 - **AC**: AC-S-163 步骤 5 ｜ P0 ｜ E2E ｜ 场景

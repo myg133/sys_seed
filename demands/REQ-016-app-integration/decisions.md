@@ -422,3 +422,324 @@ Dev 照着实现、BA 照着判定，错的那个数会被「通过」。
 - `capabilities/permissions.json` 的 `total` **32 → 35** —— 依据：REQ-022 后是 32，本轮 +3 个 `app:*`；
 - `platform_app` 的**11 列** —— 依据：D265 的表（**逐列写死**，Dev 照着建）。
 
+
+---
+
+## rev 2（2026-11-21）：**QA 挑刺 39 条的逐条裁决**（D276~D285）
+
+> **39 条全部接受**（无一驳回）。其中 **9 条阻塞级**，本 rev 逐条给修法。
+> BA 已**独立核实** 6 条阻塞（S-01 / S-02 / S-03 / S-04 / S-09 / S-10），**全部成立**。
+
+### rev 2 裁决总览
+
+| 编号 | 一句话 | 级别 | 处置 |
+|---|---|---|---|
+| S-01 | 3 个 `app.*` 配置键**没写 `scope: platform`** → 落到 tenant 作用域 → 平台级读写直接拒 → AC-S-160/161 的「配置生效」永不可达 | 阻塞 | **D276** |
+| S-02 | design §6 的 `config` 段是**裸值** → 非法 manifest schema → 解析失败 → **服务起不来** | 阻塞 | **D277** |
+| S-03 | AC-S-163 的「运行时路由」在现有壳层**没有落点**（`routes` const / `createRouter` 捕获数组 / 无 `component` / 硬编码 if/else） | 阻塞 | **D278**（重写 AC-S-163） |
+| S-04 | 播种没给 `launch_url` + design 要求「非空才可见」→ 照字面实现得到 **0 组** | 阻塞 | **D279** |
+| S-05 | AC-S-156 步骤 8~11 前置不闭合（需未被占用的 client / 唯一名） | 阻塞 | **D280** |
+| S-06 | AC-S-158 路径 3 **删的是共享夹具 `client-A`** → 打掉 4 条 AC 的数据 | 阻塞 | **D281** |
+| S-07 | 「把配置改成 N」**没有执行主体与合法通道** | 阻塞 | **D282** |
+| S-08 | 「把 `launch_url` 置空」在 `Option<String>` 下**表达不出来** | 阻塞 | **D283** |
+| S-09 | D269 的导航字段**凭空多出 3 个**（`MenuSpec` 只有 label/icon/route/perm） | 阻塞 | **D284** |
+| S-10 | AC-S-024 的「`exp` 距撤销时刻 ≤ TTL」**数学恒真** | 高 | **D285** |
+| 其余 29 条 | 见 `qa-req016-spec-review.md` 逐条 | 高/中/低 | 随本 rev 一并改规格 |
+
+---
+
+## D276: 3 个配置键**必须写 `"scope": "platform"`**
+
+### 实测证据
+
+- `crates/platform-core/src/extension/manifest.rs:196-197` —— `ConfigSpec` 的 `scope` 有 `#[serde(default = "default_scope")]`；
+- 同文件 `:264-266` —— `fn default_scope() -> ConfigScope { ConfigScope::Tenant }`
+  → **不写 `scope` = 落到 `Tenant`**；
+- `crates/platform-config/src/service.rs:280` —— 平台级**写**端点：
+  `if spec.scope != ConfigScope::Platform { Err(ScopeNotAllowed{...}) }`；
+- 同文件 `:238-246` —— 平台级**读**也只取 `scope == Platform` 的键；
+- 对照已交付范式：`crates/platform-oauth/manifest.json` 的 5 个键**每条都带 `"scope": "platform"`**。
+
+### 决定
+
+`app.recentCount` / `app.workspace.maxApps` / `app.icon.allowHttp` **三个键全部写**
+`"scope": "platform"` —— 因为它们是**整个底座**的策略（不是某租户的偏好）。
+
+### 为什么这很危险（必须记住）
+
+漏了 `scope` → manifest **能解析**、迁移**能写库**、编译**能过**，
+**只有运行时静默过滤** → 失败现象是「**配置改了不生效**」，最像业务 bug。
+
+### 判据
+
+AC-S-160 步骤 4 / AC-S-161 步骤 6 的前置里**显式断言**：
+`SELECT count(*) FROM platform_config WHERE key LIKE 'app.%' AND scope = 'platform'` == **3**。
+
+---
+
+## D277: `config` 段必须是 **`ConfigSpec` 对象**，不是裸值
+
+### 实测证据
+
+- `crates/platform-core/src/extension/manifest.rs:189-207` —— `ConfigSpec { kind(`type`) / default / scope / label? / format? }`；
+  `type` 与 `default` **无 serde 默认** → **必填**；
+- 同文件 `:247-248` —— `pub config: Option<BTreeMap<String, ConfigSpec>>`；
+- `:229` 有 `deny_unknown_fields`；
+- `Manifest::parse_checked` 的调用点：`crates/xtask/src/capabilities.rs:241`、
+  `crates/platform-rbac/src/registry.rs:130`（**启动对账**）。
+
+### 决定
+
+design §6 的 `config` 段改成（**照抄 `crates/platform-oauth/manifest.json` 的形状**）：
+
+```json
+"config": {
+  "app.recentCount": {
+    "type": "number", "default": 6, "scope": "platform",
+    "label": "最近访问与常用应用各取前 N 条"
+  },
+  "app.workspace.maxApps": {
+    "type": "number", "default": 60, "scope": "platform",
+    "label": "工作台最多展示的应用数"
+  },
+  "app.icon.allowHttp": {
+    "type": "boolean", "default": false, "scope": "platform",
+    "label": "图标 URL 是否允许 http（仅本地开发）"
+  }
+}
+```
+
+### 后果（若不改）
+
+`cargo xtask capabilities` 报「invalid type: integer, expected struct ConfigSpec」→ **AC-S-165 步骤 1a 第一秒就红**；
+更糟：**启动对账也会因同一 manifest 解析失败而挂**，日志却写「权限点注册表对账失败」→ **误导排查方向**。
+
+---
+
+## D278: **重写 AC-S-163** —— 第三方应用**不进 SPA 路由**
+
+### 问题（S-03，BA 已核实全部 4 个事实）
+
+| 事实 | 证据 |
+|---|---|
+| `RouteDefinition` **无 component 字段** | `apps/shell/src/lib/router.ts:41-62`（只有 `path` / `title` / `permission?` / `requiresAuth?` / `load?`） |
+| `createRouter` **捕获数组引用** | `router.ts:156` `const { routes, ... } = options` → 闭包持有 |
+| `Router` **没有 `addRoute` / `setRoutes`** | `router.ts:113` 的 `export interface Router` |
+| 页面渲染是**逐路径硬编码** | `App.svelte:221-266`，**10 个** `{:else if resolution.path === ...}`，兜底是 `<Home/>` |
+
+→ design §4.4 的 `routes = [...createRoutes(...), ...routesFromNavigation(nav)]`：
+① 重赋值对路由器**零影响**；② 即使生效，新路径也**落到 `<Home/>`**，不可能「落到对应页面」；
+③ 要真生效**必须改 `router.ts`** → 违反 D270。
+
+**根因**：`ADR-0001 D4` 的「应用 = 路由」**成立，但那条路由必须是「外部 URL 的整页跳转」**。
+第三方应用是**独立 bundle / 独立站点**（`launch_url`），不是本 SPA 的页面 ——
+它**没有本 SPA 的 `component`**，天生不该进 SPA 路由表。
+
+### 决定
+
+**AC-S-163 重写为三条独立判据**（「宁可低风险交付，不交一个外形对、实质没用的东西」）：
+
+1. **函数级（必须有）**：`routesFromNavigation(items)` 对 `kind="internal"` 的项产出
+   `{ path: target, title: labelKey }`；对 `kind="external"` 的项产出 **0 条**（空数组）。
+   → 这是**纯函数单测**，有区分力，可变异。
+2. **入口级（必须有）**：`external` 项在**工作台页面**被渲染成**整页跳转**的入口
+   （`<a href={target}>` 或 `location.href`），**不经过** SPA 路由。
+3. **回归级（必须有）**：`apps/shell/src/lib/router.ts` **零改动**
+   （`git diff --stat <baseline>..HEAD -- apps/shell/src/lib/router.ts` 输出为空）。
+
+### **明确不做**（并从 AC 里删除）
+
+- ❌ 「点击导航项 → 落到对应页面（渲染新组件）」—— **做不到**，因为 `RouteDefinition` 没有组件槽。
+- ❌ 「运行时把新路由注入路由器」—— `createRouter` 捕获数组且无 `addRoute`。
+
+### 如果将来真要「底座内的页面由后端下发」
+
+那需要**三件事同时成立**（**不在本需求范围**）：
+
+1. 给 `RouteDefinition` 加 `component` 字段（或加 `wrapper`）；
+2. 把 `App.svelte` 的 10 个硬编码 if/else 改成**按 `route.component` 查表渲染**；
+3. 给 `Router` 加 `addRoute` / `routes` 改为 getter。
+
+→ 记 **TD-048**（见下），并写明「本需求**有意不做**，不是漏了」。
+
+---
+
+## D279: 工作台**不按 `launch_url` 过滤**；只有**导航**过滤
+
+### 问题（S-04）
+
+- `design-summary.md:174` / `:184` 要求「`launch_url` 非空才可见/可记访问」；
+- 但 AC-S-160 的播种**没给 `launch_url`** → 照字面实现得到 **0 组 / 0 条**。
+
+### 决定（**方案 A**）
+
+| 端点 | 是否要求 `launch_url` 非空 |
+|---|---|
+| `GET /api/apps/workspace` | **不要求**（工作台是**管理 + 展示**视角，应用可以在册但没有入口） |
+| `GET /api/apps/recent` / `frequent` | **不要求**（同工作台） |
+| `POST /api/apps/{id}/access` | **不要求**（记录「用户打开过」这件事，与有没有入口无关） |
+| `GET /api/apps/navigation` | **要求**（没入口的项点了没意义 → 不下发） |
+
+### 理由
+
+**工作台 ≠ 导航**。工作台是「这个租户接入了哪些应用」的**总览**（含尚未配入口的）；
+导航是「点了去哪」的**可点击项**。混为一谈会让「刚注册但还没填入口」的应用**在工作台上消失** ——
+正是管理员最需要看到它的时候。
+
+→ AC-S-160 / AC-S-161 的播种**不必须**给 `launch_url`；AC-S-162 的用例才给。
+
+---
+
+## D280: AC-S-156 步骤 8~11 的**前置补闭合**
+
+### 问题（S-05）
+
+步骤 8~11 要验 4 个错误码，但没写「用什么 client / 什么 displayName」→ 会先撞
+`APP_DUPLICATED`（409），而不是目标错误码。
+
+### 决定
+
+AC-S-156 的**前置条件**补：**每次调用前先新建一个专用 client**
+（`client-probe-<n>`，`n` 递增，用 REQ-022 的 `POST /api/oauth/clients` 建），
+**且每次用唯一的 `displayName`**（`探针-<n>`）。
+
+→ 用例侧同理（见 `test-cases/01-registry.md` 的 TC-016-004~014）。
+
+---
+
+## D281: AC-S-158 路径 3 **不删共享夹具 `client-A`**
+
+### 问题（S-06）
+
+`client-A` 是 `seed-e2e.sh` 播种的**全仓共享夹具**，还被 AC-S-024 / 156 / 159 / 162 用着
+→ 删它会**级联删掉 4 条 AC 的数据**，且 `client-A` 上带 `backchannel_logout_uri`（AC-S-149 要用）。
+
+### 决定
+
+路径 3 改成：**用 API 新建一个一次性 client** `client-cascade-probe`
+（`POST /api/oauth/clients`）→ 建一个应用绑它 → `DELETE` 那个 client → 查应用行。
+
+→ **不碰任何共享夹具**。
+
+---
+
+## D282: 「把配置改成 N」的**执行主体与通道**写死
+
+### 问题（S-07）
+
+AC-S-160 步骤 5 / AC-S-161 步骤 6 写「把 `app.workspace.maxApps` 改成 `2`」，
+但**没说谁改、怎么改**。而配置有 **epoch 失效机制**（`crates/platform-config/src/resolver.rs:46-47`）——
+直连 `UPDATE` 表**不会 bump epoch** → 改了**不生效**（缓存还在）。
+
+### 决定
+
+一律写成：
+
+```sql
+-- 以 base（管理员）直连执行
+SELECT platform_config_upsert('app.workspace.maxApps', '2'::jsonb);
+```
+
+`platform_config_upsert` 是**已交付的**存储过程（REQ-010），它会**自增 epoch**
+→ 下一次读就生效（无需重启、无需等 TTL）。
+
+→ 并断言：改完后**立刻**（不等 sleep）调端点，看到新值。
+
+---
+
+## D283: 「把 `launch_url` 置空」的**手段**写死
+
+### 问题（S-08）
+
+`launch_url` 是 `Option<String>`，而 `PATCH` 请求体里 `null` 与「省略该键」在 serde 里**等价**
+（都是 `None`）→「显式置空」与「不改」**分不开**。
+
+### 决定（**三选一，取最简单的**）
+
+**给 `platform_app` 加一个专用端点**：
+
+```
+DELETE /api/apps/{appId}/launch-url    → 204，把 launch_url 置 NULL
+```
+
+### 为什么不选另外两个
+
+| 方案 | 为什么不要 |
+|---|---|
+| `Option<Option<String>>` + `null` | 需要在 `PATCH` 的 DTO 上做**双层 Option**，
+且 serde 的 `deserialize_with` 要处理「键缺失 vs 键为 null」→ **容易写错、难测** |
+| 用空串 `""` 表示「清空」 | 空串与 NULL 语义不同（前者是「配了但为空」）→ **口径混乱** |
+
+→ 专用端点**最明确、最好测**（一条 `DELETE` → 204 → 查库为 NULL）。
+
+---
+
+## D284: 导航项的字段**收缩到 `MenuSpec` 真有的 4 个**
+
+### 问题（S-09，BA 已核实）
+
+`MenuSpec` 只有 **4 个字段**：`label` / `icon` / `route` / `perm`（`manifest.rs:120-133`）。
+我 D269 里写的 `labelKey` / `category` / `sortOrder` / `key` **全部不存在**。
+
+### 决定：`NavigationItem` 的字段**分两种来源分别定义**
+
+```json
+// source="module"（来自 manifest 的 menus[]）—— 只能用 MenuSpec 真有的字段
+{ "source": "module",
+  "label": "<menus[].label，中文文案>",
+  "icon": "<menus[].icon | null>",
+  "target": "<menus[].route>",
+  "kind": "internal",
+  "requiredPermission": "<menus[].perm | null>" }
+
+// source="app"（来自 platform_app）—— 用应用表的字段
+{ "source": "app",
+  "appId": "<platform_app.id>",
+  "label": "<platform_app.display_name>",
+  "icon": "<platform_app.icon_url | null>",
+  "target": "<platform_app.launch_url>",
+  "kind": "external",
+  "requiredPermission": null }
+```
+
+- ⚠️ **`module` 来源用 `label`（中文文案）而不是 `labelKey`** —— 因为 `MenuSpec` 里只有 `label`。
+  前端**直接渲染** `label`（不再过 `t()`）。
+  → **代价**：模块菜单**不再随语言切换**（`menus[].label` 是写死的文案）。
+  → **理由**：菜单下发的**起点**就是 manifest 的 `label`；要做多语言得先给 `MenuSpec` 加
+  `labelKey` 字段（**跨需求，D109 要声明**）→ **记 TD-049**。
+- ⚠️ **`category` / `sortOrder` 只对 `app` 来源有意义**（`platform_app` 有这两列）；
+  `module` 来源**没有** → 排序规则改成：**`module` 在前、`app` 在后**，组内各自按 `label` 升序。
+- ⚠️ **取消 `key` 字段**（它原来说「manifest 的 `menus[].label`」，与 `label` 重复）。
+
+---
+
+## D285: AC-S-024 的断言**改成双向等式**
+
+### 问题（S-10，BA 已核实）
+
+原文：「`exp` 距撤销时刻**不超过** `access_token_expires_in` 秒」。
+**数学恒真**：`exp = iat + TTL`，而撤销必然晚于签发 →
+`exp - t_revoke = TTL - (t_revoke - iat) < TTL` **恒成立** → **零区分力**。
+
+### 决定
+
+改成：
+
+| 判据 | 断言 |
+|---|---|
+| ① | `exp - iat == access_token_expires_in`（**逐字节相等**）← 这才是「TTL 被正确应用」 |
+| ② | 撤销后签名**仍然有效**（`VerifyOutcome::Valid`）← 证明撤销**没改**令牌本身 |
+| ③ | 撤销后内省 `active == false`（**立即**，不等待） |
+
+→ 三条**互相独立**，任一条被改坏都会红。
+
+---
+
+## 附：本轮**不做**但记债的 4 条
+
+| 债号 | 内容 |
+|---|---|
+| **TD-048** | 底座内的页面**不能由后端下发**（`RouteDefinition` 无 `component` 槽 + `App.svelte` 10 处硬编码 if/else + `Router` 无 `addRoute`）→ 见 D278 的「将来真要做的三件事」 |
+| **TD-049** | `menus[].label` 是**写死的中文文案** → 模块菜单**不随语言切换**（要修得给 `MenuSpec` 加 `labelKey`，跨需求） |
+| **TD-050** | 应用注册**没有数量配额**（一个租户可注册任意多个应用）→ 后续按 `app.workspace.maxApps` 之外的维度加限制 |
+| **TD-051** | `PATCH /api/apps/{id}` **无并发控制**（两人同时改会丢更新）→ 后续加 `If-Match` / `version` 列 |

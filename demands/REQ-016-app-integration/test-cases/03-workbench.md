@@ -38,7 +38,7 @@
 - **AC**: AC-S-160 步骤 4-5 ｜ P0 ｜ 集成 ｜ 边界值
 - **步骤**: 1) `base` 执行 `SELECT platform_config_upsert('app.workspace.maxApps','2'::jsonb)` 2) 立刻 `GET /api/apps/workspace`
 - **预期**: 应用总数**恰好 2**；且 == 全局 `(category, sortOrder, displayName)` 排序后的前 2 条（按 `design` §4.2 的语义：`finance` 组 B、A）
-- **〔AC 修正〕**: ① 原文「不超过 2」容许 0/1（S-18）；② 原文没写改配置的手段 → 必须用 `platform_config_upsert`（自增 epoch），直连 `UPDATE` 不失效（S-07）
+- **〔AC 修正〕**: ① 原文「不超过 2」容许 0/1（S-18）→ **D 已改成「恰好 2」**；② 原文没写改配置的手段 → 必须用 `platform_config_upsert`（自增 epoch），直连 `UPDATE` 不失效（S-07）
 - **⚠️ 需先定 S-18**：截断在分组前还是后；本条按「全局排序后取前 N，再分组」写
 
 ### TC-016-035 launch_url 为空的应用不出现在工作台〔AC 补充〕

@@ -1,8 +1,8 @@
 # 设计摘要：应用接入与应用注册表（REQ-016）
 
 - **需求编号**: REQ-016
-- **状态**: rev 1（2026-11-21 —— BA 规格阶段，四件套补齐）
-- **配套**: [demand.md](demand.md) / [acceptance.md](acceptance.md) / [decisions.md](decisions.md)
+- **状态**: **rev 2**（2026-11-21 —— QA 挑刺 39 条裁决落地：**D276~D285**）
+- **配套**: [demand.md](demand.md) / [acceptance.md](acceptance.md) rev 4 / [decisions.md](decisions.md) rev 2
 - **基线代码**: `develop` @ `aa5b305`（REQ-022 已合并）
 
 > ⚠️ 本文件里的每个 `file:line` 都是在 `aa5b305` 上**实测**的（dev-guide §9.11）。
@@ -27,7 +27,7 @@
                    ▼                          ▼
    ┌───────────────────────────┐   ┌──────────────────────────┐
    │ platform-app（**新 crate**）│   │ platform-oauth（既有）    │
-   │  · 2 张表 + 10 个端点      │──▶│  · platform_oauth_client  │
+   │  · 2 张表 + 11 个端点      │──▶│  · platform_oauth_client  │
    │  · 3 个权限点              │只读│    （**引用**，不复制）     │
    │  · 3 个审计事件码          │   │                          │
    └───────────┬───────────────┘   └──────────────────────────┘
@@ -61,7 +61,7 @@
 | `created_at` | `timestamptz` | NOT NULL |
 | `created_by` | `text` | NOT NULL |
 
-**⚠️ 恰好 12 列**（D265 的表里我写了 11 列，漏了 `launch_url` —— **以本表为准**）。
+**⚠️ 恰好 12 列**（以 D265 的表为准）。
 
 - **UNIQUE (tenant_id, client_id)** —— 同租户不能重复接入同一 client
 - **UNIQUE (tenant_id, display_name)** —— 工作台上两个同名应用没法区分
@@ -98,7 +98,7 @@
 
 ---
 
-## 3. 端点清单（**10 个**，一律 Problem Details）
+## 3. 端点清单（**11 个**，一律 Problem Details）
 
 | 方法 | 路径 | 权限点 / 认证 | 作用 |
 |---|---|---|---|
@@ -112,8 +112,11 @@
 | `GET` | `/api/apps/frequent` | **登录即可** | 常用应用 |
 | `POST` | `/api/apps/{appId}/access` | **登录即可** | 记一次访问（UPSERT） |
 | `GET` | `/api/apps/navigation` | **登录即可** | **导航项**（module + app 合并，按权限点过滤） |
+| `DELETE` | `/api/apps/{appId}/launch-url` | `app:registry:write` | **把 `launch_url` 置 NULL** → **204**（D283 / S-08） |
 
-> **共 10 个端点**（本表是唯一权威）。acceptance 的「完成定义对照」里若写 8 个 → 以本表为准。
+> **共 11 个端点**（本表是唯一权威）。
+> ⚠️ `DELETE …/launch-url` 是 **D283 补的**：`Option<String>` 下 `PATCH` 的 `null` 与「省略键」
+> 在 serde 里**等价** → 「显式置空」表达不出来，必须用专用端点。
 
 ### 3.1 跨栈 JSON 字段（**D258 同款，钉死**）
 
@@ -127,24 +130,39 @@
 | `POST /api/apps/{id}/access` | — | `{ status: "recorded", accessCount }` |
 | `GET /api/apps/navigation` | — | `{ items: [NavigationItem] }` |
 
-**`NavigationItem`**（D269 的字段**逐字**）：
+**`NavigationItem`** —— ⚠️ **按来源分别定义**（D284 / S-09）：
 
-```json
-{ "source": "module" | "app",
-  "key": "<string>",
-  "labelKey": "<仅 module 有>",
-  "label": "<仅 app 有>",
-  "target": "<站内路径 或 外部 URL>",
-  "kind": "internal" | "external",
-  "icon": "<string|null>",
-  "category": "<string>",
-  "sortOrder": 0,
-  "requiredPermission": "<string|null>" }
+`MenuSpec` 只有 **4 个字段**（`label` / `icon` / `route` / `perm`，`manifest.rs:120-133`）
+→ **没有** `labelKey` / `category` / `sortOrder` / `key`。
+
+```jsonc
+// source="module" —— 只能用 MenuSpec 真有的字段
+{
+  "source": "module",
+  "label":  "<menus[].label，中文文案>",
+  "icon":   "<menus[].icon | null>",
+  "target": "<menus[].route>",
+  "kind":   "internal",
+  "requiredPermission": "<menus[].perm | null>"
+}
+
+// source="app" —— 用 platform_app 的字段
+{
+  "source": "app",
+  "appId":  "<platform_app.id>",
+  "label":  "<platform_app.display_name>",
+  "icon":   "<platform_app.icon_url | null>",
+  "target": "<platform_app.launch_url>",
+  "kind":   "external",
+  "requiredPermission": null
+}
 ```
 
-- ⚠️ `labelKey` **仅** `module` 来源有；`label` **仅** `app` 来源有。
-  两者**互斥**（前端按 `source` 取用）。
-- ⚠️ `kind` **必须**有（`internal` 走 SPA 路由、`external` 整页跳）。
+- ⚠️ **`module` 来源用 `label`（中文文案），不是 `labelKey`** —— 前端**直接渲染**、不过 `t()`。
+  → **代价**：模块菜单**不随语言切换** → **TD-049**（要修得给 `MenuSpec` 加 `labelKey`，跨需求）。
+- ⚠️ **`category` / `sortOrder` 只影响工作台**（`platform_app` 有这两列），**不影响导航排序**。
+- ⚠️ **没有 `key` 字段**（原来写的「manifest 的 `menus[].label`」与 `label` 重复）。
+- ⚠️ `kind` **必须**有：`internal` 走 SPA 路由（`router.navigate`）、`external` 整页跳（`location.href`）。
 
 ---
 
@@ -171,7 +189,8 @@ GET /api/apps/navigation   (Bearer)
 
 ```
 GET /api/apps/workspace
-1. 取 status='active' 的应用（RLS 限定 + launch_url 非空）
+1. 取 status='active' 的应用（RLS 限定）—— ⚠️ **不**按 `launch_url` 过滤（D279 / S-04：
+   工作台是「接入了哪些应用」的总览，含尚未配入口的；只有**导航**才要求 `launch_url` 非空）
 2. 应用 app.workspace.maxApps 上限（**超了截断**，按排序后的前 N）
 3. 按 category 分组；组按 category 字典序；组内按 (sortOrder, displayName)
 4. 200 { groups: [...] }
@@ -191,29 +210,36 @@ POST /api/apps/{appId}/access
 
 ⚠️ **`access_count` 必须累加**（不能用 `EXCLUDED.access_count` —— 那是 1，会把计数重置）。
 
-### 4.4 前端运行时路由（AC-S-163 / D270）
+### 4.4 前端运行时路由（AC-S-163 / D278 —— **rev 2 重写**）
+
+🔴 **原设计（rev 1）是死路，已推翻**。四个实测事实：
+
+| 事实 | 证据 |
+|---|---|
+| `RouteDefinition` **无 component 字段** | `apps/shell/src/lib/router.ts:41-62` |
+| `createRouter` **捕获数组引用** | `router.ts:156` `const { routes } = options` |
+| `Router` **无 `addRoute` / `setRoutes`** | `router.ts:113` |
+| 页面渲染**逐路径硬编码** | `App.svelte:221-266`，**10 个** `{:else if}`，兜底 `<Home/>` |
+
+→ 「运行时加路由就能渲染新页面」**做不到**；要真做到必须改 `router.ts`（违反 D270）。
+
+**根因**：第三方应用是**独立站点**（`launch_url`），**没有本 SPA 的组件**
+→ 天生**不该**进 SPA 路由表。
+
+**rev 2 的交付（三条判据，见 AC-S-163）**：
 
 ```ts
-// 现状（apps/shell/src/lib/routes.ts:79）：同步、编译期构造
-export function createRoutes(client, onRoles?, onAudit?, onOAuthGrants?): readonly RouteDefinition[]
-
-// 新增（**独立纯函数**，可单测）
+// 新增纯函数（可单测）—— 只处理 internal
 export function routesFromNavigation(items: readonly NavigationItem[]): readonly RouteDefinition[]
+//   internal → [{ path: target, title: label }]
+//   external → []（不进 SPA 路由表）
 ```
 
-`App.svelte` 里：
-
-```ts
-// 既有：routes 只构造一次
-let routes = createRoutes(client, …);
-// 新增：拿到导航后**追加** internal 项对应的路由
-const navigation = await loadNavigation(client);
-routes = [...createRoutes(client, …), ...routesFromNavigation(navigation.items)];
-```
-
-- `routesFromNavigation` **只处理** `kind === 'internal'`；
-  `external` 项返回空 → **不进 SPA 路由表**（否则 `resolve()` 会拿外部 URL 去 `match()` → 静默失败）。
-- **`router.ts` 零改动**（D270）。
+- **`external` 应用**：在工作台页面渲染成**整页跳转**的入口（`<a href>` / `location.href`），
+  **不经过** SPA 路由。
+- **`router.ts` 零改动**（D270，用 `git diff --stat <baseline>..HEAD` 钉死）。
+- ❌ **明确不做**：「点导航项落到 SPA 内新页面」→ **TD-048**（要做需三件事：加 `component` 槽、
+  `App.svelte` 改查表渲染、`Router` 加 `addRoute`）。
 
 ---
 
@@ -258,9 +284,18 @@ routes = [...createRoutes(client, …), ...routesFromNavigation(navigation.items
   },
   "dependencies": [],
   "config": {
-    "app.recentCount": 6,
-    "app.workspace.maxApps": 60,
-    "app.icon.allowHttp": false
+    "app.recentCount": {
+      "type": "number", "default": 6, "scope": "platform",
+      "label": "最近访问与常用应用各取前 N 条"
+    },
+    "app.workspace.maxApps": {
+      "type": "number", "default": 60, "scope": "platform",
+      "label": "工作台最多展示的应用数"
+    },
+    "app.icon.allowHttp": {
+      "type": "boolean", "default": false, "scope": "platform",
+      "label": "图标 URL 是否允许 http（仅本地开发）"
+    }
   }
 }
 ```
@@ -311,7 +346,7 @@ routes = [...createRoutes(client, …), ...routesFromNavigation(navigation.items
 | 单元 | `crates/platform-app/src/**` 的 `mod tests` |
 | 集成（真库 + 真 HTTP） | `crates/platform-app/tests/*.rs` |
 | 契约 | `crates/platform-app/tests/contract_c5.rs`（**真 C-5**） |
-| 跨栈 | `crates/platform-server/tests/i18n_titles.rs`（101）+ `crates/platform-server/tests/app_real_stack.rs`（导航 / 工作台的真装配） |
+| 跨栈 | `crates/platform-server/tests/i18n_titles.rs`（**99** —— 6 个 `APP_*` 码）+ `crates/platform-server/tests/app_real_stack.rs`（导航 / 工作台的真装配） |
 | 前端单测 | `apps/shell/test/app-api.test.ts` / `app-navigation.test.ts` / `workbench.test.ts` |
 | E2E | `e2e/apps.spec.ts` |
 
@@ -369,4 +404,4 @@ REQ-022 踩过、已记 **TD-047**：
 | R3 | ~~`menus[].perm` 是否 `Option<String>`~~ | ✅ **已实测确认**（`manifest.rs:120-132`）→ **省略 `perm` 键**即可；不用 `null` |
 | R4 | **前端 `createRoutes` 加参数**可能影响 REQ-011/013/014/022 的既有用例 | 加**可选**参数（默认 `undefined`）；棒2 必须跑前端全量回归 |
 | R5 | `nav.ts` 的 `NAV_ITEMS` 若直接删掉，既有测试会红 | **保留**它作兜底，只**新增** `routesFromNavigation` |
-| R6 | **`launch_url` 为空的应用不出现在导航** —— 但工作台要不要显示它？ | **不显示**（没入口点了没意义）→ AC-S-160 / 162 一致 |
+| R6 | ~~`launch_url` 为空时工作台是否显示~~ | ✅ **已定（D279）**：工作台**显示**、导航**不显示** —— 两者不是一回事 |

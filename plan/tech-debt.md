@@ -827,3 +827,73 @@ Sprint 3 复盘的第 2 条教训：**修漏洞会制造新漏洞** —— 但�
   （验令牌 + 建 ctx + `ensure_fresh` + 注入 checker），新模块**直接用**，不自己写；
   ② 或加一条契约检查：扫 `src/**/*.rs`，凡出现 `insert(checker)` 的文件，
   同一函数体内必须出现 `ensure_fresh`（**带阳性对照**：临时删掉 → 必须报错）。
+
+---
+
+## TD-048: 底座内的**页面不能由后端下发**（`RouteDefinition` 无组件槽 + `App.svelte` 硬编码 10 处 if/else）
+
+- **发现于**: REQ-016 QA 挑刺（S-03）；BA 已逐条核实全部成立
+- **证据**（`develop` @ `aa5b305`）:
+  - `apps/shell/src/lib/router.ts:41-62` —— `RouteDefinition` 只有
+    `path` / `title` / `permission?` / `requiresAuth?` / `load?`，**没有组件字段**；
+  - `router.ts:156` —— `createRouter` 执行 `const { routes } = options` → **闭包捕获数组引用**；
+  - `router.ts:113` —— `export interface Router` **没有** `addRoute` / `setRoutes`；
+  - `apps/shell/src/App.svelte:221-266` —— 页面渲染是**逐路径硬编码**，
+    **10 个** `{:else if resolution.path === ...}`，兜底 `{:else}<Home/>`。
+- **影响面**: 「应用清单在运行时可扩展（新增应用 = 加一条注册记录 + 一个路由，**不改底座代码**）」
+  （ADR-0001 D4）—— **只做到了「菜单级」，没做到「路由级」**。
+  第三方应用能出现在导航里并**整页跳出**（本需求 AC-S-163 已交付），
+  但**不能**作为「底座内的一个页面」被下发。
+- **本轮的处置**（D278）: AC-S-163 **降级且重写**为三条可判的判据
+  （纯函数单测 / `external` 整页跳 / `router.ts` 零改动），
+  并把「不做」显式写进规格（`AC-S-163.b`）—— **不是漏了，是有意不做**。
+- **要做需三件事同时**（后续 REQ）:
+  1. `RouteDefinition` 加 `component`（或 `wrapper`）字段；
+  2. `App.svelte` 的 10 处硬编码 if/else 改成**按 `route.component` 查表渲染**；
+  3. `Router` 加 `addRoute`，或把 `routes` 改成 getter。
+  ⚠️ 这三件都要动 **REQ-011 已交付的路由核心** → 必须显式声明（D109）+ 全量回归。
+
+---
+
+## TD-049: `menus[].label` 是**写死的中文文案** → 模块菜单**不随语言切换**
+
+- **发现于**: REQ-016 QA 挑刺（S-09）；BA 核实 `MenuSpec` 只有 4 个字段
+- **证据**:
+  - `crates/platform-core/src/extension/manifest.rs:120-133` —— `MenuSpec { label / icon? / route / perm? }`
+    → **没有 `labelKey`**；
+  - 前端既有范式用的是**翻译键**：`apps/shell/src/lib/nav.ts` 的 `NavItem.labelKey`
+    （注释明写「`labelKey` 是翻译键而不是文案：语言切换后菜单要跟着变」）。
+- **影响面**: 本需求 AC-S-162 的 `source="module"` 导航项只能下发 `menus[].label`（中文文案），
+  前端**直接渲染**、不过 `t()` → **中文环境正常，切到英文仍是中文**。
+  （`platform-oauth` 的 `menus[]` 也受同样限制，只是它只有一条「授权管理」。）
+- **本轮为何不修**: 要给 `MenuSpec` 加 `labelKey` 字段 = **改平台 manifest schema**
+  → 跨需求（D109 要显式声明）+ 要改所有既有 manifest + 要改 `capabilities` 生成
+  → **超出 REQ-016 范围**。
+- **建议修法**: 给 `MenuSpec` 加 `labelKey: Option<String>`（可选，缺省回退到 `label`），
+  然后逐步把各 manifest 的 `menus[]` 迁到 `labelKey`。
+
+---
+
+## TD-050: 应用注册**没有数量配额**（一个租户可注册任意多个）
+
+- **发现于**: REQ-016 规格阶段（QA 提的 §4 缺漏之一）
+- **现状**: `platform_app` 无「每租户应用数上限」约束；
+  `app.workspace.maxApps`（默认 60）只控制**工作台展示**多少，**不限制注册**。
+- **影响面**: 恶意/误操作可注册海量应用 → 工作台查询变慢、`platform_app` 表膨胀。
+  比 REQ-006 的租户配额（那里有 `platform_db::quota`）弱。
+- **建议修法**: 复用 `platform-db` 的配额机制（`crates/platform-db/src/quota.rs`），
+  加一个 `app.maxAppsPerTenant` 配置 + 注册时校验。
+
+---
+
+## TD-051: `PATCH /api/apps/{id}` **无并发控制**（两人同时改会丢更新）
+
+- **发现于**: REQ-016 规格阶段（QA 提的 §4 缺漏之一）
+- **现状**: `PATCH` 是「读 → 改 → 写」，没有 `If-Match` / `version` 列 → **last-write-wins**。
+- **影响面**: 两个管理员同时改同一个应用的 `displayName` / `sortOrder`，后提交的会**静默覆盖**前者。
+  与平台其它写端点（`platform-config` 有 epoch、`platform-rbac` 有权限点 epoch）**不一致**。
+- **本轮为何不修**: 加 `version` 列要改表结构 + 所有写路径 + 前端要处理 409 →
+  超出「应用注册表 CRUD」的最小范围。
+- **建议修法**: `platform_app` 加 `version int8 NOT NULL DEFAULT 1`；
+  `PATCH` 要求 `If-Match: <version>` → 冲突返回 **409 `APP_VERSION_CONFLICT`**；
+  更新时 `SET version = version + 1 ... WHERE version = $expected`。

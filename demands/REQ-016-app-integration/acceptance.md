@@ -2,9 +2,10 @@
 
 - **需求编号**: REQ-016
 - **父需求**: REQ-001
-- **状态**: **rev 3**（2026-11-21 —— 补齐四件套：从 1 条 AC 扩到 **11 条**）
+- **状态**: **rev 4**（2026-11-21 —— QA 挑刺 39 条全部接受后的裁决已落地：**D276~D285**）
 - **对应验收标准**: **11 条**（AC-S-024（既有）+ **AC-S-156 ~ AC-S-165**）
-- **决策依据**: [decisions.md](decisions.md) rev 1（**D262~D274**）
+  + **1 个「明确不做」清单**（AC-S-163.b，**不是 AC**，是防止后人以为漏了的说明）
+- **决策依据**: [decisions.md](decisions.md) **rev 2（D262~D285）**
 - **基线代码**: `develop` @ `aa5b305`
 - **更新时间**: 2026-11-21
 
@@ -92,8 +93,10 @@ rev 2 只有 **1 条 AC**（AC-S-024），而 `demand.md` 列了 **4 项功能�
   4. 读元数据里的 `access_token_expires_in`。
 - **预期结果**:
   - 步骤 2：`active = false` —— **立即失效**（不等待任何 TTL）；
-  - 步骤 3：签名**仍然有效**，但 `exp` 距撤销时刻**不超过** `access_token_expires_in` 秒；
-  - 步骤 4：`access_token_expires_in` 与步骤 3 的窗口**逐字一致**。
+  - 步骤 3：签名**仍然有效**（`VerifyOutcome::Valid`）—— 证明撤销**没改**令牌本身；
+  - 步骤 4：**`exp - iat` 与 `access_token_expires_in` 逐字节相等**
+    （⚠️ **不再是**「距撤销时刻 ≤ TTL」—— 那**数学恒真**、零区分力，见 **D285 / S-10**）。
+  - **三条判据互相独立**：①②③ 任一条被改坏都会红。
 - **类型**: 安全
 - **⚠️ 本条在 rev 3 里的定位**：REQ-022 的 AC-S-143 / 144 / 147 已验过同一件事。
   本条是**跨需求的端到端回归判据** —— 在**应用注册表存在之后**再验一遍，
@@ -107,7 +110,11 @@ rev 2 只有 **1 条 AC**（AC-S-024），而 `demand.md` 列了 **4 项功能�
   - `tenant-a` 下有管理员账号 `u-perm-app@example.com`，
     **持 `app:registry:read` / `app:registry:write` / `app:registry:delete`**
     —— **由 `scripts/seed-e2e.sh` 播种**；
-  - 已存在 `client-A`（REQ-022 的 client，`confidential`）。
+  - 已存在 `client-A`（REQ-022 的 client，`confidential`）；
+  - ⚠️ **路径 2~5 的前置（D280 / S-05）**：**每次调用前先新建一个专用 client**
+    `client-probe-<n>`（用 REQ-022 的 `POST /api/oauth/clients` 建，`n` 递增），
+    **且每次用唯一的 `displayName`**（`探针-<n>`）
+    —— 否则会先撞 `APP_DUPLICATED`（409），**测的不是目标错误码**。
 - **测试步骤**（**主路径 + 5 条独立路径**）:
   1. （主）`POST /api/apps`，body 含 `clientId` / `displayName` / `description` / `category` /
      `iconUrl` / `launchUrl` / `sortOrder`；
@@ -174,16 +181,20 @@ rev 2 只有 **1 条 AC**（AC-S-024），而 `demand.md` 列了 **4 项功能�
 - **前置条件**: `platform_app.client_id` 是外键，`ON DELETE CASCADE`（D264）。
 - **测试步骤**（**四条独立路径**）:
   1. `POST /api/apps` 用一个**不存在**的 `clientId`；
-  2. 把 `client-A` 的 `status` 改成 `disabled`（REQ-022 的 `PATCH /api/oauth/clients/{id}`）→
-     再 `POST /api/apps` 绑定它；
-  3. 把 `client-A` 改回 `active` → 建一个应用 → `DELETE /api/oauth/clients/{client-A}`；
-  4. 查 `platform_app` 里步骤 3 那行。
+  2. **新建**一次性 client `client-lifecycle-probe`（**不用共享夹具 `client-A`**，D281 / S-06）
+     → 把它的 `status` 改成 `disabled`（REQ-022 的 `PATCH /api/oauth/clients/{id}`）
+     → 再 `POST /api/apps` 绑定它；
+  3. 把它改回 `active` → 建一个应用 → `DELETE /api/oauth/clients/client-lifecycle-probe`；
+  4. 查 `platform_app` 里步骤 3 那行；
+  5. **回归**：`GET /api/oauth/clients/client-A` 仍 **200**（**共享夹具未被碰**）。
 - **预期结果**:
   - 路径 1：**400** + `APP_CLIENT_INVALID`；
   - 路径 2：**400** + `APP_CLIENT_INVALID`（**停用的 client 不能接入**）；
-  - 路径 3：删除 client **成功**（**200/204**，且**不**因外键受阻）
+  - 路径 3：删除 client **成功**（**204**，且**不**因外键受阻）
     → **证明没有改坏 REQ-022 的 AC-S-135 步骤 7**；
-  - 路径 4：该应用行**已被级联删除**（按 `appId` 查 `count == 0`）。
+  - 路径 4：该应用行**已被级联删除**（按 `appId` 查 `count == 0`）；
+  - 路径 5：`client-A` **仍然存在**（200）—— 证明本条用例**没有污染共享夹具**
+    （D281 / S-06 的根因就是原写法会删掉它）。
 - **类型**: 功能 / 安全
 
 ---
@@ -214,11 +225,16 @@ rev 2 只有 **1 条 AC**（AC-S-024），而 `demand.md` 列了 **4 项功能�
     `D`(category=general, sortOrder=0, active) /
     `E`(category=general, sortOrder=0, **status=hidden**)。
 - **测试步骤**:
+  0. **前置断言（D276 / S-01）**：
+     `SELECT count(*) FROM platform_config WHERE key LIKE 'app.%' AND scope = 'platform'` == **3**
+     —— 证明 3 个配置键**都是平台级**（漏写 `scope` 会落到 tenant，平台端点直接拒）；
   1. `GET /api/apps/workspace`（用户会话）；
   2. 连打 **3 次**，逐次比较 `groups` 的 JSON；
   3. 读 `groups` 的结构与顺序；
-  4. 查配置 `app.workspace.maxApps` 的当前值；
-  5. 把 `app.workspace.maxApps` 改成 `2` → 再 `GET`。
+  4. 查配置 `app.workspace.maxApps` 的当前值（应为 **60**）；
+  5. 以 `base` 执行 **`SELECT platform_config_upsert('app.workspace.maxApps', '2'::jsonb);`**
+     （**必须用这个函数** —— 直连 `UPDATE` 不会 bump epoch，改了不生效，D282 / S-07）
+     → **立刻**（不 sleep）`GET`。
 - **预期结果**:
   - 步骤 1：**200**；
   - 步骤 2：**3 次响应逐字节相同**（`serde_json` 序列化后比较字符串）→ **确定性排序**；
@@ -227,7 +243,10 @@ rev 2 只有 **1 条 AC**（AC-S-024），而 `demand.md` 列了 **4 项功能�
     - `finance` 组内顺序 **B → A**（`sortOrder` 10 < 20）；
     - `general` 组内顺序 **C → D**（`sortOrder` 相同 → 按 `displayName` 升序）；
     - **E 不在任何组里**（`status=hidden` 被过滤）；
-  - 步骤 5：应用总数**不超过 2**（`maxApps` 生效）。
+  - 步骤 5：应用总数**恰好 2**（**不是**「不超过 2」—— 那容许 0/1，零区分力，S-18），
+    且是全局 `(sortOrder, displayName)` 排序后的**前 2 条**（钉死是哪两条，S-19）；
+  - ⚠️ **工作台不按 `launch_url` 过滤**（D279 / S-04）：播种**不必须**给 `launch_url`。
+    工作台是「接入了哪些应用」的**总览**；导航才是「点了去哪」（那里才要求非空）。
 - **类型**: 功能
 
 ---
@@ -243,62 +262,114 @@ rev 2 只有 **1 条 AC**（AC-S-024），而 `demand.md` 列了 **4 项功能�
   3. `GET /api/apps/frequent`；
   4. `POST /api/apps/{A}/access` 再打一次 → 查 `platform_app_access` 里 A 那行；
   5. 把应用 `B` 的 `status` 改成 `hidden` → 再 `GET /api/apps/recent`；
-  6. 把 `app.recentCount` 改成 `1` → 再 `GET /api/apps/recent`。
+  6. 以 `base` 执行 **`SELECT platform_config_upsert('app.recentCount', '1'::jsonb);`**（D282 / S-07）
+     → **立刻** `GET /api/apps/recent`。
 - **预期结果**:
   - 步骤 2：`recent` 的**第一条是 A**（最后访问）；
   - 步骤 3：`frequent` 的**第一条是 A**（`access_count = 2` 最大）；
   - 步骤 4：A 那行 `access_count` **变成 3**（UPSERT 累加，**不是**插入新行）
-    → 且 `platform_app_access` 里 `(tenant_id,user_id,client_id)` 的行数**仍为 3**；
+    → 且 `platform_app_access` 里 **`WHERE tenant_id='tenant-a' AND user_id=<该用户>`**
+    的行数**仍为 3**（⚠️ 必须绑定 `user_id` —— 不绑会被别的用例的行污染，S-28）；
   - 步骤 5：`B` **不在** `recent` 里（`hidden` 被过滤）；
   - 步骤 6：`recent` 长度 **== 1**（配置生效）。
 - **类型**: 功能
 
 ---
 
-### AC-S-162: 菜单下发 API：两类来源合并 + **按权限点过滤** + `kind` 区分
+### AC-S-162: 导航下发 API：两类来源合并 + **按权限点过滤** + `kind` 区分
 
 - **前置条件**:
   - `tenant-a` 下有一个绑定 `client-A`（`launch_url = "https://expense.example/app"`）的 active 应用；
-  - 平台模块的 `menus[]` 里至少有一个带 `perm` 的项（如 `audit` 的 `/admin/audit` + `audit:events:read`）；
+  - 平台模块的 `menus[]` 里至少有一个带 `perm` 的项（`audit` 的 `/admin/audit` + `audit:events:read`）；
   - 两个账号：`u-perm-audit@example.com`（**持** `audit:events:read`）、
-    `u-perm-read@example.com`（**不持**）。
+    `u-perm-read@example.com`（**不持**）；外加 `u-perm-none@example.com`（**无任何权限点**）。
 - **测试步骤**:
   1. 用 `u-perm-audit` 调 `GET /api/apps/navigation`；
   2. 用 `u-perm-read` 调同一端点；
-  3. 读响应里每一项的 `source` / `kind` / `target`；
-  4. 查应用那项的 `target` 与 `platform_app.launch_url` 的关系；
-  5. 把应用的 `launch_url` 置空（`NULL`）→ 再调。
+  3. 用 `u-perm-none` 调同一端点（**验 `perm` 缺省的项仍然下发**）；
+  4. 读响应里每一项的 `source` / `kind` / `target` / 字段集；
+  5. 查应用那项的 `target` 与 `platform_app.launch_url` 的关系；
+  6. `DELETE /api/apps/{appId}/launch-url`（**专用端点**，D283 / S-08）→ 再调。
 - **预期结果**:
-  - 步骤 1：`items` 里**既有** `source="module"` 的项（含 `audit` 那条）、
-    **也有** `source="app"` 的项；
-  - 步骤 2：`source="module"` 里**没有** `audit` 那条（缺 `audit:events:read`）
-    → 但 `source="app"` 的项**仍在**（应用不是权限点）；
-  - 步骤 3：
-    - `module` 项：`kind == "internal"`、`target` 是**站内路径**（以 `/` 开头）；
-    - `app` 项：`kind == "external"`、`target` 是 `https://` 开头的**外部 URL**；
-  - 步骤 4：`target` **逐字等于** `launch_url`；
-  - 步骤 5：该应用**不出现在** `items` 里（没入口就不下发）。
+  - 步骤 1：`items` 里**既有** `source="module"` 的项（含 audit 那条）、**也有** `source="app"` 的项；
+  - 步骤 2：`source="module"` 里**没有** audit 那条；但 `source="app"` 的项**仍在**
+    （应用不是权限点）；
+  - 步骤 3：`platform-app` 自己的「工作台」项（`menus[].perm` **缺省**）**仍出现**
+    —— 证明「`perm` 缺省 = 登录即可见」（D269）；
+  - 步骤 4：**字段集按来源分别钉死**（D284 / S-09 —— `MenuSpec` 只有 4 个字段，
+    **没有** `labelKey` / `category` / `sortOrder` / `key`）：
+
+    | 来源 | 字段（**恰好这些，不多不少**） |
+    |---|---|
+    | `module` | `source` / `label` / `icon` / `target` / `kind` / `requiredPermission` |
+    | `app` | `source` / `appId` / `label` / `icon` / `target` / `kind` / `requiredPermission` |
+
+    - `module` 项：`kind == "internal"`、`target` 是**站内路径**（以 `/` 开头）、
+      `label` 是 **manifest 的中文文案**（**不是翻译键**）；
+    - `app` 项：`kind == "external"`、`target` 是 `https://` 开头的**外部 URL**、
+      `requiredPermission == null`；
+  - 步骤 5：`target` **逐字等于** `launch_url`；
+  - 步骤 6：**204**，且该应用**不出现在** `items` 里（没入口不下发）。
+
+- **排序**（确定性，D284）: `module` 项**在前**、`app` 项**在后**；各组内按 `label` 升序。
 - **类型**: 功能 / 安全
+
+> ⚠️ **rev 4 的三处修正**（QA 的 S-08 / S-09 / S-24）：
+> 1. **`label` 不是 `labelKey`** —— `MenuSpec` 只有 `label`（中文文案）。
+>    → **代价**：模块菜单**不随语言切换** → 记 **TD-049**。
+> 2. **取消 `category` / `sortOrder` / `key`** —— `MenuSpec` 里不存在；`platform_app` 的
+>    `category`/`sort_order` **只影响工作台**，不影响导航排序。
+> 3. **置空 `launch_url` 用专用端点** `DELETE /api/apps/{appId}/launch-url`
+>    —— `Option<String>` 下 `PATCH` 的 `null` 与「省略键」**分不开**（D283）。
 
 ---
 
-### AC-S-163: 前端**运行时**路由注册表：新增应用**不改底座代码**
+### AC-S-163: 前端**运行时**路由注册表 —— `routesFromNavigation` 纯函数 + `external` 走整页跳转
 
-- **前置条件**: `apps/shell/dist` 已构建；导航 API 可返回 `kind="internal"` 的项。
-- **测试步骤**:
-  1. 用 `git diff --stat` 对比本需求**前后** `apps/shell/src/lib/router.ts` 是否被改；
-  2. 单测 `routesFromNavigation(items)`：传入 2 个 `internal` 项 + 1 个 `external` 项；
-  3. 单测：传入 `kind="external"` 的项 → **不产生**路由；
-  4. **E2E**：登录后访问工作台 → 导航里出现应用项 → 点 `internal` 项 → 落到对应页面；
-  5. **E2E**：点 `external` 项 → 浏览器**整页跳转**到外部 URL（用 `page.route` 拦截验证）。
+> 🔴 **rev 4 重写（D278 / S-03）**。原文要求「点击导航项 → **落到对应页面**（渲染新组件）」——
+> **在现有壳层里做不到**，四个事实（BA 实测）：
+>
+> | 事实 | 证据 |
+> |---|---|
+> | `RouteDefinition` **无 component 字段** | `apps/shell/src/lib/router.ts:41-62` |
+> | `createRouter` **捕获数组引用** | `router.ts:156` `const { routes } = options` |
+> | `Router` **无 `addRoute` / `setRoutes`** | `router.ts:113` |
+> | 页面渲染是**逐路径硬编码** | `App.svelte:221-266`，**10 个** `{:else if}`，兜底 `<Home/>` |
+>
+> **根因**：第三方应用是**独立站点**（`launch_url`），**没有本 SPA 的组件** → 天生不该进 SPA 路由表。
+> → 见 D278；将来真要「后端下发页面」需要三件事（**不在本需求范围**）→ **TD-048**。
+
+- **前置条件**: `apps/shell/dist` 已构建；导航 API 可返回 `kind="internal"` 与 `kind="external"` 两类项。
+- **测试步骤**（**三条独立判据**）:
+  1. **函数级**：单测 `routesFromNavigation(items)` ——
+     传入 **2 个 `internal`** 项（`target` 分别为 `/a`、`/b`，`label` 分别为 `A`、`B`）
+     **+ 1 个 `external`** 项（`target` = `https://x.example/`）；
+  2. **函数级**：只传 1 个 `external` 项；
+  3. **入口级（E2E）**：登录 → 打开工作台 → 找到 `external` 应用项 → 点击；
+  4. **回归级**：`git diff --stat <本需求基线>..HEAD -- apps/shell/src/lib/router.ts`。
 - **预期结果**:
-  - 步骤 1：`router.ts` **零改动**（D270）；
-  - 步骤 2：`routesFromNavigation` 返回**2 条**路由，`path` 与 `target` 逐字相等；
-  - 步骤 3：`external` 项**不产生**路由（返回空数组）→ 这条是关键：
-    若把它也塞进 SPA 路由表，`resolve()` 会拿外部 URL 去 `match()` → 静默失败；
-  - 步骤 4：`internal` 项点击后 URL 变成对应站内路径，**页面标题**是该导航项的 `labelKey`；
-  - 步骤 5：`external` 项点击后 `page.url()` 变成外部 URL（被拦截的 200 页）。
+  - 步骤 1：返回 **恰好 2 条**路由；`[0].path == "/a"` 且 `[0].title == "A"`、
+    `[1].path == "/b"` 且 `[1].title == "B"`
+    （⚠️ `title` 用 **`label` 的文案**，不是翻译键 —— D284）；
+  - 步骤 2：返回 **空数组** `[]`
+    ⚠️ **这条是关键**：若把 `external` 也塞进 SPA 路由表，
+    `resolve()` 会拿外部 URL 去 `match()` → **静默失败**；
+  - 步骤 3：`page.url()` **逐字等于** `https://x.example/`（`page.route` 拦截后返 200 桩页）；
+    且**没有**触发 SPA 内部导航（`history.pushState` 未被调用 → 是**整页跳转**）；
+  - 步骤 4：输出**为空**（`router.ts` **零改动**）。
 - **类型**: 功能 / 可维护性
+
+### AC-S-163.b: **明确不做**的事项（写进规格，防止「后面以为漏了」）
+
+| 不做 | 为什么 |
+|---|---|
+| ❌ 「点导航项 → 落到 SPA 内的新页面」 | `RouteDefinition` 无组件槽；`App.svelte` 硬编码 10 处 if/else → **做不到** |
+| ❌ 「运行时把新路由注入路由器」 | `createRouter` 捕获数组、`Router` 无 `addRoute` → **做不到** |
+| ❌ 「微前端容器（qiankun / wujie）」 | ADR-0001 D4 明确**只预留接口不实现** |
+
+→ 若要真做，需要**三件事同时**（**记 TD-048**）：
+① `RouteDefinition` 加 `component`；② `App.svelte` 改按 `route.component` 查表渲染；
+③ `Router` 加 `addRoute` 或把 `routes` 改 getter。
 
 ---
 
