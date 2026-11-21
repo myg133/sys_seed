@@ -239,6 +239,10 @@ rev 2 只有 **1 条 AC**（AC-S-024），而 `demand.md` 列了 **4 项功能�
   - 步骤 1：**200**；
   - 步骤 2：**3 次响应逐字节相同**（`serde_json` 序列化后比较字符串）→ **确定性排序**；
   - 步骤 3：
+    - ⚠️ **判据落在 HTTP 响应体上，不是页面渲染**（D286 / 棒 2 的第 1 个问题）：
+      前端 `sortWorkspace` 会**重排**返回的 groups（防御性），
+      所以**只有直接读 HTTP 响应体**才能验后端排序；
+      → 测试侧**不经任何前端函数**，直接对 `GET /api/apps/workspace` 的 **原始 JSON** 断言；
     - `groups` **恰好 2 组**：`finance` 在前、`general` 在后（category 字典序升序）；
     - `finance` 组内顺序 **B → A**（`sortOrder` 10 < 20）；
     - `general` 组内顺序 **C → D**（`sortOrder` 相同 → 按 `displayName` 升序）；

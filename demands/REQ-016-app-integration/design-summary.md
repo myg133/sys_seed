@@ -200,7 +200,8 @@ GET /api/apps/workspace
 
 ```
 POST /api/apps/{appId}/access
-1. 校验 app 存在且属于当前租户（RLS 保证）且 active 且 launch_url 非空
+1. 校验 app 存在且属于当前租户（RLS 保证）且 active
+   ⚠️ **不要求 `launch_url` 非空**（**以 D279 / D289 为准**：访问记录与有没有入口 URL 无关）
 2. INSERT INTO platform_app_access (tenant_id, user_id, client_id, last_accessed_at, access_count)
    VALUES (…, now(), 1)
    ON CONFLICT (tenant_id, user_id, client_id)

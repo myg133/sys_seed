@@ -897,3 +897,22 @@ Sprint 3 复盘的第 2 条教训：**修漏洞会制造新漏洞** —— 但�
 - **建议修法**: `platform_app` 加 `version int8 NOT NULL DEFAULT 1`；
   `PATCH` 要求 `If-Match: <version>` → 冲突返回 **409 `APP_VERSION_CONFLICT`**；
   更新时 `SET version = version + 1 ... WHERE version = $expected`。
+
+---
+
+## TD-052: `Home.svelte` 的硬编码占位菜单与工作台的真实导航**并存**
+
+- **发现于**: REQ-016 棒 2 交付（它主动提的第 2 个问题）
+- **证据**:
+  - `apps/shell/src/lib/nav.ts` 的 `NAV_ITEMS` 是**硬编码占位**（REQ-010 交付，
+    它自己的注释写着「本期为占位数据，后续由应用注册表下发」）；
+  - 而 REQ-016 的工作台用**真实导航**（`GET /api/apps/navigation`）。
+  - → `Home.svelte` 与 `Workbench.svelte` **两套菜单并存**，语义重叠但内容不同。
+- **影响面**: 用户看到两个入口区域；`Home` 的占位菜单里有些路径（`/api/iam` 等）
+  **不是页面路由**，点进去会落到 `<Home/>` 兜底 —— 看起来像「点了没反应」。
+- **本轮为何不统一**: 统一会动 **REQ-010 的 E2E**（`e2e/shell.spec.ts:48`
+  「shell 渲染并可过滤菜单」依赖 `NAV_ITEMS`）→ 超出 REQ-016 范围，
+  且属「改已交付行为」（D109 要显式声明）。
+- **建议修法**: 后续 REQ 里把 `NAV_ITEMS` 彻底换成「导航 API 的下发结果」，
+  `Home.svelte` 与 `Workbench.svelte` 合并成一个入口页；同步改 REQ-010 的 E2E。
+
