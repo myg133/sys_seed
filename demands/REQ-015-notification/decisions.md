@@ -355,7 +355,7 @@ crates/platform-notify/
 
 ---
 
-## D304: 4 个配置项
+## D304: **5 个**配置项（rev 2：S-06 裁决后加第 5 个）
 
 | 键 | 类型 | 默认 | scope |
 |---|---|---|---|
@@ -363,6 +363,10 @@ crates/platform-notify/
 | `notify.retryBaseSeconds` | `number` | `30` | platform |
 | `notify.retryMultiplier` | `number` | `2` | platform |
 | `notify.retryMaxSeconds` | `number` | `3600` | platform |
+| **`notify.deliveringTimeoutSeconds`** | `number` | **`300`** | platform |
+
+⚠️ **第 5 个是 D313（S-06）加的**：`delivering` 残留状态的回收阈值必须**可配**，
+否则「10 分钟」是魔数，且没有它就无法写「未超阈值不回收」的阴性对照。
 
 ⚠️ **每个键必须带 `"scope": "platform"`**（REQ-016 的 S-01 教训：漏写会落到 `Tenant` → 平台端点直接拒 → 配置永不生效）。
 ⚠️ `config` 段必须是 `ConfigSpec` 对象，**不是裸值**（REQ-016 的 S-02 教训：裸值 → 服务起不来）。
@@ -511,3 +515,155 @@ SMTP 的连接信息**一个都不进** manifest。
 | 3 | **worker 是显式 CLI 命令**，不是 web 进程内后台 | BA 提议（进程重启不丢消息 + 多实例不重复 + 测试可控） |
 | 4 | **多语言按 locale 分行存**，不复用 i18n 词库 | BA 提议（通知正文是「管理员维护的内容」，不是「界面翻译」） |
 | 5 | **SMTP 只做 STARTTLS（587），不做隐式 TLS（465）** | 需真实凭据才能验 465；记 TD-055 |
+
+---
+
+## 裁决轮：QA 挑刺 11 条的处置（D308 ~ D318）
+
+**挑刺报告**: [qa-req015-spec-review.md](../../feature-meta/qa-req015-spec-review.md)（11 条：高 4 / 中 5 / 低 2）
+**裁决**: **11 条全部接受**，全部回填进 `acceptance.md` rev 3。
+
+> ⚠️ **独立性说明**：这轮挑刺由 BA 自己完成（派了两轮 QA 子 Agent 都卡在写文件上）。
+> S-05~S-11 出自用例棒的 QA Agent，S-01~S-04 出自 BA 自查。
+> → 独立性弱于前几轮，**独立复核时要重点重查 S-01~S-04**。
+
+---
+
+## D308: AC-S-166 补 **头注入防御** 判据（S-01）
+
+**问题**：`design-summary §4.6` 写了头注入防御是「安全判据」，但 AC 里 `头注入` 出现 **0 次**
+（阳性对照：`AUTH LOGIN` = 1 次）→ **写了没判据 = 等于没要求**。
+
+**决定**：AC-S-166 加 **路径 7**：
+
+- `payload = {userName: "x\r\nBcc: attacker@evil.example"}`，模板 `{{userName}}` 进 `Subject`；
+- 判据必须用**假服务器实际收到的字节**：断言 `DATA` 段里 **`Bcc:` 出现 0 次**；
+- **阳性对照**：同一份 `DATA` 里 `To:` 出现 **1 次**（证明扫的是真收到的内容，不是空串）。
+
+⚠️ **不许**只断言「返回了错」——那是另一回事（AC-S-167 的无效占位符）。
+
+---
+
+## D309: AC-S-166 补 **base64 每 76 字符换行**判据（S-02）
+
+**问题**：`design-summary §4.6` 写了「不换行会被严格 MTA 拒」，AC 里 `76` 出现 **0 次**。
+
+**决定**：AC-S-166 的 SMTP 主路径加判据：假服务器收到的 `DATA` 正文里，
+**除最后一行外每行 base64 长度恰好 76**，且总行数 = `ceil(len(base64) / 76)`。
+
+⚠️ **必须逐行算长度**，不许只断言「含换行」——后者对「整段一行」也成立。
+
+---
+
+## D310: AC-S-166 补 **「STARTTLS 后重发 EHLO」** 判据（S-03）
+
+**问题**：D305 自己写「这条尤其关键 —— SMTP 实现里最常被漏掉的一步」，但 AC 里 `EHLO` 出现 **0 次**。
+
+**决定**：
+
+- 假 SMTP 服务器 `auth_only_after_tls: true` —— **只在 TLS 握手之后的 `EHLO` 响应**里带 `250-AUTH LOGIN`；
+- 判据①：认证成功（`delivered == true`）；
+- 判据②：假服务器记录的 `EHLO` 次数**恰好 2**（TLS 前 1 + TLS 后 1）。
+
+⚠️ **两条缺一不可**：只断言「成功」不够 —— 客户端可能压根没做 STARTTLS 就直接明文认证了
+（在某些服务器上也能成功，但**密码明文上网**）。
+
+---
+
+## D311: AC-S-173 补 **3 张表全验 RLS**（S-04）
+
+**问题**：design §2.4 声明 3 张表进 `tenantScoped`，但 AC 只有 **1 张**（delivery）验了 RLS。
+
+**决定**：AC-S-173 加一步（3 个小判据）：
+
+1. 断言 `crates/platform-notify/manifest.json` 的 `tenantScoped.tables`
+   **双向相等**于 `{platform_notify_template, platform_notify_preference, platform_notify_delivery}`；
+2. `DATABASE_URL="$DATABASE_URL_TEST" cargo xtask tenant-policies --check` **退出码 0**；
+3. 对 `template` 与 `preference` **各做一次**直连 RLS 验证（同步骤 6 手法，换表）。
+
+⚠️ **为什么这条重要**：manifest 里漏写某张表 → `tenant-policies --check` **会绿**
+（没声明就不生成也不校验）→ 那张表**完全无隔离**。
+
+---
+
+## D312: AC-S-169 钉死退订时 `attempt_count == 0`（S-05）
+
+**问题**：原文没说 `attempt_count` 是 0 还是 1 → 两种实现都能过，
+包括「退订后还重试 5 次才进死信」这种**明显浪费**的实现。
+
+**决定**：钉死 **`attempt_count == 0`**。理由：「用户已退订」是**确定性终态**，
+重试 5 次不会改变结论 → 重试纯属浪费且拖慢 worker。
+→ 实现要求：退订检查必须在**投递尝试之前**完成。
+
+---
+
+## D313: 新增配置项 `notify.deliveringTimeoutSeconds`（默认 300）（S-06）
+
+**问题**：AC-S-170 步骤 5 只验「10 分钟前的 `delivering` 应被回收」，
+**没有未超阈值的对照** → 「只要看到 `delivering` 就抢」的实现也能过
+→ 会在正常投递进行中把行抢走 → **重复投递**。
+
+**决定**：
+
+1. 补**阴性对照**：`delivering` + `updated_at = now - 5s` → `tick()` 后该行**仍不被取**；
+2. **新增第 5 个配置项** `notify.deliveringTimeoutSeconds`（`number` / 默认 `300` / `scope: platform`）
+   —— 阈值必须可配，否则「10 分钟」是魔数；
+3. → **D304 的配置项从 4 个变 5 个**；AC-S-174 的 `permissions.json` 断言不受影响
+   （配置项不进权限点），但 **manifest 的 `config` 段要多一项**。
+
+---
+
+## D314: AC-S-172 给出并发**构造法**（S-07）
+
+**问题**：只写「并发发 2 个 resend」，没给构造法 → Dev 写成串行也能过
+（第一个已改 pending，第二个自然 409）→ **看起来测了并发，其实测了串行**。
+
+**决定**：判据必须落在**影响行数**上：
+
+- 构造法（二选一，Dev 在交付说明里写明选了哪个）：
+  - (a) `tokio::sync::Barrier::new(2)` 让两个 task 同一时刻发 HTTP 请求；
+  - (b) **更可靠**：两个独立 `TenantTx`，各自 `execute` 同一条
+    `UPDATE … SET status='pending' … WHERE id = ? AND status = 'dead_letter'`；
+- 判据：两次的 `rows_affected` 集合**恰好是 `{1, 0}`**
+  （⚠️ **不是** `{1}`，也**不是**「两个都 1」）。
+
+---
+
+## D315: AC-S-166 步骤 7 的超时给**可断言区间**（S-08）
+
+**问题**：「`error` 含超时（10 秒）」太弱 —— 一个**立刻失败**的实现也能造出含 `timeout` 的文案。
+
+**决定**：断言 ① `10s <= elapsed <= 12s`（下界证明真等了，上界防写成 60s 仍绿）；
+② `call_count("AUTH") == 0`（超时前不该走到认证）。
+
+---
+
+## D316: AC-S-167 步骤 11 的 SSTI 判据加 `catch_unwind`（S-09）
+
+**问题**：若载荷导致 panic（索引越界等），测试以 panic 结束 →
+看起来是「测试崩了」而不是「发现漏洞」。
+
+**决定**：用 `std::panic::catch_unwind` 包住渲染调用，断言
+① **不 panic**；② 返回 `Err` 且码为 `NOTIFY_TEMPLATE_INVALID_PLACEHOLDER`。**两条都要。**
+
+---
+
+## D317: AC-S-166 步骤 2 封死 `Ok(DeliveryResult{delivered:false})`（S-10）
+
+**问题**：原文「`delivered` 不得为 `true`」允许 `Ok(delivered:false)` ——
+而后者会让 worker 走**重试**分支 → 对未配置的通道**重试 5 次**才进死信，与 D292 冲突。
+
+**决定**：改成「4 个未配置通道的 `send()` **必须返回 `Err`**；
+**不得**返回 `Ok`（**含** `Ok(DeliveryResult{ delivered: false, .. })`）」。
+
+---
+
+## D318: AC-S-174 的 `all_codes()` 判据改成**读源码断言**（S-11）
+
+**问题**：原文说「`all_codes()` 漏加会**假绿**」，但判据写的是「步骤 1c 通过」——
+**而漏加时它恰好就是绿的** → 判据与它要防的东西**同向**。
+
+**决定**：判据改成读源码断言：
+`grep -c "platform_notify::error::ALL_CODES" crates/platform-server/tests/i18n_titles.rs` **≥ 1**，
+配阳性对照 `grep -c "platform_app::error::ALL_CODES"` **= 1**。
+→ 即「**断言那行代码存在**」而不是「断言测试绿」。

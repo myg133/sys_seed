@@ -302,6 +302,33 @@ QUIT                   → 221
 `notify.template.created` / `notify.template.updated` / `notify.template.deleted` /
 `notify.dead_letter.resent`（三段式，与已交付的 `app.registry.*` / `oauth.client.*` 一致）。
 
+### 5.1 ⚠️ 新增 8 个码必须同步改的**三处**（Dev 最容易漏）
+
+这不是「加个常量」就完事的 —— 仓里有**三条既有机制**会因此变红或假绿：
+
+| # | 位置 | 不改的后果 |
+|---|---|---|
+| 1 | `crates/platform-core/src/titles.rs:45` 的 `TITLES` **加 8 行** | 步骤 1c 的 `titles_cover_every_code` 红（取到 `FALLBACK_TITLE`） |
+| 2 | `crates/platform-server/tests/i18n_titles.rs:174` 的 `the_title_table_has_the_pinned_number_of_rows` **加 `const REQ_015_NEW_CODES: usize = 8;`** | 该测试**硬编码**了 `58+21+5+9+6 = 99`；实际变 107 → **红** |
+| 3 | 同文件 `:59` 的 `all_codes()` **加 `platform_notify::error::ALL_CODES`** | ⚠️ **会假绿**：新码不在清单里 → `titles_cover_every_code` 检查不到它们（表里缺了也不报） |
+| 4 | `packages/i18n/src/locales/{zh-CN,en-US}.json` 各加 8 条 `error.<CODE>` | `every_error_code_is_registered_in_every_locale`（`:382`）红 |
+
+> ⚠️ **第 3 条是最危险的**：它是唯一一个「不写不会红、但会让守卫失效」的改动
+> —— 与 TD-047（`ensure_fresh` 只是散文不是机制）是同一类问题。
+
+### 5.2 ⚠️ `org.*` 在 `TITLES` 里，`notify.*` 不进 —— 别照抄错的样板
+
+`titles.rs:195-200` 里确实有 **6 个 `org.*` 事件码**，注释写明「platform-org 的通知标题
+（事件码，不是 HTTP 错误码）」。**这不代表事件码都要进 `TITLES`**：
+
+| | `org.*`（**在**表里） | `notify.*`（**不进**表） |
+|---|---|---|
+| 用途 | 通知标题的**文案来源** | 审计记录的 `action` 字段 |
+| 谁查 | `OrgEventKind::title()` 显式调 `title_of_code()`（`crates/platform-org/src/notify.rs:144`） | 没人查 |
+| 前端消费 | 是 | 否 |
+
+→ 4 个 `notify.*` 若被塞进 `TITLES`，`TITLES.len()` 就是 **111 ≠ 107** → 步骤 1c 红。
+
 ---
 
 ## 6. 权限点与 manifest
@@ -330,12 +357,13 @@ QUIT                   → 221
     "notify.maxAttempts":       { "type": "number", "default": 5,    "scope": "platform", "label": "最多尝试次数（含首次）" },
     "notify.retryBaseSeconds":  { "type": "number", "default": 30,   "scope": "platform", "label": "首次重试延迟（秒）" },
     "notify.retryMultiplier":   { "type": "number", "default": 2,    "scope": "platform", "label": "退避倍数" },
-    "notify.retryMaxSeconds":   { "type": "number", "default": 3600, "scope": "platform", "label": "单次重试延迟上限（秒）" }
+    "notify.retryMaxSeconds":   { "type": "number", "default": 3600, "scope": "platform", "label": "单次重试延迟上限（秒）" },
+    "notify.deliveringTimeoutSeconds": { "type": "number", "default": 300, "scope": "platform", "label": "delivering 残留状态的回收阈值（秒）" }
   }
 }
 ```
 
-⚠️ 4 个配置项**全部** `"scope": "platform"` 且是 `ConfigSpec` **对象**
+⚠️ **5 个**配置项**全部** `"scope": "platform"` 且是 `ConfigSpec` **对象**
 （REQ-016 的 S-01 / S-02 两条教训）。
 ⚠️ **SMTP 的 5 个环境变量不进 manifest**（`ConfigSpec` 无 `Secret` 类型，D306）。
 
@@ -352,7 +380,7 @@ QUIT                   → 221
 |---|---|
 | `20261121000400_notify_schema.{up,down}.sql` | 3 张表 + 索引 + `base_platform_notify` 组角色授权 |
 | `20261121000500_notify_permission_seed.{up,down}.sql` | 3 个权限点 + 1 个菜单 |
-| `20261121000600_notify_config_seed.{up,down}.sql` | 4 个配置项（`scope = platform`） |
+| `20261121000600_notify_config_seed.{up,down}.sql` | 5 个配置项（`scope = platform`） |
 
 ⚠️ 命名沿用 `2026112100xxxx` 序列（现有最后一个是 `20261121000300_app_config_seed`）。
 

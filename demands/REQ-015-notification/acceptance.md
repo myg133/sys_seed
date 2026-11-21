@@ -2,10 +2,10 @@
 
 - **需求编号**: REQ-015
 - **父需求**: REQ-001
-- **状态**: **rev 2**（2026-11-21 —— 从 1 条空泛 AC 补齐到 **10 条**；并按用户裁定把邮件改为真实现）
+- **状态**: **rev 3**（2026-11-21 —— rev 2 补齐 10 条 AC；rev 3 按 QA 挑刺 11 条回填判据）
 - **对应验收标准**: **10 条**（AC-S-023 **重写** + **AC-S-166 ~ AC-S-174**）+
   **1 个「明确不做」清单**（AC-S-166.b，**不是 AC**，是防止后人以为漏了的说明）
-- **决策依据**: [decisions.md](decisions.md) **rev 2（D291~D307）**
+- **决策依据**: [decisions.md](decisions.md) **rev 3（D291~D318）**
 - **基线代码**: `develop` @ `a2b7e52`（REQ-016 已合并）
 - **更新时间**: 2026-11-21
 
@@ -81,7 +81,7 @@ rev 1 只有 **1 条空泛 AC**（AC-S-023，正文是「行为与本条标题�
 > ⚠️ 事件码（**4 个** `notify.*`：`notify.template.created` / `notify.template.updated` /
 > `notify.template.deleted` / `notify.dead_letter.resent`）**不进 `TITLES`**（D223 同款口径）。
 
-### 本需求的配置项（**4 个**，全在 manifest 的 `config` 段）
+### 本需求的配置项（**5 个**，全在 manifest 的 `config` 段）
 
 | 键 | 类型 | 默认 | scope |
 |---|---|---|---|
@@ -89,11 +89,16 @@ rev 1 只有 **1 条空泛 AC**（AC-S-023，正文是「行为与本条标题�
 | `notify.retryBaseSeconds` | `number` | `30` | **platform** |
 | `notify.retryMultiplier` | `number` | `2` | **platform** |
 | `notify.retryMaxSeconds` | `number` | `3600` | **platform** |
+| `notify.deliveringTimeoutSeconds` | `number` | `300` | **platform** |
 
+> ⚠️ 第 5 个（`deliveringTimeoutSeconds`）是 **D313 / S-06** 加的：
+> `delivering` 残留状态的回收阈值必须可配，否则「10 分钟」是魔数，
+> 且没有它写不出「未超阈值**不**回收」的阴性对照。
+>
 > ⚠️ 每个键**必须**带 `"scope": "platform"`（REQ-016 的 S-01 教训：
 > 漏写会落到 `Tenant` → 平台端点直接拒 → 配置永不生效）。
 > ⚠️ `config` 段必须是 `ConfigSpec` **对象**，不是裸值（REQ-016 的 S-02 教训：裸值 → 服务起不来）。
-> ⚠️ **SMTP 的连接信息与密码不进这 4 项**（`ConfigSpec` 无 `Secret` 类型，
+> ⚠️ **SMTP 的连接信息与密码不进这 5 项**（`ConfigSpec` 无 `Secret` 类型，
 > `crates/platform-core/src/extension/manifest.rs:189-207`）→ 走环境变量，见 AC-S-166 步骤 8。
 
 ---
@@ -149,7 +154,7 @@ rev 1 只有 **1 条空泛 AC**（AC-S-023，正文是「行为与本条标题�
 - **前置条件**:
   - `tenant-a` 存在；SMTP 的 5 个环境变量按 D306 设置（指向假 SMTP 服务器）；
   - Webhook 指向一个 `page.route` / 假 HTTP 服务器。
-- **测试步骤**（**主路径 + 6 条独立路径**）:
+- **测试步骤**（**主路径 + 9 条独立路径**）:
   1. （主）按 `channel()` 名字把 3 个 provider 装进 `ChannelRegistry`，逐个用 `send()` 投递；
   2. 查 `ChannelRegistry` 注册的通道名集合；
   3. **路径 2**：向短信通道投递 → 读错误；
@@ -157,21 +162,48 @@ rev 1 只有 **1 条空泛 AC**（AC-S-023，正文是「行为与本条标题�
   5. **路径 4**：把假 SMTP 服务器设成 `AUTH` 回 `535`，向邮件通道投递；
   6. **路径 5**：把假 SMTP 服务器设成对**第 2 个** `RCPT TO` 回 `550`，投递 2 个收件人；
   7. **路径 6**：把假 SMTP 服务器设成「连上但不发 `220`」；
-  8. 检查 `SmtpConfig` 的 `Debug` 输出。
+  8. 检查 `SmtpConfig` 的 `Debug` 输出；
+  9. **路径 7（头注入）**：`payload = {userName: "x\r\nBcc: attacker@evil.example"}`，
+     模板 `{{userName}}` 渲染进 `Subject`，向邮件通道投递；
+  10. **路径 8（base64 折行）**：投递一条正文长度使 base64 超过 **76** 字符的通知；
+  11. **路径 9（STARTTLS 后重发 EHLO）**：假服务器设成
+      `auth_only_after_tls: true`（**只在 TLS 握手之后的 `EHLO`** 响应里带 `250-AUTH LOGIN`），
+      向邮件通道投递；
+  12. **路径 10（未配置形态）**：对 4 个未配置通道的返回值做**类型判别**
+      （是 `Err` 还是 `Ok`）。
 - **预期结果**:
   - 步骤 1：站内信 → `delivered == true`；邮件 → `delivered == true` 且
-    `provider_message_id.is_some()`（取 250 响应的队列 ID）；Webhook → `delivered == true`；
+    `provider_message_id.is_some()`（**必须逐字等于**假服务器在 `DATA` 后回的那行 250 里
+    写死的队列 ID，证明取的是服务端响应而不是自造 uuid）；Webhook → `delivered == true`；
   - 步骤 2：**恰好**是 `["in_app", "smtp", "webhook", "sms", "dingtalk", "wecom", "feishu"]`
-    —— ⚠️ 后 4 个**也在注册表里**（它们必须存在以返回明确错误），
-    但它们的 `send()` **必须返回 `Err`**，`delivered` **不得**为 `true`；
+    —— ⚠️ 后 4 个**也在注册表里**（它们必须存在以返回明确错误）；
   - 步骤 3/4：**4 次全部** `Err`，错误码 `NOTIFY_CHANNEL_NOT_CONFIGURED`
     （⚠️ **不是** `Ok(DeliveryResult { delivered: false })`、**不是**静默成功 —— D292 的铁律）；
   - 步骤 5：`Err`，`error` 含 **`535`**（证明服务端应答码被带出来了，不是「认证失败」这种泛化文案）；
+    且 `error` **不含**密码明文（含 base64 后的密码串也不行）；
   - 步骤 6：整条 `Err`，`error` 含 **`550`**（**任一收件人被拒 → 整条失败**，不部分成功）；
-  - 步骤 7：`Err`，`error` 含超时（10 秒，D305）；
+  - 步骤 7：`Err`，且 **`10s <= elapsed <= 12s`**（⚠️ **必须断言实际耗时区间**：
+    下界证明真的等了 10 秒而不是立刻失败，上界防止实现把 timeout 写成 60 秒而判据仍然绿），
+    且 `error` 含超时语义；
   - 步骤 8：**不含**密码明文 —— 断言 `format!("{:?}", cfg)` 里
     **不包含**环境变量 `BASE_SMTP_PASSWORD` 的值，且包含 `"***"`；
-    **阳性对照**：同时断言该 `Debug` 输出里**包含** `BASE_SMTP_HOST` 的值（证明 `Debug` 不是全空）。
+    **阳性对照**：同时断言该 `Debug` 输出里**包含** `BASE_SMTP_HOST` 的值（证明 `Debug` 不是全空）；
+  - 步骤 9（**安全判据**）：假服务器**实际收到的 `DATA` 段**里
+    **`Bcc:` 出现 0 次**；
+    **阳性对照**：同一份 `DATA` 里 **`To:` 出现 1 次**
+    （证明扫的是真收到的内容而不是空串 —— 否则「什么都没收到」也会让上一条绿）；
+    ⚠️ **不许**用「返回了错」代替本条 —— 那是另一件事；
+  - 步骤 10：假服务器收到的 `DATA` 正文里，**除最后一行外每行 base64 长度恰好 76**，
+    且总行数 = `ceil(len(base64) / 76)`
+    （⚠️ **必须逐行算长度**；只断言「含换行」对「整段一行」也成立 → 零区分力）；
+  - 步骤 11：① 投递成功（`delivered == true`）；② 假服务器记录的 **`EHLO` 次数恰好 2**
+    （TLS 前 1 + TLS 后 1）。
+    ⚠️ **两条缺一不可**：只断言「成功」不够 —— 客户端可能压根没做 STARTTLS
+    就直接明文认证了（在某些服务器上也能成功，但**密码明文上网**）；
+  - 步骤 12：4 个未配置通道的返回值 **全部是 `Err`**；
+    **不得**出现 `Ok(_)` —— 包括 `Ok(DeliveryResult { delivered: false, .. })`
+    （⚠️ 后者语义是「投递完成但失败」→ worker 会走**重试**分支
+    → 对未配置的通道白重试 5 次才进死信，与 D292 冲突）。
 - **类型**: 功能 / 安全
 
 ### AC-S-166.b: **明确不做**的事项（写进规格，防止「后面以为漏了」）
@@ -226,6 +258,11 @@ rev 1 只有 **1 条空泛 AC**（AC-S-023，正文是「行为与本条标题�
   - 步骤 11：**4 次全部** `NOTIFY_TEMPLATE_INVALID_PLACEHOLDER`
     —— ⚠️ **这是安全判据**：`{{x.y}}` 与 `{{> partial}}` 若被当语法接受，
     等于把模板变成了通用模板语言；`{{constructor.constructor(...)}}` 是 SSTI 的经典载荷。
+    ⚠️ **必须用 `std::panic::catch_unwind` 包住渲染调用**，同时断言：
+    ① **不 panic**（若载荷导致索引越界等 panic，测试会以 panic 结束 →
+    看起来是「测试崩了」而不是「发现漏洞」，会掩盖问题）；
+    ② 返回 `Err` 且错误码为 `NOTIFY_TEMPLATE_INVALID_PLACEHOLDER`。
+    **两条缺一不可。**
 - **类型**: 功能 / 安全
 
 ---
@@ -269,7 +306,12 @@ rev 1 只有 **1 条空泛 AC**（AC-S-023，正文是「行为与本条标题�
 - **预期结果**:
   - 步骤 1：投递成功（`delivered`），站内信 provider 计数 +1；
   - 步骤 3：**该条进死信**，`status == "dead_letter"`，
-    `last_error` 指明「用户已退订 `marketing`」——
+    `last_error` 指明「用户已退订 `marketing`」，
+    且 **`attempt_count == 0`**
+    （⚠️ **钉死为 0**：退订检查必须在**投递尝试之前**完成 ——
+    「用户已退订」是**确定性终态**，重试 5 次不会改变结论 → 重试纯属浪费且拖慢 worker；
+    若留空间给 `1`，「退订后还重试 5 次」这种明显错误的实现也能通过，
+    因为它的 `last_error` 同样与退订相关）；
     ⚠️ **不是 `delivered`、不是 `pending` 静默丢弃**：退订必须**留下可查的记录**
     （用户投诉「为什么没收到」时能回答）；
   - 步骤 4：返回该用户的偏好列表，含 `{category: "marketing", optedOut: true}`；
@@ -293,8 +335,11 @@ rev 1 只有 **1 条空泛 AC**（AC-S-023，正文是「行为与本条标题�
   2. **并发**跑 **4 个** `tick()`（`tokio::join!` 4 个 future，各自独立事务），每批取 30；
   3. 汇总：查 provider 的总调用次数与 100 条的最终状态；
   4. **路径 2（未到期不取）**：入队 1 条 `next_attempt_at = now + 1 小时`，`tick()` 一次；
-  5. **路径 3（崩溃恢复）**：把一条置成 `status = "delivering"` 且 `updated_at` 是 10 分钟前，
-     `tick()` 一次；
+  5. **路径 3（崩溃恢复 + 阴性对照）**：
+     - **3a（超阈值）**：把一条置成 `status = "delivering"` 且 `updated_at` 是
+       `now - notify.deliveringTimeoutSeconds - 60s`（默认阈值 300 → 即 6 分钟前），`tick()` 一次；
+     - **3b（未超阈值）**：把另一条置成 `status = "delivering"` 且 `updated_at = now - 5s`，
+       `tick()` 一次；
   6. **路径 4（幂等）**：对已 `delivered` 的行再 `tick()` 三次。
 - **预期结果**:
   - 步骤 2/3：100 条**全部 `delivered`**（不遗漏），且 provider 总调用次数
@@ -302,11 +347,19 @@ rev 1 只有 **1 条空泛 AC**（AC-S-023，正文是「行为与本条标题�
     ⚠️ **两个数字都要断言**：只断言「全部 delivered」的话，
     「投两次但状态只记一次」这种重复投递会漏过去；
   - 步骤 4：那条**仍是 `pending`**（`next_attempt_at` 未到时不许取）；
-  - 步骤 5：那条被**重新取到并投递**（`delivering` 是崩溃残留状态，
+  - 步骤 5-3a：那条被**重新取到并投递**（`delivering` 是崩溃残留状态，
     超过阈值必须回收 —— 否则一条消息永远卡住）→ 最终 `delivered`；
+  - 步骤 5-3b：那条 **`status` 仍是 `delivering`**，且 provider 调用次数**不变**
+    （⚠️ **这条是阴性对照，缺了它就有零区分力**：
+    一个「只要看到 `delivering` 就抢」的实现也能过 3a，
+    而它会在**正常投递进行中**把行抢走 → 同一通知被两个 worker 同时投递
+    → **重复投递**，正是 D296 要避免的事）；
   - 步骤 6：3 次 `tick()` 后 provider 调用次数**不再增加**
     （`delivered` 是终态，不参与出队）。
 - **类型**: 功能 / 可靠性
+
+> ⚠️ **阈值必须来自配置 `notify.deliveringTimeoutSeconds`（默认 300）**，不是代码里的魔数。
+> 依据 **D313 / S-06**。
 
 ---
 
@@ -352,10 +405,15 @@ rev 1 只有 **1 条空泛 AC**（AC-S-023，正文是「行为与本条标题�
     `status` / `attempt_count` / `next_attempt_at` **逐字段不变**；
   - 步骤 4：**404** + **`NOT_FOUND`**（平台通用码；本需求**不新增**专用码，
     理由见本条末尾的说明）；
-  - 步骤 5：**恰好 1 个 200、1 个 409**（不两个都成功）——
-    ⚠️ **这条必须靠 SQL 影响行数守卫**
-    （`UPDATE ... WHERE status = 'dead_letter'` 的 `rows_affected == 0` → 409），
+  - 步骤 5：**两次的 `rows_affected` 集合恰好是 `{1, 0}`**
+    （⚠️ **不是** `{1}`，也**不是**「两个都 1」）。
+    **必须用 `WHERE status = 'dead_letter'` 的影响行数做判据**，
     **不是**「先 SELECT 查状态、再 UPDATE」：后者在并发下两条都读到 `dead_letter` → 两条都成功。
+    ⚠️ **并发必须真的并发**（**D314 / S-07**，构造法二选一，Dev 在交付说明里写明选了哪个）：
+    - (a) `tokio::sync::Barrier::new(2)` 让两个 task 同一时刻发 HTTP 请求；
+    - (b) **更可靠**：两个独立 `TenantTx`，各自 `execute` 同一条 UPDATE 语句。
+    **若写成串行**（先发一次、再发一次），第一个已改成 `pending`、第二个自然 409
+    → **判据是绿的，但根本没测并发**。
 - **类型**: 功能 / 可靠性
 
 > ⚠️ **步骤 4 的码口径**：本需求**不新增**「投递记录不存在」专用码。
@@ -384,7 +442,14 @@ rev 1 只有 **1 条空泛 AC**（AC-S-023，正文是「行为与本条标题�
   5. **路径 3（阳性对照）**：`payload = {"secretary": "x"}`（**不应**命中的近似词）；
   6. **路径 4（RLS 直连绕过）**：用 `base_app` 直连，`SET app.tenant_id = 'tenant-a'`
      后 `SELECT count(*)` 全表；
-  7. **路径 5（列集合）**：查 `information_schema.columns`。
+  7. **路径 5（列集合）**：查 `information_schema.columns`；
+  8. **路径 6（3 张表全验 RLS，D311 / S-04）**：
+     ① 断言 `crates/platform-notify/manifest.json` 的 `tenantScoped.tables`
+     **双向相等**于 `{platform_notify_template, platform_notify_preference,
+     platform_notify_delivery}`；
+     ② `DATABASE_URL="$DATABASE_URL_TEST" cargo xtask tenant-policies --check` **退出码 0**；
+     ③ 对 **`platform_notify_template`** 与 **`platform_notify_preference`** 各做一次
+     与步骤 6 同手法的直连 RLS 验证（换表，断言只看到当前租户的行）。
 - **预期结果**:
   - 步骤 2：`renderedBody` **仍是旧文案**（逐字）—— **快照**语义，模板改了不追溯；
   - 步骤 3：`tenant-a` 的列表**不含** `tenant-b` 的任何记录（`tenantId` 全部逐字等于 `tenant-a`）；
@@ -400,7 +465,14 @@ rev 1 只有 **1 条空泛 AC**（AC-S-023，正文是「行为与本条标题�
     `created_at` / `updated_at` / `delivered_at`），
     且 `payload` 的类型是 `jsonb`。
     ⚠️ **判据写法要求**：断言要写成「查询结果与一个**显式列出的** 18 元素集合相等」，
-    **不许**写成「列数 = 18」（列数对但列错，那种断言会放过改名列）。
+    **不许**写成「列数 = 18」（列数对但列错，那种断言会放过改名列）；
+  - 步骤 8：① 集合**双向相等**（既不缺也不多）；
+    ② 退出码 **0**；
+    ③ **两张表各自**都只返回当前租户的行。
+    ⚠️ **为什么必须验另外两张表**：`design-summary` §2.4 声明了 3 张表进 `tenantScoped`，
+    而原先只有 delivery 一张有判据 → 若 manifest 漏写某张表的声明，
+    `tenant-policies --check` **会绿**（**没声明就不生成也不校验**）
+    → 那张表**完全无隔离** → **跨租户读别人的通知模板 / 订阅偏好**。
 - **类型**: 安全
 
 ---
@@ -408,9 +480,10 @@ rev 1 只有 **1 条空泛 AC**（AC-S-023，正文是「行为与本条标题�
 ### AC-S-174: 权限点三处齐、启动对账 **fail-fast**、C-5 在本 crate 上通过、审计埋点
 
 - **前置条件**: 本需求新增 `crates/platform-notify/manifest.json` 与权限点种子迁移。
-- **测试步骤**（**4 条独立路径**）:
+- **测试步骤**（**5 条独立路径**）:
   1a. `cargo xtask capabilities` **重新生成**；
   1b. `cargo test -p platform-notify --test contract_c5`（**该测试文件由本需求新增**）；
+  1c. `cargo test -p platform-server --test i18n_titles`（**既有测试，本需求必须让它继续绿**）；
   2. **只改 manifest、不加种子 INSERT**，起服务；
   3. 把 manifest 里某个权限点从代码的 `require_permission` 调用点**删掉**（改成非字面量），
      再跑 1b；
@@ -431,6 +504,26 @@ rev 1 只有 **1 条空泛 AC**（AC-S-023，正文是「行为与本条标题�
     且含 `notify:template:read` / `notify:template:write` / `notify:delivery:read`
     **逐字 3 条**；
   - 步骤 1b：**通过**（真 C-5 命令）；
+  - 步骤 1c：**通过**，且其中**两条既有断言必须被同步更新**（⚠️ **Dev 最容易漏的一步**）：
+    - **`the_title_table_has_the_pinned_number_of_rows`**
+      （`crates/platform-server/tests/i18n_titles.rs:174`）**硬编码了**当前基线：
+      `58 + REQ_013(21) + REQ_014(5) + REQ_022(9) + REQ_016(6) = 99`。
+      → 必须加一行 **`const REQ_015_NEW_CODES: usize = 8;`** 并计入 assert，
+      否则 `TITLES.len() == 99` 而实际是 107 → **这条测试会红**；
+    - **`all_codes()`**（同文件 `:59`）是**逐 crate 手工列举**的
+      （`platform_core::problem::ALL_CODES`、`platform_app::error::ALL_CODES` …）。
+      → 必须加 `for code in platform_notify::error::ALL_CODES { … }`，
+      否则新加的 8 个码**不在清单里** → `titles_cover_every_code` 检查不到它们
+      （**会假绿**：表里缺了也不报）。
+      ⚠️ **判据必须读源码，不能只看测试绿**（**D318 / S-11**）——
+      因为「漏加时它恰好就是绿的」，看绿等于没验：
+      `grep -c "platform_notify::error::ALL_CODES" crates/platform-server/tests/i18n_titles.rs`
+      **≥ 1**；
+      **阳性对照**：`grep -c "platform_app::error::ALL_CODES"`（同文件）**= 1**
+      （证明扫的是真文件、模式有效）。
+    ⚠️ 同时须满足 `every_error_code_is_registered_in_every_locale`（`:382`）：
+    **每个新码在 `zh-CN` 与 `en-US` 两个词库里都要有 `error.<CODE>` 条目**
+    （实测基线：两库各 **99** 条 `error.*`，加 8 条后各 **107**）。
   - 步骤 2：服务**起不来**（退出码非 0），日志**逐条**列出缺失的权限点编码与
     来源 manifest 路径 `crates/platform-notify/manifest.json`；
   - 步骤 3：C-5 **失败**（已登记但无鉴权调用点）→ **阳性对照**；
@@ -443,6 +536,19 @@ rev 1 只有 **1 条空泛 AC**（AC-S-023，正文是「行为与本条标题�
     `created_at` / `prev_hash` / `hash`），`object_type` **恰好**是 `platform_notify_template`
     或 `platform_notify_delivery`（表名语义），且 `ChainVerifier::verify(tenant-a)` → `ok == true`。
 - **类型**: 可维护性 / 安全
+
+> ⚠️ **为什么 4 个 `notify.*` 事件码不进 `TITLES`，而 6 个 `org.*` 事件码在 `TITLES` 里**
+> —— 这两件事看起来矛盾，必须说清（否则 Dev 会照着 `org` 的样子把 `notify.*` 也塞进去）：
+>
+> | | `org.*`（**在** `TITLES` 里） | `notify.*`（**不进** `TITLES`） |
+> |---|---|---|
+> | 用途 | **通知标题的文案来源** | **审计记录的 `action` 字段** |
+> | 谁查 | `OrgEventKind::title()` 显式调 `title_of_code()`（`crates/platform-org/src/notify.rs:144`） | 没人查 `title_of_code` |
+> | 前端消费 | 是（按事件码渲染中文文案） | 否 |
+> | 依据 | 已交付事实（`titles.rs:195-200` 的注释「platform-org 的通知标题（事件码，不是 HTTP 错误码）」） | D223（审计事件码不是 HTTP 错误码，不进 `TITLES`） |
+>
+> → **判据**：`notify.*` 这 4 个码**不得**出现在 `TITLES` 里
+> （步骤 1c 的钉死行数会自动抓住 —— 多写 4 行就是 111 ≠ 107）。
 
 ---
 
