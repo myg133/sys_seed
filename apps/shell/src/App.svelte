@@ -21,6 +21,7 @@
   import { applyBranding, fetchBranding } from './lib/branding';
   import { createAppApi } from './lib/api';
   import { AUTH_CONTEXT_KEY } from './lib/auth-context';
+  import { loadNavigation, type NavigationItem } from './lib/app-api';
   import type { AuditLoadResult } from './lib/audit-api';
   import { i18nRuntime } from './lib/i18n';
   import {
@@ -32,12 +33,21 @@
     type OAuthGrantsLoadResult,
   } from './lib/oauth-api';
   import { createRouter, initialResolution } from './lib/router';
-  import { createRoutes, AUDIT_ROUTE_PATH, SCHEMA_ROUTE_PATH, toRoles } from './lib/routes';
+  import {
+    APPS_ADMIN_ROUTE_PATH,
+    AUDIT_ROUTE_PATH,
+    createRoutes,
+    SCHEMA_ROUTE_PATH,
+    toRoles,
+    WORKBENCH_ROUTE_PATH,
+    type AppsLoadResult,
+  } from './lib/routes';
   import { SSO_CALLBACK_ROUTE_PATH } from './lib/sso-api';
 
   import LanguageSwitcher from './components/LanguageSwitcher.svelte';
   import LocaleInfo from './components/LocaleInfo.svelte';
 
+  import AppRegistry from './pages/AppRegistry.svelte';
   import Audit from './pages/Audit.svelte';
   import Forbidden from './pages/Forbidden.svelte';
   import Home from './pages/Home.svelte';
@@ -49,6 +59,7 @@
   import ProtectedRoles from './pages/ProtectedRoles.svelte';
   import SchemaPage from './pages/SchemaPage.svelte';
   import SsoCallback from './pages/SsoCallback.svelte';
+  import Workbench from './pages/Workbench.svelte';
 
   // 同源：页面由 platform-server 的静态目录托管（本仓没有 CORS 层）。
   // 租户在登录时由用户填（D98），这里不传死值。
@@ -63,6 +74,16 @@
   let audit = $state<AuditLoadResult | undefined>(undefined);
   /** 「我的授权」页首屏（由路由的 `load` 取；`undefined` = 还没取到）。 */
   let oauthGrants = $state<OAuthGrantsLoadResult | undefined>(undefined);
+  /**
+   * 下发的导航项（REQ-016 / AC-S-162）。
+   *
+   * 取到后交给工作台渲染：`module` 项是站内链接、`app` 项是**整页跳转**入口。
+   * ⚠️ 它**不进** SPA 路由表（D278 / AC-S-163）——
+   * `routesFromNavigation` 的产物只用于登记，`router.ts` 零改动。
+   */
+  let navigation = $state<readonly NavigationItem[]>([]);
+  /** 应用注册表首屏（由路由的 `load` 取；`undefined` = 还没取到）。 */
+  let apps = $state<AppsLoadResult | undefined>(undefined);
   let resolution = $state(initialResolution(window.location.pathname));
 
   const routes = createRoutes(
@@ -75,6 +96,9 @@
     },
     (result) => {
       oauthGrants = result;
+    },
+    (result) => {
+      apps = result;
     },
   );
 
@@ -135,6 +159,31 @@
   }
 
   /**
+   * 取导航项（REQ-016 / AC-S-162）。
+   *
+   * # 为什么在**登录后**取、且失败不影响任何页面
+   *
+   * `GET /api/apps/navigation` 需要登录态（未登录 → 401）。导航只是**菜单**，
+   * 它不可用不该让工作台白屏（工作台自己还有 workspace / recent / frequent 三个端点）
+   * 也不该挡住跳转 → 失败就是**空列表** + 一条可发现的告警，不抛错。
+   *
+   * # 取到的项**不进** SPA 路由表（D278 / AC-S-163）
+   *
+   * `external` 项（第三方应用）天生没有本 SPA 的组件 → 它由工作台渲染成
+   * **整页跳转**的 `<a href>`；把它拼进路由表只会让 `resolve()` 拿外部 URL
+   * 去 `match()` → **静默失败**。`router.ts` **零改动**是这个决定的落点。
+   */
+  async function loadAppNavigation(): Promise<void> {
+    try {
+      navigation = await loadNavigation(client);
+    } catch (error) {
+      navigation = [];
+      // eslint-disable-next-line no-console -- 导航下发失败必须可发现（否则「菜单空了」无从排查）
+      console.warn('[apps] failed to load /api/apps/navigation; menus stay empty', error);
+    }
+  }
+
+  /**
    * 登录成功后的落点。
    *
    * # `?return_to=` 优先（REQ-022 / D221）
@@ -152,6 +201,8 @@
    */
   function handleLoggedIn() {
     authState = auth.state;
+    // 登录后才拿得到导航（未登录 → 401）。
+    void loadAppNavigation();
     const redirect = resolveLoginRedirect(window.location.search, resolution.intendedPath);
     if (redirect.kind === 'replace') {
       // 整页跳转 → query 一个不丢。页面会在新文档里自己加载 i18n 上下文。
@@ -173,6 +224,8 @@
     authState = auth.state;
     router.navigate('/', { replace: true });
     void loadI18nContext();
+    // SSO 落点同样是登录态 → 导航要取（否则工作台没有菜单）。
+    void loadAppNavigation();
   }
 
   /** 回调页的「返回登录页」（缺 ticket / ticket 已失效）。 */
@@ -193,6 +246,10 @@
     router.start();
     // 会话恢复后再读租户配置：未登录时该接口是 401，拿不到租户级时区/币种。
     void loadI18nContext();
+    // 整页重载恢复出来的会话同样是登录态 → 导航要取（否则菜单一直是空的）。
+    if (authState.authenticated) {
+      void loadAppNavigation();
+    }
   }
 
   onMount(() => {
@@ -253,6 +310,18 @@
   <Audit {client} initial={audit} />
 {:else if resolution.path === '/admin/roles' && resolution.allowed}
   <ProtectedRoles {roles} />
+{:else if resolution.path === WORKBENCH_ROUTE_PATH && resolution.allowed}
+  <!--
+    应用工作台（REQ-016 / AC-S-160）：登录即可（`requiresAuth` → 未登录落登录页）。
+    导航项由宿主在登录后取好（一次请求），以 prop 传进来 —— 页面不重复取。
+  -->
+  <Workbench {client} navigation={navigation} />
+{:else if resolution.path === APPS_ADMIN_ROUTE_PATH && resolution.allowed}
+  <!--
+    应用注册表（REQ-016 / AC-S-156）：`resolution.allowed` 是**硬要求** ——
+    守卫不放行时页面不渲染 → `GET /api/apps` 的请求计数为 **0**。
+  -->
+  <AppRegistry {client} initial={apps} />
 {:else if resolution.route?.path === SCHEMA_ROUTE_PATH && resolution.allowed}
   <!-- 通配路由（D104）：模块 / 实体只来自 URL 参数，页面不认识任何具体实体。 -->
   {#key resolution.path}

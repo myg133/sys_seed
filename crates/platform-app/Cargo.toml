@@ -1,0 +1,35 @@
+[package]
+name = "platform-app"
+description = "应用接入与应用注册表：租户级应用注册、工作台、常用/最近、导航下发（REQ-016）"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# 平台核心：请求上下文 / 统一错误体 / 鉴权入口 / 权限点 trait / 审计 sink trait / manifest
+platform-core.workspace = true
+# 数据访问：租户作用域入口（`TenantDb` / `TenantQuery`）—— RLS 兜底
+platform-db.workspace = true
+# 出站 IdP：**只读**它的 client 表（`platform_oauth_client`）—— 引用而非复制（D262）
+platform-oauth.workspace = true
+# HTTP 层：路由与中间件
+axum.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+# 测试要驱动 axum 路由（`ServiceExt::oneshot`），不连网络。
+tower.workspace = true
+http-body-util.workspace = true
+# 真实库集成测试要直连（管理员连接 + 应用角色连接）。
+sqlx.workspace = true
+# 真实登录令牌（验认证中间件与权限点过滤），不自己发明令牌形态。
+platform-iam.workspace = true
+# C-5 契约扫描入口（`check_c5_for` / `scan_auth_calls`）—— 真 C-5 命令的依赖。
+platform-contracts.workspace = true

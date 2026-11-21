@@ -179,6 +179,18 @@ pub const TITLES: &[(&str, &str)] = &[
     ),
     ("OAUTH_TICKET_INVALID", "OAuth Consent Ticket Invalid"),
     ("OAUTH_GRANT_NOT_FOUND", "OAuth Grant Not Found"),
+    // -- platform-app（REQ-016，6 个）--------------------------------------
+    // ⚠️ **只有** 6 个：3 个 `app.*` 审计**事件码不进本表**（D223）——
+    //    事件码不进响应体 → 没有「面向用户的标题」这回事。
+    // ⚠️ 6 个码**逐个**都有 AC 会真的触发它（无死码，D226 同款口径）：
+    //    NOT_FOUND=AC-S-156 步6 / DUPLICATED=路径2 / CLIENT_INVALID=AC-S-158 路1+2 /
+    //    LAUNCH_URL_INVALID=路径3 / ICON_URL_INVALID=路径4 / INVALID_REQUEST=路径5。
+    ("APP_NOT_FOUND", "App Not Found"),
+    ("APP_DUPLICATED", "App Duplicated"),
+    ("APP_CLIENT_INVALID", "App OAuth Client Invalid"),
+    ("APP_LAUNCH_URL_INVALID", "App Launch URL Invalid"),
+    ("APP_ICON_URL_INVALID", "App Icon URL Invalid"),
+    ("APP_INVALID_REQUEST", "Invalid App Request"),
     // -- platform-org 的通知标题（事件码，不是 HTTP 错误码）------------------
     ("org.member-added", "Organization Membership Added"),
     ("org.member-removed", "Organization Membership Removed"),

@@ -53,7 +53,9 @@ describe('语言包与键体系（AC-S-091）', () => {
   it('键格式 <domain>.<KEY>，domain 是五值枚举，错误键是大写 + 下划线', () => {
     const catalog = readCatalog(BASE_LOCALE);
     // `oauth` 是 REQ-022 新增的 domain（出站 OAuth 的界面文案）。
-    const domains = new Set(['error', 'common', 'schema', 'nav', 'oauth']);
+    // `app` 是 REQ-016 新增的 domain（应用接入的**界面**文案；
+    // `error.APP_*` 的**错误码文案**归同一需求的棒 1，仍住在 `error` 域）。
+    const domains = new Set(['error', 'common', 'schema', 'nav', 'oauth', 'app']);
     for (const key of Object.keys(catalog)) {
       const [domain, name] = key.split('.');
       expect(domains.has(domain ?? ''), `非法 domain: ${key}`).toBe(true);
@@ -196,6 +198,14 @@ describe('语言包与键体系（AC-S-091）', () => {
       'OAUTH_UNSUPPORTED_CODE_CHALLENGE_METHOD',
       'OAUTH_TICKET_INVALID',
       'OAUTH_GRANT_NOT_FOUND',
+      // REQ-016（应用接入与应用注册表）新增的 6 个码，见 acceptance.md §全局约定
+      // ⚠️ **恰好 6 个**：3 个 `app.*` 审计事件码**不进**本清单（D223 同款 —— 事件码不是 HTTP 错误码）。
+      'APP_NOT_FOUND',
+      'APP_DUPLICATED',
+      'APP_CLIENT_INVALID',
+      'APP_LAUNCH_URL_INVALID',
+      'APP_ICON_URL_INVALID',
+      'APP_INVALID_REQUEST',
     ];
     for (const code of codes) {
       expect(catalog[`error.${code}`], `缺少键 error.${code}`).toBeTypeOf('string');

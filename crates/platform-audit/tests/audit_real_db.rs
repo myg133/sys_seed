@@ -1000,6 +1000,19 @@ async fn column_names(fixture: &Fixture, table: &str) -> BTreeSet<String> {
 }
 
 /// 扫描目录下的文件，返回命中的 `路径:行号`。
+/// 递归扫 `root` 下所有 `.ext` 文件里的 `needle`。
+///
+/// # ⚠️ 必须跳过 `tests/` 目录（REQ-016 修）
+///
+/// 这个扫描器的**意图**是「**生产代码**不得绕过审计 sink 直写 `platform_audit_log`」。
+/// 而 `tests/` 里的**阳性对照**恰恰**必须**直插一行才能证明扫描器有效
+/// （dev-guide §9.2：不证明会命中的「0 命中」不可信）。
+///
+/// 把 `tests/` 算进来会让「写阳性对照」与「守卫」直接冲突：
+/// - REQ-022 的 `crates/platform-server/tests/oauth_real_stack.rs` 为验 AC-S-154 步骤 4
+///   必须直插一行含假 secret 的审计记录 → 本守卫就**误报**成违例。
+///
+/// → 只扫**非 test** 的源码：`tests/`、`benches/`、`examples/` 一律跳过。
 fn scan_dir(root: &std::path::Path, extension: &str, needle: &str) -> Vec<String> {
     let mut hits = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -1010,6 +1023,11 @@ fn scan_dir(root: &std::path::Path, extension: &str, needle: &str) -> Vec<String
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
+                // 跳过测试/基准/示例目录（它们的阳性对照必须直插）。
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if matches!(name, "tests" | "benches" | "examples" | "target") {
+                    continue;
+                }
                 stack.push(path);
                 continue;
             }

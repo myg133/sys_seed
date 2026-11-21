@@ -39,6 +39,27 @@
       ]
     },
     {
+      "manifest": "crates/platform-app/manifest.json",
+      "module": "app",
+      "permissions": [
+        {
+          "code": "app:registry:read",
+          "name": "查看应用注册表",
+          "type": "menu"
+        },
+        {
+          "code": "app:registry:write",
+          "name": "管理应用注册表",
+          "type": "button"
+        },
+        {
+          "code": "app:registry:delete",
+          "name": "删除应用",
+          "type": "button"
+        }
+      ]
+    },
+    {
       "manifest": "crates/platform-audit/manifest.json",
       "module": "audit",
       "permissions": [
@@ -199,5 +220,5 @@
       ]
     }
   ],
-  "total": 32
+  "total": 35
 }

@@ -315,6 +315,15 @@ async fn serve() -> Result<(), Failure> {
         Arc<platform_rbac::RbacService>,
     )> = None;
 
+    // 应用接入（REQ-016）的装配依赖（IAM / RBAC 就绪后才拿得到）。
+    //
+    // ⚠️ **没有 IAM 就不装配** —— 应用注册表按「登录用户」隔离，
+    //    没有 IAM 就没有可验的登录会话 → 不提供 `/api/apps/*`。
+    let mut app_iam: Option<(
+        Arc<platform_iam::service::IamService>,
+        Arc<platform_rbac::RbacChecker>,
+    )> = None;
+
     // 审计 sink（REQ-014 D150）：**平台构造** sink → 以 `Arc<dyn AuditSink>`
     // **向下注入**各业务模块。
     //
@@ -393,6 +402,16 @@ async fn serve() -> Result<(), Failure> {
             rbac_state.checker.clone(),
             rbac_state.service.clone(),
         ));
+
+        // 应用接入（REQ-016）：`/api/apps/*` + 工作台 / 导航。
+        //
+        // 依赖的两件套：
+        //
+        // | 依赖 | 实现 | 用途 |
+        // |------|------|------|
+        // | `TokenVerifier` | `IamService` | 验登录令牌 → 租户 + 用户 |
+        // | `PermissionChecker` / `PermissionRefresher` | `RbacChecker` | 判 3 个 `app:*` 权限点 + 导航过滤 |
+        app_iam = Some((iam_state.service.clone(), rbac_state.checker.clone()));
 
         // 审计查询（REQ-014）：`/api/audit/*`。
         //
@@ -552,6 +571,24 @@ async fn serve() -> Result<(), Failure> {
         app
     } else {
         tracing::warn!("未配置 IAM：平台不提供 /api/oauth/*（OAuth 令牌与登录令牌共用密钥集）");
+        app
+    };
+
+
+    // 应用接入与应用注册表（REQ-016）：`/api/apps/*`。
+    //
+    // ⚠️ **装配顺序**：应用的运行期配置读 `platform_config`（每请求读）→
+    //    必须等配置服务就绪（上面刚建好）才能装。
+    //
+    // ⚠️ **IAM 没配 → 不提供 `/api/apps/*`**（与 `/api/oauth/*` 同款口径）：
+    //    应用注册表按「登录用户 / 租户」隔离，没有 IAM 就没有可验的登录会话。
+    let app = if let Some((iam, checker)) = app_iam {
+        let app_state = build_app_state(&config, iam, config_service.clone(), audit_sink.clone(), checker).await?;
+        let app = app.nest("/api/apps", platform_app::http::router(app_state));
+        tracing::info!("应用接入已启用：/api/apps/*（注册表 / 工作台 / 最近 / 导航）");
+        app
+    } else {
+        tracing::warn!("未配置 IAM：平台不提供 /api/apps/*（应用注册表按登录用户隔离）");
         app
     };
 
@@ -856,6 +893,204 @@ impl platform_oauth::config::OAuthConfigSource for PlatformOAuthConfigSource {
                     platform_oauth::config::CONFIG_KEY_DEVICE_CODE_POLL_INTERVAL => {
                         if let Some(value) = entry.value.as_i64() {
                             settings.device_code_poll_interval_seconds = value;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Ok(settings)
+        })
+    }
+}
+
+/// 构建应用接入的状态（数据访问 + 服务 + 配置源 + 令牌校验 + 模块 manifest）。
+///
+/// # 依赖注入的五件套
+///
+/// | 依赖 | 实现 | 用途 |
+/// |------|------|------|
+/// | `AppStore` | `platform-db` 的租户作用域入口 | 2 张表 + **只读** client 表 |
+/// | `AppConfigSource` | [`PlatformAppConfigSource`] | 运行期配置（**每请求读**） |
+/// | `AuditSink` | 平台 sink | 3 个 `app.*` 审计事件码 |
+/// | `TokenVerifier` | [`AppIamTokenVerifier`] | 验登录令牌 → 租户 + 用户 |
+/// | `PermissionChecker` / `PermissionRefresher` | `RbacChecker` | 3 个 `app:*` 权限点 + 导航过滤 |
+async fn build_app_state(
+    config: &DeployConfig,
+    iam: Arc<platform_iam::service::IamService>,
+    config_service: Arc<platform_config::ConfigService>,
+    audit_sink: Arc<dyn platform_core::extension::audit::AuditSink>,
+    checker: Arc<platform_rbac::RbacChecker>,
+) -> Result<Arc<platform_app::http::AppState>, Failure> {
+    // 数据访问走 `platform-db` 的租户作用域入口（**不得**直连池）。
+    let tenant_db =
+        platform_db::TenantDb::connect(&config.database_url, platform_db::DbOptions::default())
+            .await
+            .map_err(|err| Failure::Runtime(format!("数据库连接串非法：{err}")))?;
+
+    // 导航的 `source="module"` 那一半：**全部已启用模块的菜单**。
+    //
+    // 扫 `modules/` + `crates/` 两处（与 `platform-rbac` / `platform-db` collect_scopes 同口径）。
+    let manifests = load_module_manifests(&config.manifest_root)?;
+
+    let service = Arc::new(platform_app::service::AppService::new(
+        Arc::new(platform_app::store::AppStore::new(tenant_db)),
+        Arc::new(PlatformAppConfigSource::new(config_service)),
+        audit_sink,
+        Arc::new(manifests),
+        checker.clone() as Arc<dyn PermissionChecker>,
+        Arc::new(AppIamTokenVerifier::new(iam)),
+    ));
+
+    // ⚠️ `refresher` 与 `checker` 是**同一个** `RbacChecker`（它同时实现两个 trait）——
+    // 少了 `refresher`，用户第一次打受保护的端点必然 403（TD-047）。
+    let refresher: Arc<dyn PermissionRefresher> = checker.clone();
+
+    Ok(Arc::new(platform_app::http::AppState {
+        service,
+        checker: checker as Arc<dyn PermissionChecker>,
+        refresher,
+    }))
+}
+
+/// 加载**全部已启用模块**的 manifest（导航的 `source="module"` 那一半）。
+///
+/// 扫两处（与 `platform-rbac::collect_manifest_permissions` 的口径一致）：
+///
+/// | 目录 | 谁 |
+/// |------|-----|
+/// | `modules/<模块>/manifest.json` | 业务模块 |
+/// | `crates/<crate>/manifest.json` | 平台 crate |
+///
+/// ⚠️ **单个 manifest 解析失败 → 启动失败**（fail-fast）：导航少一项是**静默**的
+/// 功能缺失，比起不来更难查。
+fn load_module_manifests(
+    manifest_root: &str,
+) -> Result<Vec<platform_core::extension::manifest::Manifest>, Failure> {
+    let root = Path::new(manifest_root);
+    let mut manifests = Vec::new();
+    for directory in ["modules", "crates"] {
+        let Ok(entries) = std::fs::read_dir(root.join(directory)) else {
+            continue;
+        };
+        let mut names: Vec<PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect();
+        names.sort();
+        for module_dir in names {
+            let manifest_path = module_dir.join("manifest.json");
+            if !manifest_path.is_file() {
+                continue;
+            }
+            let raw = std::fs::read_to_string(&manifest_path).map_err(|error| {
+                Failure::Runtime(format!("读不到 {}：{error}", manifest_path.display()))
+            })?;
+            let manifest = platform_core::extension::manifest::Manifest::parse_checked(&raw)
+                .map_err(|issues| {
+                    let detail = issues
+                        .iter()
+                        .map(|issue| format!("{}: {}", issue.field(), issue.reason()))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    Failure::Runtime(format!(
+                        "{} 不符合 Schema（导航下发要用它的 menus[]）：{detail}",
+                        manifest_path.display()
+                    ))
+                })?;
+            if manifest.enabled {
+                manifests.push(manifest);
+            }
+        }
+    }
+    Ok(manifests)
+}
+
+/// 应用接入的**令牌校验**（用 IAM 的验签实现）。
+struct AppIamTokenVerifier {
+    inner: Arc<platform_iam::service::IamService>,
+}
+
+impl AppIamTokenVerifier {
+    fn new(inner: Arc<platform_iam::service::IamService>) -> Self {
+        Self { inner }
+    }
+}
+
+impl platform_app::tokens::TokenVerifier for AppIamTokenVerifier {
+    fn verify(
+        &self,
+        token: &str,
+    ) -> Result<platform_app::tokens::VerifiedToken, platform_app::tokens::AuthError> {
+        let claims = self
+            .inner
+            .verify_access_token(token)
+            .map_err(|_| platform_app::tokens::AuthError)?;
+        Ok(platform_app::tokens::VerifiedToken {
+            user_id: claims.subject,
+            tenant_id: claims.tenant_id,
+        })
+    }
+}
+
+/// 应用接入的**配置源**（每请求读 `platform_config`）。
+///
+/// # 为什么是「每请求读」而不是「装配时读一次」
+///
+/// 装配时读一次 = **配置改了永远不生效**（除非重启）→ 用户改了
+/// `app.workspace.maxApps` 却看不到变化 → 这类「改了没反应」最难查。
+/// → 每请求读；`ConfigService` 自带 epoch 失效的缓存 → 读的开销可控。
+///
+/// # 读不到怎么办
+///
+/// **返回 `Err`**（fail closed），**不得**降级成默认值 ——
+/// 「读不出来就用默认」会让「配置改了不生效」变成一件看不见的事。
+struct PlatformAppConfigSource {
+    /// 平台配置服务。
+    config: Arc<platform_config::ConfigService>,
+}
+
+impl PlatformAppConfigSource {
+    /// 包一个平台配置服务。
+    fn new(config: Arc<platform_config::ConfigService>) -> Self {
+        Self { config }
+    }
+}
+
+impl platform_app::config::AppConfigSource for PlatformAppConfigSource {
+    fn read<'a>(
+        &'a self,
+        ctx: &'a RequestContext,
+    ) -> platform_app::config::AppBoxFuture<
+        'a,
+        Result<platform_app::config::AppSettings, platform_app::config::AppConfigError>,
+    > {
+        Box::pin(async move {
+            let keys: Vec<String> = platform_app::config::CONFIG_KEYS
+                .iter()
+                .map(|key| key.to_string())
+                .collect();
+            let entries = self
+                .config
+                .read_platform_entries(ctx, &keys)
+                .await
+                .map_err(|_| platform_app::config::AppConfigError)?;
+            let mut settings = platform_app::config::AppSettings::default();
+            for entry in entries {
+                match entry.key.as_str() {
+                    platform_app::config::CONFIG_KEY_RECENT_COUNT => {
+                        if let Some(value) = entry.value.as_i64() {
+                            settings.recent_count = value;
+                        }
+                    }
+                    platform_app::config::CONFIG_KEY_WORKSPACE_MAX_APPS => {
+                        if let Some(value) = entry.value.as_i64() {
+                            settings.workspace_max_apps = value;
+                        }
+                    }
+                    platform_app::config::CONFIG_KEY_ALLOW_HTTP => {
+                        if let Some(value) = entry.value.as_bool() {
+                            settings.allow_http = value;
                         }
                     }
                     _ => {}
