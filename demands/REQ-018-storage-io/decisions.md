@@ -277,7 +277,7 @@ pub enum ScanVerdict { Clean, Infected { signature: String }, Skipped }
 crates/platform-storage/
   src/
     lib.rs
-    error.rs        // 8 个错误码
+    error.rs        // 9 个错误码
     events.rs       // 审计事件码
     model.rs        // 表行 + DTO
     object_store/   // D319 的 trait + 两个实现
@@ -304,7 +304,7 @@ crates/platform-storage/
 
 ---
 
-## D330: **8 个错误码**（每个都必须有 AC 会触发）
+## D330: **9 个错误码**（每个都必须有 AC 会触发）
 
 | 码 | HTTP | 何时 | 触发它的 AC |
 |---|---|---|---|
@@ -316,8 +316,9 @@ crates/platform-storage/
 | `STORAGE_UPLOAD_TOO_LARGE` | 413 | 超过 `maxUploadBytes` | 178 步骤 2 |
 | `STORAGE_UNSUPPORTED_FORMAT` | 415 | 上传 `.xlsx` 等（D320） | 179 步骤 5 |
 | `STORAGE_FILE_INFECTED` | 422 | 扫描判定为感染 | 178 步骤 4 |
+| **`STORAGE_TTL_OUT_OF_RANGE`** | 400 | 请求的 TTL 超上限或为 0 | 026 步骤 5 |
 
-⚠️ **`TITLES` 行数**：**107 → 115**（+8）。
+⚠️ **`TITLES` 行数**：**107 → 116**（+9）。
 ⚠️ 事件码（**4 个** `storage.*`）**不进** `TITLES`（D223 同款）。
 
 ---

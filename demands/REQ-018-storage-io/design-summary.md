@@ -241,21 +241,21 @@ pub async fn tick(service, ctx, batch_jobs) -> Result<TickStats> {
 
 ---
 
-## 5. 错误码（**8 个**）
+## 5. 错误码（**9 个**）
 
 逐条见 [acceptance.md](acceptance.md) §全局约定 —— 每个都指到了具体 AC 步骤。
 
-⚠️ `TITLES`：**107 → 115**。
+⚠️ `TITLES`：**107 → 116**（+9，含 `STORAGE_TTL_OUT_OF_RANGE`）。
 ⚠️ 4 个 `storage.*` 事件码**不进 `TITLES`**（D223）。
 
-### 5.1 新增 8 个码必须同步改的**四处**（Dev 最容易漏）
+### 5.1 新增 9 个码必须同步改的**四处**（Dev 最容易漏）
 
 | # | 位置 | 不改的后果 |
 |---|---|---|
-| 1 | `crates/platform-core/src/titles.rs` 的 `TITLES` 加 8 行 | `titles_cover_every_code` 红（取到兜底） |
-| 2 | `crates/platform-server/tests/i18n_titles.rs:179` 加 `const REQ_018_NEW_CODES: usize = 8;` | 该测试硬编码 107；实际 115 → **红** |
+| 1 | `crates/platform-core/src/titles.rs` 的 `TITLES` 加 9 行 | `titles_cover_every_code` 红（取到兜底） |
+| 2 | `crates/platform-server/tests/i18n_titles.rs:179` 加 `const REQ_018_NEW_CODES: usize = 9;` | 该测试硬编码 107；实际 116 → **红** |
 | 3 | 同文件 `:59` 的 `all_codes()` 加 `platform_storage::error::ALL_CODES` | ⚠️ **会假绿**：新码不在清单里 → 检查不到（表里缺了也不报） |
-| 4 | `packages/i18n/src/locales/{zh-CN,en-US}.json` 各加 8 条 + `packages/i18n/test/i18n.test.ts` 的 codes 数组加 8 个 | 两处都会红 |
+| 4 | `packages/i18n/src/locales/{zh-CN,en-US}.json` 各加 9 条 + `packages/i18n/test/i18n.test.ts` 的 codes 数组加 9 个 | 两处都会红 |
 
 > ⚠️ **第 3 条最危险**：唯一一个「不写不会红、但会让守卫失效」的改动
 > （REQ-015 的 D318 / S-11 同款）。判据必须是**读源码 grep**，不是「看测试绿」。

@@ -13,7 +13,7 @@
 | [demand.md](demand.md) | ✅ rev 1（补齐「需求来源披露」+ 达成成色对照） |
 | [acceptance.md](acceptance.md) | ✅ rev 1（**11 条 AC**：AC-S-026 重写 + AC-S-175~184） |
 | [decisions.md](decisions.md) | ✅ rev 1（**D319~D332**，14 条） |
-| [design-summary.md](design-summary.md) | ✅ rev 1（4 表 / 12 路由 / 8 错误码 / 6 配置项） |
+| [design-summary.md](design-summary.md) | ✅ rev 1（4 表 / 12 路由 / 9 错误码 / 6 配置项） |
 | `test-cases/` | ⏳ 待 QA 产出 |
 
 ## 状态历史
@@ -35,10 +35,10 @@
 
 | 项 | 实测值 |
 |---|---|
-| `TITLES` | **107** → 目标 **115**（+8） |
+| `TITLES` | **107** → 目标 **116**（+9） |
 | `permissions.total` | **38** → 目标 **41**（+3） |
 | `capabilities/` 文件数 | **14**（不增不减） |
-| i18n `error.*` | `zh-CN` **107** / `en-US` **107** → 各 **115** |
+| i18n `error.*` | `zh-CN` **107** / `en-US` **107** → 各 **116** |
 | 迁移最后编号 | `20261121000600_notify_config_seed` → 下一批 `2026112200xxxx` |
 | `manifest.json` 数量 | **7** → 新增后 **8** |
 | S3 SDK | **0 个**在树里 |

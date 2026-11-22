@@ -61,7 +61,7 @@ rev 0 只有 **1 条空泛 AC**（AC-S-026，正文是「行为与本条标题�
 ⚠️ `hmac` **不是新增依赖**：它已在 `Cargo.lock`（由 `jsonwebtoken` / `totp-rs` 传递引入），
 本需求只是**加 workspace 条目**把它变成直接依赖（**不新增 lock 条目**）。
 
-### 本需求的平台错误码（**8 个**）
+### 本需求的平台错误码（**9 个**）
 
 | 码 | HTTP | 何时 | 哪个 AC 触发它 |
 |---|---|---|---|
@@ -73,9 +73,10 @@ rev 0 只有 **1 条空泛 AC**（AC-S-026，正文是「行为与本条标题�
 | `STORAGE_UPLOAD_TOO_LARGE` | 413 | 超 `maxUploadBytes` | AC-S-178 步骤 2 |
 | `STORAGE_UNSUPPORTED_FORMAT` | 415 | 上传 `.xlsx` 等 | AC-S-179 步骤 5 |
 | `STORAGE_FILE_INFECTED` | 422 | 扫描判定为感染 | AC-S-178 步骤 4 |
+| `STORAGE_TTL_OUT_OF_RANGE` | 400 | 请求的 TTL 超上限或为 0 | AC-S-026 步骤 5 |
 
-⚠️ **规则**：每个错误码必须有一条 AC 会**真的触发**它，否则删掉（D226 / REQ-016 删过两个死码）。
-⚠️ `TITLES` 行数：**107 → 115**（+8）。
+⚠️ **规则**：每个错误码必须有一条 AC 会**真的触发**它，否则删掉（**9 个全部有触发点**）（D226 / REQ-016 删过两个死码）。
+⚠️ `TITLES` 行数：**107 → 116**（+9）。
 ⚠️ 事件码（**4 个** `storage.*`：`storage.file.uploaded` / `storage.file.deleted` /
 `storage.import.completed` / `storage.export.completed`）**不进 `TITLES`**（D223）。
 
@@ -121,7 +122,9 @@ rev 0 只有 **1 条空泛 AC**（AC-S-026，正文是「行为与本条标题�
   - 步骤 3：**403** + `STORAGE_PRESIGN_EXPIRED`；
   - 步骤 4：token 是 base64url，**解码后包含**过期时间字段
     （⚠️ 不是「不可读的随机串」—— 实现必须能让运维排障时看出什么时候过期）；
-  - 步骤 5：**400**，且**不签发** —— TTL 上限 `86400` 秒（超了拒绝，不是截断）。
+  - 步骤 5：**400 + `STORAGE_TTL_OUT_OF_RANGE`**，且**不签发** ——
+    TTL 上限 `86400` 秒（超了拒绝，**不是截断**：截断会让调用方以为自己拿到了 1 年的链接）；
+    ⚠️ 同时断言 `ttlSeconds: 0` 也返回该码（**边界**：0 是非法而非「立即过期」）。
 - **类型**: 安全
 
 ---
@@ -371,15 +374,15 @@ rev 0 只有 **1 条空泛 AC**（AC-S-026，正文是「行为与本条标题�
   - 步骤 1c：**通过**，且其中**三处**必须同步更新（⚠️ **Dev 最容易漏**）：
     - **`the_title_table_has_the_pinned_number_of_rows`**
       （`crates/platform-server/tests/i18n_titles.rs:179`）硬编码了各需求的增量 →
-      必须加 `const REQ_018_NEW_CODES: usize = 8;`，
-      否则 `TITLES.len()` 实际 **115** 而断言仍是 107 → **红**；
+      必须加 `const REQ_018_NEW_CODES: usize = 9;`，
+      否则 `TITLES.len()` 实际 **116** 而断言仍是 107 → **红**；
     - **`all_codes()`**（同文件 `:59`）是逐 crate 手工列举 →
       必须加 `platform_storage::error::ALL_CODES`，否则新码**不在清单里**
       → `titles_cover_every_code` **检查不到它们**（**会假绿**）；
     - **`packages/i18n/test/i18n.test.ts`** 的 `codes` 数组（实测 `:102` 起，到 `:222`）
-      也硬编码了全部错误码 → 必须加 8 个 `STORAGE_*`；
-  - 步骤 1c 续：`packages/i18n/src/locales/{zh-CN,en-US}.json` 各加 **8** 条
-    `error.STORAGE_*`（实测基线各 **107** → **115**）；
+      也硬编码了全部错误码 → 必须加 9 个 `STORAGE_*`；
+  - 步骤 1c 续：`packages/i18n/src/locales/{zh-CN,en-US}.json` 各加 **9** 条
+    `error.STORAGE_*`（实测基线各 **107** → **116**）；
   - 步骤 2：服务**起不来**（退出码非 0），日志逐条列出缺失的权限点编码与
     来源 manifest 路径 `crates/platform-storage/manifest.json`；
   - 步骤 3：C-5 **失败**（阳性对照）；
