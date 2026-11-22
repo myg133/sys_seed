@@ -76,6 +76,12 @@ rev 0 只有 **1 条空泛 AC**（AC-S-026，正文是「行为与本条标题�
 | `STORAGE_TTL_OUT_OF_RANGE` | 400 | 请求的 TTL 超上限或为 0 | AC-S-026 步骤 5 |
 
 ⚠️ **规则**：每个错误码必须有一条 AC 会**真的触发**它，否则删掉（**9 个全部有触发点**）（D226 / REQ-016 删过两个死码）。
+
+⚠️ **为什么要区分 413 与 400**（S-07）：都是「输入有问题」，但语义不同 ——
+**413 = 资源超限**（请求本身**合法**，只是太大，RFC 9110 §15.5.14）；
+**400 = 格式 / 取值非法**（请求本身**不合法**）。
+→ `STORAGE_UPLOAD_TOO_LARGE` 用 413、`STORAGE_UNSUPPORTED_FORMAT` 与
+`STORAGE_TTL_OUT_OF_RANGE` 用 400。这是 HTTP 的既有语义，不是我们的发明。
 ⚠️ `TITLES` 行数：**107 → 116**（+9）。
 ⚠️ 事件码（**4 个** `storage.*`：`storage.file.uploaded` / `storage.file.deleted` /
 `storage.import.completed` / `storage.export.completed`）**不进 `TITLES`**（D223）。
@@ -146,9 +152,13 @@ rev 0 只有 **1 条空泛 AC**（AC-S-026，正文是「行为与本条标题�
   - 步骤 4：**404** + `STORAGE_OBJECT_NOT_FOUND`；
   - 步骤 5：`DELETE` **204**；之后 `GET` **404**；
   - 步骤 6：两次 `PUT` 都 **200**，读回的是**第二次**的内容（覆盖语义）；
-  - 步骤 7：**400**，且**不得**在 `BASE_STORAGE_ROOT` 之外创建任何文件
-    （⚠️ **安全判据**：路径穿越。断言方式：在 `BASE_STORAGE_ROOT` 的父目录放一个哨兵文件，
-    请求后该文件**不得**被读到或覆盖）；
+  - 步骤 7：**400**，且满足**两条判据**（⚠️ **安全判据**：路径穿越）：
+    ① **直接判据**：请求后列出 `BASE_STORAGE_ROOT` 下**所有文件的绝对路径**，
+    断言**每一个**都以 `canonicalize(root)` 为前缀（`Path::starts_with`）——
+    这约束的是**所有**落盘，不只这一次；
+    ② **间接判据（阳性对照）**：在 `BASE_STORAGE_ROOT` 的父目录放一个哨兵文件，
+    请求后该文件**内容未变**（证明没被覆盖）；
+    ⚠️ 只写 ② 不够：它只证明「这一次没被读到」，不证明「落盘路径一定在 root 之内」；
   - **`S3Store` 的存在性**：`cargo test` 里有 SigV4 签名测试且**通过**
     （⚠️ 只证明签名对，**不证明** S3 可用 —— 见 TD-059）。
 - **类型**: 功能 / 安全
@@ -218,9 +228,15 @@ rev 0 只有 **1 条空泛 AC**（AC-S-026，正文是「行为与本条标题�
   5. 步骤 4 之后检查落盘目录。
 - **预期结果**:
   - 步骤 1：**200**（边界包含，不是「小于」）；
-  - 步骤 2：**413 + `STORAGE_UPLOAD_TOO_LARGE`**，
-    且 ⚠️ **流式拒绝**：不得先把 1 MiB 全读进内存再拒（判据：内存峰值不随 body 增长，
-    用 `maxUploadBytes` 之外的 body 验证——见用例集的具体手法）；
+  - 步骤 2：**413 + `STORAGE_UPLOAD_TOO_LARGE`**，且满足**两条可断言的事实**：
+    ① **响应体里带 `params.maxBytes`**（= `104857600` 之外的那个配置值，逐字等于 `1048576`）；
+    ② **落盘目录里没有残留文件**（拒绝发生在写盘之前，不是「写完再删」；
+    断言 `.uploads/` 与对象目录都为空）；
+    ⚠️ **删掉原判据「内存峰值不随 body 增长」**：它在测试里**无法可靠断言**
+    （需要测 RSS 或自定义分配器，噪声大且平台相关）。
+    → 「流式」这个**实现要求**改由**代码评审**保证（`axum::extract::Multipart`
+    是流式的；只要不用 `to_bytes()` 全读就是流式）；
+    → 真实可断言的是「超限请求**不产生副作用**」，即上面 ②。
   - 步骤 3：`scanVerdict == "skipped"`（⚠️ **不是** `"clean"` ——
     「没扫」和「扫过且干净」是两件事，D326）；
   - 步骤 4：**422 + `STORAGE_FILE_INFECTED`**，且 `params.signature` 非空；
@@ -284,8 +300,16 @@ rev 0 只有 **1 条空泛 AC**（AC-S-026，正文是「行为与本条标题�
   - 步骤 5：目标表里**恰好 49990 行**（合法行全入库，非法行跳过）；
   - 步骤 6：**恰好 10 条**错误回执，每条含 `rowNumber` / `column` / `reason`，
     且 `rowNumber` 是**文件里的真实行号**（1-based，含表头偏移）；
-  - **进度可查的判据**：worker 跑的过程中至少有一个中间态 `0 < processedRows < 50000`
-    （⚠️ 只在最后写一次进度的实现会红 —— 那样「进度可查」是假的）。
+  - **进度可查的判据**（⚠️ 必须写清**怎么观察**，否则不可执行）：
+    **不并发、不 sleep** 的做法 —— 把 worker 的批次上限设为 **1 批**
+    （`tick(service, ctx, jobs_batch = 1)` 且 `importBatchSize = 1000`），
+    然后**连续调 2 次 `tick`**：
+    ① 第 1 次之后 `GET /jobs/{id}` → `0 < processedRows < 50000`（应为 **1000**）；
+    ② 第 2 次之后 → `processedRows == 2000`；
+    ③ 循环到 `completed`。
+    ⚠️ **这样的判据才有区分力**：只在最后写一次进度的实现，
+    在第 ① 步就会返回 `0` 或 `50000` → **变红**。
+    ⚠️ **不要**用「起后台线程 + 轮询」的写法：那会引入 sleep 与时序不稳定。
 - **类型**: 功能
 
 ---
@@ -338,15 +362,18 @@ rev 0 只有 **1 条空泛 AC**（AC-S-026，正文是「行为与本条标题�
 - **测试步骤**（**4 条**）:
   1. `tenant-a` 管理员 `GET /api/storage/objects`；
   2. `tenant-a` 管理员 `GET /api/storage/jobs`；
-  3. 用 `base_app` 直连，`SET app.tenant_id = 'tenant-a'` 后 `SELECT count(*)` 三张表；
+  3. 用 `base_app` 直连，`SET app.tenant_id = 'tenant-a'` 后 `SELECT count(*)` **四张表**；
   4. 断言 manifest 的 `tenantScoped.tables` 与 `cargo xtask tenant-policies --check`。
 - **预期结果**:
   - 步骤 1/2：列表里**不含** `tenant-b` 的任何行（`tenantId` 全部逐字等于 `tenant-a`）；
-  - 步骤 3：三张表**各自**只返回 `tenant-a` 的行；
+  - 步骤 3：**四张表各自**只返回 `tenant-a` 的行（`object` / `upload` / `job` / `job_error`）；
   - 步骤 4：`tenantScoped.tables` **双向相等**于
-    `{platform_storage_object, platform_storage_upload, platform_storage_job}`
-    （+ `platform_storage_job_error`，见 design）；`--check` **退出码 0**；
-  - ⚠️ **为什么这 3~4 张表都要验**：manifest 漏声明某张表 →
+    `{platform_storage_object, platform_storage_upload, platform_storage_job,
+    platform_storage_job_error}`（**恰好 4 个**）；且 `--check` **退出码 0**；
+    ⚠️ **判据写法**：断言要写成「与显式列出的 **4** 元素集合双向相等」，
+    **不许**写成「包含这 4 个」（漏写第 4 张表时「包含 3 个」也会绿）；
+    ⚠️ 步骤 3 的直连 RLS 验证也要覆盖 **4 张**（`job_error` 表同样按租户隔离）；
+  - ⚠️ **为什么这 4 张表都要验**：manifest 漏声明某张表 →
     `tenant-policies --check` **会绿**（没声明就不生成也不校验）→ 那张表**完全无隔离**
     （REQ-015 的 D311 / S-04 教训）。
 - **类型**: 安全

@@ -94,6 +94,17 @@ UNIQUE (tenant_id, object_key)
 `<root>/.uploads/<upload_id>/part-<n>`），**元数据就是文件是否存在**
 → 「哪些片已传」= 列目录。这样幂等覆盖天然成立（同名文件覆盖）。
 
+### ⚠️ 并发上传同一 part 的原子性（S-05）
+
+**必须**：先写 `<root>/.uploads/<upload_id>/.tmp-<random>`，
+**再 `fs::rename` 到 `part-<n>`**（POSIX `rename` 是**原子**的）。
+
+理由：若直接写目标文件，两个并发上传同一个 part 会**交错**写
+（一个写前 1 MiB、另一个写后 1 MiB）→ 得到一个**既不是 A 也不是 B** 的损坏文件。
+坏处是**暴露得太晚**：sha256 校验在 `complete` 时才做，
+用户会看到「checksum 不匹配」却不知道为什么（他重传了同一份数据）。
+→ 用 `rename` 后，并发结果是「后写的赢」，且**永远不会读到半个文件**。
+
 ### 2.3 `platform_storage_job` —— 导入/导出任务（**租户级**，RLS）
 
 | 列 | 说明 |
