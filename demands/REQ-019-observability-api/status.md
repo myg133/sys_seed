@@ -82,20 +82,36 @@
 
 > ⚠️ **本需求尚未通过验收。** 下面逐条说明，不拿「跑绿了 483 条测试」当完成证据。
 
-| AC | 结论 | 已有什么 | **缺什么** |
-|---|---|---|---|
-| AC-S-029 trace_id 三处同值 | **部分** | 中间件（生成/校验/写上下文/开 span/回写头）+ 单测 | **端到端测试**：没有一条用例证明「日志里的 trace_id == 响应头 == 否则」 |
-| AC-S-030 入站校验 | **部分** | 单测覆盖 5 条路径（合法/大写/太短/路径穿越/CRLF/多字节） | **HTTP 端到端**：没有用例验证「响应头不回显非法值」 |
-| **AC-S-031 三级独立** | **达成** | 真库测试 15 条（三级各自 + 跨租户 + query 不绕桶 + 禁用不记账） | — |
-| **AC-S-032 429 语义** | **达成** | retry_after 正整数 + 上界、params 键闭集、窗口过期恢复 | — |
-| **AC-S-033 跨实例** | **达成** | 两个独立池 + DB 里恰好 1 行（区分全局 static 盲区） | — |
-| AC-S-034 分页契约 | **部分** | audit 超限改 400（含既有单测改名）、新端点 + 分页单测 | **端到端**：翻页零重叠、两端点字段名一致、`?page=` 回归 判据都没写 |
-| AC-S-035 OpenAPI | **部分** | 机制成立（生成 + `--check` 逐字节 + **阳性对照已验证**：篡改→1，还原→0） | **覆盖只有 1 个端点**，判据要求含 `/health/live` 与 `/api/rbac/roles` → **TD-073** |
-| AC-S-036 弃用头 | **部分** | 模块 + IMF-fixdate 单测 + 接线（`/api/audit/events`） | **端到端**：没有用例验「响应头真的有」与「**阴性对照**（未弃用端点没有）」 |
-| AC-S-037 OTel | **部分** | `init_otel` + `is_enabled` + `remote_span_context`（含 2 个实测踩坑修正） | **span layer 未挂进 subscriber** → 步骤 1（span trace_id == X-Request-Id）**未达成** → **TD-074** |
-| AC-S-038 就绪探针 | **部分** | handler 已改（限流表检查 + 只在 enabled 时查 + checks 字段） | **没有任何测试** |
+| AC | 结论 | 判据（`file:line` + 函数名） |
+|---|---|---|
+| **AC-S-029 trace_id 三处同值** | **达成** | span 侧：`otel_in_memory::the_exported_span_carries_the_incoming_trace_id`（**变异验证**：去掉 `set_parent` → 红）；日志侧：`trace_logging::the_log_line_carries_the_resolved_trace_id`（断言 `trace_id=<T>` **带等号的具体形态**）；失败响应体 `.trace_id` 已接 |
+| **AC-S-030 入站校验** | **达成** | `trace` 单测 5 条路径（合法/大写归一/太短/路径穿越/多字节/控制字符）+ `http_contract::the_trace_middleware_echoes_a_valid_header_and_replaces_an_invalid_one` |
+| **AC-S-031 三级独立** | **达成** | `rate_limit_real_db` 真库 15 条（三级各自 + **跨租户** + query 不绕桶 + 禁用不记账） |
+| **AC-S-032 429 语义** | **达成** | retry_after 正整数 + **上界**、params 键**闭集**、窗口过期立即恢复 |
+| **AC-S-033 跨实例** | **达成** | 两个独立池 + DB 里**恰好 1 行**（区分「全局 static」盲区） |
+| **AC-S-034 分页契约** | **达成** | audit 侧：翻页零重叠已有（`two_consecutive_pages_share_no_ids`）+ `limit` 超限改 **400**（`an_oversized_limit_is_rejected`）；新端点：`http_contract` 7 条（越界 400 / 边界 200 / camelCase / 可反序列化）+ **跨 crate 字段名对应**（`the_pagination_envelope_matches_the_audit_field_names`，编译期断言） |
+| AC-S-035 OpenAPI | **部分** | 机制成立（生成 + `--check` 逐字节 + **阳性对照**：篡改→退出码 1）；⚠️ **覆盖只有 1 个端点**，判据要求含 `/health/live` 与 `/api/rbac/roles` → **TD-073** |
+| **AC-S-036 弃用头** | **达成** | `http_contract` 5 条：正向（`Deprecation: true` + Sunset **严格 IMF-fixdate 反解**）+ **阴性对照** + 子路径不继承 + 空清单零开销；**变异验证**：不挂头 → 红 |
+| **AC-S-037 OTel** | **达成** | 步骤 1：span trace_id == 入站（**变异验证**）；步骤 2：**时延上界 < 1 秒**（`an_unreachable_collector_does_not_slow_the_requests_down`）；步骤 3：禁用时 `is_enabled()==false`；no-op 安全（未挂 layer 不 panic） |
+| **AC-S-038 就绪探针** | **达成** | `rate_limit_readiness`（抽成可测函数）：启用+可达 → `Some(true)`；**关闭 → `None`**（不检查）；未装配 → `None`；就绪检查**不写行**；`main` 的 `ready` handler 用它 |
 
-**汇总：达成 3 / 部分 7 / 不成立 0。** 这不构成「已通过验收」。
+**汇总：达成 9 / 部分 0 / 不成立 0 —— 但 AC-S-035 是「部分」，所以严格说是 达成 8 / 部分 1。**
+
+⚠️ **仍未通过验收**的**结构性**原因（不是 AC 判据）：
+**挑刺 M5 的 `build_router` 抽取未做** —— 上述 HTTP 级用例跑的是
+`platform_observability` 自己的 router，**不是** `main.rs` 的完整装配。
+「中间件在 main 里挂对了」这件事**没有判据**。→ 记为 **TD-075**。
+
+### 变异验证（本轮累计 5 个，全部命中）
+
+| 变异 | 命中的用例 |
+|---|---|
+| endpoint 键加 user 段 | 2 条（同租户共享桶 + 跨租户隔离） |
+| `retry_after` 固定 999999 | 1 条（上界判据） |
+| `>=` 改 `>`（差一） | 8 条 |
+| **去掉 `set_parent`** | 2 条（span trace_id + 非法值传播） |
+| 弃用头不挂 | 1 条 |
+| `limit` 改回静默截断 | 1 条 |
 
 ### 本轮实测数字
 

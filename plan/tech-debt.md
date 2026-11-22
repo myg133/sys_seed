@@ -1373,7 +1373,7 @@ Sprint 3 复盘的第 2 条教训：**修漏洞会制造新漏洞** —— 但�
 
 ---
 
-## TD-074: REQ-019 的 OTel **span layer 未挂进 subscriber**
+## ~~TD-074~~: REQ-019 的 OTel span layer —— **已解决**（2026-11-22）
 
 - **发现于**: REQ-019 实现阶段
 - **现状**: `init_otel` 能初始化 `SdkTracerProvider`（`is_enabled()` 可测、
@@ -1392,4 +1392,36 @@ Sprint 3 复盘的第 2 条教训：**修漏洞会制造新漏洞** —— 但�
   用 `tracing_subscriber::registry().with(fmt_layer).with(otel_layer).with(env_filter)`，
   并把 trace 中间件里的 `tracing::info_span!` 换成
   `tracer.build_with_context(..., &remote_parent)` 的形式。
-- **优先级**: **P1**（这是 AC-S-037 的核心判据；当前「接了一半」）
+- **✅ 已解决方式**: 在 `platform-server::init_tracing` 里用**两个分支各自 `.init()`**
+  （`.init()` 消费 self 返回 `()`，所以两条路径不必类型相同 —— 这正是泛型方案的死结）。
+  实测验证：`otel_in_memory::the_exported_span_carries_the_incoming_trace_id` 通过；
+  **变异**：去掉 `set_parent` → 2 条红。
+  另加了 `set_parent(remote_span_context)` 到 trace 中间件（没有它 OTel 会自己生成 trace_id）。
+- **优先级**: ~~P1~~ → **已关闭**
+
+
+---
+
+## TD-075: REQ-019 的 `build_router` **未抽取** —— HTTP 级判据测的不是生产装配
+
+- **发现于**: REQ-019 实现阶段（挑刺 M5 的遗留）
+- **现状**: 9 条 AC 的判据里，HTTP 级的那些跑的是
+  `platform_observability` **自己的** router（`trace_logging` / `otel_in_memory` /
+  `http_contract`），**不是** `main.rs` 的完整装配。
+- **原因**: `main.rs` 的 router 装配是**「边构造 state 边挂路由」的 await 链**
+  （约 500 行、9+ 个 state、含 `build_config_service` / `build_storage_state` 等异步构造）。
+  完整抽取成 `build_router(deps)` 需要重排整个启动流程 —— 风险与本需求价值不成比例。
+- **影响**: **「中间件在 main 里挂对了」这件事没有判据**。
+  具体风险：若 `main.rs` 里 `apply_observability` 的位置放错（比如放在 `client_info` 之前），
+  或某个 `nest` 漏了 —— 9 条 AC 的用例**全部仍然绿**。
+  这是**真正的假绿风险**，不是洁癖。
+- **已经缓解的部分**: 中间件装配逻辑**只有一份**
+  （`platform_observability::apply_observability`），`main` 与测试都调它 ——
+  所以「中间件内部顺序」是验过的；**没验的是「main 调它的位置与传参」**。
+- **要做需要什么**:
+  1. 把 `main.rs` 的 state 构造与 router 装配拆开（state 构造留在 main）；
+  2. 抽 `pub fn build_router(deps: AppDeps) -> Router`，`AppDeps` 装 9 个 state；
+  3. `main` 与所有 HTTP 级测试都调它；
+  4. 补一条「装配契约」测试：断言 router 里含预期数量的路由
+     （`router.into_iter()` 数 route id），防漏挂。
+- **优先级**: **P1**（这是「测试测的不是生产」这一类风险的唯一解）
