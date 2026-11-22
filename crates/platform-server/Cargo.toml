@@ -41,6 +41,10 @@ platform-app.workspace = true
 # 而 `tests/i18n_titles.rs` 的 `all_codes()` 要按 crate 列举 —— 所以是**正式依赖**
 # （不是 dev-only）：路由装配在 `main.rs` 里。
 platform-notify.workspace = true
+# 文件存储与导入导出（REQ-018）：9 个 `STORAGE_*` 错误码要进 `TITLES`（116 行），
+# 而 `tests/i18n_titles.rs` 的 `all_codes()` 要按 crate 列举 —— 所以是**正式依赖**
+# （不是 dev-only）。
+platform-storage.workspace = true
 # 审计记录的时间戳格式化（UTC、微秒 6 位 —— D142 / D144）
 time.workspace = true
 # 业务模块装配（REQ-012 D103）：编译期注册的模块必须在**装配层**被链接进来，

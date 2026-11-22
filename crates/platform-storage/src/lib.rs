@@ -35,11 +35,18 @@
 //! 存储域里「是否允许访问这个 key」听起来像鉴权 —— 它**不是**，
 //! 那是业务规则「这个 key 属不属于本租户」→ 用 `is_key_visible_to_tenant`。
 
+pub mod authz;
+pub mod config;
 pub mod csv;
 pub mod error;
 pub mod events;
+pub mod http;
 pub mod model;
 pub mod object_store;
+pub mod scanner;
+pub mod service;
+pub mod store;
+pub mod worker;
 
 pub use error::{ALL_CODES, ServiceError, StorageError};
 pub use events::ALL_CODES as ALL_EVENT_CODES;

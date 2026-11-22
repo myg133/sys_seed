@@ -390,6 +390,60 @@ pub fn required_field<'a>(map: &'a BTreeMap<String, String>, name: &str) -> Opti
     map.get(name).map(String::as_str).filter(|v| !v.is_empty())
 }
 
+// ---------------------------------------------------------------------------
+// `FromRow` 实现（用平台声明的宏，**不直接依赖 sqlx**）
+// ---------------------------------------------------------------------------
+
+platform_db::tenant_row!(ObjectRow {
+    id: "id",
+    tenant_id: "tenant_id",
+    object_key: "object_key",
+    size_bytes: "size_bytes",
+    sha256: "sha256",
+    content_type: "content_type",
+    scan_verdict: "scan_verdict",
+    status: "status",
+    created_at: "created_at",
+    updated_at: "updated_at",
+});
+
+platform_db::tenant_row!(UploadRow {
+    upload_id: "upload_id",
+    tenant_id: "tenant_id",
+    object_key: "object_key",
+    total_parts: "total_parts",
+    part_size: "part_size",
+    declared_checksum: "declared_checksum",
+    status: "status",
+    created_at: "created_at",
+    updated_at: "updated_at",
+    expires_at: "expires_at",
+});
+
+platform_db::tenant_row!(JobRow {
+    id: "id",
+    tenant_id: "tenant_id",
+    kind: "kind",
+    entity: "entity",
+    status: "status",
+    total_rows: "total_rows",
+    processed_rows: "processed_rows",
+    failed_rows: "failed_rows",
+    object_key: "object_key",
+    error: "error",
+    created_at: "created_at",
+    updated_at: "updated_at",
+    finished_at: "finished_at",
+});
+
+platform_db::tenant_row!(JobErrorRow {
+    job_id: "job_id",
+    tenant_id: "tenant_id",
+    row_number: "row_number",
+    column: "column",
+    reason: "reason",
+});
+
 #[cfg(test)]
 mod tests {
     use super::*;

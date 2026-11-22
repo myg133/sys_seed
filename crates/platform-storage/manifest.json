@@ -1,0 +1,62 @@
+{
+  "id": "storage",
+  "name": "文件存储",
+  "version": "0.1.0",
+  "enabled": true,
+  "permissions": [
+    { "code": "storage:file:read", "name": "查看与下载文件", "type": "menu" },
+    { "code": "storage:file:write", "name": "上传与删除文件", "type": "button" },
+    { "code": "storage:job:read", "name": "查看导入导出任务", "type": "menu" }
+  ],
+  "menus": [
+    { "label": "文件", "icon": "folder", "route": "/storage" }
+  ],
+  "tenantScoped": {
+    "tables": [
+      "platform_storage_object",
+      "platform_storage_upload",
+      "platform_storage_job",
+      "platform_storage_job_error"
+    ],
+    "column": "tenant_id"
+  },
+  "dependencies": [],
+  "config": {
+    "storage.maxUploadBytes": {
+      "type": "number",
+      "default": 104857600,
+      "scope": "platform",
+      "label": "单文件上传上限（字节，默认 100 MiB）"
+    },
+    "storage.partSizeBytes": {
+      "type": "number",
+      "default": 8388608,
+      "scope": "platform",
+      "label": "分片上传的每片大小（字节，默认 8 MiB）"
+    },
+    "storage.presignTtlSeconds": {
+      "type": "number",
+      "default": 900,
+      "scope": "platform",
+      "label": "预签名链接的默认有效期（秒，默认 15 分钟）"
+    },
+    "storage.importBatchSize": {
+      "type": "number",
+      "default": 1000,
+      "scope": "platform",
+      "label": "导入时每批提交的行数"
+    },
+    "storage.maxRowBytes": {
+      "type": "number",
+      "default": 65536,
+      "scope": "platform",
+      "label": "CSV 单行的字节上限（默认 64 KiB）"
+    },
+    "storage.uploadSessionTtlSeconds": {
+      "type": "number",
+      "default": 86400,
+      "scope": "platform",
+      "label": "未完成上传会话的超时（秒，默认 24 小时）"
+    }
+  }
+}

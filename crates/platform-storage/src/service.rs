@@ -1,0 +1,545 @@
+//! 编排层（REQ-018，design §4）。
+//!
+//! # 职责
+//!
+//! 把「HTTP 请求」变成「存储调用 + 数据库记录」：
+//!
+//! | 场景 | 流程 |
+//! |---|---|
+//! | 直接上传 | 大小校验 → 扫描 → 落存储 → UPSERT 元数据 |
+//! | 分片上传 | 建会话 → 逐片落存储 → complete 时校验缺片 + sha256 |
+//! | 预签名 | 读元数据 → 签发 token |
+//! | 建导入 | 建任务（pending）→ worker 处理 |
+//! | 建导出 | 建任务（pending）→ worker 处理 |
+//!
+//! # ⚠️ 三条不可妥协的顺序
+//!
+//! 1. **大小校验在写盘之前**（AC-S-178 步骤 2 的判据 ②：超限时**落盘目录为空**）；
+//! 2. **扫描在落库之前**（感染的文件绝不入库，AC-S-178 步骤 4）；
+//! 3. **`checksum` 校验在落对象之前**（坏文件绝不覆盖好文件，AC-S-177 步骤 6）。
+
+use std::sync::Arc;
+
+use bytes::Bytes;
+use platform_core::RequestContext;
+use time::OffsetDateTime;
+
+use crate::config::StorageConfig;
+use crate::error::{ServiceError, StorageError};
+use crate::model::{
+    CreateJobBody, CreateUploadBody, JobRow, ObjectRow, UploadRow, job_kind, upload_status,
+};
+use crate::object_store::{ObjectStore, is_safe_object_key, presign, sha256_hex};
+use crate::scanner::{ScanVerdict, VirusScanner};
+use crate::store::{NewJob, NewObject, NewUpload, RowFailure, StorageStore};
+
+/// 存储服务的依赖。
+///
+/// ⚠️ 用**显式字段**而不是 `Arc<dyn Trait>` 的组合 —— 便于测试里逐个替换。
+pub struct StorageService {
+    store: StorageStore,
+    config: StorageConfig,
+    objects: Arc<dyn ObjectStore>,
+    scanner: Arc<dyn VirusScanner>,
+    /// 预签名密钥。
+    presign_secret: Vec<u8>,
+    /// 密钥标识（用于轮换）。
+    presign_key_id: String,
+}
+
+impl StorageService {
+    /// 构造。
+    pub fn new(
+        store: StorageStore,
+        config: StorageConfig,
+        objects: Arc<dyn ObjectStore>,
+        scanner: Arc<dyn VirusScanner>,
+        presign_secret: Vec<u8>,
+        presign_key_id: String,
+    ) -> Self {
+        Self {
+            store,
+            config,
+            objects,
+            scanner,
+            presign_secret,
+            presign_key_id,
+        }
+    }
+
+    /// 读底层 store（worker 用）。
+    pub fn store(&self) -> &StorageStore {
+        &self.store
+    }
+
+    /// 读配置（worker 用）。
+    pub fn config(&self) -> &StorageConfig {
+        &self.config
+    }
+
+    /// 读对象存储（worker 用）。
+    pub fn objects(&self) -> &Arc<dyn ObjectStore> {
+        &self.objects
+    }
+
+    /// 读扫描器（worker 用）。
+    pub fn scanner(&self) -> &Arc<dyn VirusScanner> {
+        &self.scanner
+    }
+
+    // -- 直接上传 -----------------------------------------------------------
+
+    /// 上传一个对象（**直接 PUT**）。
+    ///
+    /// # 顺序（不可换）
+    ///
+    /// ① 大小校验（**在写盘之前**）→ ② 扫描 → ③ 落存储 → ④ UPSERT 元数据。
+    pub async fn put_object(
+        &self,
+        ctx: &RequestContext,
+        key: &str,
+        bytes: Bytes,
+        content_type: &str,
+    ) -> Result<ObjectRow, ServiceError> {
+        if !is_safe_object_key(key) {
+            return Err(StorageError::ObjectNotFound {
+                object_key: key.to_string(),
+            }
+            .into());
+        }
+        let settings = self.config.settings(ctx).await;
+
+        // ① 大小校验 —— **必须在写盘之前**（否则超限的请求会留下残骸）。
+        let actual = bytes.len() as i64;
+        if actual > settings.max_upload_bytes {
+            return Err(StorageError::UploadTooLarge {
+                max_bytes: settings.max_upload_bytes,
+                actual_bytes: actual,
+            }
+            .into());
+        }
+
+        // ② 扫描 —— 感染则**不落盘也不落库**。
+        let verdict = self
+            .scanner
+            .scan(&bytes)
+            .await
+            .map_err(|reason| ServiceError::Internal {
+                reason: format!("the virus scanner failed: {reason}"),
+            })?;
+        if let Some(signature) = verdict.signature() {
+            return Err(StorageError::FileInfected {
+                signature: signature.to_string(),
+            }
+            .into());
+        }
+
+        // ③ 落存储。
+        self.objects.put(key, bytes.clone()).await?;
+
+        // ④ UPSERT 元数据。
+        let new = NewObject {
+            id: uuid::Uuid::new_v4().to_string(),
+            object_key: key.to_string(),
+            size_bytes: actual,
+            sha256: sha256_hex(&bytes),
+            content_type: content_type.to_string(),
+            scan_verdict: verdict.as_str().to_string(),
+        };
+        Ok(self.store.upsert_object(ctx, &new).await?)
+    }
+
+    /// 读对象内容。
+    pub async fn get_object(
+        &self,
+        ctx: &RequestContext,
+        key: &str,
+    ) -> Result<(ObjectRow, Bytes), ServiceError> {
+        // 先查元数据（**同时起到租户校验作用**：别人的 key 查不到 → 404）。
+        let row = self.store.find_object(ctx, key).await?.ok_or_else(|| {
+            StorageError::ObjectNotFound {
+                object_key: key.to_string(),
+            }
+        })?;
+        let bytes = self.objects.get(key).await?;
+        Ok((row, bytes))
+    }
+
+    /// 删对象（元数据 + 内容）。
+    pub async fn delete_object(&self, ctx: &RequestContext, key: &str) -> Result<(), ServiceError> {
+        let affected = self.store.delete_object(ctx, key).await?;
+        if affected == 0 {
+            return Err(StorageError::ObjectNotFound {
+                object_key: key.to_string(),
+            }
+            .into());
+        }
+        self.objects.delete(key).await?;
+        Ok(())
+    }
+
+    /// 列出对象。
+    pub async fn list_objects(&self, ctx: &RequestContext) -> Result<Vec<ObjectRow>, ServiceError> {
+        Ok(self.store.list_objects(ctx).await?)
+    }
+
+    // -- 预签名 -------------------------------------------------------------
+
+    /// 签发预签名 URL。
+    pub async fn presign_object(
+        &self,
+        ctx: &RequestContext,
+        key: &str,
+        ttl_seconds: Option<i64>,
+    ) -> Result<(String, OffsetDateTime), ServiceError> {
+        // 元数据必须存在（防「对任意 key 签链接」）。
+        self.store
+            .find_object(ctx, key)
+            .await?
+            .ok_or_else(|| StorageError::ObjectNotFound {
+                object_key: key.to_string(),
+            })?;
+
+        let settings = self.config.settings(ctx).await;
+        let ttl = ttl_seconds.unwrap_or(settings.presign_ttl_seconds);
+        let now = OffsetDateTime::now_utc();
+        let (token, expires_at_unix) = presign::issue(
+            &self.presign_secret,
+            &self.presign_key_id,
+            key,
+            ttl,
+            now.unix_timestamp(),
+        )?;
+        let expires_at = OffsetDateTime::from_unix_timestamp(expires_at_unix).map_err(|_| {
+            ServiceError::Internal {
+                reason: "the computed expiry is out of range".to_string(),
+            }
+        })?;
+        Ok((format!("/api/storage/download/{token}"), expires_at))
+    }
+
+    /// 校验预签名令牌（**免鉴权下载端点用**）。
+    pub async fn verify_presign(&self, token: &str) -> Result<String, ServiceError> {
+        let verified = presign::verify(
+            &self.presign_secret,
+            token,
+            OffsetDateTime::now_utc().unix_timestamp(),
+        )?;
+        Ok(verified.object_key)
+    }
+
+    // -- 分片上传 -----------------------------------------------------------
+
+    /// 建上传会话。
+    pub async fn create_upload(
+        &self,
+        ctx: &RequestContext,
+        body: &CreateUploadBody,
+    ) -> Result<UploadRow, ServiceError> {
+        if !is_safe_object_key(&body.object_key) {
+            return Err(StorageError::ObjectNotFound {
+                object_key: body.object_key.clone(),
+            }
+            .into());
+        }
+        if body.total_parts <= 0 {
+            return Err(StorageError::PartMissing {
+                missing_parts: vec![],
+            }
+            .into());
+        }
+        let settings = self.config.settings(ctx).await;
+        // 预估总大小也要在上限内（否则分片传完才发现超限，浪费带宽）。
+        let estimated = body.part_size.saturating_mul(i64::from(body.total_parts));
+        if estimated > settings.max_upload_bytes {
+            return Err(StorageError::UploadTooLarge {
+                max_bytes: settings.max_upload_bytes,
+                actual_bytes: estimated,
+            }
+            .into());
+        }
+
+        let upload_id = uuid::Uuid::new_v4().to_string();
+        self.objects
+            .create_multipart(&upload_id, &body.object_key, body.total_parts)
+            .await?;
+
+        let new = NewUpload {
+            upload_id,
+            object_key: body.object_key.clone(),
+            total_parts: body.total_parts,
+            part_size: body.part_size,
+            declared_checksum: body.checksum.clone(),
+            expires_at: OffsetDateTime::now_utc()
+                + time::Duration::seconds(settings.upload_session_ttl_seconds),
+        };
+        Ok(self.store.insert_upload(ctx, &new).await?)
+    }
+
+    /// 上传一个分片（**幂等**）。
+    pub async fn upload_part(
+        &self,
+        ctx: &RequestContext,
+        upload_id: &str,
+        part_number: u32,
+        bytes: Bytes,
+    ) -> Result<(), ServiceError> {
+        let session = self
+            .store
+            .find_upload(ctx, upload_id)
+            .await?
+            .ok_or_else(|| StorageError::ObjectNotFound {
+                object_key: upload_id.to_string(),
+            })?;
+        if session.status != upload_status::PENDING {
+            return Err(StorageError::ObjectNotFound {
+                object_key: format!("the upload session is {}", session.status),
+            }
+            .into());
+        }
+        if part_number == 0 || part_number > session.total_parts.max(0) as u32 {
+            return Err(StorageError::PartMissing {
+                missing_parts: vec![part_number],
+            }
+            .into());
+        }
+        self.objects
+            .upload_part(upload_id, part_number, bytes)
+            .await?;
+        Ok(())
+    }
+
+    /// 完成分片上传（**缺片检测 + sha256 校验**）。
+    pub async fn complete_upload(
+        &self,
+        ctx: &RequestContext,
+        upload_id: &str,
+        content_type: Option<&str>,
+    ) -> Result<ObjectRow, ServiceError> {
+        let session = self
+            .store
+            .find_upload(ctx, upload_id)
+            .await?
+            .ok_or_else(|| StorageError::ObjectNotFound {
+                object_key: upload_id.to_string(),
+            })?;
+        if session.status != upload_status::PENDING {
+            return Err(StorageError::ObjectNotFound {
+                object_key: format!("the upload session is {}", session.status),
+            }
+            .into());
+        }
+
+        // 缺片检测（`complete_multipart` 内部会做，且会返回 `PART_MISSING`）。
+        let actual_sha = self
+            .objects
+            .complete_multipart(upload_id, &session.object_key, session.total_parts)
+            .await?;
+
+        // ⚠️ **sha256 校验在落库之前**：不符就删掉刚合并的对象（不能留坏文件）。
+        if let Some(expected) = session.declared_checksum.as_ref()
+            && !expected.eq_ignore_ascii_case(&actual_sha)
+        {
+            // 清掉刚合并出来的坏对象。
+            let _ = self.objects.delete(&session.object_key).await;
+            self.store
+                .update_upload_status(ctx, upload_id, upload_status::ABORTED)
+                .await?;
+            return Err(StorageError::ChecksumMismatch {
+                expected: expected.clone(),
+                actual: actual_sha,
+            }
+            .into());
+        }
+
+        let size = self
+            .objects
+            .get(&session.object_key)
+            .await
+            .map(|b| b.len() as i64)
+            .unwrap_or(0);
+
+        let new = NewObject {
+            id: uuid::Uuid::new_v4().to_string(),
+            object_key: session.object_key.clone(),
+            size_bytes: size,
+            sha256: actual_sha,
+            content_type: content_type
+                .unwrap_or("application/octet-stream")
+                .to_string(),
+            // 分片上传的扫描判定：本实现在 complete 时**没有重新扫**
+            // → 如实记 `skipped`（不谎称 clean）。
+            scan_verdict: ScanVerdict::Skipped.as_str().to_string(),
+        };
+        let row = self.store.upsert_object(ctx, &new).await?;
+        self.store
+            .update_upload_status(ctx, upload_id, upload_status::COMPLETED)
+            .await?;
+        Ok(row)
+    }
+
+    /// 中止分片上传。
+    pub async fn abort_upload(
+        &self,
+        ctx: &RequestContext,
+        upload_id: &str,
+    ) -> Result<(), ServiceError> {
+        let session = self
+            .store
+            .find_upload(ctx, upload_id)
+            .await?
+            .ok_or_else(|| StorageError::ObjectNotFound {
+                object_key: upload_id.to_string(),
+            })?;
+        if session.status == upload_status::COMPLETED {
+            return Err(StorageError::ObjectNotFound {
+                object_key: "the upload session is already completed".to_string(),
+            }
+            .into());
+        }
+        self.objects.abort_multipart(upload_id).await?;
+        self.store
+            .update_upload_status(ctx, upload_id, upload_status::ABORTED)
+            .await?;
+        Ok(())
+    }
+
+    // -- 任务 ---------------------------------------------------------------
+
+    /// 建导入任务（**202 pending**）。
+    pub async fn create_import(
+        &self,
+        ctx: &RequestContext,
+        body: &CreateJobBody,
+    ) -> Result<JobRow, ServiceError> {
+        let key = body.object_key.as_deref().ok_or_else(|| {
+            ServiceError::Storage(StorageError::ObjectNotFound {
+                object_key: "(missing objectKey for import)".to_string(),
+            })
+        })?;
+        // 源对象必须存在（否则异步跑起来才发现 → 用户等半天才报错）。
+        self.store
+            .find_object(ctx, key)
+            .await?
+            .ok_or_else(|| StorageError::ObjectNotFound {
+                object_key: key.to_string(),
+            })?;
+        // ⚠️ 格式校验在最前面：非 .csv 立即 415（不等 worker）。
+        ensure_csv_key(key)?;
+
+        let new = NewJob {
+            id: uuid::Uuid::new_v4().to_string(),
+            kind: job_kind::IMPORT.to_string(),
+            entity: body.entity.clone(),
+            object_key: Some(key.to_string()),
+        };
+        Ok(self.store.insert_job(ctx, &new).await?)
+    }
+
+    /// 建导出任务。
+    pub async fn create_export(
+        &self,
+        ctx: &RequestContext,
+        body: &CreateJobBody,
+    ) -> Result<JobRow, ServiceError> {
+        let new = NewJob {
+            id: uuid::Uuid::new_v4().to_string(),
+            kind: job_kind::EXPORT.to_string(),
+            entity: body.entity.clone(),
+            object_key: None,
+        };
+        Ok(self.store.insert_job(ctx, &new).await?)
+    }
+
+    /// 读任务。
+    pub async fn find_job(
+        &self,
+        ctx: &RequestContext,
+        job_id: &str,
+    ) -> Result<JobRow, ServiceError> {
+        self.store.find_job(ctx, job_id).await?.ok_or_else(|| {
+            StorageError::ObjectNotFound {
+                object_key: job_id.to_string(),
+            }
+            .into()
+        })
+    }
+
+    /// 列任务。
+    pub async fn list_jobs(&self, ctx: &RequestContext) -> Result<Vec<JobRow>, ServiceError> {
+        Ok(self.store.list_jobs(ctx).await?)
+    }
+
+    /// 列某任务的错误回执。
+    pub async fn list_job_errors(
+        &self,
+        ctx: &RequestContext,
+        job_id: &str,
+    ) -> Result<Vec<crate::model::JobErrorRow>, ServiceError> {
+        Ok(self.store.list_job_errors(ctx, job_id).await?)
+    }
+}
+
+/// 只接受 `.csv`（D320：Excel 显式拒绝）。
+///
+/// ⚠️ **不是**「静默当 CSV 解析」——`.xlsx` 的内容是 ZIP，当 CSV 解析会得到乱码行，
+/// 用户会以为「文件坏了」而不是「格式不支持」。
+pub fn ensure_csv_key(key: &str) -> Result<(), StorageError> {
+    let lower = key.to_ascii_lowercase();
+    if lower.ends_with(".csv") {
+        return Ok(());
+    }
+    // 取出扩展名（无扩展名 → 空串）。
+    let extension = lower
+        .rsplit_once('.')
+        .map(|(_, ext)| ext)
+        .unwrap_or("")
+        .to_string();
+    Err(StorageError::UnsupportedFormat { extension })
+}
+
+/// 导入一行的校验结果（worker 用）。
+pub type RowValidation = Result<Vec<(String, String)>, RowFailure>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `.csv` 通过（含大写扩展名）。
+    #[test]
+    fn csv_keys_are_accepted() {
+        for key in ["a.csv", "dir/b.CSV", "x.y.csv"] {
+            assert!(ensure_csv_key(key).is_ok(), "应接受：{key}");
+        }
+    }
+
+    /// Excel 被拒，且**错误里带扩展名**（AC-S-179 步骤 2 的判据）。
+    #[test]
+    fn excel_keys_are_rejected_with_the_extension() {
+        for (key, expected_ext) in [("a.xlsx", "xlsx"), ("b.xls", "xls"), ("c.XLSX", "xlsx")] {
+            let err = ensure_csv_key(key).expect_err("必须拒绝");
+            assert_eq!(err.code(), "STORAGE_UNSUPPORTED_FORMAT", "key={key}");
+            assert_eq!(
+                err.params().get("extension").and_then(|v| v.as_str()),
+                Some(expected_ext),
+                "扩展名必须逐字出现在 params 里"
+            );
+            assert!(
+                err.detail().contains("only csv is supported"),
+                "detail 必须说明只支持 csv：{}",
+                err.detail()
+            );
+        }
+    }
+
+    /// 无扩展名也被拒（扩展名是空串）。
+    #[test]
+    fn a_key_without_extension_is_rejected() {
+        let err = ensure_csv_key("noext").expect_err("必须拒绝");
+        assert_eq!(
+            err.params().get("extension").and_then(|v| v.as_str()),
+            Some(""),
+            "无扩展名时 extension 是空串"
+        );
+    }
+}
