@@ -8,6 +8,7 @@ members = [
     "crates/platform-contracts-macros",
     "crates/platform-app",
     "crates/platform-notify",
+    "crates/platform-storage",
     "crates/platform-db",
     "crates/platform-iam",
     "crates/platform-oauth",
@@ -30,6 +31,7 @@ publish = false
 platform-core = { path = "crates/platform-core" }
 platform-app = { path = "crates/platform-app" }
 platform-notify = { path = "crates/platform-notify" }
+platform-storage = { path = "crates/platform-storage" }
 platform-audit = { path = "crates/platform-audit" }
 platform-config = { path = "crates/platform-config" }
 platform-contracts = { path = "crates/platform-contracts" }
@@ -44,7 +46,16 @@ platform-server = { path = "crates/platform-server" }
 # REQ-012：业务模块挂进服务（D103）。平台 crate **不**依赖它，只有装配层（platform-server）依赖。
 sandbox = { path = "modules/sandbox" }
 
-axum = "0.8"
+# ⚠️ **第二次依赖破例**（D321，第一次是 D123 的 TLS 栈）：
+# `multipart` feature → `multer 3.1`，实测**净增 5 个包**
+# （`multer` + `encoding_rs` + `core_detect` + `multiversion_no_op` + `simdutf8`；
+# 其余 6 个传递依赖 httparse/log/mime/spin/memchr/futures-util 已在 lock）。
+# ⚠️ **rev 2 实测修正**：原文写「净增 2 个包」，那是**只数了一层**传递依赖的错误 ——
+# `encoding_rs 0.8.44` 自己还拉了 `core_detect` / `multiversion_no_op` / `simdutf8`
+# （`cargo tree -p encoding_rs -e normal` 确认是实际编译依赖，不是可选 feature）。
+# 为什么破例：父 AC-025 要求「上传大文件（分片）」，multipart 是标准做法；
+# 自己实现边界扫描 + 流式 body 约 300 行，且**比 CSV 解析更容易出安全洞**。
+axum = { version = "0.8", features = ["multipart"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -86,6 +97,10 @@ totp-rs = { version = "5", features = ["otpauth"] }
 rand = "0.8"
 # 摘要：refresh token / 重置令牌 / 恢复码的**哈希存储**（高熵值，不需要慢哈希）。
 sha2 = "0.10"
+# SigV4 与预签名令牌（D322 / D329）—— **不新增 lock 条目**：
+# `hmac` 由 jsonwebtoken / totp-rs 传递引入，`subtle` 由 ring / rustls 传递引入。
+hmac = "0.12"
+subtle = "2"
 # P-256：JWT 签名密钥的生成与公钥坐标（JWKS 需要 x / y）。
 p256 = { version = "0.13", default-features = false, features = ["ecdsa", "pem", "std"] }
 # base64url：refresh token 与 JWKS 坐标的编码。

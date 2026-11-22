@@ -217,6 +217,19 @@ describe('语言包与键体系（AC-S-091）', () => {
       'NOTIFY_CATEGORY_MANDATORY',
       'NOTIFY_NOT_DEAD_LETTER',
       'NOTIFY_SENSITIVE_PAYLOAD',
+      // REQ-018（文件存储与导入导出）新增的 9 个码，见 acceptance.md §全局约定 / D330
+      // ⚠️ `StorageError::Internal` **不进**本清单：它映射到平台的 `INTERNAL_ERROR`，
+      //    不作为 `STORAGE_*` 码出现在响应体里。
+      'STORAGE_OBJECT_NOT_FOUND',
+      'STORAGE_PRESIGN_EXPIRED',
+      'STORAGE_PRESIGN_INVALID',
+      'STORAGE_PART_MISSING',
+      'STORAGE_CHECKSUM_MISMATCH',
+      'STORAGE_UPLOAD_TOO_LARGE',
+      'STORAGE_UNSUPPORTED_FORMAT',
+      'STORAGE_FILE_INFECTED',
+      'STORAGE_TTL_OUT_OF_RANGE',
+      'STORAGE_UNKNOWN_ENTITY',
     ];
     for (const code of codes) {
       expect(catalog[`error.${code}`], `缺少键 error.${code}`).toBeTypeOf('string');

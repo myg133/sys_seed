@@ -27,6 +27,41 @@ pub enum Command {
     Audit(AuditArgs),
     /// 通知投递批处理（REQ-015 / D296）。
     Notify(NotifyArgs),
+    /// 导入导出批处理（REQ-018 / D324）。
+    Storage(StorageArgs),
+}
+
+/// `storage` 参数。
+///
+/// 与 `notify` 同构：worker 是**显式命令**而不是 web 进程内的后台线程（D296 / D324）。
+#[derive(Debug, Args)]
+pub struct StorageArgs {
+    #[command(subcommand)]
+    pub action: StorageAction,
+}
+
+/// `storage` 的子动作。
+#[derive(Debug, Subcommand)]
+pub enum StorageAction {
+    /// 跑一轮导入导出批处理。
+    Worker(StorageWorkerArgs),
+}
+
+/// `storage worker` 参数。
+#[derive(Debug, Args)]
+pub struct StorageWorkerArgs {
+    /// 租户 ID（**必填** —— 导入导出任务是租户级的，D324）。
+    #[arg(long)]
+    pub tenant: String,
+    /// 这一批最多取多少个任务。
+    #[arg(long, default_value_t = 4)]
+    pub batch: i64,
+    /// 连续跑多少轮；`1` = 只跑一次（默认）。`0` = 一直跑到没有待处理任务。
+    #[arg(long, default_value_t = 1)]
+    pub rounds: u32,
+    /// 数据库连接串；默认取环境变量 `DATABASE_URL`。
+    #[arg(long)]
+    pub database_url: Option<String>,
 }
 
 /// `notify` 参数。

@@ -232,6 +232,49 @@ pub const TITLES: &[(&str, &str)] = &[
         "NOTIFY_SENSITIVE_PAYLOAD",
         "Notification Payload Contains Sensitive Keys",
     ),
+    // -- platform-storage 的错误码（REQ-018）--------------------------------
+    // 错误码（不是事件码）：每个都是 `platform-storage` 可能返回给客户端的
+    // HTTP 失败形态 —— 前端按标题展示，因此文案是给**终端用户**看的。
+    (
+        "STORAGE_OBJECT_NOT_FOUND",
+        "Storage Object Not Found",
+    ),
+    (
+        "STORAGE_PRESIGN_EXPIRED",
+        "Storage Presigned Link Expired",
+    ),
+    (
+        "STORAGE_PRESIGN_INVALID",
+        "Storage Presigned Link Invalid",
+    ),
+    (
+        "STORAGE_PART_MISSING",
+        "Storage Upload Part Missing",
+    ),
+    (
+        "STORAGE_CHECKSUM_MISMATCH",
+        "Storage Checksum Mismatch",
+    ),
+    (
+        "STORAGE_UPLOAD_TOO_LARGE",
+        "Storage Upload Too Large",
+    ),
+    (
+        "STORAGE_UNSUPPORTED_FORMAT",
+        "Storage Unsupported Format",
+    ),
+    (
+        "STORAGE_FILE_INFECTED",
+        "Storage File Infected",
+    ),
+    (
+        "STORAGE_TTL_OUT_OF_RANGE",
+        "Storage Ttl Out Of Range",
+    ),
+    (
+        "STORAGE_UNKNOWN_ENTITY",
+        "Storage Unknown Entity",
+    ),
     // -- platform-org 的通知标题（事件码，不是 HTTP 错误码）------------------
     ("org.member-added", "Organization Membership Added"),
     ("org.member-removed", "Organization Membership Removed"),

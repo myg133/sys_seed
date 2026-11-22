@@ -235,5 +235,15 @@
   "error.NOTIFY_CHANNEL_NOT_CONFIGURED": "Notification channel is not configured",
   "error.NOTIFY_CATEGORY_MANDATORY": "This notification category cannot be unsubscribed",
   "error.NOTIFY_NOT_DEAD_LETTER": "The delivery is not in the dead-letter state",
-  "error.NOTIFY_SENSITIVE_PAYLOAD": "Notification payload contains sensitive fields"
+  "error.NOTIFY_SENSITIVE_PAYLOAD": "Notification payload contains sensitive fields",
+  "error.STORAGE_OBJECT_NOT_FOUND": "File not found",
+  "error.STORAGE_PRESIGN_EXPIRED": "The download link has expired, please request a new one",
+  "error.STORAGE_PRESIGN_INVALID": "The download link is invalid",
+  "error.STORAGE_PART_MISSING": "An upload part is missing, please upload it again",
+  "error.STORAGE_CHECKSUM_MISMATCH": "Checksum mismatch, please upload the file again",
+  "error.STORAGE_UPLOAD_TOO_LARGE": "The file exceeds the size limit",
+  "error.STORAGE_UNSUPPORTED_FORMAT": "Unsupported file format",
+  "error.STORAGE_FILE_INFECTED": "The file failed the security scan",
+  "error.STORAGE_TTL_OUT_OF_RANGE": "The time to live is outside the allowed range",
+  "error.STORAGE_UNKNOWN_ENTITY": "The target entity is not supported"
 }

@@ -235,5 +235,15 @@
   "error.NOTIFY_CHANNEL_NOT_CONFIGURED": "通知通道未配置",
   "error.NOTIFY_CATEGORY_MANDATORY": "该通知类型不可退订",
   "error.NOTIFY_NOT_DEAD_LETTER": "该投递不在死信状态",
-  "error.NOTIFY_SENSITIVE_PAYLOAD": "通知载荷含敏感字段"
+  "error.NOTIFY_SENSITIVE_PAYLOAD": "通知载荷含敏感字段",
+  "error.STORAGE_OBJECT_NOT_FOUND": "文件不存在",
+  "error.STORAGE_PRESIGN_EXPIRED": "下载链接已过期，请重新获取",
+  "error.STORAGE_PRESIGN_INVALID": "下载链接无效",
+  "error.STORAGE_PART_MISSING": "上传分片缺失，请重传",
+  "error.STORAGE_CHECKSUM_MISMATCH": "文件校验值不匹配，请重新上传",
+  "error.STORAGE_UPLOAD_TOO_LARGE": "文件超过大小上限",
+  "error.STORAGE_UNSUPPORTED_FORMAT": "不支持的文件格式",
+  "error.STORAGE_FILE_INFECTED": "文件未通过安全扫描",
+  "error.STORAGE_TTL_OUT_OF_RANGE": "有效期超出允许范围",
+  "error.STORAGE_UNKNOWN_ENTITY": "不支持的目标实体"
 }

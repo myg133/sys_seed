@@ -1,0 +1,50 @@
+[package]
+name = "platform-storage"
+description = "文件存储与导入导出：对象存储抽象（本地 FS / S3 协议）、预签名、分片上传、CSV 异步导入导出（REQ-018）"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# 平台核心：请求上下文 / 统一错误体 / 鉴权入口 / 敏感键扫描 / 标题表
+platform-core.workspace = true
+# 数据访问：租户作用域入口（`TenantDb` / `TenantTx` / `TenantQuery`）—— RLS 兜底
+platform-db.workspace = true
+# 运行期配置：读 `storage.*` 6 个配置项（D331）
+platform-config.workspace = true
+# HTTP 层：路由与中间件。**multipart 是第二次依赖破例**（D321）
+# 破例的实测代价是**净增 5 个包**：`multer` / `encoding_rs` / `core_detect` /
+# `multiversion_no_op` / `simdutf8`。
+# rev 2 实测修正：上一版注释写「净增 2 个包（`multer` + `encoding_rs`）」漏了传递依赖——
+# `encoding_rs 0.8.44` 自己还拉 3 个（`core_detect` / `multiversion_no_op` / `simdutf8`）。
+axum.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+time.workspace = true
+# SigV4 与预签名令牌（D322 / D329）—— 已在 `Cargo.lock`，不新增条目
+hmac.workspace = true
+sha2.workspace = true
+base64.workspace = true
+# 常数时间比较（防时序侧信道，D322 / TD-062）
+subtle.workspace = true
+bytes.workspace = true
+
+[dev-dependencies]
+# 测试要驱动 axum 路由（`ServiceExt::oneshot`），不连网络。
+tower.workspace = true
+http-body-util.workspace = true
+# 真实库集成测试要直连（管理员连接 + 应用角色连接）。
+sqlx.workspace = true
+# C-5 契约扫描入口（`check_c5_for` / `scan_auth_calls`）。
+platform-contracts.workspace = true
+# 让失败用例能看到真实的数据库/IO 错误。
+tracing-subscriber.workspace = true
+# 审计真库测试（D334）：`PgAuditSink` 落 `platform_audit_log` + `ChainVerifier` 验链。
+# ⚠️ 只做 **dev-dependency** —— 生产代码只用 `platform-core` 的 `AuditSink` trait（D150 不成环）。
+platform-audit = { path = "../platform-audit" }
