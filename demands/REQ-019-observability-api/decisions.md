@@ -79,6 +79,24 @@ VALUES ({tenant}, $1, $2, now());
 | `user` | `rl:user:<tenant_id>:<user_id>` | `rl:user:tenant-a:user-a` |
 | `endpoint` | `rl:endpoint:<METHOD>:<路径模板>` | `rl:endpoint:GET:/api/rbac/roles` |
 
+### ⚠️ 三个桶的实际作用域（**这是挑刺 B1 的根源，必须写清**）
+
+`platform_rate_limit` 是 **RLS 租户表**，`tenant_id` 是**列**。
+查询恒带 `WHERE tenant_id = {tenant}` → **三个维度的桶都是「租户内」的**：
+
+| 维度 | 作用域 | 谁共享这个桶 |
+|---|---|---|
+| `tenant` | 租户内**所有**请求 | 该租户的所有用户 |
+| `user` | 租户内**某个用户** | 只有该用户 |
+| `endpoint` | 租户内**某个端点** | **该租户的所有用户**（⚠️ 键里没有 user 段） |
+
+⚠️ **因此「同一租户内 user-b 不受 user-a 的 endpoint 限流影响」是错的** ——
+endpoint 桶本就按租户维度共享，`user-a` 打满后 `user-b` 打同一端点**必然** 429。
+
+rev 1 的 AC-S-031 步骤 4 断言「`user-b` 打同一端点仍 200」，
+**在实现正确时会红、在实现错误（键带 user_id）时才绿** —— 这是最坏的一种判据缺陷：
+它主动奖励错误实现。rev 2 已改为**跨租户**验证（`tenant-b` 的桶与 `tenant-a` 完全独立）。
+
 ⚠️ **endpoint 用路径模板，不是完整 URL** —— 否则 `?x=1` 与 `?x=2` 会算两个桶，
 攻击者加个随机 query 就能无限打（**AC-S-031 专门测这个**）。
 
@@ -187,6 +205,23 @@ AC-S-037 只验「配置生效 / span 结构 / 失败不影响业务 / 可关闭
 3. **回写**：响应头 `X-Request-Id` **必带**（成功与失败都带）；
 4. **注入日志**：`tracing` 的 span 里带 `trace_id` 字段，每行日志自动继承。
 
+### ⚠️ 校验的具体写法（先 ASCII 再长度，避免误读）
+
+```rust
+fn normalize_trace_id(raw: &str) -> Option<String> {
+    // ① 先判 ASCII hex —— 这一步就排除了所有多字节 UTF-8
+    if !raw.bytes().all(|b| b.is_ascii_hexdigit()) { return None; }
+    // ② 再判长度：此时字节数 == 字符数，所以 len() 是安全的
+    if raw.len() != 32 { return None; }
+    Some(raw.to_ascii_lowercase())
+}
+```
+
+⚠️ **顺序很关键**：先判 ASCII 再判长度，`len()` 的语义就不再有歧义
+（能过第 ① 步的串必然全是单字节 ASCII）。
+rev 1 的写法（先 `len()` 再 `chars().all()`）**功能上也正确**，但注释里同时写着
+「不能用 `len()` 判字节」，读起来自相矛盾（挑刺 m3）。
+
 ### ⚠️ 为什么必须校验（AC-S-030 步骤 4）
 
 不校验就会形成**日志注入**：
@@ -215,16 +250,43 @@ OTel 的 `trace_id` 是 16 字节（32 hex），与我们的格式**天然一致
 
 请求参数：`limit`（1~100，默认 20）、`cursor`（不透明字符串）。
 
+### ⚠️ 与契约 C7 的关系（挑刺 M12）
+
+`docs/contracts/api-conventions/v1.md:118-119` 的 C7 明写：
+「响应含 `next_cursor`、上限 200，**兼容分页 `?page=N&page_size=M`，二者互斥**」。
+
+本需求：
+- **保留** `?page=&page_size=`（不破坏已验收行为）；
+- 把「超上限」从**夹取**改为 **400**（破坏性，见上表）；
+- **新增**端点只用 cursor，不提供 `page`（C7 说的是「兼容」，不是「必须」）。
+
+→ 需要在实现时**同步更新 C7 文档**，把「夹到上限」改成「超上限 400」。
+
 ### ⚠️ 为什么不提供 `offset`
 
 `offset` 在大表上**越翻越慢**（`OFFSET 100000` 要扫 10 万行），
 且**并发写入时会漏行/重行**（翻页期间插入一条，第 2 页会重复第一条）。
 cursor（keyset）没有这两个问题。
 
-### ⚠️ `limit` 越界必须 400，不能静默截断
+### ⚠️ `limit` 越界必须 400，不能静默截断 —— **这是对 D153 / C7 的破坏性修正**
 
-`limit=1000` 静默截成 100 → 调用方以为自己拿到了 1000 条 → **数据静默丢失**。
+`limit=1000` 静默截到上限 → 调用方以为自己拿到了 1000 条 → **数据静默丢失**。
 这是 AC-S-034 步骤 4 的判据。
+
+⚠️ **必须明码声明破坏面**（挑刺 B4 / M12）：
+
+| 项 | 现状（D153 + 契约 C7） | 本需求改为 | 破坏性 |
+|---|---|---|---|
+| `limit` 上限 | 200（`query.rs:53`） | **200（不变）** | 否 |
+| 超上限行为 | **夹到 200 返回 200**（`query.rs:178`） | **400 + `INVALID_REQUEST`** | **是** |
+| `limit <= 0` | `AUDIT_INVALID_FILTER` | **400 + `INVALID_REQUEST`** | **是** |
+| `?page=&page_size=` | 支持 | **保留** | 否 |
+
+**要改的既有测试**（实现时必须在提交信息里点名）：
+`crates/platform-audit/src/query.rs:646-652`
+`an_oversized_limit_is_clamped_instead_of_rejected` → 改为 `an_oversized_limit_is_rejected`。
+
+⚠️ 上限**保持 200 不改 100** 是为了减少破坏面 —— C7 的 200 继续有效。
 
 ### ⚠️ 本轮只做**样板**，不改造全部 crate
 

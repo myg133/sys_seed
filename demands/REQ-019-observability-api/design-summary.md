@@ -68,17 +68,64 @@ DELETE FROM platform_rate_limit
 
 ---
 
+## 2.3 未认证请求怎么办（挑刺 M7，**明码不做**）
+
+`platform_rate_limit` 是 **RLS 租户表**，`TenantDb::begin` 在**无租户**时
+直接 `DbError::MissingTenant`（`crates/platform-db/src/tenant.rs:180`）。
+
+→ 登录 / 注册 / `/health` 等**认证之前**的请求**写不进限流表**。
+
+**本轮决定：不做**（→ **TD-072**）。理由：
+1. 要做得正确，需要「按 IP 的独立维度」或「sentinel 租户 + 非 RLS 路径」——
+   前者要新表（IP 不是租户数据），后者要在 RLS 上开后门（风险大）；
+2. 现有 IAM 登录**已有**自己的 IP 限流（`platform-iam/src/service.rs:837`
+   `check_ip_rate_limit`），所以暴力破解**不是完全裸露**；
+3. 本需求的 9 条 AC 全部只覆盖**已认证**请求 —— 这是**明码的范围**，不是遗漏。
+
+⚠️ **实现时必须有这一步**：限流中间件遇到「无租户上下文」时
+**直接放行**（而不是报错）—— 否则登录端点会因为拿不到租户而 500。
+
+---
+
 ## 3. 限流判定流程
 
 ```
 请求进来
   ↓
 ① 读配置（rateLimit.enabled？三个维度的 requests / windowSeconds）
+  ↓ ⚠️ 读配置**失败 / 键未登记 / 缓存无快照** → 一律视为 disabled
+     （**fail open** + 一条 WARN），见下方「读配置的失败语义」
   ↓ enabled=false → 直接放行（零开销，不查库）
+  ↓ 无租户上下文（未认证）→ 直接放行（见 §2.3）
 ② 依次判定三个维度（tenant → user → endpoint）
   ↓ 任一维度超限 → 429 + Retry-After + params.dimension，**直接返回**
 ③ 三个维度都通过 → 各写一行（同一个事务）→ 放行
 ```
+
+### ⚠️ 读配置的失败语义（挑刺 M8）—— **必须写死，否则 1496 个测试会炸**
+
+实测 `DbConfigResolver::resolve` 在两种情况下都返回 `None`
+（`crates/platform-config/src/resolver.rs:237-239`）：
+① 键**未登记**；② **缓存快照未 refresh**。
+
+现有 1496 个测试的装配里**不会**登记 `rateLimit.*` 这些新键 → 中间件拿到 `None`。
+
+**决定**：
+```rust
+// 三种情况一律 fail open（放行）+ WARN：
+//   ① 读失败（DB 错误） ② 键未登记（None） ③ enabled 键不存在
+let enabled = read_bool(cfg, "rateLimit.enabled").await.unwrap_or(false);
+if !enabled {
+    tracing::debug!("rate limiting is disabled");
+    return next.run(request).await;   // 零查库开销
+}
+```
+
+⚠️ **绝不能**「读不到就报错」——那会让 19 个已完成需求的 1496 个测试**集体变红**。
+这是实现阶段最容易踩的坑，写在这里防止忘记。
+
+⚠️ 配置读取走 `ConfigService::read_*`（**含 refresh**），不是裸 `resolve` ——
+否则新建的键在缓存 refresh 之前永远读不到。
 
 ### ⚠️ 三个必须注意的顺序/原子性
 
@@ -176,6 +223,45 @@ assert!(logs.contains(&format!("trace_id={T}")));
 ---
 
 ## 5. OTel 装配（AC-S-037）
+
+### 5.1 可注入缝（挑刺 B10）—— **没有它 AC-S-037 不可执行**
+
+```rust
+/// `exporter_override` 为 `None` 时用生产 OTLP exporter；
+/// 测试传 `Some(InMemorySpanExporter)` → 能取回 span。
+pub fn init_otel(
+    cfg: &OtelConfig,
+    exporter_override: Option<Box<dyn SpanExporter>>,
+) -> Option<OtelGuard> { ... }
+
+/// 句柄：`is_enabled()` 供 AC-S-037 步骤 3 断言。
+pub struct OtelGuard { /* provider */ }
+impl OtelGuard {
+    pub fn is_enabled(&self) -> bool { ... }
+}
+```
+
+### 5.2 入站 `X-Request-Id` → OTel `TraceId`（挑刺 B10 的后半）
+
+⚠️ 本需求要求「span 的 `trace_id` **逐字等于** 响应头 `X-Request-Id`」（AC-S-029 步骤 5）。
+这**必须显式实现**，`tracing` + `tracing-opentelemetry` 默认**不**做这件事：
+
+```rust
+// ① 把 32 hex 解析成 OTel TraceId
+let trace_id = opentelemetry::trace::TraceId::from_hex(hex_32)?;
+// ② 用远端父上下文把入站值设为本次 trace 的根
+let parent = Context::new().with_remote_span_context(SpanContext::new(
+    trace_id, SpanId::INVALID, Sampler::AlwaysOn, None, false,
+));
+// ③ 在该 Context 里开 span
+let span = tracer.build_with_context(Span::builder("http.request"), &parent).start();
+```
+
+⚠️ **不用 `SpanId::INVALID` 的替代方案**：如果实现直接开新 span（不设父上下文），
+OTel 会**自己生成**一个 `trace_id` → 与 `X-Request-Id` 不等 → AC-S-029 步骤 5 红。
+这是本需求**最容易做错**的一处。
+
+---
 
 ```rust
 // 只为说明结构，实现细节见代码
@@ -297,13 +383,35 @@ pub struct Page<T> {
 
 | # | 方法 | 路径 | 说明 | AC |
 |---|---|---|---|---|
-| 1 | `GET` | `/api/health/ready` | **修改**：就绪检查加「限流表可达」 | AC-S-031 前置 |
-| 2 | `GET` | `/api/audit/events` | **修改**：对齐分页契约 | AC-S-034 |
+| 1 | `GET` | **`/health/ready`** | **修改**：就绪检查加「限流表可达」（⚠️ 是 `/health/*` 不是 `/api/health/*`） | **AC-S-038** |
+| 2 | `GET` | `/api/audit/events` | **修改**：对齐分页契约 + **标注弃用**（见 AC-S-036） | AC-S-034 / AC-S-036 |
 | 3 | `GET` | `/api/openapi.json` | **新增**：产出 OpenAPI 文档 | AC-S-035 |
-| 4 | `GET` | `/api/_deprecated-probe` | **新增**：测试用弃用端点（标 `#[deprecated]` + 头） | AC-S-036 |
+| 4 | `GET` | **`/api/observability/rate-limit/status`** | **新增**：限流配置与当前用量（**这是 AC-S-034 依赖的「新分页端点」**） | AC-S-034 |
+| 5 | `GET` | `/api/rbac/roles` | **修改**：加 `#[utoipa::path]` + 作为弃用头的**阴性对照** | AC-S-035 / AC-S-036 |
 
-⚠️ 第 4 个端点是**测试专用**，必须在实现里注明「仅为验弃用头存在」，
-并考虑是否在生产构建中排除。
+⚠️ **rev 2 修正（挑刺 B5 / B6 / M10）**：
+- 原第 1 行路径写成 `/api/health/ready` → 实际是 `/health/ready`（`main.rs:290-291`）；
+- 原端点清单里**没有**任何「新增的分页列表端点」，但 AC-S-034 依赖它 → 补第 4 行；
+- 删掉「测试专用端点 `/api/_deprecated-probe` + 考虑是否在生产排除」——
+  冻结的规格里留「考虑」等于执行时无人能判对错。改为**在真实端点
+  `/api/audit/events` 上标注弃用**（理由：分页契约升版给了它合理的弃用理由）。
+
+### 10.1 `/api/observability/rate-limit/status` 的响应
+
+```json
+{
+  "items": [
+    { "dimension": "endpoint", "key": "GET:/api/rbac/roles",
+      "limit": 1, "windowSeconds": 60, "used": 1 }
+  ],
+  "nextCursor": null,
+  "total": 3
+}
+```
+
+⚠️ 这个端点**本身也受限流保护**（它走同一个中间件）——
+所以在 AC-S-034 里测分页时，必须先把 `rateLimit.enabled` 设为 `false`
+或用足够高的上限，否则会被自己的限流拦掉。
 
 ---
 
@@ -314,21 +422,73 @@ pub struct Page<T> {
 | `items` | 分页数据 |
 | `nextCursor` | 下一页游标（`null` = 没有下一页） |
 | `total` | 总数 |
-| `traceId` / `trace_id` | ⚠️ **两种都存在**：`ProblemDetails` 用 `trace_id`（现有契约），业务响应体用 `traceId`。**不改现有契约**（D109） |
+| `trace_id` | ⚠️ **只有这一种**：错误响应体（`ProblemDetails.trace_id`，`problem.rs:104`）用它。**业务成功响应体不加任何 trace 字段**（那要改 REQ-011 已验收的 DTO 契约 → 挑刺 B8）。rev 1 写的「业务响应体用 `traceId`。不改现有契约」**自相矛盾**（要加字段就是改契约） |
 | `dimension` | 限流的维度（`params.dimension`） |
 
 ---
 
-## 12. 与现有代码的交互点（**跨需求改动，必须声明 D109**）
+## 11.5 **必须新增**：可测的路由装配（挑刺 M5）
 
-| 改动 | 影响的 crate | 风险 |
+### 问题
+
+`crates/platform-server/src/lib.rs:9-20` 只导出模块，**整个 `Router` 在
+`main.rs:289` 起内联装配近 1500 行**。既有全栈测试是**手工复刻**，
+并自己注释「与 `main.rs` 相同的挂法」（`tests/app_real_stack.rs:227`）。
+
+→ 6 条 HTTP 级 AC（029/030/031/032/036/037）跑在**测试自造的栈**上，
+**中间件漏装 / 顺序错都能绿** —— 这正是 `platform-core/src/log.rs:1-20`
+写过的教训（「测过的东西与线上跑的不是同一份代码 → 假绿」）。
+
+### 决定
+
+抽出：
+
+```rust
+// platform-server/src/app.rs
+pub struct AppDeps { /* 各 service、config、限流器、otel guard… */ }
+
+/// 装配**完整**路由（含全部中间件，顺序与生产一致）。
+pub fn build_router(deps: AppDeps) -> axum::Router { ... }
+```
+
+- `main.rs` 只负责「读配置 → 构造 deps → build_router → serve」；
+- 所有 HTTP 级测试调 `build_router(测试 deps)` —— **与生产同一条装配路径**。
+
+⚠️ 这是对 `platform-server` 的**结构性改动**（不是加一行），
+必须列进 §12 的跨需求改动表并标「**中**」风险。
+
+---
+
+## 12. 与现有代码的交互点（**跨需求改动，全部声明 D109**）
+
+⚠️ **rev 2 修正（挑刺 B2 / E）**：rev 1 曾写「`platform-audit` 的分页改动是
+**唯一**会动到已验收需求的地方」—— **这是假话**。实际至少 **6 处**动到已验收需求：
+
+| # | 改动 | 影响的 crate | 风险 | 会动到哪个已验收需求 |
+|---|---|---|---|---|
+| 1 | **`build_router` 抽取**（§11.5） | `platform-server` | **中**（结构改动） | 全部 19 个（改装配路径） |
+| 2 | **`limit` 超上限从夹取改为 400**（D341） | `platform-audit` | **中** | **REQ-014**（单测 `query.rs:646-652` 锁死了夹取行为） |
+| 3 | **`new_trace_id()` 从 36 字符 uuid 改为 32 hex** | `platform-core` | **中**（对外可见格式变化） | 全部（`context.rs:156` 有单测断言 `len()==36`） |
+| 4 | **`init_tracing` 抽出 `build_subscriber(level, writer)`** | `platform-server` | 低 | REQ-002（启动路径） |
+| 5 | **限流中间件挂进 server** | `platform-server` | **中**（默认关闭 + fail open） | 全部（若 fail open 写错会集体红） |
+| 6 | **各 crate 路由加 `#[utoipa::path]`** | `platform-app` / `rbac` / `audit` 等 | 低（纯标注） | 无行为变化，但改源码 |
+
+### ⚠️ 明码**不动**的已验收契约（rev 1 曾误写成会动）
+
+| 项 | rev 1 怎么说 | rev 2 决定 | 为什么 |
+|---|---|---|---|
+| **审计表加 `trace_id`** | 要求断言 `platform_audit_log.trace_id` | **不动** → **TD-071** | 契约 C12 是 13 个冻结字段；加列要改在线表 + 归档表 + `platform_audit_append` 签名 + **哈希公式** → 断历史链，破坏 REQ-014 的链校验 |
+| **业务成功响应体加 `traceId`** | 要求 `POST /api/apps` 的 201 体带 `.traceId` | **不动**（改用失败响应体的 `ProblemDetails.trace_id`） | `AppView` 等 DTO 无 trace 字段，加它要改 **REQ-011** 已验收的响应契约 |
+| **错误响应媒体类型改 `problem+json`** | 要求产物里含 `application/problem+json` | **不动**，改为断言 `application/json` | 实际就是 `application/json`（`problem.rs:305`），且 **D183** 已把「要求 problem+json」这条判据**当成 BA 写错修正掉了** |
+| **`limit` 上限 200 → 100** | 隐含 | **不动**，保持 200 | 减少破坏面；只改「超上限」的行为 |
+
+### 实现时必须一起改的既有测试（逐个点名，不许漏）
+
+| 文件:行 | 函数 | 怎么改 |
 |---|---|---|
-| `RequestContext` 增加 trace_id 校验入口 | `platform-core` | 低（新增方法，不改签名） |
-| `init_tracing` 加 trace_id Layer | `platform-server` | 低 |
-| `platform-server` 装配限流中间件 | `platform-server` | **中**（默认关闭，避免打断现有测试） |
-| `platform-audit` 的 `QueryPage` 对齐契约 | `platform-audit` | **中**（改响应字段 → 现有测试要跟着改） |
-| 各 crate 路由加 `#[utoipa::path]` | 多个 | 低（纯标注，不改行为） |
-| `Cargo.lock` 净增 20~29 包 | 全仓 | **依赖破例**（D338/D339） |
+| `crates/platform-audit/src/query.rs:646-652` | `an_oversized_limit_is_clamped_instead_of_rejected` | 改名为 `an_oversized_limit_is_rejected`，断言 400 |
+| `crates/platform-core/src/context.rs:156` | 断言 `trace_id.len() == 36` | 改为 `== 32` 且断言全 hex |
+| `docs/contracts/api-conventions/v1.md:118-119`（C7） | 「超上限夹到 200」 | 改为「超上限 400」 |
+| `deploy/RUNBOOK.md` 里的 trace_id 示例 | 36 字符 uuid 形态 | 改为 32 hex |
 
-⚠️ **`platform-audit` 的分页改动是唯一会动到已验收需求的地方** ——
-必须跑它的全量测试并在提交信息里点명。
+⚠️ 这四处在**实现阶段的提交信息里必须点名** —— 它们是「改了已验收行为」的证据。
