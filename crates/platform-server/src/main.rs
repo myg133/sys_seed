@@ -616,6 +616,40 @@ async fn serve() -> Result<(), Failure> {
         app
     };
 
+    // 文件存储与导入导出（REQ-018）：`/api/storage/*`。
+    //
+    // ⚠️ **与 `/api/notify/*` 同款口径**：IAM 没配 → 不提供（对象按租户隔离，
+    //    没有 IAM 就没有可验的登录会话）。
+    //
+    // ⚠️ **存储后端走环境变量**（D319）：`BASE_STORAGE_ROOT` /
+    //    `BASE_STORAGE_PRESIGN_SECRET` / `BASE_STORAGE_PRESIGN_KEY_ID` 没配齐
+    //    → `build_storage_state` 返回 Err，这里 warn 后**只跳过这组路由**（服务照常起）。
+    let app = if let Some((iam, checker)) = app_iam.clone() {
+        match build_storage_state(&config, iam, config_service.clone(), checker).await {
+            Ok(storage_state) => {
+                let app = app.nest(
+                    "/api/storage",
+                    platform_storage::http::router(storage_state),
+                );
+                tracing::info!(
+                    "文件存储已启用：/api/storage/*（对象 / 上传会话 / 导入导出 / 预签名下载）"
+                );
+                app
+            }
+            Err(Failure::Runtime(reason)) => {
+                tracing::warn!("未配置存储后端，平台不提供 /api/storage/*：{reason}");
+                app
+            }
+            Err(_) => {
+                tracing::warn!("存储系统装配失败，平台不提供 /api/storage/*");
+                app
+            }
+        }
+    } else {
+        tracing::warn!("未配置 IAM：平台不提供 /api/storage/*（对象按租户隔离）");
+        app
+    };
+
     // SSO 入站（REQ-013）：把「配置源」等后设槽接到 IAM 服务上。
     //
     // 配置源用 `ConfigService::read_entries` 实现 —— 与 `GET /api/config/entries`
@@ -1033,6 +1067,123 @@ impl platform_notify::config::NotifyConfigSource for PlatformNotifyConfigSource 
         // 与 `platform-config` 的 `FALLBACK_LOCALES` 一致（`registry.rs:44`）。
         // TODO(TD-057)：租户级 locale 偏好还没有存储位；本轮固定基准语言。
         Box::pin(async { "zh-CN".to_string() })
+    }
+}
+
+/// 装配文件存储系统（REQ-018）。
+///
+/// # 依赖注入的五件套
+///
+/// | 依赖 | 实现 | 用途 |
+/// |------|------|------|
+/// | `StorageStore` | `platform-db` 的租户作用域入口 | 对象 / 上传会话 / 导入导出任务 |
+/// | `StorageConfigSource` | [`PlatformStorageConfigSource`] | 运行期配置（**每请求读**） |
+/// | `ObjectStore` | `LocalFsStore` | 本地 FS 真实现（D319） |
+/// | `VirusScanner` | `NoopScanner` | 本轮**不做**病毒扫描（显式 `Skipped`） |
+/// | `TokenVerifier` | [`StorageIamTokenVerifier`] | 验登录令牌 → 租户 + 用户 |
+///
+/// # ⚠️ 存储后端的三个环境变量**必须齐**
+///
+/// 缺一个 → 返回 `Err`，调用方 warn 后**不挂** `/api/storage/*`
+/// （不是静默用默认根目录 —— 那会把对象写到一个运维不知道的地方）。
+async fn build_storage_state(
+    config: &DeployConfig,
+    iam: Arc<platform_iam::service::IamService>,
+    config_service: Arc<platform_config::ConfigService>,
+    checker: Arc<platform_rbac::RbacChecker>,
+) -> Result<Arc<platform_storage::http::StorageState>, Failure> {
+    let env = platform_storage::config::LocalStorageEnv::from_env().ok_or_else(|| {
+        Failure::Runtime(
+            "缺少 BASE_STORAGE_ROOT / BASE_STORAGE_PRESIGN_SECRET / BASE_STORAGE_PRESIGN_KEY_ID"
+                .to_string(),
+        )
+    })?;
+
+    // 数据访问走 `platform-db` 的租户作用域入口（**不得**直连池）。
+    let tenant_db =
+        platform_db::TenantDb::connect(&config.database_url, platform_db::DbOptions::default())
+            .await
+            .map_err(|err| Failure::Runtime(format!("数据库连接串非法：{err}")))?;
+
+    let service = Arc::new(platform_storage::service::StorageService::new(
+        platform_storage::store::StorageStore::new(tenant_db),
+        platform_storage::config::StorageConfig::new(Arc::new(PlatformStorageConfigSource::new(
+            config_service,
+        ))),
+        Arc::new(platform_storage::object_store::local_fs::LocalFsStore::new(
+            env.root,
+        )),
+        Arc::new(platform_storage::scanner::NoopScanner),
+        env.presign_secret.into_bytes(),
+        env.presign_key_id,
+    ));
+
+    // ⚠️ `refresher` 与 `checker` 是**同一个** `RbacChecker`（它同时实现两个 trait）——
+    // 少了 `refresher`，用户第一次打受保护的端点必然 403（TD-047）。
+    let refresher: Arc<dyn PermissionRefresher> = checker.clone();
+
+    Ok(Arc::new(platform_storage::http::StorageState {
+        service,
+        tokens: Arc::new(StorageIamTokenVerifier::new(iam)),
+        checker: checker as Arc<dyn PermissionChecker>,
+        refresher,
+    }))
+}
+
+/// 文件存储的令牌校验（复用 IAM 的 access token 验签）。
+struct StorageIamTokenVerifier {
+    /// IAM 服务。
+    inner: Arc<platform_iam::service::IamService>,
+}
+
+impl StorageIamTokenVerifier {
+    fn new(inner: Arc<platform_iam::service::IamService>) -> Self {
+        Self { inner }
+    }
+}
+
+impl platform_storage::http::TokenVerifier for StorageIamTokenVerifier {
+    fn verify(&self, token: &str) -> Option<platform_storage::http::VerifiedUser> {
+        let claims = self.inner.verify_access_token(token).ok()?;
+        Some(platform_storage::http::VerifiedUser {
+            user_id: claims.subject,
+            tenant_id: claims.tenant_id,
+        })
+    }
+}
+
+/// 文件存储的**配置源**（每请求读 `platform_config`，与 `PlatformNotifyConfigSource` 同款）。
+struct PlatformStorageConfigSource {
+    /// 平台配置服务。
+    config: Arc<platform_config::ConfigService>,
+}
+
+impl PlatformStorageConfigSource {
+    fn new(config: Arc<platform_config::ConfigService>) -> Self {
+        Self { config }
+    }
+
+    /// 读一个平台级配置项为 `i64`（`number` 型）。
+    async fn read_number(&self, ctx: &RequestContext, key: &str) -> Option<i64> {
+        let entries = self
+            .config
+            .read_platform_entries(ctx, &[key.to_string()])
+            .await
+            .ok()?;
+        entries
+            .into_iter()
+            .find(|entry| entry.key == key)
+            .and_then(|entry| entry.value.as_i64())
+    }
+}
+
+impl platform_storage::config::StorageConfigSource for PlatformStorageConfigSource {
+    fn read_platform<'a>(
+        &'a self,
+        ctx: &'a RequestContext,
+        key: &'a str,
+    ) -> platform_storage::config::StorageBoxFuture<'a, Option<i64>> {
+        Box::pin(async move { self.read_number(ctx, key).await })
     }
 }
 

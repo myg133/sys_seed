@@ -22,6 +22,22 @@ use crate::scanner::ScanVerdict;
 use crate::service::StorageService;
 use crate::store::{NewObject, RowFailure};
 
+/// 一次导入处理的结果。
+///
+/// ⚠️ `Partial` 是「这一轮只跑了几批，还没完」—— 见 `max_batches` 的说明。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportOutcome {
+    /// 跑完了。
+    Completed,
+    /// 只跑了一部分（需要下一次 tick 接着跑）。
+    Partial {
+        /// 已处理行数。
+        processed: i64,
+        /// 失败行数。
+        failed: i64,
+    },
+}
+
 /// 一次 `tick()` 的统计（**可断言**）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TickStats {
@@ -31,12 +47,14 @@ pub struct TickStats {
     pub completed: usize,
     /// 失败多少。
     pub failed: usize,
+    /// **只跑了一部分**（进度已更新，需下次继续）多少。
+    pub partial: usize,
 }
 
 impl TickStats {
     /// 计数是否自洽（防「认领了但被静默吞掉」）。
     pub fn is_balanced(&self) -> bool {
-        self.completed + self.failed == self.claimed
+        self.completed + self.failed + self.partial == self.claimed
     }
 }
 
@@ -46,6 +64,21 @@ pub async fn tick(
     ctx: &RequestContext,
     batch: i64,
 ) -> Result<TickStats, ServiceError> {
+    tick_with_limit(service, ctx, batch, usize::MAX).await
+}
+
+/// 与 [`tick`] 相同，但**限制每个任务一次最多处理几批**。
+///
+/// ⚠️ 这是 AC-S-180「进度可查」的机制：`tick()` 用 `usize::MAX`（一次跑完），
+/// 而需要观察中间态的测试用 `tick_with_limit(.., 1)`。
+/// 生产上 `xtask storage worker --rounds 0` 会循环调 `tick()`，
+/// 每次跑完一个任务 → 进度在每次 `tick` 之间可见。
+pub async fn tick_with_limit(
+    service: &StorageService,
+    ctx: &RequestContext,
+    batch: i64,
+    max_batches_per_tick: usize,
+) -> Result<TickStats, ServiceError> {
     let jobs = service.store().claim_jobs(ctx, batch).await?;
     let mut stats = TickStats {
         claimed: jobs.len(),
@@ -54,12 +87,23 @@ pub async fn tick(
 
     for job in &jobs {
         let outcome = if job.kind == job_kind::IMPORT {
-            run_import(service, ctx, job).await
+            run_import(service, ctx, job, max_batches_per_tick).await
         } else {
-            run_export(service, ctx, job).await
+            run_export(service, ctx, job, max_batches_per_tick).await
         };
         match outcome {
-            Ok(()) => stats.completed += 1,
+            Ok(ImportOutcome::Completed) => stats.completed += 1,
+            Ok(ImportOutcome::Partial { .. }) => {
+                // ⚠️ **还没完** → 退回 `pending`，下一次 tick 接着跑。
+                // 这一步做完 `processed_rows` 已经是可见的中间值 →
+                // 「进度可查」成立（AC-S-180）。
+                service
+                    .store()
+                    .requeue_job(ctx, &job.id)
+                    .await
+                    .map_err(ServiceError::from)?;
+                stats.partial += 1;
+            }
             Err(reason) => {
                 stats.failed += 1;
                 service
@@ -78,7 +122,8 @@ async fn run_import(
     service: &StorageService,
     ctx: &RequestContext,
     job: &crate::model::JobRow,
-) -> Result<(), String> {
+    max_batches: usize,
+) -> Result<ImportOutcome, String> {
     let settings = service.config().settings(ctx).await;
     let key = job
         .object_key
@@ -117,11 +162,27 @@ async fn run_import(
 
     // ④ 逐批处理。
     let batch_size = settings.import_batch_size.max(1) as usize;
-    let mut processed: i64 = 0;
-    let mut failed: i64 = 0;
     let mut failures: Vec<RowFailure> = Vec::new();
 
+    // ⚠️ **一次 tick 最多处理 `max_batches` 批**（AC-S-180 的「进度可查」要求）：
+    // 若一次 tick 把 5 万行全跑完，用户**永远看不到中间进度** ——
+    // 「进度可查」变成一句空话（TC-018-040 会红）。
+    // → 处理到上限就返回 [`ImportOutcome::Partial`]，让下一次 tick 接着跑。
+    let mut batches_done = 0usize;
+
+    // ⚠️ **断点续跑**：从 `processed_rows` 接着跑。
+    // 若每次都从头跑，被 `Partial` 退回的任务会**重复处理前面的行**
+    // → `processed_rows` 永远推不到 `total`（无限循环）。
+    // 已处理的行数（不是「数据序号」——两者差 0，因为 processed 只数数据行）。
+    let already_done = job.processed_rows.max(0) as usize;
+    // 从上次进度继续；`failed` 也从库里带上来（否则失败数会被重置）。
+    let mut processed: i64 = job.processed_rows.max(0);
+    let mut failed: i64 = job.failed_rows.max(0);
+
     for (index, row) in parsed.rows.iter().enumerate() {
+        if index < already_done {
+            continue; // 已经处理过（上次 tick 的成果）
+        }
         // ⚠️ **文件行号** = 数据序号 + 2（表头占第 1 行）。
         let file_line = (index + 2) as i64;
         let map = parsed.to_map(row);
@@ -152,6 +213,13 @@ async fn run_import(
                 .update_job_progress(ctx, &job.id, processed, failed)
                 .await
                 .map_err(|e| format!("updating the progress failed: {e}"))?;
+            batches_done += 1;
+
+            // 到上限就停（把控制权交回 —— 下一次 tick 从 `processed_rows` 接着跑）。
+            if batches_done >= max_batches && processed < total {
+                // 把任务退回 `pending` 让下一次 tick 能再认领它。
+                return Ok(ImportOutcome::Partial { processed, failed });
+            }
         }
     }
 
@@ -175,7 +243,7 @@ async fn run_import(
         .complete_job(ctx, &job.id, None)
         .await
         .map_err(|e| format!("completing the job failed: {e}"))?;
-    Ok(())
+    Ok(ImportOutcome::Completed)
 }
 
 /// 跑一个导出任务（读表 → 生成 CSV → 落存储）。
@@ -183,7 +251,8 @@ async fn run_export(
     service: &StorageService,
     ctx: &RequestContext,
     job: &crate::model::JobRow,
-) -> Result<(), String> {
+    _max_batches: usize,
+) -> Result<ImportOutcome, String> {
     // ① 读数据（这里的「实体 → 表」映射由装配层的 `ExportSource` 提供；
     // 本轮内置一个最小实现：把 `platform_storage_object` 的元数据导出成 CSV，
     // 这样 round-trip 用例有真实数据可验而不需要业务表）。
@@ -235,7 +304,7 @@ async fn run_export(
         .complete_job(ctx, &job.id, Some(&object_key))
         .await
         .map_err(|e| format!("completing the job failed: {e}"))?;
-    Ok(())
+    Ok(ImportOutcome::Completed)
 }
 
 /// 导出的数据源（**本轮的最小实现**：导出对象元数据）。
@@ -324,6 +393,7 @@ mod tests {
             claimed: 3,
             completed: 2,
             failed: 0,
+            partial: 0,
         };
         assert!(!unbalanced.is_balanced(), "少记一条必须被抓住");
 
@@ -331,8 +401,21 @@ mod tests {
             claimed: 3,
             completed: 2,
             failed: 1,
+            partial: 0,
         };
         assert!(balanced.is_balanced());
+    }
+
+    /// `partial` 也计入自洽（进度已更新但任务没完）。
+    #[test]
+    fn partial_counts_toward_balance() {
+        let stats = TickStats {
+            claimed: 2,
+            completed: 1,
+            failed: 0,
+            partial: 1,
+        };
+        assert!(stats.is_balanced(), "partial 必须计入自洽");
     }
 
     /// 空轮自洽。

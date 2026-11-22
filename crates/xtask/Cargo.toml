@@ -21,6 +21,8 @@ platform-db.workspace = true
 platform-audit.workspace = true
 # 通知投递批处理（REQ-015 / D296）：`xtask notify worker`
 platform-notify.workspace = true
+# 导入导出批处理（REQ-018 / D324）：`xtask storage worker`
+platform-storage.workspace = true
 # 「列出全部租户」需要一条**不带租户上下文**的查询（RLS 下管理员连接才看得到行）
 sqlx.workspace = true
 # tenant-policies 子命令要连库（异步）

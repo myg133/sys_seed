@@ -396,6 +396,21 @@ impl StorageStore {
         self.db.execute(ctx, &query).await
     }
 
+    /// 把任务**退回 `pending`**（一批跑完但整体还没完 → 下一次 tick 接着跑）。
+    ///
+    /// ⚠️ 这是 AC-S-180「进度可查」的配套：任务在多次 tick 之间保持 `pending`
+    /// 且 `processed_rows` 已更新 → 用户查得到真实进度。
+    pub async fn requeue_job(&self, ctx: &RequestContext, job_id: &str) -> DbResult<u64> {
+        let query = TenantQuery::new(format!(
+            "UPDATE {table} SET status = ?, updated_at = now() \
+             WHERE tenant_id = {{tenant}} AND id = ?::uuid",
+            table = self.db.table(JOB_TABLE)
+        ))
+        .bind(crate::model::job_status::PENDING.to_string())
+        .bind(job_id.to_string());
+        self.db.execute(ctx, &query).await
+    }
+
     /// 让任务失败。
     pub async fn fail_job(&self, ctx: &RequestContext, job_id: &str, error: &str) -> DbResult<u64> {
         let query = TenantQuery::new(format!(
