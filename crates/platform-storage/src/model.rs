@@ -277,6 +277,11 @@ pub struct JobView {
     pub failed_rows: i64,
     /// 导出结果的可下载 URL。
     pub download_url: Option<String>,
+    /// 导出结果的大小（字节）；非导出任务或未完成时为 `None`。
+    ///
+    /// ⚠️ AC-S-182 步骤 3 明确要求 `downloadUrl` **+ `size`** ——
+    /// 只有 URL 的话前端无法显示进度、也无法判断下载是否完整。
+    pub size: Option<i64>,
     /// 整体失败原因。
     pub error: Option<String>,
     /// 创建时间。
@@ -357,7 +362,10 @@ pub fn view_of_object(row: &ObjectRow) -> ObjectView {
 }
 
 /// 任务行 → 响应体。
-pub fn view_of_job(row: &JobRow, download_url: Option<String>) -> JobView {
+///
+/// `download_url` 与 `size` 只在「已完成的导出任务」上非空 ——
+/// 两者都由调用方（HTTP 层）从对象元数据取，`model` 层不查库。
+pub fn view_of_job(row: &JobRow, download_url: Option<String>, size: Option<i64>) -> JobView {
     JobView {
         job_id: row.id.clone(),
         kind: row.kind.clone(),
@@ -367,6 +375,7 @@ pub fn view_of_job(row: &JobRow, download_url: Option<String>) -> JobView {
         processed_rows: row.processed_rows,
         failed_rows: row.failed_rows,
         download_url,
+        size,
         error: row.error.clone(),
         created_at: platform_core::extension::audit::format_timestamp_micros_utc(&row.created_at),
         finished_at: row
@@ -534,6 +543,7 @@ mod tests {
             processed_rows: 0,
             failed_rows: 0,
             download_url: None,
+            size: None,
             error: None,
             created_at: "2026-11-22T00:00:00.000000Z".into(),
             finished_at: None,
@@ -548,6 +558,9 @@ mod tests {
             "processedRows",
             "failedRows",
             "downloadUrl",
+            // ⚠️ AC-S-182 步骤 3 明确要求 `downloadUrl` **+ `size`** ——
+            // 原本这条断言里没有 `size`，所以缺字段时测试是绿的。
+            "size",
             "createdAt",
             "finishedAt",
         ] {

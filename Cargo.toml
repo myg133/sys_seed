@@ -47,8 +47,12 @@ platform-server = { path = "crates/platform-server" }
 sandbox = { path = "modules/sandbox" }
 
 # ⚠️ **第二次依赖破例**（D321，第一次是 D123 的 TLS 栈）：
-# `multipart` feature → `multer 3.0`，实测**净增 2 个包**
-# （`multer` + `encoding_rs`；其余 6 个传递依赖 httparse/log/mime/spin/memchr/futures-util 已在 lock）。
+# `multipart` feature → `multer 3.1`，实测**净增 5 个包**
+# （`multer` + `encoding_rs` + `core_detect` + `multiversion_no_op` + `simdutf8`；
+# 其余 6 个传递依赖 httparse/log/mime/spin/memchr/futures-util 已在 lock）。
+# ⚠️ **rev 2 实测修正**：原文写「净增 2 个包」，那是**只数了一层**传递依赖的错误 ——
+# `encoding_rs 0.8.44` 自己还拉了 `core_detect` / `multiversion_no_op` / `simdutf8`
+# （`cargo tree -p encoding_rs -e normal` 确认是实际编译依赖，不是可选 feature）。
 # 为什么破例：父 AC-025 要求「上传大文件（分片）」，multipart 是标准做法；
 # 自己实现边界扫描 + 流式 body 约 300 行，且**比 CSV 解析更容易出安全洞**。
 axum = { version = "0.8", features = ["multipart"] }

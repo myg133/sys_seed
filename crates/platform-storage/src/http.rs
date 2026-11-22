@@ -459,7 +459,7 @@ async fn download_by_token(
     match state.service.objects().get(&key).await {
         Ok(bytes) => (
             StatusCode::OK,
-            [(header::CONTENT_TYPE, "application/octet-stream".to_string())],
+            [(header::CONTENT_TYPE, download_content_type(&key))],
             bytes,
         )
             .into_response(),
@@ -467,6 +467,26 @@ async fn download_by_token(
             let ctx = RequestContext::new();
             service_problem_response(&ServiceError::Storage(error), &ctx, "/api/storage/download")
         }
+    }
+}
+
+/// 预签名下载的 `Content-Type`（**按 key 的扩展名白名单映射**）。
+///
+/// # 为什么不读 `platform_storage_object.content_type`
+///
+/// 这个端点**没有租户上下文**（免鉴权，靠签名授权）→ 走不了 `TenantQuery`，
+/// 读不到那条元数据。见 **TD-065**。
+///
+/// # ⚠️ 为什么是白名单而不是「扩展名 → 任意类型」
+///
+/// 若把 `.html` 映射成 `text/html`，攻击者上传一个 HTML 文件再用预签名链接分享，
+/// 就得到一个**同源**的钓鱼页面（存储型 XSS 的经典形态）。
+/// 所以这里**只**返回两种类型：CSV（AC-S-182 步骤 4 要求）与通用的二进制流。
+/// 其余一律 `application/octet-stream` 强制下载，绝不让浏览器渲染。
+fn download_content_type(key: &str) -> String {
+    match key.rsplit('.').next() {
+        Some(ext) if ext.eq_ignore_ascii_case("csv") => "text/csv".to_string(),
+        _ => "application/octet-stream".to_string(),
     }
 }
 
@@ -564,7 +584,7 @@ async fn create_import(
     ApiJson(body): ApiJson<CreateJobBody>,
 ) -> Response {
     match state.service.create_import(&ctx, &body).await {
-        Ok(row) => (StatusCode::ACCEPTED, Json(view_of_job(&row, None))).into_response(),
+        Ok(row) => (StatusCode::ACCEPTED, Json(view_of_job(&row, None, None))).into_response(),
         Err(error) => service_problem_response(&error, &ctx, instance.as_str()),
     }
 }
@@ -576,7 +596,7 @@ async fn create_export(
     ApiJson(body): ApiJson<CreateJobBody>,
 ) -> Response {
     match state.service.create_export(&ctx, &body).await {
-        Ok(row) => (StatusCode::ACCEPTED, Json(view_of_job(&row, None))).into_response(),
+        Ok(row) => (StatusCode::ACCEPTED, Json(view_of_job(&row, None, None))).into_response(),
         Err(error) => service_problem_response(&error, &ctx, instance.as_str()),
     }
 }
@@ -586,7 +606,7 @@ async fn list_jobs(State(state): State<Arc<StorageState>>, Ctx { ctx, instance }
     match state.service.list_jobs(&ctx).await {
         Ok(rows) => Json(
             rows.iter()
-                .map(|row| view_of_job(row, None))
+                .map(|row| view_of_job(row, None, None))
                 .collect::<Vec<_>>(),
         )
         .into_response(),
@@ -604,17 +624,30 @@ async fn get_job(
         Ok(row) => row,
         Err(error) => return service_problem_response(&error, &ctx, instance.as_str()),
     };
-    // 完成的导出任务 → 签一个下载 URL。
-    let download_url = match (&row.object_key, row.status.as_str()) {
-        (Some(key), "completed") => state
-            .service
-            .presign_object(&ctx, key, None)
-            .await
-            .ok()
-            .map(|(url, _)| url),
-        _ => None,
+    // 完成的导出任务 → 签一个下载 URL，并带上产物大小（AC-S-182 步骤 3 要求 `downloadUrl` + `size`）。
+    let (download_url, size) = match (&row.object_key, row.status.as_str()) {
+        (Some(key), "completed") => {
+            let url = state
+                .service
+                .presign_object(&ctx, key, None)
+                .await
+                .ok()
+                .map(|(u, _)| u);
+            // ⚠️ 大小取**对象元数据**里的值（落盘时的真实字节数），
+            // 不是任务表的行数 —— 两者含义不同（行数 ≠ 字节数）。
+            let size = state
+                .service
+                .store()
+                .find_object(&ctx, key)
+                .await
+                .ok()
+                .flatten()
+                .map(|object| object.size_bytes);
+            (url, size)
+        }
+        _ => (None, None),
     };
-    Json(view_of_job(&row, download_url)).into_response()
+    Json(view_of_job(&row, download_url, size)).into_response()
 }
 
 /// 列某任务的错误回执。
@@ -681,6 +714,36 @@ mod tests {
     #[test]
     fn bearer_token_absent() {
         assert_eq!(bearer_token(&HeaderMap::new()), None);
+    }
+
+    /// AC-S-182 步骤 4：导出结果下载必须是 `text/csv`（不是 `application/octet-stream`）。
+    #[test]
+    fn the_download_content_type_is_csv_for_csv_keys() {
+        assert_eq!(download_content_type("exports/probe.csv"), "text/csv");
+        // 大小写不敏感（浏览器/客户端给什么大小写都可能）。
+        assert_eq!(download_content_type("EXPORT.CSV"), "text/csv");
+        assert_eq!(download_content_type("a.b.csv"), "text/csv");
+    }
+
+    /// ⚠️ **安全判据**：除 CSV 外**一律** `application/octet-stream`，
+    /// 绝不让浏览器渲染 —— 否则上传一个 `.html` 就能得到同源的钓鱼页。
+    #[test]
+    fn the_download_content_type_never_renders_other_types() {
+        for key in [
+            "evil.html",
+            "evil.htm",
+            "evil.svg",
+            "evil.xml",
+            "evil.js",
+            "no-extension",
+            "",
+        ] {
+            assert_eq!(
+                download_content_type(key),
+                "application/octet-stream",
+                "{key:?} 绝不能被浏览器当内容渲染"
+            );
+        }
     }
 
     /// 路由注册了全部路径（防漏挂端点）。

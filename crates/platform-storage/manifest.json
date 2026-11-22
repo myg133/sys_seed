@@ -4,19 +4,36 @@
   "version": "0.1.0",
   "enabled": true,
   "permissions": [
-    { "code": "storage:file:read", "name": "查看与下载文件", "type": "menu" },
-    { "code": "storage:file:write", "name": "上传与删除文件", "type": "button" },
-    { "code": "storage:job:read", "name": "查看导入导出任务", "type": "menu" }
+    {
+      "code": "storage:file:read",
+      "name": "查看与下载文件",
+      "type": "menu"
+    },
+    {
+      "code": "storage:file:write",
+      "name": "上传与删除文件",
+      "type": "button"
+    },
+    {
+      "code": "storage:job:read",
+      "name": "查看导入导出任务",
+      "type": "menu"
+    }
   ],
   "menus": [
-    { "label": "文件", "icon": "folder", "route": "/storage" }
+    {
+      "label": "文件",
+      "icon": "folder",
+      "route": "/storage"
+    }
   ],
   "tenantScoped": {
     "tables": [
       "platform_storage_object",
       "platform_storage_upload",
       "platform_storage_job",
-      "platform_storage_job_error"
+      "platform_storage_job_error",
+      "platform_storage_probe_row"
     ],
     "column": "tenant_id"
   },
