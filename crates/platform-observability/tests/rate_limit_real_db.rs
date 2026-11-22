@@ -586,3 +586,97 @@ async fn the_static_config_source_is_usable_from_tests() {
     let ctx = RequestContext::new();
     assert!(!source.settings(&ctx).await.enabled);
 }
+
+/// **AC-S-031 步骤 3**：三层维度**逐个单独启用**时都能独立生效。
+///
+/// # 为什么这条必须存在
+///
+/// 前面的用例各验了「某维度生效」，但**没有一条**证明
+/// 「只启用租户维度时，另外两个维度**真的不限流**」。
+///
+/// 若实现漏了 `if !limit.enabled() { continue }`，
+/// 那么「禁用」的维度会被当成「上限 0」→ **拒绝一切请求**。
+/// 这个 bug 在「三维度都启用」的用例里**看不出来**。
+#[tokio::test]
+async fn each_dimension_limits_independently_when_enabled_alone() {
+    let f = setup().await;
+
+    // ① **只启用租户维度**：上限 2。
+    f.truncate().await;
+    let limiter = limiter(f.db.clone());
+    let ctx = f.ctx_a();
+    let tenant_key = bucket_key(dimension::TENANT, TENANT_A, Some("user-a"), "/x");
+    let tenant_cfg = limit(2, 60);
+
+    for i in 1..=2 {
+        limiter
+            .check(&ctx, dimension::TENANT, &tenant_key, tenant_cfg)
+            .await
+            .unwrap_or_else(|e| panic!("租户维度第 {i} 次应放行：{e:?}"));
+    }
+    limiter
+        .check(&ctx, dimension::TENANT, &tenant_key, tenant_cfg)
+        .await
+        .expect_err("租户维度第 3 次必须拒");
+
+    // ⚠️ 关键：另两个维度**禁用时**，无论打多少次都放行。
+    let disabled = limit(0, 60);
+    for i in 1..=10 {
+        limiter
+            .check(
+                &ctx,
+                dimension::USER,
+                &bucket_key(dimension::USER, TENANT_A, Some("user-a"), "/x"),
+                disabled,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("禁用的用户维度第 {i} 次必须放行（不是「允许 0 次」）：{e:?}"));
+        limiter
+            .check(
+                &ctx,
+                dimension::ENDPOINT,
+                &bucket_key(dimension::ENDPOINT, TENANT_A, None, "/x"),
+                disabled,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("禁用的接口维度第 {i} 次必须放行：{e:?}"));
+    }
+
+    // ② **只启用用户维度**：上限 1。
+    f.truncate().await;
+    let user_key = bucket_key(dimension::USER, TENANT_A, Some("user-a"), "/y");
+    limiter
+        .check(&ctx, dimension::USER, &user_key, limit(1, 60))
+        .await
+        .expect("用户维度第 1 次放行");
+    limiter
+        .check(&ctx, dimension::USER, &user_key, limit(1, 60))
+        .await
+        .expect_err("用户维度第 2 次必须拒");
+    // 租户维度禁用 → 放行。
+    limiter
+        .check(&ctx, dimension::TENANT, &tenant_key, disabled)
+        .await
+        .expect("禁用的租户维度必须放行");
+
+    // ③ **只启用接口维度**：上限 1。
+    f.truncate().await;
+    let ep_key = bucket_key(dimension::ENDPOINT, TENANT_A, None, "/z");
+    limiter
+        .check(&ctx, dimension::ENDPOINT, &ep_key, limit(1, 60))
+        .await
+        .expect("接口维度第 1 次放行");
+    limiter
+        .check(&ctx, dimension::ENDPOINT, &ep_key, limit(1, 60))
+        .await
+        .expect_err("接口维度第 2 次必须拒");
+    // 另两维度禁用 → 放行。
+    limiter
+        .check(&ctx, dimension::USER, &user_key, disabled)
+        .await
+        .expect("禁用的用户维度必须放行（第二个场景）");
+    limiter
+        .check(&ctx, dimension::TENANT, &tenant_key, disabled)
+        .await
+        .expect("禁用的租户维度必须放行（第二个场景）");
+}
