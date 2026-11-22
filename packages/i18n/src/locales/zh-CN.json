@@ -11,6 +11,7 @@
   "error.PASSWORD_REUSED": "不能重复使用近期用过的密码",
   "error.LOGIN_RATE_LIMITED": "尝试过于频繁，请 {retryAfterSeconds} 秒后再试",
   "error.TENANT_CONTEXT_MISSING": "缺少租户标识",
+  "error.INVALID_REQUEST": "请求参数非法",
   "error.UNAUTHENTICATED": "请先登录",
   "error.NOT_FOUND": "请求的资源不存在",
   "error.CONFLICT": "资源状态冲突，请刷新后重试",

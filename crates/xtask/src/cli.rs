@@ -29,6 +29,16 @@ pub enum Command {
     Notify(NotifyArgs),
     /// 导入导出批处理（REQ-018 / D324）。
     Storage(StorageArgs),
+    /// 生成 / 校验 OpenAPI 文档（REQ-019 / D338）。
+    Openapi(OpenapiArgs),
+}
+
+/// `openapi` 参数。
+#[derive(Debug, Args)]
+pub struct OpenapiArgs {
+    /// 只校验不写入：产物与源码不一致时非零退出（CI 用）。
+    #[arg(long)]
+    pub check: bool,
 }
 
 /// `storage` 参数。

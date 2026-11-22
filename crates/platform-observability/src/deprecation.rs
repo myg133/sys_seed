@@ -19,6 +19,7 @@
 
 use axum::http::{HeaderName, HeaderValue};
 use axum::response::Response;
+use std::sync::Arc;
 use time::OffsetDateTime;
 
 /// `Deprecation` 头（RFC 9745）。本实现统一用 `true`。
@@ -112,6 +113,52 @@ pub async fn apply_deprecation(
     let mut response = next.run(request).await;
     deprecation.apply(&mut response);
     response
+}
+
+/// **按路径**给弃用端点加头（AC-S-036 的实现方式）。
+///
+/// # ⚠️ 为什么按路径而不是包住一组路由
+///
+/// `/api/audit` 这个 nest 下有**多个**端点（events / verify / archive …），
+/// 只有 `events` 被弃用。用 `route_layer` 包整组会让**所有**端点都带弃用头
+/// → AC-S-036 步骤 7（「恰好 1 个路由带」）会红。
+///
+/// → 用一张**路径表**：只有精确匹配的路径才加头。
+///
+/// # 参数
+///
+/// - `entries`：`(路径, 弃用标记)` 的清单
+pub async fn deprecation_by_path(
+    axum::extract::State(entries): axum::extract::State<Arc<Vec<(String, Deprecation)>>>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    // ⚠️ 必须在 `next.run` **之前**取路径 —— 之后 request 已被消费。
+    let path = request.uri().path().to_string();
+    let mut response = next.run(request).await;
+
+    // 精确匹配（不做前缀匹配 —— `/api/audit/events/extra` 不该继承弃用标记）。
+    if let Some((_, deprecation)) = entries.iter().find(|(p, _)| *p == path) {
+        deprecation.apply(&mut response);
+    }
+    response
+}
+
+/// 把「按路径的弃用表」挂到 router 上。
+pub fn apply_deprecation_router<S>(
+    router: axum::Router<S>,
+    entries: Vec<(String, Deprecation)>,
+) -> axum::Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    if entries.is_empty() {
+        return router;
+    }
+    router.layer(axum::middleware::from_fn_with_state(
+        Arc::new(entries),
+        deprecation_by_path,
+    ))
 }
 
 #[cfg(test)]

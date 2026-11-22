@@ -13,6 +13,11 @@ clap.workspace = true
 # cargo metadata 的输出解析
 serde.workspace = true
 serde_json.workspace = true
+# REQ-019：OpenAPI 产物生成（D338）
+utoipa.workspace = true
+# 产物来源：`platform_observability::http::ApiDoc`（REQ-019 AC-S-035）。
+# ⚠️ 不依赖 `platform-server` —— 那会间接依赖业务模块 `sandbox`（违反 D103）。
+platform-observability.workspace = true
 # manifest 的 Schema 校验复用平台核心的解析器，避免两套实现
 platform-core.workspace = true
 # 租户作用域策略的统一生成 / 校验（复用平台数据访问层的 RLS 逻辑）

@@ -18,6 +18,7 @@ pub mod modules;
 pub mod notify;
 pub mod rustscan;
 pub mod scaffold;
+pub mod openapi;
 pub mod storage;
 pub mod tenant_policies;
 

@@ -46,6 +46,15 @@ fn main() -> ExitCode {
             Ok(code) => code,
             Err(err) => fail(err),
         },
+        Command::Openapi(args) => {
+            let root = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            match xtask::openapi::run(&root, args.check) {
+                Ok(0) => ExitCode::SUCCESS,
+                // ⚠️ 非 0 = 产物与源码不一致（`--check` 的失败路径）→ FAILURE。
+                Ok(_) => ExitCode::FAILURE,
+                Err(err) => fail(anyhow::anyhow!(err)),
+            }
+        }
     }
 }
 

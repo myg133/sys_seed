@@ -5,15 +5,18 @@
 //! | 参数 | 形态 | 默认 / 上限 |
 //! |------|------|------------|
 //! | `cursor` | 不透明游标（base64url） | 与 `page` **互斥** |
-//! | `limit` | 正整数 | 默认 **20**，上限 **200**（超上限**夹到**上限） |
+//! | `limit` | 正整数 | 默认 **20**，上限 **200**（⚠️ 超上限**拒绝**，REQ-019 D341） |
 //! | `page` / `page_size` | 正整数 | 与 `cursor` **互斥** |
 //! | `sort` | `?sort=-createdAt,actorId` | 白名单：`createdAt` / `actorId` / `action` / `objectType` / `objectId` |
 //! | `filter[field][op]` | `?filter[actorId][eq]=…` | op 白名单：`eq` / `ne` / `in` / `contains` / `range` |
 //!
-//! # 非法值与超上限是**两条不同的路径**（D153）
+//! # 非法值与超上限**都是** 400（⚠️ REQ-019 D341 的破坏性修正）
 //!
 //! - `limit=abc` / `limit=0` → **400** `AUDIT_INVALID_FILTER`；
-//! - `limit=1000` → **不报错**，夹到 **200**。
+//! - `limit=1000` → **400** `AUDIT_INVALID_FILTER`（原行为是「夹到 200 + 不报错」）。
+//!
+//! ⚠️ 改的理由：静默截断会让调用方以为拿到了 1000 条 → **数据静默丢失**。
+//! 上限**保持 200**（不改 100）以减小破坏面。
 //!
 //! # 为什么参数要**自解析**
 //!
@@ -173,9 +176,21 @@ impl AuditQueryParams {
         }
 
         // -- limit ------------------------------------------------------------
+        //
+        // ⚠️ **REQ-019 D341：超上限从「夹到上限」改为「拒绝」**（契约 C7 升版）。
+        //
+        // 理由：静默截断会让调用方以为拿到了 1000 条 → **数据静默丢失**。
+        // 这是「API 治理」的核心内容，值得一次破坏性修正。
+        //
+        // ⚠️ 上限**保持 200**（不改 100）以减小破坏面。
         if let Some(raw) = params.get("limit") {
             let value = parse_positive(raw, "limit")?;
-            parsed.limit = value.min(MAX_LIMIT);
+            if value > MAX_LIMIT {
+                return Err(invalid(format!(
+                    "the `limit` parameter must not exceed {MAX_LIMIT}; got {value}"
+                )));
+            }
+            parsed.limit = value;
         }
 
         // -- page / page_size -------------------------------------------------
@@ -183,7 +198,13 @@ impl AuditQueryParams {
             parsed.page = Some(parse_positive(raw, "page")?);
         }
         if let Some(raw) = params.get("page_size") {
-            parsed.page_size = parse_positive(raw, "page_size")?.min(MAX_LIMIT);
+            let value = parse_positive(raw, "page_size")?;
+            if value > MAX_LIMIT {
+                return Err(invalid(format!(
+                    "the `page_size` parameter must not exceed {MAX_LIMIT}; got {value}"
+                )));
+            }
+            parsed.page_size = value;
         }
 
         // -- cursor -----------------------------------------------------------
@@ -643,12 +664,40 @@ mod tests {
         assert_eq!(error.code(), "AUDIT_INVALID_FILTER");
     }
 
-    /// 超上限**夹到上限**，**不报错**（D153）。
+    /// 超上限**拒绝**（⚠️ **REQ-019 D341 的破坏性修正**，原行为是「夹到上限 + 不报错」）。
+    ///
+    /// # 为什么改
+    ///
+    /// 静默截断会让调用方以为拿到了 1000 条 → **数据静默丢失**。
+    /// 契约 C7 随之升版（`超上限 → 400`），上限**保持 200** 以减小破坏面。
+    ///
+    /// ⚠️ 这条测试原来是 `an_oversized_limit_is_clamped_instead_of_rejected` ——
+    /// 名字与断言都必须反过来，否则「改了行为但测试还是绿的」。
     #[test]
-    fn an_oversized_limit_is_clamped_instead_of_rejected() {
-        let parsed =
-            AuditQueryParams::parse(&params(&[("limit", "1000")])).expect("超上限不该报错");
+    fn an_oversized_limit_is_rejected() {
+        let error = AuditQueryParams::parse(&params(&[("limit", "1000")]))
+            .expect_err("超上限必须拒绝（不再静默截断）");
+        // 错误信息必须点出上限与实际值（运维要能一眼看出差多少）。
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("200") && rendered.contains("1000"),
+            "错误信息必须含上限与实际值；实际：{rendered}"
+        );
+    }
+
+    /// 正好等于上限 → **通过**（边界包含，不是 `>=`）。
+    #[test]
+    fn a_limit_equal_to_the_maximum_is_accepted() {
+        let parsed = AuditQueryParams::parse(&params(&[("limit", "200")]))
+            .expect("正好 200 应通过（边界包含）");
         assert_eq!(parsed.limit, MAX_LIMIT);
+    }
+
+    /// `page_size` 超上限同样被拒（与 `limit` 同口径）。
+    #[test]
+    fn an_oversized_page_size_is_rejected() {
+        AuditQueryParams::parse(&params(&[("page_size", "1000")]))
+            .expect_err("page_size 超上限必须拒绝");
     }
 
     #[test]

@@ -1,0 +1,108 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "通用项目底座 API",
+    "description": "由 `utoipa` 从路由与 DTO 生成（REQ-019 D338）。                       ⚠️ 当前只覆盖部分端点，见 TD-073。",
+    "license": {
+      "name": "MIT",
+      "identifier": "MIT"
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/observability/rate-limit/status": {
+      "get": {
+        "tags": [
+          "observability"
+        ],
+        "summary": "读限流状态（分页）。",
+        "description": "⚠️ `#[utoipa::path]` 是 **REQ-019 AC-S-035** 的产物来源：\n它在编译期生成 `__path_rate_limit_status`，被 [`ApiDoc`] 的 `paths(...)` 引用。",
+        "operationId": "rate_limit_status",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "每页条数（1..=200，默认 20；越界 400）",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "不透明游标",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "分页的限流配置",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "分页响应（**与 `platform-audit` 同形**）。",
+                  "required": [
+                    "items",
+                    "total"
+                  ],
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "description": "一个限流维度的状态行。",
+                        "required": [
+                          "dimension",
+                          "requests",
+                          "windowSeconds"
+                        ],
+                        "properties": {
+                          "dimension": {
+                            "type": "string",
+                            "description": "维度（`tenant` / `user` / `endpoint`）。"
+                          },
+                          "requests": {
+                            "type": "integer",
+                            "format": "int64",
+                            "description": "窗口内允许的请求数（0 = 禁用）。"
+                          },
+                          "windowSeconds": {
+                            "type": "integer",
+                            "format": "int64",
+                            "description": "窗口长度（秒）。"
+                          }
+                        }
+                      },
+                      "description": "数据。"
+                    },
+                    "nextCursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "下一页游标（`null` = 没有下一页）。"
+                    },
+                    "total": {
+                      "type": "integer",
+                      "format": "int64",
+                      "description": "总数。"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数非法（INVALID_REQUEST）"
+          }
+        }
+      }
+    }
+  },
+  "components": {}
+}

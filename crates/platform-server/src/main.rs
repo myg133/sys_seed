@@ -15,7 +15,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode, Uri, header};
@@ -114,6 +114,12 @@ struct AppState {
     migrator: Arc<Migrator>,
     environment: Environment,
     static_root: Option<PathBuf>,
+    /// 限流中间件状态（**延迟注入**：`config_service` 在 `AppState` 之后才构造）。
+    ///
+    /// ⚠️ 用 `OnceLock` 而不是 `Option<Arc<..>>`：
+    /// 就绪探针要读它（AC-S-038），而它依赖配置服务 ——
+    /// 两者构造顺序在本函数里是固定的（`AppState` 先）。
+    rate_limit: Arc<OnceLock<Option<Arc<platform_observability::rate_limit::middleware::RateLimitState>>>>,
 }
 
 /// 统一错误响应体（RFC 9457，见 `api-conventions v1` C6）。
@@ -249,6 +255,17 @@ async fn serve() -> Result<(), Failure> {
     let config = load_config()?;
     init_tracing(&config.log_level);
 
+    // 🔑 REQ-019（AC-S-037）：初始化 OpenTelemetry。
+    //
+    // ⚠️ `guard` 必须活到进程结束 —— 提前 drop 会让批量导出器停止，
+    // 最后一批 span 丢失。
+    //
+    // ⚠️ 失败**不影响启动**：`init_otel` 内部只 warn，返回 disabled guard。
+    // 可观测性是**旁路**，不能成为启动失败的原因（D339）。
+    let _otel_guard = platform_observability::otel::init_otel(
+        &platform_observability::otel::OtelConfig::from_env(),
+    );
+
     let migrator = Arc::new(load_migrator(&config.migrations_dir).await?);
     let pool = db::pool(&config.database_url, db::DEFAULT_MAX_CONNECTIONS)
         .await
@@ -281,11 +298,13 @@ async fn serve() -> Result<(), Failure> {
     // （QA #30）。
     let schema_registry = load_schema_registry(&config.manifest_root)?;
 
+    let rate_limit_slot = Arc::new(OnceLock::new());
     let state = Arc::new(AppState {
         pool,
         migrator,
         environment: config.environment,
         static_root: config.static_dir.as_ref().map(PathBuf::from),
+        rate_limit: rate_limit_slot.clone(),
     });
 
     let mut app = Router::new()
@@ -747,6 +766,40 @@ async fn serve() -> Result<(), Failure> {
     // ⚠️ 限流**默认关闭**（D344）：`rateLimit.enabled` 读不到就是 false →
     // 中间件直接放行（零查库）。这让现有 1496 个测试不受影响。
     let rate_limit_state = build_rate_limit_state(&config, config_service.clone()).await;
+    // 延迟注入给就绪探针（AC-S-038）。
+    let _ = rate_limit_slot.set(rate_limit_state.clone());
+
+    // 🔑 REQ-019（AC-S-034）：新增的分页端点。
+    //
+    // ⚠️ 它存在的理由不只是「有用」—— **AC-S-034 的「跨 crate 一致性」判据
+    // 需要一个新增的分页端点**（否则只能测 audit 一个老端点，
+    // 「契约统一」无从证明）。挑刺 B5 指出 rev 1 的设计里没有这个端点。
+    let observability_state = Arc::new(platform_server::observability::StatusState {
+        rate_limit: rate_limit_state.clone(),
+    });
+    let app = app.nest(
+        "/api/observability",
+        platform_server::observability::router(observability_state),
+    );
+    tracing::info!("可观测性已启用：/api/observability/*");
+
+    // 🔑 REQ-019（AC-S-036）：**按路径**的弃用清单。
+    //
+    // ⚠️ 只标 `/api/audit/events` —— 弃用理由是「分页契约升版后它将被 v2 取代」
+    // （D341 给了它一个合理的弃用理由，不是随便挑的）。
+    //
+    // ⚠️ 用按路径匹配而不是包住 `/api/audit` 整组：
+    // 那组里还有 verify / archive 等**未**弃用的端点
+    // → 包整组会让「恰好 1 个路由带弃用头」的判据红。
+    let deprecations = vec![(
+        "/api/audit/events".to_string(),
+        platform_observability::deprecation::Deprecation::new(
+            // 2027-06-30（约 19 个月后 —— 客户端有足够时间迁移）。
+            time::macros::datetime!(2027-06-30 00:00:00 UTC),
+        ),
+    )];
+    let app = platform_observability::deprecation::apply_deprecation_router(app, deprecations);
+
     let app = platform_observability::apply_observability(app, rate_limit_state);
 
     let addr = config.socket_addr();
@@ -1822,6 +1875,17 @@ async fn run_tenant_policies(check: bool, manifest_root: Option<String>) -> Resu
     let config = load_config()?;
     init_tracing(&config.log_level);
 
+    // 🔑 REQ-019（AC-S-037）：初始化 OpenTelemetry。
+    //
+    // ⚠️ `guard` 必须活到进程结束 —— 提前 drop 会让批量导出器停止，
+    // 最后一批 span 丢失。
+    //
+    // ⚠️ 失败**不影响启动**：`init_otel` 内部只 warn，返回 disabled guard。
+    // 可观测性是**旁路**，不能成为启动失败的原因（D339）。
+    let _otel_guard = platform_observability::otel::init_otel(
+        &platform_observability::otel::OtelConfig::from_env(),
+    );
+
     let root = manifest_root.unwrap_or_else(|| config.manifest_root.clone());
     policies::run(&root, &config.database_url, check)
         .await
@@ -1832,6 +1896,17 @@ async fn run_tenant_policies(check: bool, manifest_root: Option<String>) -> Resu
 async fn run_migrate(action: MigrateAction) -> Result<(), Failure> {
     let config = load_config()?;
     init_tracing(&config.log_level);
+
+    // 🔑 REQ-019（AC-S-037）：初始化 OpenTelemetry。
+    //
+    // ⚠️ `guard` 必须活到进程结束 —— 提前 drop 会让批量导出器停止，
+    // 最后一批 span 丢失。
+    //
+    // ⚠️ 失败**不影响启动**：`init_otel` 内部只 warn，返回 disabled guard。
+    // 可观测性是**旁路**，不能成为启动失败的原因（D339）。
+    let _otel_guard = platform_observability::otel::init_otel(
+        &platform_observability::otel::OtelConfig::from_env(),
+    );
 
     let migrator = load_migrator(&config.migrations_dir).await?;
     let pool = db::migration_pool(&config.database_url)
@@ -1880,15 +1955,66 @@ async fn ready(State(state): State<Arc<AppState>>) -> Response {
     let ctx = RequestContext::new();
     let readiness = health::check_readiness(&state.pool, &state.migrator).await;
 
-    if readiness.is_ready() {
-        return Json(serde_json::json!({
+    // 🔑 REQ-019（AC-S-038）：**限流表**也要可达 —— 但**只在限流启用时**。
+    //
+    // ⚠️ 为什么「只在启用时」：关闭限流的部署不该因为限流表问题而不就绪
+    // （否则「没启用」反而更脆弱 —— 这是 AC-S-038 步骤 4 的判据）。
+    //
+    // ⚠️ 用 sentinel 租户（`_probe`）做**只读**查询：
+    // `TenantQuery` 必须有租户，而就绪探针没有真实租户上下文。
+    // 只 SELECT 不 INSERT → 不污染任何真实租户的计数。
+    let rate_limit_ok: Option<bool> = match state.rate_limit.get() {
+        Some(Some(rate_limit_state)) => {
+            let probe_ctx = RequestContext::new().with_tenant("_probe");
+            let settings = rate_limit_state.config.settings(&probe_ctx).await;
+            if settings.enabled {
+                match rate_limit_state.limiter.as_ref() {
+                    Some(limiter) => Some(limiter.is_reachable(&probe_ctx).await),
+                    None => None,
+                }
+            } else {
+                // 限流关闭 → 不检查（AC-S-038 步骤 4）。
+                None
+            }
+        }
+        _ => None,
+    };
+
+    if readiness.is_ready() && rate_limit_ok != Some(false) {
+        let mut body = serde_json::json!({
             "status": "ready",
             "environment": state.environment.as_str(),
             "version": platform_core::VERSION,
             "appliedMigrations": readiness.applied,
             "traceId": ctx.trace_id(),
-        }))
-        .into_response();
+            "checks": {
+                "database": "ok",
+            },
+        });
+        if let Some(ok) = rate_limit_ok {
+            body["checks"]["rate_limit"] = serde_json::Value::from(if ok { "ok" } else { "unavailable" });
+        }
+        return Json(body).into_response();
+    }
+
+    // 限流存储不可达 → 503，且**明确指出**是限流存储（不是笼统的数据库错误）。
+    if rate_limit_ok == Some(false) {
+        let code = platform_observability::error::code::RATE_LIMIT_UNAVAILABLE;
+        tracing::warn!(
+            code = code,
+            "readiness 未通过：限流存储不可达（面向用户的中文文案由前端按 code 渲染）"
+        );
+        let problem = ProblemDetails {
+            kind: format!("https://errors.base.example/{}", platform_core::problem::kebab_case(code)),
+            title: platform_core::titles::title_of_code(code).to_string(),
+            status: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+            // ⚠️ detail 不含表名 / SQL（不泄露实现细节）。
+            detail: "the rate limit store is unavailable".to_string(),
+            instance: "/health/ready".to_string(),
+            code: code.to_string(),
+            trace_id: ctx.trace_id().to_string(),
+        };
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(problem)).into_response();
     }
 
     let code = readiness.error_code.unwrap_or(health::CODE_DB_UNAVAILABLE);

@@ -28,6 +28,7 @@
 
 pub mod deprecation;
 pub mod error;
+pub mod http;
 pub mod otel;
 pub mod rate_limit;
 pub mod trace;

@@ -11,6 +11,7 @@
   "error.PASSWORD_REUSED": "A recently used password cannot be reused",
   "error.LOGIN_RATE_LIMITED": "Too many attempts, try again in {retryAfterSeconds} seconds",
   "error.TENANT_CONTEXT_MISSING": "Tenant context is missing",
+  "error.INVALID_REQUEST": "The request parameters are invalid",
   "error.UNAUTHENTICATED": "Authentication is required",
   "error.NOT_FOUND": "The requested resource was not found",
   "error.CONFLICT": "The resource state conflicts, refresh and try again",
