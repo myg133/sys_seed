@@ -49,7 +49,7 @@
       "type": "number",
       "default": 8388608,
       "scope": "platform",
-      "label": "分片上传的每片大小（字节，默认 8 MiB）"
+      "label": "单片大小上限（字节，默认 8 MiB）。⚠️ 是**硬上限**不是建议值：客户端声明的 partSize 超过它会被 413 拒绝（D335）"
     },
     "storage.presignTtlSeconds": {
       "type": "number",

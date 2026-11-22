@@ -812,3 +812,201 @@ async fn multipart_creation_rejects_an_oversized_projection() {
         Some(serde_json::json!(1024))
     );
 }
+
+/// **D335 / 复核 F-04**：`storage.partSizeBytes` 是**硬上限**（不是死配置）。
+///
+/// # 为什么这条测试必须存在
+///
+/// 复核 F-04 指出：`StorageSettings.part_size_bytes` 原本**只被填充、从不被读取**，
+/// 业务代码用的是客户端传入的 `body.part_size` → 改这个配置项**对行为无影响**，
+/// 违反 D331「6 个配置项每个必须被真实读取」。
+///
+/// # 判据的区分力
+///
+/// 这条测试**改配置**（`partSizeBytes = 1024`）然后断言行为变化 ——
+/// 如果实现不读这个配置项，请求会成功 → 测试变红。
+/// 这正是「死配置」与「真读取」的区别：后者能靠改配置让测试红绿翻转。
+#[tokio::test]
+async fn the_part_size_config_is_a_real_upper_bound() {
+    let fixture = setup().await;
+    let ctx = fixture.ctx_a();
+    // 把**单片上限**设成 1024（`maxUploadBytes` 保持默认 100 MiB，
+    // 所以下面被拒的原因只可能是「单片超限」而不是「总量超限」）。
+    fixture
+        .config
+        .set(platform_storage::config::CONFIG_KEY_PART_SIZE_BYTES, 1024);
+
+    // 边界包含：正好 1024 字节一片 → 通过。
+    fixture
+        .service
+        .create_upload(
+            &ctx,
+            &platform_storage::model::CreateUploadBody {
+                object_key: "exact-part.bin".to_string(),
+                total_parts: 2,
+                part_size: 1024,
+                checksum: None,
+            },
+        )
+        .await
+        .expect("正好等于单片上限必须通过（边界包含）");
+
+    // 超 1 字节 → 413 + `params.maxBytes` 是**单片上限**（不是总量上限）。
+    let err = fixture
+        .service
+        .create_upload(
+            &ctx,
+            &platform_storage::model::CreateUploadBody {
+                object_key: "over-part.bin".to_string(),
+                total_parts: 2,
+                part_size: 1025,
+                checksum: None,
+            },
+        )
+        .await
+        .expect_err("单片超限必须拒绝");
+    assert_eq!(err.code(), "STORAGE_UPLOAD_TOO_LARGE");
+    assert_eq!(
+        err.problem_details(&ctx, "/x")
+            .params
+            .and_then(|p| p.get("maxBytes").cloned()),
+        Some(serde_json::json!(1024)),
+        "maxBytes 必须是**单片上限**（来自 storage.partSizeBytes）"
+    );
+
+    // 非正数的 partSize 也拒绝（0 或负数会让「片数 × 片大小」失去意义）。
+    for bad in [0i64, -1] {
+        let err = fixture
+            .service
+            .create_upload(
+                &ctx,
+                &platform_storage::model::CreateUploadBody {
+                    object_key: format!("bad-{bad}.bin"),
+                    total_parts: 1,
+                    part_size: bad,
+                    checksum: None,
+                },
+            )
+            .await
+            .expect_err("非正数单片必须拒绝");
+        assert_eq!(err.code(), "STORAGE_UPLOAD_TOO_LARGE", "part_size={bad}");
+    }
+}
+
+/// **复核 F-17（安全）**：分片上传**必须**扫描合并后的文件。
+///
+/// # 为什么这是安全判据而不是普通功能判据
+///
+/// 分片是**大文件的唯一通道**。原来的 `complete_upload` 把
+/// `scan_verdict` 硬写成 `Skipped` 且**从不调用 scanner** →
+/// 配了真扫描器也能把恶意文件经 `/api/storage/uploads/*` 落库，
+/// 完全绕开 AC-S-178 步骤 4（直传路径是扫的）。
+///
+/// # 判据的区分力
+///
+/// 用「判定为感染」的替身走**分片**路径 → 必须 422 + 文件不落盘不落库。
+/// 如果实现不在 complete 时扫描（改回硬写 `Skipped`），这条会红。
+#[tokio::test]
+async fn multipart_uploads_are_scanned_on_complete() {
+    let fixture = setup().await;
+    let ctx = fixture.ctx_a();
+
+    let session = fixture
+        .service
+        .create_upload(
+            &ctx,
+            &platform_storage::model::CreateUploadBody {
+                object_key: "multi-infected.bin".to_string(),
+                total_parts: 2,
+                part_size: 512,
+                checksum: None,
+            },
+        )
+        .await
+        .expect("建会话");
+    for n in [1u32, 2] {
+        fixture
+            .service
+            .upload_part(&ctx, &session.upload_id, n, Bytes::from_static(b"evil"))
+            .await
+            .expect("传片");
+    }
+
+    // 合并前把扫描器切成「感染」。
+    fixture.scanner.set_infected();
+
+    let err = fixture
+        .service
+        .complete_upload(&ctx, &session.upload_id, None)
+        .await
+        .expect_err("感染文件必须被拒绝");
+    assert_eq!(err.code(), "STORAGE_FILE_INFECTED");
+    assert!(
+        err.problem_details(&ctx, "/x")
+            .params
+            .and_then(|p| p.get("signature").cloned())
+            .is_some_and(|v| !v.as_str().unwrap_or_default().is_empty()),
+        "params.signature 必须非空"
+    );
+
+    // ⚠️ **对象既不落库也不落盘**（坏文件不能留下）。
+    let stored = fixture
+        .query_i64(
+            "SELECT count(*) FROM platform_storage_object WHERE object_key = 'multi-infected.bin'",
+        )
+        .await;
+    assert_eq!(stored, 0, "感染的分片文件不得落库");
+    let on_disk = fixture.list_stored_files();
+    assert!(
+        !on_disk
+            .iter()
+            .any(|p| p.file_name().is_some_and(|n| n == "multi-infected.bin")),
+        "感染的分片文件不得落盘；实际：{on_disk:?}"
+    );
+
+    // 会话被标成 aborted（不留「pending 但片已合并」的半成品状态）。
+    let status = fixture
+        .query_text(
+            "SELECT status FROM platform_storage_upload WHERE object_key = 'multi-infected.bin'",
+        )
+        .await;
+    assert_eq!(status, vec!["aborted".to_string()], "会话必须标成 aborted");
+}
+
+/// **对照**：干净的分片上传仍能成功，且 `scanVerdict` 如实记 `skipped`
+/// （默认 `NoopScanner` 没扫 → 不能谎称 `clean`，D326）。
+#[tokio::test]
+async fn a_clean_multipart_upload_records_the_real_scan_verdict() {
+    let fixture = setup().await;
+    let ctx = fixture.ctx_a();
+
+    let session = fixture
+        .service
+        .create_upload(
+            &ctx,
+            &platform_storage::model::CreateUploadBody {
+                object_key: "multi-clean.bin".to_string(),
+                total_parts: 2,
+                part_size: 512,
+                checksum: None,
+            },
+        )
+        .await
+        .expect("建会话");
+    for n in [1u32, 2] {
+        fixture
+            .service
+            .upload_part(&ctx, &session.upload_id, n, Bytes::from_static(b"ok"))
+            .await
+            .expect("传片");
+    }
+    let row = fixture
+        .service
+        .complete_upload(&ctx, &session.upload_id, None)
+        .await
+        .expect("干净文件应成功");
+    assert_eq!(
+        row.scan_verdict, "skipped",
+        "默认 NoopScanner 必须如实记 skipped（不是 clean，D326）"
+    );
+}

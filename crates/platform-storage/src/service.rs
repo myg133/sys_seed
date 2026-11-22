@@ -31,7 +31,7 @@ use crate::model::{
     CreateJobBody, CreateUploadBody, JobRow, ObjectRow, UploadRow, job_kind, upload_status,
 };
 use crate::object_store::{ObjectStore, is_safe_object_key, presign, sha256_hex};
-use crate::scanner::{ScanVerdict, VirusScanner};
+use crate::scanner::VirusScanner;
 use crate::store::{NewJob, NewObject, NewUpload, RowFailure, StorageStore};
 
 /// 存储服务的依赖。
@@ -361,6 +361,33 @@ impl StorageService {
             .into());
         }
 
+        // ⚠️ **单片上限**（D335 / 复核 F-04）：`storage.partSizeBytes` 是**硬上限**，
+        // 不是「推荐值」。
+        //
+        // 为什么必须有服务端上限（客户端说了不算）：
+        // 1. 客户端声明 `totalParts = 1_000_000, partSize = 1`（差一字节一片）
+        //    → 在磁盘上制造上百万个小文件（**inode 耗尽**，比磁盘满更难处理）；
+        // 2. 反过来声明一个超大单片 → 绕过 `maxUploadBytes` 的**逐片**检查
+        //    （上面只校验 `partSize × totalParts` 的**乘积**，单片本身没有上限）；
+        // 3. 单片过大还会让 `put_object` 的内存压力失控（见 TD-066）。
+        //
+        // ⚠️ 复核 F-04 指出：改这个配置项原本**对行为无影响**（零读取）
+        // → 违反 D331「6 个配置项每个必须被真实读取」。这一处就是它的真实读取点。
+        if body.part_size > settings.part_size_bytes {
+            return Err(StorageError::UploadTooLarge {
+                max_bytes: settings.part_size_bytes,
+                actual_bytes: body.part_size,
+            }
+            .into());
+        }
+        if body.part_size <= 0 {
+            return Err(StorageError::UploadTooLarge {
+                max_bytes: settings.part_size_bytes,
+                actual_bytes: body.part_size,
+            }
+            .into());
+        }
+
         let upload_id = uuid::Uuid::new_v4().to_string();
         self.objects
             .create_multipart(&upload_id, &body.object_key, body.total_parts)
@@ -461,6 +488,38 @@ impl StorageService {
             .map(|b| b.len() as i64)
             .unwrap_or(0);
 
+        // ⚠️ **合并后必须扫描**（复核 F-17，安全）。
+        //
+        // 原来的实现直接 `scan_verdict: Skipped` 落库 —— 而分片是**大文件的唯一通道**，
+        // 这意味着「配了真扫描器也能把恶意文件经 `/uploads/*` 落库」，
+        // 绕开了 AC-S-178 步骤 4（直传路径是扫的）。
+        //
+        // 顺序不可换：**扫描在落库之前**，且感染要**删掉刚合并的文件**
+        // （否则磁盘上留一个可被预签名链接取回、但数据库里没有记录的文件）。
+        let scan_bytes = self
+            .objects
+            .get(&session.object_key)
+            .await
+            .map_err(ServiceError::Storage)?;
+        let verdict = self
+            .scanner
+            .scan(&scan_bytes)
+            .await
+            .map_err(|reason| ServiceError::Internal {
+                reason: format!("the virus scanner failed: {reason}"),
+            })?;
+        if let Some(signature) = verdict.signature() {
+            // 清掉合并出来的感染文件 + 把会话标成 aborted（不留半成品状态）。
+            let _ = self.objects.delete(&session.object_key).await;
+            self.store
+                .update_upload_status(ctx, upload_id, upload_status::ABORTED)
+                .await?;
+            return Err(StorageError::FileInfected {
+                signature: signature.to_string(),
+            }
+            .into());
+        }
+
         let new = NewObject {
             id: uuid::Uuid::new_v4().to_string(),
             object_key: session.object_key.clone(),
@@ -469,9 +528,8 @@ impl StorageService {
             content_type: content_type
                 .unwrap_or("application/octet-stream")
                 .to_string(),
-            // 分片上传的扫描判定：本实现在 complete 时**没有重新扫**
-            // → 如实记 `skipped`（不谎称 clean）。
-            scan_verdict: ScanVerdict::Skipped.as_str().to_string(),
+            // 如实记扫描器的判定（`skipped` / `clean` / `infected` 三选一）。
+            scan_verdict: verdict.as_str().to_string(),
         };
         let row = self.store.upsert_object(ctx, &new).await?;
         self.store
