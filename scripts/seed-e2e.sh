@@ -603,6 +603,42 @@ if [ "$sso_keys" != '12' ]; then
   exit 1
 fi
 
+# REQ-018（AC-S-183 前置条件）：**两个租户各**播种 1 个文件 + 1 个任务 + 1 条错误回执
+# + 1 行导入目标实体。
+#
+# ⚠️ 为什么必须两个租户都有：AC-S-183 的判据是「tenant-a 的列表里**不含** tenant-b 的行」——
+# 只播一个租户的话，「隔离生效」和「压根没数据」是**同一个结果**，判据没有区分力。
+#
+# ⚠️ `platform_storage_probe_row` 也要播：它是 D333 新增的导入真实落点，
+# 存的是**业务数据**（不是元数据），漏隔离最严重。
+for storage_tenant in tenant-a tenant-b; do
+  printf '%s\n' \
+    "INSERT INTO platform_storage_object
+       (id, tenant_id, object_key, size_bytes, sha256, content_type, scan_verdict, status)
+     VALUES (gen_random_uuid(), '$storage_tenant', 'e2e/$storage_tenant.txt', 5,
+             'aa', 'text/plain', 'skipped', 'available')
+     ON CONFLICT (tenant_id, object_key) DO NOTHING;
+
+     INSERT INTO platform_storage_job
+       (id, tenant_id, kind, entity, status, total_rows, processed_rows, failed_rows)
+     VALUES ('00000000-0000-4000-8000-00000000${storage_tenant#tenant-}0',
+             '$storage_tenant', 'import', 'probe_row', 'completed', 1, 1, 0)
+     ON CONFLICT (id) DO NOTHING;
+
+     INSERT INTO platform_storage_job_error (job_id, tenant_id, row_number, \"column\", reason)
+     SELECT id, '$storage_tenant', 2, 'amount', 'the value is not a valid integer'
+     FROM platform_storage_job
+     WHERE tenant_id = '$storage_tenant' LIMIT 1
+     ON CONFLICT (job_id, row_number, \"column\") DO UPDATE SET reason = EXCLUDED.reason;
+
+     INSERT INTO platform_storage_probe_row (id, tenant_id, job_id, email, amount, note)
+     SELECT gen_random_uuid(), '$storage_tenant', id, 'e2e-$storage_tenant@example.com', 1, 'e2e'
+     FROM platform_storage_job
+     WHERE tenant_id = '$storage_tenant' LIMIT 1
+     ON CONFLICT (tenant_id, job_id, email) DO NOTHING;" \
+    | run_sql >/dev/null
+done
+
 # 强断言 ④：REQ-014 的审计夹具**至少 11 条**（AC-S-132 的翻页用例：
 # 每页 10 条 → 第 2 页还有 1 条 → 响应带 nextCursor）。
 #
@@ -615,6 +651,26 @@ audit_fixture="$(printf '%s\n' \
 if [ "${audit_fixture:-0}" -lt 11 ]; then
   echo "✗ 审计夹具核对失败：期望至少 11 条，实际 '$audit_fixture'" >&2
   echo "  （AC-S-132 的翻页用例需要两页；每页 10 条 → 第 2 页必须还有记录。）" >&2
+  exit 1
+fi
+
+# 强断言 ④b：REQ-018 的存储夹具**两个租户各 4 张表都有行**（AC-S-183 前置条件）。
+#
+# ⚠️ 断言的是**每张表在每个租户下都恰好 1 行** ——
+# 少播一张表，AC-S-183 步骤 3 的「五张表各自只返回本租户的行」就有一张是空断言
+# （空集合 trivially 只包含本租户的行 → 假绿）。
+storage_fixture="$(printf '%s\n' \
+  "SELECT count(*) FROM (
+     SELECT 'object' AS t, tenant_id FROM platform_storage_object WHERE object_key LIKE 'e2e/%'
+     UNION ALL SELECT 'job', tenant_id FROM platform_storage_job WHERE entity = 'probe_row'
+     UNION ALL SELECT 'job_error', tenant_id FROM platform_storage_job_error WHERE \"column\" = 'amount'
+     UNION ALL SELECT 'probe_row', tenant_id FROM platform_storage_probe_row WHERE note = 'e2e'
+   ) x WHERE tenant_id IN ('tenant-a','tenant-b');" \
+  | run_sql -tA | tr -d '[:space:]')"
+# 4 张表 × 2 个租户 = 8 行。
+if [ "${storage_fixture:-0}" -lt 8 ]; then
+  echo "✗ 存储夹具核对失败：期望至少 8 行（4 表 × 2 租户），实际 '$storage_fixture'" >&2
+  echo "  （AC-S-183 要对**每张表每个租户**验 RLS；空表会让隔离断言变成假绿。）" >&2
   exit 1
 fi
 
@@ -648,6 +704,7 @@ fi
 echo "✓ E2E 夹具就绪：u-perm-read / u-perm-write / u-perm-none / u-perm-audit / u-perm-oauth / e2e-user-oauth（tenant-a）+ u-perm-other（tenant-b）"
 echo "  授权：read=4 / write=5 / none=0 / audit=1 / oauth=5 / oauth-user=1 / other=3 个权限点"
 echo "  审计夹具：$audit_fixture 条（object_type = e2e_fixture）"
+echo "  存储夹具：$storage_fixture 行（4 表 × 2 租户，REQ-018 / AC-S-183）"
 echo "  OAuth client：client-A / client-B / public-client（back-channel → $OAUTH_BACKCHANNEL_URI）"
 echo "  OAuth client 明文 secret（只此一次，库里只存摘要）："
 echo "    client-A    = $OAUTH_CLIENT_A_SECRET"
