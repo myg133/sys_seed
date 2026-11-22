@@ -312,3 +312,123 @@ mod tests {
         assert!(parse_limit(Some("-1")).is_err());
     }
 }
+
+// ---------------------------------------------------------------------------
+// 中间件装配（TD-075 的处置）
+// ---------------------------------------------------------------------------
+
+/// 本需求新增的**按路径弃用清单**。
+///
+/// ⚠️ 只标 `/api/audit/events` —— 弃用理由是「分页契约升版后它将被 v2 取代」
+/// （D341 给了它一个合理的弃用理由，不是随便挑的）。
+///
+/// ⚠️ 用**按路径**匹配而不是包住 `/api/audit` 整组：
+/// 那组里还有 `verify` / `archive` 等**未**弃用的端点
+/// → 包整组会让「恰好 1 个路由带弃用头」的判据（AC-S-036 步骤 7）红。
+pub fn default_deprecations() -> Vec<(String, crate::deprecation::Deprecation)> {
+    vec![(
+        "/api/audit/events".to_string(),
+        crate::deprecation::Deprecation::new(
+            // 2027-06-30（约 19 个月后 —— 客户端有足够时间迁移）。
+            time::macros::datetime!(2027-06-30 00:00:00 UTC),
+        ),
+    )]
+}
+
+/// **中间件装配的唯一实现**（TD-075）。
+///
+/// # ⚠️ 为什么这个函数存在
+///
+/// `main.rs` 里的中间件装配原本是内联的（约 50 行）—— 测试**够不着**它
+/// （bin crate 的函数不可引用）。后果：
+/// 若 `main` 把 `apply_observability` 放在 `client_info` **之前**，
+/// 或漏掉了 `apply_observability`，**所有 HTTP 级 AC 的用例仍然全绿** ——
+/// 因为它们测的是自己的 router，不是 `main` 的装配。
+///
+/// → 把这段抽成函数，`main` 与测试**都调它**：
+/// 「装配顺序与内容」这件事就**有判据**了。
+///
+/// # 顺序（**不可换**）
+///
+/// ```text
+/// client_info（填 IP / UA）
+///   └─ trace_id（生成/校验 → 开 span → 回写头）
+///        └─ rate_limit（三级判定）
+///             └─ 业务路由
+/// ```
+///
+/// ⚠️ `client_info` 必须在最外层：各子系统**各自**建 `RequestContext`，
+/// 「对所有路由生效」只能在顶层加一次（REQ-014 D149）。
+///
+/// # 参数
+///
+/// - `rate_limit`：`None` → 不挂限流中间件（零开销）
+pub fn apply_all_middlewares<S>(
+    router: axum::Router<S>,
+    rate_limit: Option<Arc<RateLimitState>>,
+) -> axum::Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    // ⚠️ 挂载顺序 = 执行顺序的**反向**（后挂在外层）。
+    // 目标执行：client_info → trace_id → rate_limit → 弃用 → 业务
+    let router = crate::apply_observability(router, rate_limit);
+    let router = crate::deprecation::apply_deprecation_router(router, default_deprecations());
+    router.layer(axum::middleware::from_fn(
+        platform_server_client_info::client_info,
+    ))
+}
+
+/// `client_info` 中间件的桥接。
+///
+/// ⚠️ 它原本在 `platform-server` 里，而 `platform-observability` **不能**依赖它
+/// （会成环：server → observability）。→ 用「函数指针注入」的方式：
+/// 装配函数接受一个 `client_info` 实现。
+///
+/// 这里给一个**默认空实现**（只用于测试与「没装 client_info」的场景）——
+/// 生产必须用 `platform-server` 的真实实现（见 [`apply_all_middlewares_with`]）。
+pub mod platform_server_client_info {
+    /// 空实现：不做任何事，直接放行。
+    ///
+    /// ⚠️ **生产不能用它** —— 那会让所有请求的 IP/UA 为空（审计与排障都受影响）。
+    /// 它只用于「本 crate 的单元测试」与「装配顺序的判据」。
+    pub async fn client_info(
+        request: axum::extract::Request,
+        next: axum::middleware::Next,
+    ) -> axum::response::Response {
+        next.run(request).await
+    }
+}
+
+/// 与 [`apply_all_middlewares`] 相同，但 `client_info` **由调用方注入**。
+///
+/// 生产用它（传入 `platform_server::client_info::client_info`），
+/// 这样依赖方向是 `server → observability`，不成环。
+pub fn apply_all_middlewares_with<S, F, Fut>(
+    router: axum::Router<S>,
+    rate_limit: Option<Arc<RateLimitState>>,
+    client_info: F,
+) -> axum::Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+    F: Fn(axum::extract::Request, axum::middleware::Next) -> Fut
+        + Clone
+        + Send
+        + Sync
+        + 'static,
+    Fut: std::future::Future<Output = axum::response::Response> + Send + 'static,
+{
+    // ⚠️ **`layer` 是「后挂的在外层」**（实测确认：先挂 A 后挂 B → B 先执行）。
+    //
+    // 目标执行顺序：`client_info` → `trace_id` → `rate_limit` → 业务
+    // → 挂载顺序必须**反过来**：先挂 rate_limit（最内），再 trace_id，最后 client_info（最外）。
+    //
+    // 这个顺序我踩过两次：
+    // 1. `apply_observability` 里先挂 trace 后挂 limit → limit 先跑，读不到租户 → 限流永不生效；
+    // 2. 这里先挂 client_info → 它变成内层 → trace_id 先跑，读不到 client_info 填的租户。
+    // 抓到它们的是 `middleware_assembly` 的判据。
+    let router = crate::apply_observability(router, rate_limit);
+    let router = crate::deprecation::apply_deprecation_router(router, default_deprecations());
+    // 最后挂 → 最外层 → 最先执行。
+    router.layer(axum::middleware::from_fn(client_info))
+}

@@ -787,24 +787,15 @@ async fn serve() -> Result<(), Failure> {
     let app = app.merge(platform_server::i18n::router(i18n_state));
     tracing::info!("国际化已启用：/api/i18n/context、/api/i18n/fx/convert");
 
-    // 🔑 **全局**中间件：把来源 IP 与设备填进 `RequestContext`（REQ-014 D149）。
+    // 🔑 REQ-019（TD-075）：**中间件装配抽到 `platform_observability`** ——
+    // 这样「main 里挂对了没有」终于有判据了（测试能调同一个函数）。
     //
-    // 为什么必须在**顶层**：各子系统**各自**建上下文（`platform-config`、
-    // `platform-rbac`、`platform-i18n`、业务模块的 `authenticate_module`）
-    // → 「对所有路由生效」只能在顶层加一次。
-    // 各子系统的中间件随后 `extensions().get::<RequestContext>().cloned()`
-    // **继承**它。
+    // 顺序（不可换）：`client_info` → `trace_id` → `rate_limit` → 业务。
+    // ⚠️ `client_info` 必须在最外层：各子系统**各自**建 `RequestContext`，
+    // 「对所有路由生效」只能在顶层加一次（REQ-014 D149）。
     //
     // ⚠️ `ip` 是**客户端可控的头**（`x-forwarded-for` 的第一跳）——
     // 用途是**关联与排查**，**不是取证**（D149）。
-    let app = app.layer(axum::middleware::from_fn(
-        platform_server::client_info::client_info,
-    ));
-
-    // 🔑 REQ-019 可观测性中间件：`trace_id`（必挂）+ 三级限流（可选）。
-    //
-    // ⚠️ 顺序不可换：`client_info` → `trace_id` → `rate_limit` → 业务。
-    // 理由见 `platform_observability::apply_observability` 的文档。
     //
     // ⚠️ 限流**默认关闭**（D344）：`rateLimit.enabled` 读不到就是 false →
     // 中间件直接放行（零查库）。这让现有 1496 个测试不受影响。
@@ -815,8 +806,7 @@ async fn serve() -> Result<(), Failure> {
     // 🔑 REQ-019（AC-S-034）：新增的分页端点。
     //
     // ⚠️ 它存在的理由不只是「有用」—— **AC-S-034 的「跨 crate 一致性」判据
-    // 需要一个新增的分页端点**（否则只能测 audit 一个老端点，
-    // 「契约统一」无从证明）。挑刺 B5 指出 rev 1 的设计里没有这个端点。
+    // 需要一个新增的分页端点**（否则只能测 audit 一个老端点）。
     let observability_state = Arc::new(platform_server::observability::StatusState {
         rate_limit: rate_limit_state.clone(),
     });
@@ -826,24 +816,12 @@ async fn serve() -> Result<(), Failure> {
     );
     tracing::info!("可观测性已启用：/api/observability/*");
 
-    // 🔑 REQ-019（AC-S-036）：**按路径**的弃用清单。
-    //
-    // ⚠️ 只标 `/api/audit/events` —— 弃用理由是「分页契约升版后它将被 v2 取代」
-    // （D341 给了它一个合理的弃用理由，不是随便挑的）。
-    //
-    // ⚠️ 用按路径匹配而不是包住 `/api/audit` 整组：
-    // 那组里还有 verify / archive 等**未**弃用的端点
-    // → 包整组会让「恰好 1 个路由带弃用头」的判据红。
-    let deprecations = vec![(
-        "/api/audit/events".to_string(),
-        platform_observability::deprecation::Deprecation::new(
-            // 2027-06-30（约 19 个月后 —— 客户端有足够时间迁移）。
-            time::macros::datetime!(2027-06-30 00:00:00 UTC),
-        ),
-    )];
-    let app = platform_observability::deprecation::apply_deprecation_router(app, deprecations);
-
-    let app = platform_observability::apply_observability(app, rate_limit_state);
+    // 中间件全部在这里挂（**唯一实现**，见 `apply_all_middlewares_with` 的文档）。
+    let app = platform_observability::http::apply_all_middlewares_with(
+        app,
+        rate_limit_state,
+        platform_server::client_info::client_info,
+    );
 
     let addr = config.socket_addr();
     let listener = tokio::net::TcpListener::bind(addr)

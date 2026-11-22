@@ -159,17 +159,26 @@ pub fn apply_observability<S>(
 where
     S: Clone + Send + Sync + 'static,
 {
-    // ① trace_id（**永远挂**：它没有成本，且是所有排障的基础）。
-    let router = router.layer(axum::middleware::from_fn(trace::middleware::trace_id));
+    // ⚠️ **axum 的 `layer` 是「后挂的在外层」** ——
+    // 所以要实现「`trace_id` 先跑、`rate_limit` 后跑」，
+    // 必须**先挂 rate_limit、后挂 trace_id**。
+    //
+    // 这个顺序我踩过：反着写时，限流中间件先执行，
+    // 它读到的 `RequestContext` 里**没有租户**（ucer_info 填的租户被 trace_id 覆盖前
+    // 还没写进去）→ 按 TD-072 的规则直接放行 → 限流**永远不生效**。
+    // 抓到它的是 `middleware_assembly::the_rate_limit_middleware_is_installed`。
 
-    // ② 限流（可选）。
-    match rate_limit {
+    // ① 限流（可选；**先挂 → 在内层**）。
+    let router = match rate_limit {
         Some(state) => router.layer(axum::middleware::from_fn_with_state(
             state,
             rate_limit::middleware::rate_limit,
         )),
         None => router,
-    }
+    };
+
+    // ② trace_id（**后挂 → 在外层**，先于限流执行）。
+    router.layer(axum::middleware::from_fn(trace::middleware::trace_id))
 }
 
 /// 用租户作用域入口构造一个 PG 滑动窗口限流器。
