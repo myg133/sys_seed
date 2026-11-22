@@ -137,3 +137,71 @@
 - **AC-S-036 的「弃用 ≠ 下线，仍返回 200」**（`:215`）：抓得准，避免了「一标弃用就 410」的常见破坏。
 - **AC-S-034 的「字段名断言写包含、不写等于（D194）」**（`:169-171`）：正确遵循了跨栈断言口径。
 - **`design-summary.md:123-138` 对 `len()` 的推演**：自己把坑推演清楚了，比直接删掉更有价值。
+
+---
+
+## 处置回执（BA，2026-11-22）
+
+**31 条全部处置，无一条以「多虑」为由驳回。** 逐条记录：
+
+### BLOCKER（10 条）
+
+| # | 处置 | 改在哪 |
+|---|---|---|
+| B1 | **改判据**：AC-S-031 步骤 4 从「同租户 `user-b` 打同一端点」改为**跨租户**（`tenant-b` 的 `user-c` 打同一路径仍 200）。D337 补「三个桶的实际作用域」表说明根源 | `acceptance.md` AC-S-031；`decisions.md` D337 |
+| B2 | **接受**：AC-S-029 移除审计表断言，改为日志 / 失败响应体 / OTel span 三处。父 AC-028 原文只要求「日志、链路、异步消息」，是我过度设计。审计带 trace_id → **TD-071** | `acceptance.md` AC-S-029；`tech-debt.md` TD-071 |
+| B3 | **接受**：AC-S-033 步骤 3 改用 `occurred_at` 的**行数**，删掉 `window_start` 与「计数」，并写明「被拒请求不落行」 | `acceptance.md` AC-S-033 |
+| B4 | **接受并声明破坏**：D341 增加契约 C7 / D153 升版对照表（上限保持 200 不动，只把「超上限」从夹取改 400），点名要改的单测 `query.rs:646-652` | `decisions.md` D341；`design-summary.md` §12 |
+| B5 | **接受**：设计补真实分页端点 `GET /api/observability/rate-limit/status`（含响应示例） | `design-summary.md` §10 / §10.1 |
+| B6 | **接受**：路径改 `/health/live` / `/health/ready`（实测 `main.rs:290-291`） | `acceptance.md` AC-S-035；`design-summary.md` §10 |
+| B7 | **接受**：改断言 `application/json`（`problem.rs:305` 实际；D183 已裁定） | `acceptance.md` AC-S-035 |
+| B8 | **接受**：改测**失败响应体**的 `ProblemDetails.trace_id`；§11 删掉「业务体用 traceId」的自相矛盾表述 | `acceptance.md` AC-S-029；`design-summary.md` §11 |
+| B9 | **接受**：覆盖表按 demand 的 **7 条**逐条对账；就绪探针补 **AC-S-038**（含「关闭限流时不该因限流表不就绪」的判据） | `acceptance.md` AC-S-038 + 覆盖表 |
+| B10 | **接受**：设计加 `init_otel(cfg, exporter_override)` 注入缝 + `OtelGuard::is_enabled()`，并写明 `TraceId::from_hex` + 远端父上下文的**具体实现路径**（不用父上下文 OTel 会自己生成 id → AC 必红） | `design-summary.md` §5.1 / §5.2 |
+
+### MAJOR（14 条）
+
+| # | 处置 |
+|---|---|
+| M1 | AC-S-033 删掉「`max_connections` 不同」这条无区分力断言，改为 `assert_ne!(pool_a.id(), pool_b.id())`；重心移到步骤 3（DB 里真有行）；**明码记录盲区**（全局 static 计数器无法与 PG 区分） |
+| M2 | AC-S-032 步骤 3 改为**键白名单**（`params` 的键集合 ⊆ `{dimension, retryAfter}`）+ `detail` 的**有限黑名单**；删掉「PG 相关字样」这种无界集合 |
+| M3 | AC-S-037 步骤 2 加**时延上界**（单次 < 1 秒），与「导出超时 3s」形成对照 |
+| M4 | 设计加 `build_subscriber(level, writer)` 抽出（production 与测试共用），并写明 `with_default` 是线程局部的、跨 `.await` 不可靠 |
+| M5 | 设计新增 §11.5：**必须抽 `build_router(deps)`**，`main.rs` 与所有 HTTP 测试共用同一装配路径 |
+| M6 | §12 明确 `new_trace_id()` 改 32 hex 会动 `context.rs:156` 的 `len()==36` 断言，风险从「低」改「**中（对外可见格式变化）**」 |
+| M7 | 设计新增 §2.3：未认证请求**明码不做**（→ **TD-072**），并要求中间件遇无租户**直接放行**（否则登录端点 500） |
+| M8 | 设计新增「读配置的失败语义」：未登记 / 缓存无快照 / 读失败**一律 fail open + WARN**，并写明「读不到就报错会让 1496 个测试集体红」 |
+| M9 | AC-S-035 步骤 5 从「注释掉 `#[utoipa::path]`」（会编译失败）改为「**改一个 DTO 字段名**」（能编译但产物该变），并断言输出含**差异行** |
+| M10 | 删掉 `/api/_deprecated-probe` 与「考虑是否在生产排除」；改为在**真实端点** `/api/audit/events` 上标注弃用（分页升版给了合理理由） |
+| M11 | AC-S-030 补**5 条路径**（含 CRLF 注入向量 `\r\nFAKE LOG LINE`），并把「不得回显」拆成**三处**逐处断言（响应头 / 日志 / 失败响应体）；**不再声称验审计表**（真空成立） |
+| M12 | D341 增加与 C7 的关系说明（保留 `page/page_size`；新增端点只用 cursor），并要求实现时**同步更新 C7 文档** |
+| M13 | AC-S-032 前置改为**独立**（`endpoint.windowSeconds = 2`，另两维度禁用），不再引用 AC-S-031 的 60 秒 |
+| M14 | AC-S-031 改为**5 个独立场景**，每步开头 **truncate**，并列出**四个具体端点**（不写省略号）；步骤 2 用「禁用 endpoint 维度」隔离变量 |
+
+### MINOR / NIT（7 条）
+
+| # | 处置 |
+|---|---|
+| m1 | `demand.md` 改为「AC-S-029 ~ AC-S-038（9 条）」 |
+| m2 | 确认「2 表」是我推断错误（设计本就只有 1 张表）；`design-summary.md` §2.2 改为「清理任务（**非表**）」 |
+| m3 | D340 改为「**先判 ASCII 再判长度**」的代码顺序，删掉「不能用 `len()`」那半句，改为澄清「先判 ASCII 后 `len()` 无歧义」 |
+| m4 | AC-S-036 阴性对照指定 `GET /api/rbac/roles`，并注明**必须同一 router** |
+| m5 | AC-S-032 补 `Retry-After` 上界：`1 ≤ retryAfter ≤ windowSeconds + 1` |
+| m6 | §10 第 1 行的 AC 列从「AC-S-031 前置」改为 **AC-S-038** |
+| m7 | AC-S-029 前置写明「沿用 `app_real_stack` 的装配（IAM token + ADMIN 权限 + 真实 audit sink）」 |
+
+### 我确认挑刺说对了、但我的任务单猜错的
+
+- **AC-S-031 跨维度隔离**：任务单猜的是「键设计错了也会绿」，实际更严重 ——
+  「键**按 D337 设计正确**时这条**必红**」（B1）。挑刺比我判断得准。
+- **`MatchedPath` 可用性**：任务单担心「拿不到路径模板」，挑刺查了 axum 源码确认可用
+  （`axum-0.8.9/src/extract/matched_path.rs:57` + `path_router.rs:394`），
+  我自己也实测过（`?x=1` → `/api/rbac/roles`）。**技术障碍不存在**。
+- **「2 表」**：任务单的推断不成立（设计只有 1 张表）。挑刺帮我避免了改错地方。
+
+### 挑刺覆盖了我的盲区（最有价值的部分）
+
+B2（审计表没有 trace_id 列）、B4（limit 与 D153 冲突）、B7（problem+json 与 D183 冲突）、
+B8（`AppView` 无 traceId）、M5（无可测 router）、M7（未认证请求写不进 RLS 表）、
+M8（读配置 None 的语义）—— **这 7 条我完全没想到**，
+其中 B2 / B4 / B7 / B8 都是「我的判据与已验收决策正面冲突且我没意识到」。
