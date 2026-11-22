@@ -195,7 +195,11 @@ impl VirusScanner for SwitchableScanner {
 /// 测试夹具。
 pub struct Fixture {
     /// 业务服务（走**应用角色**连接，RLS 生效）。
-    pub service: StorageService,
+    ///
+    /// ⚠️ 用 `Arc` 共享：HTTP 层测试要把同一个实例装进 `StorageState`，
+    /// 而 `StorageService` **不是 `Clone`**（它持有 `OnceLock` 审计槽，
+    /// 克隆会得到两个独立的槽 → 装配了 sink 的那份可能不是被测的那份）。
+    pub service: Arc<StorageService>,
     /// 配置源（可改）。
     pub config: StaticConfigSource,
     /// 扫描器（可切成感染）。
@@ -385,14 +389,14 @@ pub async fn setup() -> Fixture {
     })
     .expect("测试环境变量应齐");
 
-    let service = StorageService::new(
+    let service = Arc::new(StorageService::new(
         StorageStore::new(app_db),
         StorageConfig::new(Arc::new(config.clone())),
         objects,
         Arc::new(scanner.clone()),
         env.presign_secret.clone().into_bytes(),
         env.presign_key_id.clone(),
-    );
+    ));
 
     Fixture {
         service,
