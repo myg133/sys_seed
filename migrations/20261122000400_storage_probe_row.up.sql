@@ -43,7 +43,11 @@ CREATE TABLE IF NOT EXISTS platform_storage_probe_row (
     amount     BIGINT      NOT NULL,
     -- 可选列：不参与必填校验，用来承载「含逗号 / 含换行」这类 round-trip 字段。
     note       TEXT        NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- ⚠️ 幂等键：同一任务里同一个 email 只占一行。
+    -- 断点续跑被 `Partial` 退回后重跑时，`ON CONFLICT DO NOTHING` 靠它防重复翻倍；
+    -- 没有它的话「部分成功 + 重试」会让行数变成 2 倍，而 AC-S-180 步骤 5 断言的是**恰好** 49990。
+    CONSTRAINT platform_storage_probe_row_job_email_key UNIQUE (tenant_id, job_id, email)
 );
 
 -- AC-S-180 步骤 5 / AC-S-181 步骤 4 都要按「租户」数行；导入进度排查按 job 数。

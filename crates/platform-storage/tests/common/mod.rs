@@ -324,9 +324,12 @@ pub async fn setup() -> Fixture {
     drop(conn);
 
     // 4) 清表（用例之间不得互相污染）。
+    // ⚠️ 新增租户表**必须**加进这个清单 —— 漏了会让上一条用例的数据
+    // 被下一条用例读到（症状是「单独跑绿、连跑红」这种最难查的假失败）。
     for table in [
         "platform_storage_job_error",
         "platform_storage_job",
+        "platform_storage_probe_row",
         "platform_storage_upload",
         "platform_storage_object",
     ] {

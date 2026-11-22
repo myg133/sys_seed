@@ -57,7 +57,7 @@ fn every_storage_permission_has_an_authorization_call_site() {
 
 /// manifest 合法 + **4 张表全部**在 `tenantScoped` 里（AC-S-183 步骤 4）。
 #[test]
-fn the_storage_manifest_declares_all_four_tables() {
+fn the_storage_manifest_declares_all_five_tables() {
     let root = repo_root();
     let raw = std::fs::read_to_string(root.join("crates/platform-storage/manifest.json"))
         .expect("manifest 应可读");
@@ -79,9 +79,13 @@ fn the_storage_manifest_declares_all_four_tables() {
             "platform_storage_job".to_string(),
             "platform_storage_job_error".to_string(),
             "platform_storage_object".to_string(),
+            "platform_storage_probe_row".to_string(),
             "platform_storage_upload".to_string(),
         ],
-        "**恰好 4 张**租户表（⚠️ 不是「包含」，是双向相等 —— 漏一张 = 该表完全无隔离）"
+        "**恰好 5 张**租户表（⚠️ 不是「包含」，是双向相等 —— 漏一张 = 该表完全无隔离）。\n\
+         ⚠️ 第 5 张 `platform_storage_probe_row` 是 D333 新增的**导入目标表** ——\n\
+         它存的是**业务数据**（不是元数据），漏隔离的后果比原来更严重：\n\
+         A 租户导入的数据会出现在 B 租户的导出里。"
     );
 }
 

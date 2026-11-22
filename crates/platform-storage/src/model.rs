@@ -1,4 +1,4 @@
-//! 数据模型：**4 张表的行类型** + 跨栈 DTO（REQ-018，design §2 / §3.1）。
+//! 数据模型：**5 张表的行类型** + 跨栈 DTO（REQ-018，design §2 / §3.1）。
 
 use std::collections::BTreeMap;
 
@@ -13,6 +13,27 @@ pub const UPLOAD_TABLE: &str = "platform_storage_upload";
 pub const JOB_TABLE: &str = "platform_storage_job";
 /// 行级错误回执表（**租户级**）。
 pub const JOB_ERROR_TABLE: &str = "platform_storage_job_error";
+/// 导入的**目标实体表**（**租户级**，D333）。
+///
+/// ⚠️ 这是本需求唯一存**业务数据**（而非元数据）的表 ——
+/// AC-S-180 步骤 5 与 AC-S-181 步骤 4 的「目标表行数」判据都落在这里。
+pub const PROBE_ROW_TABLE: &str = "platform_storage_probe_row";
+
+/// 探针实体的**表头**（导入/导出的列名，D333）。
+///
+/// ⚠️ 列名必须与迁移 `20261122000400_storage_probe_row.up.sql` 一致，
+/// 也与 AC-S-181 要求的「真实列名」（`email` / `amount`，不是 `column_2`）一致。
+pub const PROBE_ROW_HEADER: &[&str] = &["email", "amount", "note"];
+
+/// 探针实体的**必填列**。
+///
+/// ⚠️ `email` 空单元格 = 「缺必填列」→ 行级回执（AC-S-181 步骤 3 的第 1 条）。
+pub const PROBE_ROW_REQUIRED: &[&str] = &["email"];
+
+/// 探针实体的**数字列**。
+///
+/// ⚠️ `amount` 非数字 = 行级回执（AC-S-181 步骤 3 的第 2 条）。
+pub const PROBE_ROW_NUMERIC: &[&str] = &["amount"];
 
 /// 对象的**状态**。
 pub mod object_status {

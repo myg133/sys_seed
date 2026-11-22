@@ -20,9 +20,24 @@ use platform_db::{DbResult, TenantDb, TenantQuery};
 use time::OffsetDateTime;
 
 use crate::model::{
-    JOB_ERROR_TABLE, JOB_TABLE, JobErrorRow, JobRow, OBJECT_TABLE, ObjectRow, UPLOAD_TABLE,
-    UploadRow,
+    JOB_ERROR_TABLE, JOB_TABLE, JobErrorRow, JobRow, OBJECT_TABLE, ObjectRow, PROBE_ROW_TABLE,
+    UPLOAD_TABLE, UploadRow,
 };
+
+/// 待写入目标实体表的一行（D333）。
+///
+/// ⚠️ 字段就是 `platform_storage_probe_row` 的业务列（`email` / `amount` / `note`），
+/// **不含** `id` / `tenant_id` / `job_id` / `created_at` ——
+/// 那四个由写入时补齐（`id` 是新 uuid，`tenant_id` 走 `TenantQuery`，`job_id` 是当前任务）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeRow {
+    /// 必填列（AC-S-181 要求列名是真实的 `email`）。
+    pub email: String,
+    /// 数字列（AC-S-181 要求列名是真实的 `amount`）。
+    pub amount: i64,
+    /// 可选列（承载含逗号 / 含换行的 round-trip 字段）。
+    pub note: Option<String>,
+}
 
 /// 对象表的列清单（**库层真列名**，DDL 断言用）。
 #[cfg_attr(not(test), allow(dead_code))]
@@ -491,6 +506,136 @@ impl StorageStore {
         platform_db::tenant_row!(CountRow { n: "n" });
         let row: CountRow = self.db.fetch_one(ctx, &query).await?;
         Ok(row.n)
+    }
+
+    // -- 导入目标实体（D333）-------------------------------------------------
+
+    /// 批量写入导入的**合法行**到目标实体表。
+    ///
+    /// # ⚠️ 为什么用单条语句插整批
+    ///
+    /// `TenantQuery` 要求 `{tenant}` **恰好出现一次** —— 那就不能写
+    /// `VALUES (?, {tenant}, ...), (?, {tenant}, ...)`（每行一个 tenant）。
+    /// 但逐行 `execute` 又会让 5 万行变成 5 万次往返（低配机上要跑几十分钟）。
+    ///
+    /// → 用**参数数组 + `UNNEST`**：一次往返插一整批，
+    /// 且 `{tenant}` 只出现**一次**（在 `SELECT {tenant} AS tenant_id` 里）。
+    ///
+    /// # 幂等
+    ///
+    /// 断点续跑时会从头重算「哪些行已经处理过」（见 `worker::run_import` 的
+    /// `already_done`），所以这里**不需要**去重约束；但为避免「部分成功 + 重试」
+    /// 造成重复行，加了 `(tenant_id, job_id, email)` 的唯一约束（迁移里）。
+    /// 这里用 `ON CONFLICT DO NOTHING` —— 重复导入同一份 CSV 不会翻倍。
+    pub async fn insert_rows_batch(
+        &self,
+        ctx: &RequestContext,
+        job_id: &str,
+        rows: &[ProbeRow],
+    ) -> DbResult<u64> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        // ⚠️ 分块：一批 1000 行时数组元素也是 1000 个；
+        // Postgres 的绑定参数上限是 65535 → 远在上限内，
+        // 但为防止调用方传超大 `batch_size`，这里硬切 5000 行一块。
+        const CHUNK: usize = 5_000;
+        let mut affected = 0u64;
+        for chunk in rows.chunks(CHUNK) {
+            // ⚠️ `platform-db` 的 `BindValue` 只支持 `Vec<String>`（不支持 `Vec<i64>` /
+            // `Vec<Option<String>>`）→ 一律按 `text[]` 传参，在 SQL 里 `::bigint[]` 转换。
+            // 这不是绕路：`text[] → bigint[]` 的转换由 Postgres 做，非法值会在**写库时**报错，
+            // 而非法值在 `validate_row` 阶段就已被挡掉（`amount` 必然是合法整数）。
+            let ids: Vec<String> = chunk
+                .iter()
+                .map(|_| uuid::Uuid::new_v4().to_string())
+                .collect();
+            let emails: Vec<String> = chunk.iter().map(|r| r.email.clone()).collect();
+            let amounts: Vec<String> = chunk.iter().map(|r| r.amount.to_string()).collect();
+            // `note` 为 `None` 时传空串，SQL 里用 `NULLIF(..., '')` 还原成 NULL。
+            let notes: Vec<String> = chunk
+                .iter()
+                .map(|r| r.note.clone().unwrap_or_default())
+                .collect();
+
+            let query = TenantQuery::new(format!(
+                "INSERT INTO {table} (id, tenant_id, job_id, email, amount, note) \
+                 SELECT u.id::uuid, {{tenant}}, ?::uuid, u.email, u.amount::bigint, \
+                        NULLIF(u.note, '') \
+                 FROM UNNEST(?::text[], ?::text[], ?::text[], ?::text[]) \
+                      AS u(id, email, amount, note) \
+                 ON CONFLICT (tenant_id, job_id, email) DO NOTHING",
+                table = self.db.table(PROBE_ROW_TABLE)
+            ))
+            .bind(job_id.to_string())
+            .bind(ids)
+            .bind(emails)
+            .bind(amounts)
+            .bind(notes);
+            affected += self.db.execute(ctx, &query).await?;
+        }
+        Ok(affected)
+    }
+
+    /// 数目标实体表里某任务写入了多少行。
+    ///
+    /// ⚠️ 这是 AC-S-180 步骤 5 / AC-S-181 步骤 4 的**唯一可信数据源**：
+    /// `processed_rows` 只证明「数了行」，本方法才证明「入了库」。
+    pub async fn count_probe_rows(&self, ctx: &RequestContext, job_id: &str) -> DbResult<i64> {
+        let query = TenantQuery::new(format!(
+            "SELECT count(*) AS n FROM {table} \
+             WHERE tenant_id = {{tenant}} AND job_id = ?::uuid",
+            table = self.db.table(PROBE_ROW_TABLE)
+        ))
+        .bind(job_id.to_string());
+        #[derive(Debug)]
+        struct CountRow {
+            n: i64,
+        }
+        platform_db::tenant_row!(CountRow { n: "n" });
+        let row: CountRow = self.db.fetch_one(ctx, &query).await?;
+        Ok(row.n)
+    }
+
+    /// 读目标实体表里某任务写入的行（导出用）。
+    pub async fn list_probe_rows(
+        &self,
+        ctx: &RequestContext,
+        job_id: Option<&str>,
+    ) -> DbResult<Vec<ProbeRow>> {
+        let query = match job_id {
+            Some(id) => TenantQuery::new(format!(
+                "SELECT email, amount, note FROM {table} \
+                 WHERE tenant_id = {{tenant}} AND job_id = ?::uuid ORDER BY email, amount",
+                table = self.db.table(PROBE_ROW_TABLE)
+            ))
+            .bind(id.to_string()),
+            None => TenantQuery::new(format!(
+                "SELECT email, amount, note FROM {table} \
+                 WHERE tenant_id = {{tenant}} ORDER BY email, amount",
+                table = self.db.table(PROBE_ROW_TABLE)
+            )),
+        };
+        #[derive(Debug)]
+        struct Row {
+            email: String,
+            amount: i64,
+            note: Option<String>,
+        }
+        platform_db::tenant_row!(Row {
+            email: "email",
+            amount: "amount",
+            note: "note",
+        });
+        let rows: Vec<Row> = self.db.fetch_all(ctx, &query).await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| ProbeRow {
+                email: r.email,
+                amount: r.amount,
+                note: r.note,
+            })
+            .collect())
     }
 }
 

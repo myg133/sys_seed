@@ -340,21 +340,27 @@ async fn an_xlsx_import_is_rejected_with_a_clear_code() {
 async fn a_large_import_reports_progress_and_row_level_errors() {
     let fixture = setup().await;
     let ctx = fixture.ctx_a();
-    // 每批 500 行（便于观察中间态）。
+    // 规格要求 `storage.importBatchSize = 1000`（AC-S-180 前置条件）。
     fixture
         .config
-        .set(platform_storage::config::CONFIG_KEY_IMPORT_BATCH_SIZE, 500);
+        .set(platform_storage::config::CONFIG_KEY_IMPORT_BATCH_SIZE, 1000);
 
-    // 造 CSV：表头 + 2500 行，其中第 100/600/1100/1600/2100 个数据行（文件行号 +2）非法。
-    let mut csv = String::from("objectKey,sizeBytes\n");
-    let bad_data_rows = [100usize, 600, 1100, 1600, 2100];
-    for i in 1..=2500usize {
-        let size = if bad_data_rows.contains(&i) {
+    // ⚠️ **规模按规格来：50001 行 = 1 行表头 + 5 万数据行**（AC-S-180 前置条件）。
+    // 原文的测试只跑了 2500 行，且**完全没有断言目标表行数** → F-01（合法行不入库）
+    // 因此逃过了测试（复核 F-02）。这里两处都补上。
+    const DATA_ROWS: usize = 50_000;
+    const BAD_ROWS: usize = 10;
+    // 表头是 `email,amount,note`（D333 统一；AC-S-181 要求列名是 email / amount）。
+    let mut csv = String::from("email,amount,note\n");
+    // 恰好 10 行 `amount` 写成非数字（散布在 5 万行里，覆盖多个批次）。
+    let bad_data_rows: Vec<usize> = (1..=BAD_ROWS).map(|i| i * 5_000).collect();
+    for i in 1..=DATA_ROWS {
+        let amount = if bad_data_rows.contains(&i) {
             "not-a-number"
         } else {
             "10"
         };
-        csv.push_str(&format!("row-{i}.csv,{size}\n"));
+        csv.push_str(&format!("row-{i}@example.com,{amount},note-{i}\n"));
     }
     let bytes = Bytes::from(csv.into_bytes());
     fixture
@@ -368,18 +374,19 @@ async fn a_large_import_reports_progress_and_row_level_errors() {
         .create_import(
             &ctx,
             &platform_storage::model::CreateJobBody {
-                entity: "probe".to_string(),
+                entity: "probe_row".to_string(),
                 object_key: Some("import.csv".to_string()),
             },
         )
         .await
         .expect("建导入任务");
+    // ⚠️ 步骤 2：**证明是异步的**（建完立刻就是 pending、进度 0）。
     assert_eq!(job.status, job_status::PENDING, "必须是异步（pending）");
     assert_eq!(job.processed_rows, 0, "初始进度 0");
 
     // ⚠️ 用 `tick_with_limit(.., 1)`（**每个任务一次只跑 1 批**）+ 连调多次，
-    // 才能观察到 `0 < processedRows < 2500` 的中间态 —— 这是 AC-S-180 的核心判据。
-    // （若用 `tick()`，一次就把 2500 行跑完 → 永远看不到中间态 → 判据红。）
+    // 才能观察到 `0 < processedRows < 50000` 的中间态 —— 这是 AC-S-180 的核心判据。
+    // （若用 `tick()`，一次就把 5 万行跑完 → 永远看不到中间态 → 判据红。）
     let mut observed_intermediate = false;
     let mut rounds = 0;
     loop {
@@ -396,13 +403,12 @@ async fn a_large_import_reports_progress_and_row_level_errors() {
             .find_job(&ctx, &job.id)
             .await
             .expect("读任务");
-        // ⚠️ 中间态判据：**只要 processedRows 落在 (0, 2500) 开区间**就算观察到 ——
-        // 不论此时任务是 `running` 还是被 `Partial` 退回成 `pending`。
-        // （`pending` + 非零进度**正是**「下次接着跑」的状态，它就是进度可见的证据。）
-        if current.processed_rows > 0 && current.processed_rows < 2500 {
+        // ⚠️ 中间态判据：**只要 processedRows 落在 (0, 50000) 开区间**就算观察到。
+        if current.processed_rows > 0 && current.processed_rows < DATA_ROWS as i64 {
             observed_intermediate = true;
         }
-        assert!(rounds < 20, "不该跑这么多轮（{rounds}）");
+        // 5 万行 / 每 tick 1 批（1000 行）= 50 轮，留足余量。
+        assert!(rounds < 120, "不该跑这么多轮（{rounds}）");
     }
 
     let done = fixture
@@ -411,34 +417,48 @@ async fn a_large_import_reports_progress_and_row_level_errors() {
         .await
         .expect("读最终任务");
     assert_eq!(done.status, job_status::COMPLETED, "最终必须 completed");
-    assert_eq!(done.processed_rows, 2500, "processedRows 必须是 2500");
-    assert_eq!(done.failed_rows, 5, "failedRows 必须是 5");
+    // ⚠️ 步骤 4：**两个数字都要断言**。
+    assert_eq!(
+        done.processed_rows, DATA_ROWS as i64,
+        "processedRows 必须是 50000"
+    );
+    assert_eq!(done.failed_rows, BAD_ROWS as i64, "failedRows 必须是 10");
     assert!(
         observed_intermediate,
-        "必须观察到 0 < processedRows < 2500 的中间态（只在最后写一次进度的实现会红）"
+        "必须观察到 0 < processedRows < 50000 的中间态（只在最后写一次进度的实现会红）"
     );
 
-    // 错误回执：恰好 5 条，**带文件行号与真实列名**。
+    // ⚠️ **步骤 5：目标表里恰好 49990 行** —— 这是 F-01 / F-02 的核心判据。
+    // 只有这条断言才能证明「合法行**真的入了库**」，而不是只「数了行」。
+    let stored = fixture
+        .service
+        .store()
+        .count_probe_rows(&ctx, &job.id)
+        .await
+        .expect("数目标表");
+    assert_eq!(
+        stored,
+        (DATA_ROWS - BAD_ROWS) as i64,
+        "目标表必须恰好 49990 行（合法行全入库，非法行跳过）"
+    );
+
+    // 错误回执：恰好 10 条，**带文件行号与真实列名**。
     let errors = fixture
         .service
         .list_job_errors(&ctx, &job.id)
         .await
         .expect("读错误回执");
-    assert_eq!(errors.len(), 5, "恰好 5 条回执");
+    assert_eq!(errors.len(), BAD_ROWS, "恰好 10 条回执");
     for err in &errors {
-        assert_eq!(err.column, "sizeBytes", "列名必须是真实列名");
+        assert_eq!(err.column, "amount", "列名必须是真实列名");
         assert!(err.reason.is_ascii(), "reason 必须是 ASCII");
     }
-    // 行号 = 数据序号 + 2（表头占第 1 行）。
+    // 行号 = 数据序号 + 1（表头占第 1 行）。
     let mut row_numbers: Vec<i64> = errors.iter().map(|e| e.row_number).collect();
     row_numbers.sort_unstable();
-    // ⚠️ 推导**必须**写清（差 1 是最容易错的地方）：
-    // CSV 第 1 行是表头 → 数据第 i 行（1-based）= **文件第 i + 1 行**。
-    // 测试里 `bad_data_rows = [100, 600, ...]` 指的是**数据序号**（1-based）→
-    // 文件行号 = 100 + 1 = **101**（不是 102 —— 102 是「数据序号 + 2」的错误推导）。
+    let expected: Vec<i64> = bad_data_rows.iter().map(|i| (*i + 1) as i64).collect();
     assert_eq!(
-        row_numbers,
-        vec![101, 601, 1101, 1601, 2101],
+        row_numbers, expected,
         "文件行号 = 数据序号 + 1（表头占第 1 行）"
     );
 }
@@ -448,7 +468,8 @@ async fn a_large_import_reports_progress_and_row_level_errors() {
 async fn a_clean_import_has_no_error_receipts() {
     let fixture = setup().await;
     let ctx = fixture.ctx_a();
-    let csv = "objectKey,sizeBytes\nok-1.csv,10\nok-2.csv,20\n";
+    // 表头是 `email,amount,note`（D333；与 AC-S-181 要求的真实列名一致）。
+    let csv = "email,amount,note\nok-1@example.com,10,a\nok-2@example.com,20,b\n";
     fixture
         .service
         .put_object(
@@ -465,7 +486,7 @@ async fn a_clean_import_has_no_error_receipts() {
         .create_import(
             &ctx,
             &platform_storage::model::CreateJobBody {
-                entity: "probe".to_string(),
+                entity: "probe_row".to_string(),
                 object_key: Some("clean.csv".to_string()),
             },
         )
@@ -486,6 +507,14 @@ async fn a_clean_import_has_no_error_receipts() {
         .await
         .expect("读回执");
     assert!(errors.is_empty(), "干净导入不该有回执");
+    // ⚠️ 合法行**真的入库**（F-01 的判据：只数行不入库的实现会在这里红）。
+    let stored = fixture
+        .service
+        .store()
+        .count_probe_rows(&ctx, &job.id)
+        .await
+        .expect("数目标表");
+    assert_eq!(stored, 2, "2 条合法行都必须入库");
 }
 
 /// **AC-S-182**：导出 → 落 CSV → **round-trip 逐字段一致**（TC-018-045/046/047）。
@@ -493,26 +522,59 @@ async fn a_clean_import_has_no_error_receipts() {
 async fn export_then_download_round_trips() {
     let fixture = setup().await;
     let ctx = fixture.ctx_a();
-    // 造两个对象（其中一个的 key 含逗号 → 必须被正确转义）。
-    for key in ["plain.txt", "with,comma.txt"] {
-        fixture
-            .service
-            .put_object(&ctx, key, Bytes::from_static(b"data"), "text/plain")
-            .await
-            .expect("上传");
-    }
+    // ⚠️ AC-S-182 前置条件要求「含一个带逗号的字段、**一个带换行的字段**」。
+    // 导出的数据源是 `platform_storage_probe_row`（D333）→ 先**导入**造数据，
+    // 这样导出的 CSV 再由本需求解析器读回来才是真 round-trip。
+    let csv = "email,amount,note\n\
+               a@example.com,1,\"comma,inside\"\n\
+               b@example.com,2,\"line\nbreak\"\n\
+               c@example.com,3,plain\n";
+    fixture
+        .service
+        .put_object(
+            &ctx,
+            "seed.csv",
+            Bytes::from_static(csv.as_bytes()),
+            "text/csv",
+        )
+        .await
+        .expect("上传种子 csv");
+
+    let import = fixture
+        .service
+        .create_import(
+            &ctx,
+            &platform_storage::model::CreateJobBody {
+                entity: "probe_row".to_string(),
+                object_key: Some("seed.csv".to_string()),
+            },
+        )
+        .await
+        .expect("建导入任务");
+    platform_storage::worker::tick(&fixture.service, &ctx, 1)
+        .await
+        .expect("跑导入");
+    let imported = fixture
+        .service
+        .find_job(&ctx, &import.id)
+        .await
+        .expect("读导入任务");
+    assert_eq!(imported.status, job_status::COMPLETED);
+    assert_eq!(imported.processed_rows, 3, "3 行都该处理");
+    assert_eq!(imported.failed_rows, 0, "种子数据应全部合法");
 
     let job = fixture
         .service
         .create_export(
             &ctx,
             &platform_storage::model::CreateJobBody {
-                entity: "probe".to_string(),
+                entity: "probe_row".to_string(),
                 object_key: None,
             },
         )
         .await
         .expect("建导出任务");
+    // ⚠️ 步骤 1：导出也是**异步**的（建完立刻 pending）。
     assert_eq!(job.status, job_status::PENDING, "导出也是异步");
 
     platform_storage::worker::tick(&fixture.service, &ctx, 1)
@@ -537,21 +599,44 @@ async fn export_then_download_round_trips() {
     assert_eq!(&bytes[..3], &[0xEF, 0xBB, 0xBF], "导出的 CSV 必须带 BOM");
 
     let parsed = platform_storage::csv::parse(&bytes, 65536).expect("解析导出结果");
-    assert_eq!(parsed.row_count(), 2, "恰好 2 条对象");
-    // 含逗号的 key 必须被正确加引号/转义 → 解析回来仍是**一个字段**。
-    let keys: Vec<String> = parsed.rows.iter().map(|r| r[0].clone()).collect();
+    assert_eq!(parsed.row_count(), 3, "恰好 3 行");
+    // ⚠️ 步骤 5：**每个字段逐字等于原值** —— 尤其含逗号 / 含换行的字段。
+    let notes: Vec<String> = parsed
+        .rows
+        .iter()
+        .map(|r| parsed.to_map(r).get("note").cloned().unwrap_or_default())
+        .collect();
     assert!(
-        keys.iter().any(|k| k == "with,comma.txt"),
-        "含逗号的 key 必须 round-trip 回来；实际：{keys:?}"
+        notes.iter().any(|n| n == "comma,inside"),
+        "含逗号的字段必须 round-trip 逐字一致；实际：{notes:?}"
     );
+    assert!(
+        notes.iter().any(|n| n == "line\nbreak"),
+        "含换行的字段必须 round-trip 逐字一致；实际：{notes:?}"
+    );
+    assert!(
+        notes.iter().any(|n| n == "plain"),
+        "普通字段必须原样保留；实际：{notes:?}"
+    );
+    let emails: Vec<String> = parsed
+        .rows
+        .iter()
+        .map(|r| parsed.to_map(r).get("email").cloned().unwrap_or_default())
+        .collect();
+    for expected in ["a@example.com", "b@example.com", "c@example.com"] {
+        assert!(
+            emails.iter().any(|e| e == expected),
+            "email {expected} 必须 round-trip；实际：{emails:?}"
+        );
+    }
     // 导出任务读到的 downloadUrl 非空（预签名）。
     let final_job = fixture.service.find_job(&ctx, &job.id).await.expect("读");
     assert_eq!(final_job.kind, job_kind::EXPORT);
 }
 
-/// **AC-S-183 步骤 3**：**4 张表各自**只返回本租户的行（TC-018-050）。
+/// **AC-S-183 步骤 3**：**5 张表各自**只返回本租户的行（TC-018-050）。
 #[tokio::test]
-async fn all_four_tables_are_isolated_by_tenant() {
+async fn all_five_tables_are_isolated_by_tenant() {
     let fixture = setup().await;
 
     // 两个租户各造 1 个对象 + 1 个任务 + 1 条错误回执（管理员连接绕过 RLS）。
@@ -579,11 +664,20 @@ async fn all_four_tables_are_isolated_by_tenant() {
                  VALUES (gen_random_uuid(), '{tenant}', 'import', 'probe', 'pending', 0, 0, 0)"
             ))
             .await;
+        // ⚠️ 第 5 张表（D333）：导入的真实落点 —— 存的是**业务数据**，
+        // 漏隔离的后果比元数据表更严重（A 租户导入的数据会出现在 B 租户的导出里）。
+        fixture
+            .exec(&format!(
+                "INSERT INTO platform_storage_probe_row (id, tenant_id, job_id, email, amount, note) \
+                 SELECT gen_random_uuid(), '{tenant}', id, 'p-{tenant}@example.com', 1, 'n' \
+                 FROM platform_storage_job WHERE tenant_id = '{tenant}' LIMIT 1"
+            ))
+            .await;
         // 错误回执需要一个 job_id（用刚插入的那个）。
         fixture
             .exec(&format!(
                 "INSERT INTO platform_storage_job_error (job_id, tenant_id, row_number, \"column\", reason) \
-                 SELECT id, '{tenant}', 2, 'sizeBytes', 'bad' FROM platform_storage_job \
+                 SELECT id, '{tenant}', 2, 'amount', 'bad' FROM platform_storage_job \
                  WHERE tenant_id = '{tenant}' LIMIT 1"
             ))
             .await;
@@ -647,12 +741,27 @@ async fn all_four_tables_are_isolated_by_tenant() {
         uploads.iter().all(|u| u.tenant_id == TENANT_A),
         "上传会话表的 tenantId 必须全是 tenant-a"
     );
+
+    // ⚠️ **第 5 张表**（`platform_storage_probe_row`，D333）：
+    // 它是导入的真实落点，**存的是业务数据** —— 漏隔离最严重。
+    let probe_rows = fixture
+        .service
+        .store()
+        .list_probe_rows(&fixture.ctx_a(), None)
+        .await
+        .expect("读目标实体表");
+    assert_eq!(probe_rows.len(), 1, "目标实体表：tenant-a 只应看到 1 行");
+    assert_eq!(
+        probe_rows[0].email,
+        format!("p-{TENANT_A}@example.com"),
+        "目标实体表只应返回 tenant-a 的行（不能看到 tenant-b 的 p-tenant-b@...）"
+    );
 }
 
-/// **AC-S-183 步骤 4**：4 张表都在 manifest 的 `tenantScoped` 里
+/// **AC-S-183 步骤 4**：5 张表都在 manifest 的 `tenantScoped` 里
 /// （已在 contract_c5 里断言；这里补一条「库层真有 policy」）。
 #[tokio::test]
-async fn all_four_tables_have_rls_policies() {
+async fn all_five_tables_have_rls_policies() {
     let fixture = setup().await;
     let rows = fixture
         .query_text(
@@ -666,9 +775,10 @@ async fn all_four_tables_have_rls_policies() {
             "platform_storage_job".to_string(),
             "platform_storage_job_error".to_string(),
             "platform_storage_object".to_string(),
+            "platform_storage_probe_row".to_string(),
             "platform_storage_upload".to_string(),
         ],
-        "4 张表都必须有 RLS policy；实际：{rows:?}"
+        "5 张表都必须有 RLS policy（含 D333 新增的导入目标表）；实际：{rows:?}"
     );
 }
 

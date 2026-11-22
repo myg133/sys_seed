@@ -16,11 +16,11 @@ use platform_core::RequestContext;
 
 use crate::csv;
 use crate::error::ServiceError;
-use crate::model::job_kind;
+use crate::model::{PROBE_ROW_HEADER, PROBE_ROW_NUMERIC, PROBE_ROW_REQUIRED, job_kind};
 use crate::object_store::sha256_hex;
 use crate::scanner::ScanVerdict;
 use crate::service::StorageService;
-use crate::store::{NewObject, RowFailure};
+use crate::store::{NewObject, ProbeRow, RowFailure};
 
 /// 一次导入处理的结果。
 ///
@@ -163,6 +163,11 @@ async fn run_import(
     // ④ 逐批处理。
     let batch_size = settings.import_batch_size.max(1) as usize;
     let mut failures: Vec<RowFailure> = Vec::new();
+    // ⚠️ **合法行**的缓冲区：攒够一批就 `insert_rows_batch` 落库。
+    // 这是 F-01 的核心修复 —— 原来的 `Ok(()) => {}` 什么都不做，
+    // 导致 AC-S-180 步骤 5（目标表 49990 行）与 AC-S-181 步骤 4（3 行入库）
+    // 两条判据根本没有实现。
+    let mut pending_rows: Vec<ProbeRow> = Vec::new();
 
     // ⚠️ **一次 tick 最多处理 `max_batches` 批**（AC-S-180 的「进度可查」要求）：
     // 若一次 tick 把 5 万行全跑完，用户**永远看不到中间进度** ——
@@ -186,8 +191,8 @@ async fn run_import(
         // ⚠️ **文件行号** = 数据序号 + 2（表头占第 1 行）。
         let file_line = (index + 2) as i64;
         let map = parsed.to_map(row);
-        match validate_row(&parsed.header, &map) {
-            Ok(()) => {}
+        match validate_row(&map) {
+            Ok(probe) => pending_rows.push(probe),
             Err(failure) => {
                 failures.push(RowFailure {
                     row_number: file_line,
@@ -198,8 +203,19 @@ async fn run_import(
         }
         processed += 1;
 
-        // 每批：写错误回执 + 更新进度（**⚠️ 这是 AC-S-180 的核心判据**）。
+        // 每批：**先写数据、再写错误回执、最后更新进度**（AC-S-180 的核心判据）。
+        //
+        // ⚠️ 顺序不可换：若先更新进度再写数据，崩在这两步之间的话
+        // `processed_rows` 已经前进而数据没进去 → 断点续跑会**跳过**这一批（数据永久丢失）。
         if processed % batch_size as i64 == 0 {
+            if !pending_rows.is_empty() {
+                service
+                    .store()
+                    .insert_rows_batch(ctx, &job.id, &pending_rows)
+                    .await
+                    .map_err(|e| format!("writing the imported rows failed: {e}"))?;
+                pending_rows.clear();
+            }
             if !failures.is_empty() {
                 service
                     .store()
@@ -223,7 +239,14 @@ async fn run_import(
         }
     }
 
-    // 尾批。
+    // 尾批（不足一整批的余数）。
+    if !pending_rows.is_empty() {
+        service
+            .store()
+            .insert_rows_batch(ctx, &job.id, &pending_rows)
+            .await
+            .map_err(|e| format!("writing the imported rows failed: {e}"))?;
+    }
     if !failures.is_empty() {
         service
             .store()
@@ -307,78 +330,102 @@ async fn run_export(
     Ok(ImportOutcome::Completed)
 }
 
-/// 导出的数据源（**本轮的最小实现**：导出对象元数据）。
+/// 导出的数据源：**目标实体表 `platform_storage_probe_row`**（D333）。
 ///
-/// ⚠️ 真正的「导出业务表」需要一个「实体 → 表/列」的映射（属业务侧）。
-/// 本轮把 `platform_storage_object` 自身的元数据导出成 CSV ——
-/// 这让 round-trip 用例（TC-018-047）有**真实数据**可验，
-/// 而不假装支持任意业务表（那样做出来的是**假能力**）。
+/// ⚠️ 导出的表头必须与导入**同源**（`probe_header()` 取自 `model::PROBE_ROW_HEADER`），
+/// 否则「导出的 CSV 再导入」round-trip 会因表头不一致而断掉（AC-S-182 步骤 5）。
+///
+/// ⚠️ 真正的「导出任意业务表」需要一个「实体 → 表/列」的映射（属业务侧）→ **TD-064**。
 async fn export_rows(
     service: &StorageService,
     ctx: &RequestContext,
 ) -> Result<(Vec<String>, Vec<Vec<String>>), ServiceError> {
-    let objects = service.store().list_objects(ctx).await?;
-    let header = vec![
-        "objectKey".to_string(),
-        "sizeBytes".to_string(),
-        "sha256".to_string(),
-        "contentType".to_string(),
-        "scanVerdict".to_string(),
-    ];
-    let rows = objects
+    let rows = service.store().list_probe_rows(ctx, None).await?;
+    let header = probe_header();
+    let body = rows
         .iter()
-        .map(|o| {
+        .map(|r| {
             vec![
-                o.object_key.clone(),
-                o.size_bytes.to_string(),
-                o.sha256.clone(),
-                o.content_type.clone(),
-                o.scan_verdict.clone(),
+                r.email.clone(),
+                r.amount.to_string(),
+                r.note.clone().unwrap_or_default(),
             ]
         })
         .collect();
-    Ok((header, rows))
+    Ok((header, body))
 }
 
-/// 校验一行（返回 `RowFailure` 指出**列名**与原因）。
+/// 校验一行并**转成待入库的实体行**（返回 `RowFailure` 指出**列名**与原因）。
 ///
-/// # 本轮的最小校验
+/// # 校验规则（对应 AC-S-181）
 ///
-/// - 所有列都必须存在（缺列表头 → 每行都失败）；
-/// - `sizeBytes` 若有则必须是整数（这是导出格式里的数字列，
-///   用它来验「数字列非法」这条判据，TC-018-041/042）。
+/// 1. **必填列非空**（`PROBE_ROW_REQUIRED` = `email`）：
+///    空单元格视为「缺必填列」→ `column: "email"`。
+///    ⚠️ 复核 F-11 指出：原实现检查的是「列名是否在 map 里」，
+///    但 `csv::parse` 已保证每行列数 == 表头列数 → 那个分支**不可达**。
+///    真正能表达「缺必填列」的是「单元格为空」，所以改成这个判据。
+/// 2. **数字列合法**（`PROBE_ROW_NUMERIC` = `amount`）：
+///    非整数 → `column: "amount"`。
+/// 3. 可选列（`note`）空 → `None`。
+///
+/// # ⚠️ 列名来源
+///
+/// 用 `model` 里的常量（`PROBE_ROW_REQUIRED` / `PROBE_ROW_NUMERIC`），
+/// **不是**从 CSV 表头动态取 —— 否则 CSV 表头就成了「攻击者可控的列名」，
+/// 而且错误回执里会出现 `column_2` 这种下标式列名（AC-S-181 明确禁止）。
 fn validate_row(
-    header: &[String],
     map: &std::collections::BTreeMap<String, String>,
-) -> Result<(), RowFailure> {
-    // 空表头 → 无法校验，直接通过（空文件的用例要能过）。
-    if header.is_empty() {
-        return Ok(());
-    }
-    // 每行列数是否与表头一致（`csv::parse` 已经检查过，这里再兜一次）。
-    for name in header {
-        if !map.contains_key(name) {
+) -> Result<ProbeRow, RowFailure> {
+    // ① 必填列：空单元格 = 缺。
+    for name in PROBE_ROW_REQUIRED {
+        let value = map.get(*name).map(String::as_str).unwrap_or("");
+        if value.is_empty() {
             return Err(RowFailure {
                 row_number: 0,
-                column: name.clone(),
-                reason: "the column is missing from this row".to_string(),
+                column: (*name).to_string(),
+                reason: "the required column is empty".to_string(),
             });
         }
     }
-    // 数字列校验（`sizeBytes` / `totalRows` / `processedRows` 这类）。
-    for numeric in ["sizeBytes", "totalRows", "processedRows", "failedRows"] {
-        if let Some(value) = map.get(numeric)
-            && !value.is_empty()
-            && value.parse::<i64>().is_err()
-        {
-            return Err(RowFailure {
-                row_number: 0,
-                column: numeric.to_string(),
-                reason: "the value is not a valid integer".to_string(),
-            });
+    // ② 数字列：必须能解析成 i64。
+    let mut amount: i64 = 0;
+    for name in PROBE_ROW_NUMERIC {
+        let value = map.get(*name).map(String::as_str).unwrap_or("");
+        // 空数字列也算非法（必填语义：`amount` 是金额，不能空）。
+        match value.parse::<i64>() {
+            Ok(parsed) => amount = parsed,
+            Err(_) => {
+                return Err(RowFailure {
+                    row_number: 0,
+                    column: (*name).to_string(),
+                    reason: "the value is not a valid integer".to_string(),
+                });
+            }
         }
     }
-    Ok(())
+    // ③ 可选列。
+    let note = map
+        .get("note")
+        .map(String::as_str)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    let email = map
+        .get("email")
+        .cloned()
+        .unwrap_or_default();
+    Ok(ProbeRow {
+        email,
+        amount,
+        note,
+    })
+}
+
+/// 探针实体的表头（导出用）。
+///
+/// ⚠️ 与导入的校验列**同源**（`model::PROBE_ROW_HEADER`），
+/// 否则「导出的 CSV 再导入」会因表头不一致而 round-trip 断掉。
+fn probe_header() -> Vec<String> {
+    PROBE_ROW_HEADER.iter().map(|s| (*s).to_string()).collect()
 }
 
 #[cfg(test)]
@@ -424,17 +471,17 @@ mod tests {
         assert!(TickStats::default().is_balanced());
     }
 
-    /// 数字列非整数 → 报错且**指出列名**（TC-018-041 的列名判据）。
+    /// 数字列 `amount` 非整数 → 报错且**指出真实列名**（AC-S-181 第 2 条回执）。
     #[test]
     fn a_non_numeric_value_reports_the_column_name() {
-        let header = vec!["objectKey".to_string(), "sizeBytes".to_string()];
         let mut map = BTreeMap::new();
-        map.insert("objectKey".to_string(), "a.csv".to_string());
-        map.insert("sizeBytes".to_string(), "not-a-number".to_string());
+        map.insert("email".to_string(), "a@example.com".to_string());
+        map.insert("amount".to_string(), "not-a-number".to_string());
+        map.insert("note".to_string(), String::new());
 
-        let failure = validate_row(&header, &map).expect_err("必须报错");
+        let failure = validate_row(&map).expect_err("必须报错");
         assert_eq!(
-            failure.column, "sizeBytes",
+            failure.column, "amount",
             "必须指出**真实列名**，不是 column_2 这种下标"
         );
         assert!(
@@ -444,39 +491,64 @@ mod tests {
         );
     }
 
-    /// 合法行通过。
+    /// 合法行通过，且转成正确的 `ProbeRow`。
     #[test]
     fn a_valid_row_passes() {
-        let header = vec!["objectKey".to_string(), "sizeBytes".to_string()];
         let mut map = BTreeMap::new();
-        map.insert("objectKey".to_string(), "a.csv".to_string());
-        map.insert("sizeBytes".to_string(), "1024".to_string());
-        assert!(validate_row(&header, &map).is_ok());
+        map.insert("email".to_string(), "a@example.com".to_string());
+        map.insert("amount".to_string(), "1024".to_string());
+        map.insert("note".to_string(), "含逗号,的值".to_string());
+        let row = validate_row(&map).expect("合法行必须通过");
+        assert_eq!(row.email, "a@example.com");
+        assert_eq!(row.amount, 1024);
+        assert_eq!(row.note.as_deref(), Some("含逗号,的值"));
     }
 
-    /// 空表头 → 通过（空文件用例要能过）。
+    /// 空 `note` → `None`（可选列不参与必填校验）。
     #[test]
-    fn an_empty_header_passes() {
-        assert!(validate_row(&[], &BTreeMap::new()).is_ok());
+    fn an_empty_optional_cell_becomes_none() {
+        let mut map = BTreeMap::new();
+        map.insert("email".to_string(), "a@example.com".to_string());
+        map.insert("amount".to_string(), "1".to_string());
+        map.insert("note".to_string(), String::new());
+        let row = validate_row(&map).expect("空可选列不该报错");
+        assert_eq!(row.note, None);
     }
 
-    /// 空值的数字列**不算错**（空字段是「未填」不是「非法」）。
+    /// ⚠️ **AC-S-181 第 1 条回执**：`email` 为空 = 缺必填列 → 列名必须是 `email`。
+    ///
+    /// 这条替换了原来的 `a_missing_column_reports_its_name` ——
+    /// 原来测的是「列名不在 map 里」，但 `csv::parse` 已保证每行列数 == 表头列数，
+    /// 那个分支**不可达**（复核 F-11）。真正能表达「缺必填列」的是「单元格为空」。
     #[test]
-    fn an_empty_numeric_cell_is_not_an_error() {
-        let header = vec!["sizeBytes".to_string()];
+    fn an_empty_required_cell_reports_its_column() {
         let mut map = BTreeMap::new();
-        map.insert("sizeBytes".to_string(), String::new());
-        assert!(validate_row(&header, &map).is_ok(), "空值不该报错");
+        map.insert("email".to_string(), String::new());
+        map.insert("amount".to_string(), "1".to_string());
+        let failure = validate_row(&map).expect_err("空必填列必须报错");
+        assert_eq!(failure.column, "email", "必须指出真实列名 email");
+        assert!(failure.reason.is_ascii(), "reason 必须是 ASCII");
     }
 
-    /// 缺列 → 报错且指出那个列名。
+    /// 列完全缺失（map 里没有 `email` 键）也算缺必填列。
     #[test]
-    fn a_missing_column_reports_its_name() {
-        let header = vec!["objectKey".to_string(), "sha256".to_string()];
+    fn a_missing_required_column_reports_its_name() {
         let mut map = BTreeMap::new();
-        map.insert("objectKey".to_string(), "a".to_string());
-        // 故意不给 sha256
-        let failure = validate_row(&header, &map).expect_err("必须报错");
-        assert_eq!(failure.column, "sha256");
+        map.insert("amount".to_string(), "1".to_string());
+        let failure = validate_row(&map).expect_err("缺必填列必须报错");
+        assert_eq!(failure.column, "email");
+    }
+
+    /// 表头常量与迁移里的列名一致（防漂移）。
+    #[test]
+    fn the_probe_header_matches_the_required_and_numeric_columns() {
+        let header: Vec<&str> = PROBE_ROW_HEADER.iter().copied().collect();
+        for name in PROBE_ROW_REQUIRED {
+            assert!(header.contains(name), "必填列 {name} 必须在表头里");
+        }
+        for name in PROBE_ROW_NUMERIC {
+            assert!(header.contains(name), "数字列 {name} 必须在表头里");
+        }
+        assert_eq!(header, vec!["email", "amount", "note"]);
     }
 }
