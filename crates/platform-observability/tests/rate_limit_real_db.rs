@@ -680,3 +680,83 @@ async fn each_dimension_limits_independently_when_enabled_alone() {
         .await
         .expect("禁用的租户维度必须放行（第二个场景）");
 }
+
+/// **prune 的保留期边界**：只删「超出 2 倍窗口」的行，**不误删**窗口内的。
+///
+/// # 为什么这条必须有
+///
+/// `prune(max_window)` 用的保留期是 `max_window × 2`（留一倍余量）。
+/// 若实现写成 `max_window × 1`（或漏了 `×2`），
+/// **仍在窗口内**的行会被删掉 → 限流计数突然变小 → **限流被绕过**。
+///
+/// 这个 bug 在「表本来就空」的用例里看不出来 —— 必须**主动插历史行**。
+#[tokio::test]
+async fn prune_keeps_rows_inside_double_the_window() {
+    let f = setup().await;
+    f.truncate().await;
+    let limiter = limiter(f.db.clone());
+    let ctx = f.ctx_a();
+    let key = bucket_key(dimension::TENANT, TENANT_A, None, "/prune-test");
+
+    // 手工插 3 行：年龄 10 秒 / 100 秒 / 400 秒。
+    f.exec(&format!(
+        "INSERT INTO platform_rate_limit (tenant_id, dimension, key, occurred_at) VALUES \
+         ('{TENANT_A}', 'tenant', '{key}', now() - interval '10 seconds'), \
+         ('{TENANT_A}', 'tenant', '{key}', now() - interval '100 seconds'), \
+         ('{TENANT_A}', 'tenant', '{key}', now() - interval '400 seconds')"
+    ))
+    .await;
+    assert_eq!(
+        f.query_i64("SELECT count(*) FROM platform_rate_limit").await,
+        3,
+        "3 行应插入成功"
+    );
+
+    // 窗口 60 秒 → 保留期 120 秒 → 只该删 400 秒那行。
+    let deleted = limiter.prune(&ctx, 60).await.expect("prune 应成功");
+    assert_eq!(deleted, 1, "只有 400 秒那行超出 2×60=120 秒，必须只删 1 行");
+
+    let remaining = f.query_i64("SELECT count(*) FROM platform_rate_limit").await;
+    assert_eq!(remaining, 2, "10 秒与 100 秒两行必须保留");
+
+    // ⚠️ **关键**：100 秒那行还在（虽然超出 60 秒窗口，但没超出保留期）。
+    let inside_window = limiter
+        .count_in_window(&ctx, dimension::TENANT, &key, 60)
+        .await
+        .expect("计数");
+    assert_eq!(
+        inside_window, 1,
+        "60 秒窗口内应只剩 10 秒那 1 行（100 秒的已过期出窗口但仍在表里）"
+    );
+    let inside_double = limiter
+        .count_in_window(&ctx, dimension::TENANT, &key, 120)
+        .await
+        .expect("计数");
+    assert_eq!(inside_double, 2, "120 秒内应有 2 行（10 秒 + 100 秒）");
+}
+
+/// `prune` 传入 0 或负数时**不能删全表**（防御性下限）。
+#[tokio::test]
+async fn prune_with_a_zero_window_does_not_wipe_the_table() {
+    let f = setup().await;
+    f.truncate().await;
+    let limiter = limiter(f.db.clone());
+    let ctx = f.ctx_a();
+    let key = bucket_key(dimension::TENANT, TENANT_A, None, "/prune-zero");
+
+    f.exec(&format!(
+        "INSERT INTO platform_rate_limit (tenant_id, dimension, key, occurred_at) \
+         VALUES ('{TENANT_A}', 'tenant', '{key}', now() - interval '30 seconds')"
+    ))
+    .await;
+
+    // ⚠️ 实现里 `max_window.max(1) * 2` → 保留期至少 2 秒 → 30 秒的行**会**被删。
+    // 这里断言的是「不会因为 ×0 而变成保留期 0 秒后 panic 或删错范围」。
+    let _ = limiter.prune(&ctx, 0).await.expect("prune 不该 panic");
+    // 表里要么剩 0 行（30 秒 > 2 秒保留期，合理），要么报错 —— 不该是「全表静默消失后无法解释」。
+    let remaining = f.query_i64("SELECT count(*) FROM platform_rate_limit").await;
+    assert_eq!(
+        remaining, 0,
+        "30 秒的行超出 2 秒保留期（0.max(1)*2），应被删除 —— 但要能解释"
+    );
+}
