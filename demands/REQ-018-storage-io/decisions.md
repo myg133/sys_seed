@@ -386,6 +386,99 @@ crates/platform-storage/
 
 ---
 
+## D333: 导入目标实体 = **新增第 5 张租户表 `platform_storage_probe_row`**（用户 2026-11-22 裁定）
+
+### 问题（实现复核 F-01 / F-02 发现）
+
+`worker.rs` 处理合法行的分支是 `Ok(()) => {}` —— **空操作**。
+全仓没有任何「`entity` → 目标表」的写入路径，且 `probe_rows` 这张表
+在 `migrations/` 里**根本不存在**。
+
+→ AC-S-180 步骤 5（目标表恰好 49990 行）与 AC-S-181 步骤 4（只有 3 行入库）
+**两条判据都没有实现**；而 AC-S-180 的测试把 5 万行换成 2500 行、
+并**删掉对目标表的全部断言** → 测试因此全绿。
+
+### 规格自身的矛盾
+
+| AC | 前置条件写的列 |
+|---|---|
+| AC-S-180 | `objectKey,sizeBytes` |
+| AC-S-181 | `email` / `amount`（且明确要求「列名必须是真实的列名」） |
+
+同一个 `entity` 两套列 → 无论怎么实现都满足不了两条。
+
+### 决定（用户裁定：方案 A）
+
+1. **新增 `platform_storage_probe_row` 表**（迁移 `20261122000400`，**租户级 + RLS**）；
+   列固定为 `id` / `tenant_id` / `job_id` / `email` / `amount` / `note` / `created_at`；
+2. **列名以 AC-S-181 为准**（`email` / `amount`）—— 因为 AC-S-181 明确禁止下标式列名，
+   而 AC-S-180 的表头只是「举例」；
+3. **AC-S-180 的表头同步改为 `email,amount,note`**（rev 2）；
+4. **AC-S-183 从 4 张表改为 5 张表**（rev 2）：
+   `tenantScoped.tables` 双向相等断言、直连 RLS 验证都要覆盖新表。
+
+> ⚠️ 第 4 条**不是放宽判据，是收紧**：新增的表存的是**业务数据**而非元数据，
+> 漏隔离的后果比原来更严重（A 租户导入的数据会出现在 B 租户的导出里）。
+
+### 为什么是「通用探针表」而不是业务表
+
+本需求做的是**通道能力**（CSV → 解析 → 校验 → 落库），
+具体导到哪张业务表属于各业务域的事。本轮提供列固定的探针实体 `probe_row`：
+① 证明链路真通；② 给 AC-S-180/181 一个可断言的落点。
+真实业务表的接入是后续需求的事（记 **TD-064**）。
+
+---
+
+## D334: 审计事件 = **真实现**（注入 `AuditSink`，四处埋点，用户 2026-11-22 裁定）
+
+### 问题（实现复核 F-03 发现）
+
+4 个事件码 `storage.file.uploaded` / `storage.file.deleted` /
+`storage.import.completed` / `storage.export.completed` 在 `events.rs` 里
+**只有常量定义**，全仓零发出点；design §9 点名的 `tests/storage_audit.rs` 不存在
+→ AC-S-184 步骤 5 整条未实现。
+
+### 决定
+
+1. `StorageService` 增加 `audit: Arc<dyn AuditSink>` 字段
+   （复用 `platform_core::extension::audit::{AuditEvent, AuditSink}`，
+   **与 `platform-app` / `platform-oauth` 同一套机制**，不自创）；
+2. **四处埋点**：`put_object` 成功 → `file.uploaded`；
+   `delete_object` 成功 → `file.deleted`；
+   导入任务转 `completed` → `import.completed`；
+   导出任务转 `completed` → `export.completed`；
+3. 审计失败**不影响主流程**（与 `platform-app:660` 同款：`tracing::warn!` 后继续）——
+   审计是旁路，不能因为审计写不进去就让用户的上传失败；
+4. 新增 `tests/storage_audit.rs`：真库 + 走完「上传 → 删除 → 导入 → 导出」，
+   断言 `platform_audit_log` 里**恰好 4 条**（四个事件码各一条），
+   且 `ChainVerifier::verify(tenant-a)` → `ok == true`。
+
+---
+
+## D335: `storage.partSizeBytes` 必须**被真实读取**（实现复核 F-04）
+
+### 问题
+
+`StorageSettings.part_size_bytes` 只被 `config.rs` 填充、被单测断言默认值，
+**业务代码零读取** —— `create_upload` 用的是客户端传入的 `body.part_size`。
+改这个配置项对行为无影响 → 违反 D331「6 个配置项每个必须被真实读取」。
+
+### 决定
+
+`create_upload` 增加服务端侧约束：**`body.part_size` 不得大于 `settings.part_size_bytes`**
+（即配置项是「单片上限」而不是「建议值」）。超出 → `STORAGE_UPLOAD_TOO_LARGE`
+（带 `maxBytes`）。
+
+理由：`part_size` 完全由客户端决定时，一个恶意客户端可以声明
+`totalParts = 1000000, partSize = 1`（差一字节一片）→ 在磁盘上制造上百万个小文件
+（inode 耗尽），或者反过来声明超大单片绕过 `maxUploadBytes` 的**逐片**检查。
+服务端必须有上限。
+
+> ⚠️ 语义明确：`partSizeBytes` = **单片最大字节数**（不是「推荐值」）。
+> 这条要写进配置项的 `description`，否则下一个维护者还会以为是建议值。
+
+---
+
 ## 未决 / 待用户复核
 
 | # | 事项 | 结论 |
@@ -396,3 +489,6 @@ crates/platform-storage/
 | 4 | 病毒扫描只做钩子（默认 `Skipped`） | BA 提议（D326） |
 | 5 | 图片处理不做 | BA 提议（D327）→ TD-061 |
 | 6 | 异步导入复用 REQ-015 的 worker 形态 | BA 提议（D324） |
+| 7 | **导入目标表 = 新增第 5 张租户表 `probe_row`** | ✅ 用户 2026-11-22 裁定 → D333 |
+| 8 | **审计事件真实现**（注入 `AuditSink` + 真库测试） | ✅ 用户 2026-11-22 裁定 → D334 |
+| 9 | **`partSizeBytes` 变成硬上限** | BA 提议（D335） |

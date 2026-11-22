@@ -283,7 +283,10 @@ rev 0 只有 **1 条空泛 AC**（AC-S-026，正文是「行为与本条标题�
 ### AC-S-180: 异步导入：**5 万行分批 + 进度可查 + 部分成功**
 
 - **前置条件**: 生成一个 **50001 行**的 CSV（1 行表头 + 5 万数据行），
-  其中**恰好 10 行**的「数字列」写成非数字；`storage.importBatchSize = 1000`。
+  表头为 **`email,amount,note`**（⚠️ rev 2 修正：原文写 `objectKey,sizeBytes`，
+  与 AC-S-181 要求的 `email` / `amount` 列名**互相矛盾** → 已由 D333 统一为这一套，
+  目标表是 `platform_storage_probe_row`）；
+  其中**恰好 10 行**的 `amount`（数字列）写成非数字；`storage.importBatchSize = 1000`。
 - **测试步骤**:
   1. `POST /api/storage/imports`（body `{objectKey, entity: "probe_rows"}`）；
   2. 立刻 `GET /api/storage/jobs/{id}`；
@@ -316,7 +319,8 @@ rev 0 只有 **1 条空泛 AC**（AC-S-026，正文是「行为与本条标题�
 
 ### AC-S-181: 导入错误回执 —— **带行号与列名**，非法行跳过不入库
 
-- **前置条件**: 一个 5 行的 CSV，其中第 3 行缺必填列、第 5 行数字非法。
+- **前置条件**: 一个 5 行的 CSV（表头 `email,amount,note`，
+  目标表 `platform_storage_probe_row`），其中第 3 行缺必填列 `email`、第 5 行 `amount` 非法。
 - **测试步骤**:
   1. 导入；
   2. 跑 worker；
@@ -355,27 +359,33 @@ rev 0 只有 **1 条空泛 AC**（AC-S-026，正文是「行为与本条标题�
 
 ---
 
-### AC-S-183: 任务表与对象的**租户隔离**（3 张表各验一次 RLS）
+### AC-S-183: 任务表与对象的**租户隔离**（**5 张表**各验一次 RLS）
 
 - **前置条件**: `tenant-a` 与 `tenant-b` 各有 1 个文件、1 个任务、1 条错误回执
   （由 `scripts/seed-e2e.sh` 播种）；`crates/platform-storage/manifest.json` 含 `tenantScoped`。
 - **测试步骤**（**4 条**）:
   1. `tenant-a` 管理员 `GET /api/storage/objects`；
   2. `tenant-a` 管理员 `GET /api/storage/jobs`；
-  3. 用 `base_app` 直连，`SET app.tenant_id = 'tenant-a'` 后 `SELECT count(*)` **四张表**；
+  3. 用 `base_app` 直连，`SET app.tenant_id = 'tenant-a'` 后 `SELECT count(*)` **五张表**；
   4. 断言 manifest 的 `tenantScoped.tables` 与 `cargo xtask tenant-policies --check`。
 - **预期结果**:
   - 步骤 1/2：列表里**不含** `tenant-b` 的任何行（`tenantId` 全部逐字等于 `tenant-a`）；
-  - 步骤 3：**四张表各自**只返回 `tenant-a` 的行（`object` / `upload` / `job` / `job_error`）；
+  - 步骤 3：**五张表各自**只返回 `tenant-a` 的行
+    （`object` / `upload` / `job` / `job_error` / **`probe_row`**）；
   - 步骤 4：`tenantScoped.tables` **双向相等**于
     `{platform_storage_object, platform_storage_upload, platform_storage_job,
-    platform_storage_job_error}`（**恰好 4 个**）；且 `--check` **退出码 0**；
-    ⚠️ **判据写法**：断言要写成「与显式列出的 **4** 元素集合双向相等」，
-    **不许**写成「包含这 4 个」（漏写第 4 张表时「包含 3 个」也会绿）；
-    ⚠️ 步骤 3 的直连 RLS 验证也要覆盖 **4 张**（`job_error` 表同样按租户隔离）；
-  - ⚠️ **为什么这 4 张表都要验**：manifest 漏声明某张表 →
+    platform_storage_job_error, platform_storage_probe_row}`（**恰好 5 个**）；
+    且 `--check` **退出码 0**；
+    ⚠️ **判据写法**：断言要写成「与显式列出的 **5** 元素集合双向相等」，
+    **不许**写成「包含这 5 个」（漏写第 5 张表时「包含 4 个」也会绿）；
+    ⚠️ 步骤 3 的直连 RLS 验证也要覆盖 **5 张**（`probe_row` 是导入的真实落点，
+    恰恰最需要隔离 —— 漏了它，A 租户导入的数据会出现在 B 租户的导出里）；
+  - ⚠️ **为什么这 5 张表都要验**：manifest 漏声明某张表 →
     `tenant-policies --check` **会绿**（没声明就不生成也不校验）→ 那张表**完全无隔离**
     （REQ-015 的 D311 / S-04 教训）。
+  - ⚠️ **rev 2 修正**：原文写「4 张 / 恰好 4 个」，因 D333 新增 `platform_storage_probe_row`
+    （导入的真实目标表）→ 改为 **5 张**。这不是放宽判据，而是**收紧**：
+    新增的表正好是「业务数据」而不是「元数据」，漏隔离的后果比原来更严重。
 - **类型**: 安全
 
 ---
