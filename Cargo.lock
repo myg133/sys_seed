@@ -1915,6 +1915,7 @@ dependencies = [
  "bytes",
  "hmac",
  "http-body-util",
+ "platform-audit",
  "platform-config",
  "platform-contracts",
  "platform-core",

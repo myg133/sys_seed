@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use platform_core::RequestContext;
+use platform_core::extension::audit::{AuditEvent, AuditSink, AuditSinkSlot};
 use time::OffsetDateTime;
 
 use crate::config::StorageConfig;
@@ -45,6 +46,14 @@ pub struct StorageService {
     presign_secret: Vec<u8>,
     /// 密钥标识（用于轮换）。
     presign_key_id: String,
+    /// 审计 sink 槽（D334）。
+    ///
+    /// ⚠️ 用 **`AuditSinkSlot`（`OnceLock`）而不是必填构造参数** ——
+    /// 与 `platform-iam` / `platform-rbac` 同款（D150：业务模块只认 core 的 trait）。
+    /// 好处：现有测试与裸用服务的构造点**不用改**，未装配时只是不记审计。
+    /// 代价：装配漏了会在运行期才发现 → 所以「未装配」必须打 **warn**
+    /// （「以为在审计其实没有」比「没有审计」更危险）。
+    audit: AuditSinkSlot,
 }
 
 impl StorageService {
@@ -64,7 +73,16 @@ impl StorageService {
             scanner,
             presign_secret,
             presign_key_id,
+            audit: AuditSinkSlot::default(),
         }
+    }
+
+    /// 装配审计 sink（D334）。
+    ///
+    /// 返回 `false` 表示**已经装配过**（`OnceLock` 只能设一次）——
+    /// 与 `platform-iam::with_audit_sink` 同款语义。
+    pub fn with_audit_sink(&self, sink: Arc<dyn AuditSink>) -> bool {
+        self.audit.set(sink)
     }
 
     /// 读底层 store（worker 用）。
@@ -85,6 +103,62 @@ impl StorageService {
     /// 读扫描器（worker 用）。
     pub fn scanner(&self) -> &Arc<dyn VirusScanner> {
         &self.scanner
+    }
+
+    // -- 审计（D334）--------------------------------------------------------
+
+    /// 记一条存储审计事件（D334 / AC-S-184 步骤 5）。
+    ///
+    /// # 失败语义：**审计失败不影响主流程**
+    ///
+    /// 与 IAM 的登录审计**不同**（那边是「宁可不登录，不可无审计地登录」，
+    /// 因为登录本身是安全准入事件）。存储的上传/删除不会因为审计写不进去就失败 ——
+    /// 拒掉用户的上传只会让业务不可用，而审计的目的是**事后追溯**，不是准入控制。
+    /// 所以这里只 `warn`，不返回错误。
+    ///
+    /// # 未装配时也 `warn`
+    ///
+    /// 「以为在审计其实没有」比「没有审计」更危险 —— 必须留下痕迹。
+    pub(crate) async fn record_audit(&self, ctx: &RequestContext, event: AuditEvent) {
+        let Some(sink) = self.audit.get() else {
+            tracing::warn!(
+                event = %event.action,
+                "a storage audit event was produced but no platform audit sink is installed; \
+                 the event is NOT persisted"
+            );
+            return;
+        };
+        if let Err(error) = sink.record(ctx, &event).await {
+            tracing::warn!(
+                error = %error,
+                event = %event.action,
+                "the storage audit event could not be recorded"
+            );
+        }
+    }
+
+    /// 造一条存储审计事件（填好 tenant / actor / IP / UA）。
+    pub(crate) fn audit_event(
+        &self,
+        ctx: &RequestContext,
+        action: &str,
+        object_type: &str,
+        object_id: Option<&str>,
+        after: Option<serde_json::Value>,
+    ) -> AuditEvent {
+        AuditEvent {
+            // 无租户上下文时落空串（免鉴权端点如预签名下载就没有租户）。
+            tenant_id: ctx.tenant_id().unwrap_or_default().to_string(),
+            actor_id: ctx.user_id().map(str::to_string),
+            action: action.to_string(),
+            object_type: object_type.to_string(),
+            object_id: object_id.map(str::to_string),
+            before: None,
+            after,
+            // ⚠️ 取不到时落**空串**而不是 `NULL`（契约 C12，同 platform-app）。
+            ip: Some(ctx.client_ip().unwrap_or_default().to_string()),
+            user_agent: Some(ctx.user_agent().unwrap_or_default().to_string()),
+        }
     }
 
     // -- 直接上传 -----------------------------------------------------------
@@ -146,7 +220,24 @@ impl StorageService {
             content_type: content_type.to_string(),
             scan_verdict: verdict.as_str().to_string(),
         };
-        Ok(self.store.upsert_object(ctx, &new).await?)
+        let row = self.store.upsert_object(ctx, &new).await?;
+
+        // ⑤ 审计（D334 / AC-S-184 步骤 5）。
+        // 放在落库**之后**：审计的是「已发生的事实」，写库失败就不该记一条成功审计。
+        let event = self.audit_event(
+            ctx,
+            crate::events::FILE_UPLOADED,
+            crate::events::OBJECT_TYPE_OBJECT,
+            Some(&row.id),
+            Some(serde_json::json!({
+                "objectKey": row.object_key,
+                "sizeBytes": row.size_bytes,
+                "sha256": row.sha256,
+                "scanVerdict": row.scan_verdict,
+            })),
+        );
+        self.record_audit(ctx, event).await;
+        Ok(row)
     }
 
     /// 读对象内容。
@@ -175,6 +266,17 @@ impl StorageService {
             .into());
         }
         self.objects.delete(key).await?;
+
+        // 审计（D334）：删除只记 key —— 对象内容已经没了，
+        // 记 size/sha256 只会让人以为还能找回。
+        let event = self.audit_event(
+            ctx,
+            crate::events::FILE_DELETED,
+            crate::events::OBJECT_TYPE_OBJECT,
+            Some(key),
+            Some(serde_json::json!({ "objectKey": key })),
+        );
+        self.record_audit(ctx, event).await;
         Ok(())
     }
 

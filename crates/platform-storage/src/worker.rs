@@ -266,6 +266,20 @@ async fn run_import(
         .complete_job(ctx, &job.id, None)
         .await
         .map_err(|e| format!("completing the job failed: {e}"))?;
+
+    // ⑥ 审计（D334 / AC-S-184 步骤 5）。
+    let event = service.audit_event(
+        ctx,
+        crate::events::IMPORT_COMPLETED,
+        crate::events::OBJECT_TYPE_JOB,
+        Some(&job.id),
+        Some(serde_json::json!({
+            "entity": job.entity,
+            "processedRows": processed,
+            "failedRows": failed,
+        })),
+    );
+    service.record_audit(ctx, event).await;
     Ok(ImportOutcome::Completed)
 }
 
@@ -327,6 +341,20 @@ async fn run_export(
         .complete_job(ctx, &job.id, Some(&object_key))
         .await
         .map_err(|e| format!("completing the job failed: {e}"))?;
+
+    // 审计（D334 / AC-S-184 步骤 5）。
+    let event = service.audit_event(
+        ctx,
+        crate::events::EXPORT_COMPLETED,
+        crate::events::OBJECT_TYPE_JOB,
+        Some(&job.id),
+        Some(serde_json::json!({
+            "entity": job.entity,
+            "objectKey": object_key,
+            "rows": total,
+        })),
+    );
+    service.record_audit(ctx, event).await;
     Ok(ImportOutcome::Completed)
 }
 

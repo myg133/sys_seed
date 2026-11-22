@@ -625,7 +625,15 @@ async fn serve() -> Result<(), Failure> {
     //    `BASE_STORAGE_PRESIGN_SECRET` / `BASE_STORAGE_PRESIGN_KEY_ID` 没配齐
     //    → `build_storage_state` 返回 Err，这里 warn 后**只跳过这组路由**（服务照常起）。
     let app = if let Some((iam, checker)) = app_iam.clone() {
-        match build_storage_state(&config, iam, config_service.clone(), checker).await {
+        match build_storage_state(
+            &config,
+            iam,
+            config_service.clone(),
+            checker,
+            audit_sink.clone(),
+        )
+        .await
+        {
             Ok(storage_state) => {
                 let app = app.nest(
                     "/api/storage",
@@ -1091,6 +1099,9 @@ async fn build_storage_state(
     iam: Arc<platform_iam::service::IamService>,
     config_service: Arc<platform_config::ConfigService>,
     checker: Arc<platform_rbac::RbacChecker>,
+    // 审计 sink（D334）：存储的 4 个事件码要落 `platform_audit_log`。
+    // ⚠️ 与 IAM / RBAC 同款 —— 各模块只认 core 的 `AuditSink` trait（D150 不成环）。
+    audit_sink: Arc<dyn platform_core::extension::audit::AuditSink>,
 ) -> Result<Arc<platform_storage::http::StorageState>, Failure> {
     let env = platform_storage::config::LocalStorageEnv::from_env().ok_or_else(|| {
         Failure::Runtime(
@@ -1117,6 +1128,14 @@ async fn build_storage_state(
         env.presign_secret.into_bytes(),
         env.presign_key_id,
     ));
+
+    // ⚠️ **必须装配审计 sink**（D334）：不装的话上传/删除/导入/导出
+    // 都只打一条 warn 而不落库 → AC-S-184 步骤 5 在生产上是假绿。
+    if !service.with_audit_sink(audit_sink) {
+        return Err(Failure::Runtime(
+            "存储服务装配审计 sink 失败（已经装配过？）".to_string(),
+        ));
+    }
 
     // ⚠️ `refresher` 与 `checker` 是**同一个** `RbacChecker`（它同时实现两个 trait）——
     // 少了 `refresher`，用户第一次打受保护的端点必然 403（TD-047）。

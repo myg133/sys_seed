@@ -45,3 +45,6 @@ sqlx.workspace = true
 platform-contracts.workspace = true
 # 让失败用例能看到真实的数据库/IO 错误。
 tracing-subscriber.workspace = true
+# 审计真库测试（D334）：`PgAuditSink` 落 `platform_audit_log` + `ChainVerifier` 验链。
+# ⚠️ 只做 **dev-dependency** —— 生产代码只用 `platform-core` 的 `AuditSink` trait（D150 不成环）。
+platform-audit = { path = "../platform-audit" }
