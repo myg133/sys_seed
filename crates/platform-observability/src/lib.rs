@@ -164,7 +164,7 @@ where
     // 必须**先挂 rate_limit、后挂 trace_id**。
     //
     // 这个顺序我踩过：反着写时，限流中间件先执行，
-    // 它读到的 `RequestContext` 里**没有租户**（ucer_info 填的租户被 trace_id 覆盖前
+    // 它读到的 `RequestContext` 里**没有租户**（client_info 填的租户还没写进去，
     // 还没写进去）→ 按 TD-072 的规则直接放行 → 限流**永远不生效**。
     // 抓到它的是 `middleware_assembly::the_rate_limit_middleware_is_installed`。
 

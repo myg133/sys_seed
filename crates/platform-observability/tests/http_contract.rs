@@ -23,7 +23,31 @@ use tower::ServiceExt;
 use platform_observability::deprecation::{Deprecation, SUNSET_HEADER, apply_deprecation_router};
 use platform_observability::http::{Page, RateLimitRow, StatusState};
 
-/// 发一个请求，返回（状态码, 头, 体）。
+/// 发一个请求（可带头），返回（状态码, 头, 体）。
+async fn send_with(
+    app: axum::Router,
+    uri: &str,
+    headers: &[(&str, &str)],
+) -> (StatusCode, axum::http::HeaderMap, serde_json::Value) {
+    let mut builder = Request::builder().uri(uri);
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    let request = builder.body(Body::empty()).expect("构造请求");
+    let response = app.oneshot(request).await.expect("应有响应");
+    let status = response.status();
+    let headers = response.headers().clone();
+    let bytes = response
+        .into_body()
+        .collect()
+        .await
+        .expect("读体")
+        .to_bytes();
+    let value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, headers, value)
+}
+
+/// 发一个不带头的请求（大多数用例用这个）。
 async fn send(
     app: axum::Router,
     uri: &str,
@@ -329,4 +353,63 @@ fn the_pagination_envelope_matches_the_audit_field_names() {
     assert_eq!(audit_items_len, 0);
     assert_eq!(audit_total, 0);
     assert!(audit_has_no_next);
+}
+
+// ---------------------------------------------------------------------------
+// AC-S-029 第三处：**失败响应体**里的 trace_id
+// ---------------------------------------------------------------------------
+
+/// **AC-S-029**：失败响应体（`ProblemDetails`）的 `trace_id` **等于** 响应头。
+///
+/// # 为什么这条必须单独验
+///
+/// AC-S-029 要求「日志 / 响应体 / span **三处同一个值**」。
+/// 另外两处（日志、span）已有判据，**这一条补上第三处**：
+/// 用户拿着错误响应里的 `trace_id` 去找日志时，必须**真能对上**。
+///
+/// ⚠️ 若中间件只把 trace_id 写进**头**、没写进 `RequestContext` 的
+/// `ProblemDetails`，这条会红 —— 那正是「看起来贯穿了、实际查不到」的形态。
+#[tokio::test]
+async fn the_error_body_carries_the_same_trace_id_as_the_header() {
+    // 一个总是返回 400 + ProblemDetails 的 handler（模拟业务侧的错误响应）。
+    async fn always_fails(request: axum::extract::Request) -> axum::response::Response {
+        use axum::response::IntoResponse;
+        let ctx = request
+            .extensions()
+            .get::<platform_core::RequestContext>()
+            .cloned()
+            .unwrap_or_else(platform_core::RequestContext::new);
+        let problem = platform_core::problem::ProblemDetails::from_context(
+            "INVALID_REQUEST",
+            platform_core::titles::title_of_code("INVALID_REQUEST"),
+            400,
+            "the request is invalid",
+            &ctx,
+            "/fails",
+            None,
+        );
+        (axum::http::StatusCode::BAD_REQUEST, axum::Json(problem)).into_response()
+    }
+
+    let app: axum::Router = axum::Router::new()
+        .route("/fails", axum::routing::get(always_fails))
+        .layer(axum::middleware::from_fn(
+            platform_observability::trace::middleware::trace_id,
+        ));
+
+    let incoming = "0123456789abcdef0123456789abcdef";
+    let (status, headers, body) = send_with(app, "/fails", &[("x-request-id", incoming)]).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        headers.get("x-request-id").and_then(|v| v.to_str().ok()),
+        Some(incoming),
+        "响应头必须是入站值"
+    );
+    // ⚠️ **第三处**：响应体里的 trace_id 必须与头**逐字相同**。
+    assert_eq!(
+        body.get("trace_id").and_then(|v| v.as_str()),
+        Some(incoming),
+        "失败响应体的 trace_id 必须与响应头相同（否则用户拿它查不到日志）；实际：{body}"
+    );
 }
