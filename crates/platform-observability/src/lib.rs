@@ -26,7 +26,9 @@
 #![warn(clippy::pedantic)]
 #![allow(clippy::module_name_repetitions)]
 
+pub mod deprecation;
 pub mod error;
+pub mod otel;
 pub mod rate_limit;
 pub mod trace;
 
@@ -121,6 +123,51 @@ impl RateLimiter for rate_limit::PgRateLimiter {
         ctx: &'a RequestContext,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + 'a>> {
         Box::pin(async move { rate_limit::PgRateLimiter::is_reachable(self, ctx).await })
+    }
+}
+
+/// 把本需求的中间件挂到一个 router 上（**唯一实现**，main 与测试共用）。
+///
+/// # ⚠️ 为什么要有这个函数（挑刺 M5 的处置）
+///
+/// 6 条 HTTP 级 AC（029/030/031/032/036/037）都依赖「中间件真的挂上了、顺序对」。
+/// 若 `main.rs` 与测试**各写一份装配**，中间件漏装 / 顺序错都能绿 ——
+/// 那正是 `platform-core/src/log.rs:1-20` 写过的教训。
+///
+/// → 装配逻辑**只此一份**：`main.rs` 调它，HTTP 测试也调它。
+///
+/// # 挂载顺序（**不可换**）
+///
+/// ```text
+/// client_info（main.rs，填 IP/UA）
+///   └─ trace_id（本函数：生成/校验 → 开 span → 回写头）
+///        └─ rate_limit（本函数：三级判定）
+///             └─ 业务路由
+/// ```
+///
+/// ⚠️ `trace_id` 必须在 `rate_limit` **之前**：
+/// 否则限流自己打的日志（fail open 的 WARN）没有 trace_id。
+///
+/// # 参数
+///
+/// - `rate_limit`：`None` 表示不启用限流（连中间件都不挂，零开销）
+pub fn apply_observability<S>(
+    router: axum::Router<S>,
+    rate_limit: Option<std::sync::Arc<rate_limit::middleware::RateLimitState>>,
+) -> axum::Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    // ① trace_id（**永远挂**：它没有成本，且是所有排障的基础）。
+    let router = router.layer(axum::middleware::from_fn(trace::middleware::trace_id));
+
+    // ② 限流（可选）。
+    match rate_limit {
+        Some(state) => router.layer(axum::middleware::from_fn_with_state(
+            state,
+            rate_limit::middleware::rate_limit,
+        )),
+        None => router,
     }
 }
 

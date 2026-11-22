@@ -56,6 +56,21 @@ impl RequestContext {
         self
     }
 
+    /// 绑定 trace_id（REQ-019：入站 `X-Request-Id` 沿用时用）。
+    ///
+    /// ⚠️ 只接受**已校验**的值 —— 校验在 `platform-observability::trace`
+    /// 里做（`normalize_trace_id`）。空值忽略（保留自动生成的）。
+    ///
+    /// 为什么不在 core 里做校验：core 是**所有 crate 的依赖**且**只依赖 uuid**，
+    /// 校验规则属于可观测性域的语义 → 放在 `platform-observability`（D343）。
+    pub fn with_trace_id(mut self, trace_id: impl Into<String>) -> Self {
+        let value = trace_id.into();
+        if !value.is_empty() {
+            self.trace_id = value;
+        }
+        self
+    }
+
     /// 绑定空间；空值视为不限空间（`api-conventions v1` C3）。
     pub fn with_space(mut self, space_id: impl Into<String>) -> Self {
         self.space_id = normalize(space_id.into());
@@ -131,8 +146,26 @@ impl RequestContext {
     }
 }
 
+/// 生成 trace_id：**32 位小写 hex**（16 字节随机）。
+///
+/// # ⚠️ REQ-019 D340：格式从「36 字符 uuid」改为「32 hex」
+///
+/// 理由：与 OpenTelemetry 的 `TraceId`（16 字节 / 32 hex）**同构** ——
+/// 否则每次对接都要做一次字符串转换，而且日志里带连字符会让
+/// 运维 `grep` trace 变麻烦。
+///
+/// 这是**对外可见的格式变化**（响应头 `X-Request-Id`、`ProblemDetails.trace_id`、
+/// `/health/*` 的 `traceId` 都会跟着变）→ 属于跨需求改动（D109）。
 fn new_trace_id() -> String {
-    Uuid::new_v4().to_string()
+    // ⚠️ 取 16 字节随机再转 hex（不用 `to_string()` —— 那是带连字符的 36 字符形态）。
+    let bytes = Uuid::new_v4().into_bytes();
+    let mut out = String::with_capacity(32);
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 fn normalize(value: String) -> Option<String> {
@@ -153,7 +186,19 @@ mod tests {
         let ctx = RequestContext::new();
         assert_eq!(ctx.tenant_id(), None);
         assert_eq!(ctx.space_id(), None);
-        assert_eq!(ctx.trace_id().len(), 36, "UUID v4 字符串长度应为 36");
+        // ⚠️ REQ-019 D340：格式从 36 字符 uuid 改为 32 位小写 hex。
+        // 这条断言**必须**同步改 —— 否则改了生成器它就会红（design §12 已点名）。
+        assert_eq!(ctx.trace_id().len(), 32, "trace_id 必须是 32 位 hex");
+        assert!(
+            ctx.trace_id().bytes().all(|b| b.is_ascii_hexdigit()),
+            "trace_id 必须全是 hex：{}",
+            ctx.trace_id()
+        );
+        assert!(
+            !ctx.trace_id().contains('-'),
+            "trace_id 不得含连字符（uuid 形态）：{}",
+            ctx.trace_id()
+        );
     }
 
     #[test]

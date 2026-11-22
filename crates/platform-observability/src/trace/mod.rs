@@ -10,6 +10,8 @@
 //! 且有单测断言 `len()==36`（`context.rs:156`）→ 实现时必须同步改
 //! （`design-summary.md` §12 已点名该测试）。
 
+pub mod middleware;
+
 /// trace_id 的十六进制长度（16 字节 → 32 hex）。
 pub const TRACE_ID_HEX_LEN: usize = 32;
 

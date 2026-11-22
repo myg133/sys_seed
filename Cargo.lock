@@ -2043,6 +2043,7 @@ dependencies = [
  "platform-iam",
  "platform-notify",
  "platform-oauth",
+ "platform-observability",
  "platform-org",
  "platform-rbac",
  "platform-schema",

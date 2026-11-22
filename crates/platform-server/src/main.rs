@@ -230,9 +230,11 @@ fn load_config() -> Result<DeployConfig, Failure> {
 ///
 /// 初始化日志。
 fn init_tracing(level: &str) {
-    tracing_subscriber::fmt()
-        .with_env_filter(log_filter(level))
-        .init();
+    // ⚠️ REQ-019（挑刺 M4）：改用 `platform_core::log::build_subscriber` ——
+    // 生产与测试**共用同一个构造函数**，否则「测试装的日志层」证明不了
+    // 「生产那份会打 trace_id」（本文件上文记的假绿教训）。
+    use tracing_subscriber::util::SubscriberInitExt;
+    platform_core::log::build_subscriber(level, std::io::stdout).init();
 }
 
 /// 加载迁移目录；目录不存在时 fail-fast（readiness 依赖它）。
@@ -715,7 +717,7 @@ async fn serve() -> Result<(), Failure> {
             .await
             .map_err(|err| Failure::Runtime(format!("数据库连接串非法：{err}")))?;
     let i18n_state = Arc::new(platform_server::i18n::I18nState {
-        settings: config_service,
+        settings: config_service.clone(),
         rates: Arc::new(platform_db::fx::FxRateStore::new(fx_db)),
         tokens: config_tokens,
         locales: Arc::new(i18n_locales),
@@ -736,6 +738,16 @@ async fn serve() -> Result<(), Failure> {
     let app = app.layer(axum::middleware::from_fn(
         platform_server::client_info::client_info,
     ));
+
+    // 🔑 REQ-019 可观测性中间件：`trace_id`（必挂）+ 三级限流（可选）。
+    //
+    // ⚠️ 顺序不可换：`client_info` → `trace_id` → `rate_limit` → 业务。
+    // 理由见 `platform_observability::apply_observability` 的文档。
+    //
+    // ⚠️ 限流**默认关闭**（D344）：`rateLimit.enabled` 读不到就是 false →
+    // 中间件直接放行（零查库）。这让现有 1496 个测试不受影响。
+    let rate_limit_state = build_rate_limit_state(&config, config_service.clone()).await;
+    let app = platform_observability::apply_observability(app, rate_limit_state);
 
     let addr = config.socket_addr();
     let listener = tokio::net::TcpListener::bind(addr)
@@ -1147,6 +1159,131 @@ async fn build_storage_state(
         checker: checker as Arc<dyn PermissionChecker>,
         refresher,
     }))
+}
+
+/// REQ-019：构造限流中间件的状态（D337 / D344）。
+///
+/// # ⚠️ 返回 `None` 的语义
+///
+/// 「**连中间件都不挂**」= 永久关闭限流（零开销）。
+/// 只在数据库连不上时发生 —— 而那种情况下服务本身已经起不来，
+/// 所以这条路径实际是防御性的。
+///
+/// # ⚠️ 配置读不到 ≠ 不挂中间件
+///
+/// 配置读不到（键未登记 / 缓存无快照）由 [`PgRateLimitConfig`] 内部
+/// **降级为 `disabled`** → 中间件挂上但直接放行（fail open）。
+/// 两者都要支持：前者省开销，后者让**新建的键**在第一次 refresh 前也能正常工作。
+async fn build_rate_limit_state(
+    config: &DeployConfig,
+    config_service: Arc<platform_config::ConfigService>,
+) -> Option<Arc<platform_observability::rate_limit::middleware::RateLimitState>> {
+    let db = match platform_db::TenantDb::connect(
+        &config.database_url,
+        platform_db::DbOptions::default(),
+    )
+    .await
+    {
+        Ok(db) => db,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "rate limiting is not installed: the database handle could not be built"
+            );
+            return None;
+        }
+    };
+
+    Some(Arc::new(
+        platform_observability::rate_limit::middleware::RateLimitState {
+            limiter: Some(platform_observability::pg_rate_limiter(db)),
+            config: Arc::new(PgRateLimitConfig {
+                service: config_service,
+            }),
+        },
+    ))
+}
+
+/// 从 `platform-config` 读 `rateLimit.*` 的 7 个键（D344）。
+///
+/// # ⚠️ **fail open** 是硬要求（挑刺 M8）
+///
+/// 三种情况都返回 [`RateLimitSettings::disabled()`]，**绝不返回错误**：
+/// ① 键未登记（新建的键在迁移前）；② 缓存快照未 refresh；③ 读库失败。
+///
+/// ⚠️ 若这里返回 `Err` 或 panic，**现有 1496 个测试会集体变红**
+/// （它们的数据库里没有这些键）—— 这是实现阶段最容易踩的坑。
+struct PgRateLimitConfig {
+    service: Arc<platform_config::ConfigService>,
+}
+
+impl platform_observability::rate_limit::middleware::RateLimitConfigSource for PgRateLimitConfig {
+    fn settings<'a>(
+        &'a self,
+        ctx: &'a platform_core::RequestContext,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = platform_observability::rate_limit::RateLimitSettings> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            use platform_observability::rate_limit::{RateLimitSettings, WindowLimit};
+
+            /// 7 个键（与 `manifest.json` 的 `config` 段逐字一致）。
+            const KEYS: [&str; 7] = [
+                "rateLimit.enabled",
+                "rateLimit.tenant.requests",
+                "rateLimit.tenant.windowSeconds",
+                "rateLimit.user.requests",
+                "rateLimit.user.windowSeconds",
+                "rateLimit.endpoint.requests",
+                "rateLimit.endpoint.windowSeconds",
+            ];
+
+            let keys: Vec<String> = KEYS.iter().map(|k| (*k).to_string()).collect();
+            let entries = match self.service.read_platform_entries(ctx, &keys).await {
+                Ok(entries) => entries,
+                Err(err) => {
+                    // ⚠️ **fail open**：读不到 → 不限流（+ 一条 debug，不是 warn ——
+                    // 这在「新键还没迁移」时是**正常状态**，不该刷屏）。
+                    tracing::debug!(
+                        error = %err,
+                        "rate limiting settings are unavailable - failing open (requests are allowed)"
+                    );
+                    return RateLimitSettings::disabled();
+                }
+            };
+
+            // 逐键取值；缺失/类型不符一律用默认（同样是 fail open 的一部分）。
+            let value_of = |key: &str| -> Option<&serde_json::Value> {
+                entries.iter().find(|e| e.key == key).map(|e| &e.value)
+            };
+            let bool_of = |key: &str, default: bool| -> bool {
+                value_of(key)
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(default)
+            };
+            let i64_of = |key: &str, default: i64| -> i64 {
+                value_of(key)
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(default)
+            };
+
+            RateLimitSettings {
+                enabled: bool_of("rateLimit.enabled", false),
+                tenant: WindowLimit {
+                    requests: i64_of("rateLimit.tenant.requests", 0),
+                    window_seconds: i64_of("rateLimit.tenant.windowSeconds", 60).max(1),
+                },
+                user: WindowLimit {
+                    requests: i64_of("rateLimit.user.requests", 0),
+                    window_seconds: i64_of("rateLimit.user.windowSeconds", 60).max(1),
+                },
+                endpoint: WindowLimit {
+                    requests: i64_of("rateLimit.endpoint.requests", 0),
+                    window_seconds: i64_of("rateLimit.endpoint.windowSeconds", 60).max(1),
+                },
+            }
+        })
+    }
 }
 
 /// 文件存储的令牌校验（复用 IAM 的 access token 验签）。

@@ -86,6 +86,41 @@ pub fn log_filter_ignoring_env(level: &str) -> EnvFilter {
     EnvFilter::new(directives.join(","))
 }
 
+/// 构造日志 subscriber（**生产与测试共用的唯一一份**）。
+///
+/// # ⚠️ 为什么要有这个函数（REQ-019 挑刺 M4）
+///
+/// 原来 `init_tracing` 直接 `tracing_subscriber::fmt().init()` ——
+/// **没有 writer 缝**。测试想捕获日志只能自建一个 subscriber，
+/// 那证明的是「测试装的日志层会打 trace_id」，**证明不了生产那份**。
+///
+/// 这正是本文件开头记的教训：`测过的东西与线上跑的不是同一份代码 → 假绿`。
+///
+/// → 把「构造 subscriber」抽出来：生产传 `std::io::stdout`，
+/// 测试传内存 writer，**两者走同一个函数**。
+///
+/// # 参数
+///
+/// - `level`：日志级别（`RUST_LOG` 优先，见 [`log_filter`]）
+/// - `writer`：日志去向（`MakeWriter`）
+///
+/// # ⚠️ 调用方注意
+///
+/// 返回的 subscriber **不**自动全局安装 ——
+/// 生产用 `.init()`，测试用 `tracing::subscriber::with_default(...)`
+/// （⚠️ `with_default` 是**线程局部**的：必须在同一个线程里跑被测代码，
+/// 跨 `.await` 换线程会丢 —— 测试要用 `current_thread` runtime）。
+pub fn build_subscriber<W>(level: &str, writer: W) -> impl tracing::Subscriber + Send + Sync
+where
+    W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Send + Sync + 'static,
+{
+    tracing_subscriber::fmt()
+        .with_env_filter(log_filter(level))
+        .with_ansi(false)
+        .with_writer(writer)
+        .finish()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
