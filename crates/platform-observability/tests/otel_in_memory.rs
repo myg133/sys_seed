@@ -185,3 +185,87 @@ async fn an_invalid_trace_id_is_not_propagated_to_the_span() {
 fn shutdown(provider: SdkTracerProvider) {
     let _ = Arc::new(provider).shutdown();
 }
+
+/// **AC-S-037 步骤 2**：collector **不可达**时，请求**不变慢**。
+///
+/// # 这条判据防的是什么
+///
+/// D339 写的真实风险是「collector 不可达 → 内部重试阻塞 → **请求变慢甚至超时**」。
+/// 只断言「请求照常 200」对延迟**零区分力**（慢 3 秒仍返回 200）。
+///
+/// → 必须断言**时延上界**。
+///
+/// # 机制
+///
+/// 生产用 `with_batch_exporter`（异步 + 有界队列）→ 导出在后台线程，
+/// **不会**阻塞请求。若换成 `with_simple_exporter`（同步导出），
+/// collector 不可达时会等到超时 → 这条红。
+///
+/// ⚠️ 用**同步**测试（不是 `#[tokio::test]`）：里面要自建 runtime 给
+/// `with_default` 的同步闭包用 —— 在已有 runtime 里建 runtime 会 panic。
+#[test]
+fn an_unreachable_collector_does_not_slow_the_requests_down() {
+    use opentelemetry::trace::TracerProvider as _;
+    use std::time::{Duration, Instant};
+
+    // ⚠️ 真 OTLP exporter 指向**本机不可达端口**（127.0.0.1:1）。
+    let config = platform_observability::otel::OtelConfig {
+        disabled: false,
+        endpoint: "http://127.0.0.1:1".to_string(),
+        timeout_seconds: 1,
+    };
+    let guard = platform_observability::otel::init_otel(&config);
+    if !guard.is_enabled() {
+        // 某些平台/版本下构造可能直接失败 → 那也算「不影响业务」，
+        // 但要如实说明这条用例在本环境只验到「不崩」。
+        eprintln!("注：本环境 exporter 构造失败，步骤 2 只验到「不崩」");
+        return;
+    }
+    let provider = guard.provider().expect("已启用必有 provider");
+    let tracer = provider.tracer("latency-test");
+
+    use tracing_subscriber::layer::SubscriberExt;
+    let subscriber = tracing_subscriber::registry()
+        .with(tracing_opentelemetry::layer().with_tracer(tracer));
+
+    let app: Router = Router::new()
+        .route("/probe", get(|| async { "ok" }))
+        .layer(axum::middleware::from_fn(
+            platform_observability::trace::middleware::trace_id,
+        ));
+
+    tracing::subscriber::with_default(subscriber, || {
+        // 同步跑（`with_default` 是线程局部的）。
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("建 runtime");
+        runtime.block_on(async {
+            let mut worst = Duration::ZERO;
+            for index in 0..20 {
+                let request = axum::http::Request::builder()
+                    .uri("/probe")
+                    .header(
+                        "x-request-id",
+                        format!("0000000000000000000000000000000{index}"),
+                    )
+                    .body(Body::empty())
+                    .expect("构造请求");
+                let start = Instant::now();
+                let response = app.clone().oneshot(request).await.expect("应有响应");
+                let elapsed = start.elapsed();
+                worst = worst.max(elapsed);
+
+                assert!(
+                    response.status().is_success(),
+                    "第 {index} 次请求必须成功（导出失败不能影响业务）"
+                );
+            }
+            // ⚠️ 时延上界：单次 < 1 秒（与导出超时 1 秒同量级，但不该被它拖住）。
+            assert!(
+                worst < Duration::from_secs(1),
+                "collector 不可达时单次请求不得慢于 1 秒；实际最慢：{worst:?}"
+            );
+        });
+    });
+}

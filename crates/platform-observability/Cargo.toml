@@ -36,6 +36,8 @@ tracing-opentelemetry.workspace = true
 # ⚠️ `testing` feature 提供 `InMemorySpanExporter` —— AC-S-037 步骤 1
 # 要「看到」span 才能断言它的 trace_id。
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
+# ⚠️ AC-S-034 的「跨 crate 字段名一致」判据要对比 audit 的响应类型。
+platform-audit.workspace = true
 sqlx.workspace = true
 tracing-subscriber.workspace = true
 # 测试要驱动 axum 路由（`ServiceExt::oneshot`），不连网络。

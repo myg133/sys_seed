@@ -1949,6 +1949,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
+ "platform-audit",
  "platform-config",
  "platform-core",
  "platform-db",

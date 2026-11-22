@@ -268,3 +268,65 @@ async fn the_trace_middleware_echoes_a_valid_header_and_replaces_an_invalid_one(
     assert_ne!(echoed, bad, "非法值不得回显");
     assert_eq!(echoed.len(), 32, "必须是新生成的 32 hex");
 }
+
+// ---------------------------------------------------------------------------
+// AC-S-034：**跨 crate** 字段名一致（本 AC 的独特判据）
+// ---------------------------------------------------------------------------
+
+/// **TC-019-043**：新端点与 `platform-audit` 的**分页字段语义对应**。
+///
+/// # 为什么这条判据必须存在
+///
+/// 「契约统一」不是「两个端点各自有自己的分页」——
+/// 而是**调用方能用同一套字段名解析响应**。
+/// 只测一个端点证明不了统一（挑刺 B5 指出 rev 1 的设计里甚至没有第二个端点）。
+///
+/// # ⚠️ 这条断言的能力边界（如实说）
+///
+/// `platform_audit::AuditPage` **没有实现 `Serialize`**（序列化在
+/// `platform-server::audit` 的独立响应类型里做）。
+/// → 无法在**运行时**对比两个 JSON。
+///
+/// 这里做的是**编译期**断言：两个类型都有 `items` / `total` / `next_cursor`
+/// 三个**同名字段**（改名字会编译失败 → 这条红）。
+/// 序列化后的 camelCase 形态（`nextCursor`）由上面
+/// [`the_envelope_uses_camel_case`] 覆盖。
+#[test]
+fn the_pagination_envelope_matches_the_audit_field_names() {
+    // 新端点的信封键集合（运行时序列化）。
+    let ours = serde_json::to_value(Page {
+        items: Vec::<RateLimitRow>::new(),
+        next_cursor: None,
+        total: 0,
+    })
+    .expect("序列化新端点信封");
+    let our_keys: std::collections::BTreeSet<&str> = ours
+        .as_object()
+        .expect("应是对象")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    for field in ["items", "nextCursor", "total"] {
+        assert!(
+            our_keys.contains(field),
+            "新端点缺 `{field}`；实际：{our_keys:?}"
+        );
+    }
+    assert!(
+        !our_keys.contains("next_cursor"),
+        "不得出现 snake_case（D258）"
+    );
+
+    // audit 侧的字段名（**编译期**断言：字段不存在或改名 → 编译失败）。
+    let audit = platform_audit::AuditPage {
+        items: Vec::new(),
+        total: 0,
+        next_cursor: None,
+    };
+    let audit_items_len = audit.items.len();
+    let audit_total = audit.total;
+    let audit_has_no_next = audit.next_cursor.is_none();
+    assert_eq!(audit_items_len, 0);
+    assert_eq!(audit_total, 0);
+    assert!(audit_has_no_next);
+}

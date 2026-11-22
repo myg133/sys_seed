@@ -214,6 +214,36 @@ pub async fn rate_limit_status(
 )]
 pub struct ApiDoc;
 
+/// 就绪探针对**限流存储**的检查（AC-S-038）。
+///
+/// # 返回
+///
+/// - `None`：**不需要检查**（未装配限流器，或 `rateLimit.enabled = false`）
+/// - `Some(true)`：检查通过
+/// - `Some(false)`：限流存储**不可达** → 调用方应返回 503
+///
+/// # ⚠️ 为什么「关闭限流时返回 `None`」
+///
+/// AC-S-038 步骤 4 的判据：**关闭限流的部署不该因为限流表问题而不就绪**。
+/// 「没启用限流」反而更脆弱是荒谬的 —— 这条防止那种实现。
+///
+/// ⚠️ 抽成独立函数是为了**可测**：`main.rs` 的 `ready` handler 里
+/// 内联这段逻辑的话，测试够不着（bin crate 不可引用）。
+pub async fn rate_limit_readiness(
+    state: &Option<Arc<RateLimitState>>,
+    ctx: &RequestContext,
+) -> Option<bool> {
+    let state = state.as_ref()?;
+    // 先看启用状态：未启用 → 不检查。
+    let settings = state.config.settings(ctx).await;
+    if !settings.enabled {
+        return None;
+    }
+    let limiter = state.limiter.as_ref()?;
+    // ⚠️ 用**只读**查询（`is_reachable` 不写行）—— 就绪探针不能污染限流计数。
+    Some(limiter.is_reachable(ctx).await)
+}
+
 /// 路由。
 pub fn router<S>(state: Arc<StatusState>) -> Router<S> {
     Router::new()

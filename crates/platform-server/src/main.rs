@@ -2008,22 +2008,15 @@ async fn ready(State(state): State<Arc<AppState>>) -> Response {
     // ⚠️ 用 sentinel 租户（`_probe`）做**只读**查询：
     // `TenantQuery` 必须有租户，而就绪探针没有真实租户上下文。
     // 只 SELECT 不 INSERT → 不污染任何真实租户的计数。
-    let rate_limit_ok: Option<bool> = match state.rate_limit.get() {
-        Some(Some(rate_limit_state)) => {
-            let probe_ctx = RequestContext::new().with_tenant("_probe");
-            let settings = rate_limit_state.config.settings(&probe_ctx).await;
-            if settings.enabled {
-                match rate_limit_state.limiter.as_ref() {
-                    Some(limiter) => Some(limiter.is_reachable(&probe_ctx).await),
-                    None => None,
-                }
-            } else {
-                // 限流关闭 → 不检查（AC-S-038 步骤 4）。
-                None
-            }
-        }
-        _ => None,
-    };
+    // ⚠️ 逻辑抽在 `platform_observability::http::rate_limit_readiness`
+    // —— 那样才有测试能覆盖它（bin crate 的函数测不着）。
+    let probe_ctx = RequestContext::new().with_tenant("_probe");
+    let rate_limit_slot: Option<Arc<_>> = state.rate_limit.get().cloned().flatten();
+    let rate_limit_ok: Option<bool> = platform_observability::http::rate_limit_readiness(
+        &rate_limit_slot,
+        &probe_ctx,
+    )
+    .await;
 
     if readiness.is_ready() && rate_limit_ok != Some(false) {
         let mut body = serde_json::json!({

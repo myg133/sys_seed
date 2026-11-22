@@ -13,7 +13,9 @@ mod common;
 
 use common::{TENANT_A, TENANT_B, limiter, setup};
 use platform_observability::error::{ObservabilityError, dimension};
-use platform_observability::rate_limit::{WindowLimit, bucket_key};
+use platform_core::RequestContext;
+use platform_observability::rate_limit::{RateLimitSettings, WindowLimit, bucket_key};
+use std::sync::Arc;
 
 /// 便利：构造一个「每 window 允许 n 次」的维度配置。
 fn limit(n: i64, window: i64) -> WindowLimit {
@@ -482,4 +484,105 @@ async fn row_level_security_hides_other_tenants_rows() {
             .expect("计数");
         assert_eq!(visible, 1, "{tenant} 应只看到自己的 1 行");
     }
+}
+
+// ---------------------------------------------------------------------------
+// AC-S-038：就绪探针的限流检查
+// ---------------------------------------------------------------------------
+
+/// **TC-019-064 / 066**：启用时限流可达 → `Some(true)`；**关闭时 → `None`**（不检查）。
+///
+/// ⚠️ 第二条是关键判据：**关闭限流的部署不该因为限流表问题而不就绪** ——
+/// 否则「没启用限流」反而更脆弱（AC-S-038 步骤 4）。
+#[tokio::test]
+async fn the_readiness_check_is_conditional_on_the_enabled_flag() {
+    use platform_observability::http::rate_limit_readiness;
+    use platform_observability::rate_limit::middleware::{
+        RateLimitConfigSource, RateLimitState, StaticConfig,
+    };
+
+    let f = setup().await;
+    f.truncate().await;
+
+    let ctx = f.ctx_a();
+    let limiter = Arc::new(limiter(f.db.clone()));
+
+    // ① 启用 + 表可达 → Some(true)。
+    let enabled = RateLimitState {
+        limiter: Some(limiter.clone()),
+        config: Arc::new(StaticConfig(RateLimitSettings {
+            enabled: true,
+            tenant: WindowLimit {
+                requests: 5,
+                window_seconds: 60,
+            },
+            user: WindowLimit {
+                requests: 0,
+                window_seconds: 60,
+            },
+            endpoint: WindowLimit {
+                requests: 0,
+                window_seconds: 60,
+            },
+        })),
+    };
+    assert_eq!(
+        rate_limit_readiness(&Some(Arc::new(enabled)), &ctx).await,
+        Some(true),
+        "启用且可达时必须报 ok"
+    );
+
+    // ② **关闭** → None（不检查，AC-S-038 步骤 4）。
+    let disabled = RateLimitState {
+        limiter: Some(limiter.clone()),
+        config: Arc::new(StaticConfig(RateLimitSettings::disabled())),
+    };
+    assert_eq!(
+        rate_limit_readiness(&Some(Arc::new(disabled)), &ctx).await,
+        None,
+        "关闭限流时**不该**检查限流表（否则关闭反而更脆弱）"
+    );
+
+    // ③ 未装配 limiter → None。
+    let no_limiter = RateLimitState {
+        limiter: None,
+        config: Arc::new(StaticConfig(RateLimitSettings {
+            enabled: true,
+            tenant: WindowLimit {
+                requests: 5,
+                window_seconds: 60,
+            },
+            user: WindowLimit {
+                requests: 0,
+                window_seconds: 60,
+            },
+            endpoint: WindowLimit {
+                requests: 0,
+                window_seconds: 60,
+            },
+        })),
+    };
+    assert_eq!(
+        rate_limit_readiness(&Some(Arc::new(no_limiter)), &ctx).await,
+        None,
+        "没有 limiter 时不必检查"
+    );
+
+    // ④ 整个 state 缺失 → None。
+    assert_eq!(rate_limit_readiness(&None, &ctx).await, None);
+
+    // ⑤ 就绪检查**不写行**（不污染限流计数）。
+    let rows = f.query_i64("SELECT count(*) FROM platform_rate_limit").await;
+    assert_eq!(rows, 0, "就绪检查不得写行");
+}
+
+/// 配置源 trait 在测试里可用（`StaticConfig` 是公开的）。
+#[tokio::test]
+async fn the_static_config_source_is_usable_from_tests() {
+    use platform_observability::rate_limit::middleware::RateLimitConfigSource;
+    let source = platform_observability::rate_limit::middleware::StaticConfig(
+        RateLimitSettings::disabled(),
+    );
+    let ctx = RequestContext::new();
+    assert!(!source.settings(&ctx).await.enabled);
 }
