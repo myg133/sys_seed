@@ -52,6 +52,12 @@ platform-observability.workspace = true
 # 装配层直接依赖是因为 `#[utoipa::path]` 要挂在**这里的 handler** 上
 # （派生宏必须与被标注的代码在同一个 crate）。
 utoipa.workspace = true
+# ⚠️ REQ-019 TD-074：装配层要直接挂 `tracing_opentelemetry` 的 span 层
+# （`platform-core` 不能依赖 opentelemetry，见 `init_tracing` 的文档）。
+# 这些包已在 lock 里（经 platform-observability），**不新增**。
+opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
+tracing-opentelemetry.workspace = true
 # 审计记录的时间戳格式化（UTC、微秒 6 位 —— D142 / D144）
 time.workspace = true
 # 业务模块装配（REQ-012 D103）：编译期注册的模块必须在**装配层**被链接进来，

@@ -1580,6 +1580,8 @@ dependencies = [
  "percent-encoding",
  "rand 0.9.5",
  "thiserror 2.0.21",
+ "tokio",
+ "tokio-stream",
 ]
 
 [[package]]
@@ -2035,6 +2037,8 @@ dependencies = [
  "clap",
  "http-body-util",
  "jsonwebtoken",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "platform-app",
  "platform-audit",
  "platform-config",
@@ -2058,6 +2062,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "tracing-opentelemetry",
  "tracing-subscriber",
  "utoipa",
  "uuid",

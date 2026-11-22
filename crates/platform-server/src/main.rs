@@ -234,13 +234,55 @@ fn load_config() -> Result<DeployConfig, Failure> {
 /// 形态是「全局默认级别 + 噪音库降级」，**新增 crate 不需要改清单**。
 /// 实现与守护测试见 `crates/platform-core/src/log.rs`。
 ///
-/// 初始化日志。
-fn init_tracing(level: &str) {
-    // ⚠️ REQ-019（挑刺 M4）：改用 `platform_core::log::build_subscriber` ——
-    // 生产与测试**共用同一个构造函数**，否则「测试装的日志层」证明不了
-    // 「生产那份会打 trace_id」（本文件上文记的假绿教训）。
+/// 初始化日志（并在有 OTel provider 时挂上 span 层）。
+///
+/// # ⚠️ 为什么这里能挂 OTel layer 而 `platform-core` 不能（TD-074）
+///
+/// `platform-core` **不依赖** `opentelemetry`（否则每个 crate 都编译它，D343）。
+/// 而泛型的 `Option<L>` 方案编译不过：两个分支要返回**同一类型**，
+/// 但 `Layered<L, Layered<FmtLayer<W>, Registry>>` 与
+/// `Layered<FmtLayer<W>, Registry>` 是不同类型。
+///
+/// → 在**这里**（`platform-server`，它同时依赖 core 与 observability）
+/// 用**两个分支各自 `.init()`** 解决 —— `.init()` 消费 self、返回 `()`，
+/// 所以两条路径不必类型相同。
+///
+/// # 参数
+///
+/// - `level`：日志级别（`RUST_LOG` 优先）
+/// - `otel_provider`：`Some` → 挂 span 层（span 会被导出）；`None` → 只打日志
+fn init_tracing(level: &str, otel_provider: Option<&opentelemetry_sdk::trace::SdkTracerProvider>) {
+    use opentelemetry::trace::TracerProvider as _;
+    use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
-    platform_core::log::build_subscriber(level, std::io::stdout).init();
+
+    // ⚠️ 过滤器与格式化层**仍然来自 `platform-core`**（挑刺 M4）：
+    // 日志过滤逻辑只有一份，测试与生产共用。
+    let filter = platform_core::log::log_filter(level);
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_writer(std::io::stdout);
+
+    match otel_provider {
+        Some(provider) => {
+            // ⚠️ 这里挂 `tracing_opentelemetry` 的 layer → `tracing` 的 span
+            // 会被转成 OTel span 并批量导出（AC-S-037 步骤 1 的前提）。
+            let otel_layer = tracing_opentelemetry::layer()
+                .with_tracer(provider.tracer("base"));
+            tracing_subscriber::registry()
+                .with(fmt_layer)
+                .with(otel_layer)
+                .with(filter)
+                .init();
+        }
+        None => {
+            // 未启用 OTel → 与 `build_subscriber` 等价（不挂 span 层）。
+            tracing_subscriber::registry()
+                .with(fmt_layer)
+                .with(filter)
+                .init();
+        }
+    }
 }
 
 /// 加载迁移目录；目录不存在时 fail-fast（readiness 依赖它）。
@@ -253,9 +295,9 @@ async fn load_migrator(dir: &str) -> Result<Migrator, Failure> {
 /// 启动服务。
 async fn serve() -> Result<(), Failure> {
     let config = load_config()?;
-    init_tracing(&config.log_level);
 
-    // 🔑 REQ-019（AC-S-037）：初始化 OpenTelemetry。
+    // 🔑 REQ-019（AC-S-037）：**先**初始化 OpenTelemetry，**再**初始化日志
+    // —— 日志的 subscriber 要挂 OTel 的 span 层（顺序不可换）。
     //
     // ⚠️ `guard` 必须活到进程结束 —— 提前 drop 会让批量导出器停止，
     // 最后一批 span 丢失。
@@ -265,6 +307,7 @@ async fn serve() -> Result<(), Failure> {
     let _otel_guard = platform_observability::otel::init_otel(
         &platform_observability::otel::OtelConfig::from_env(),
     );
+    init_tracing(&config.log_level, _otel_guard.provider());
 
     let migrator = Arc::new(load_migrator(&config.migrations_dir).await?);
     let pool = db::pool(&config.database_url, db::DEFAULT_MAX_CONNECTIONS)
@@ -1873,9 +1916,9 @@ async fn reconcile_permissions(
 /// 连接串用**迁移（管理员）连接** —— 建策略需要表的属主权限。
 async fn run_tenant_policies(check: bool, manifest_root: Option<String>) -> Result<(), Failure> {
     let config = load_config()?;
-    init_tracing(&config.log_level);
 
-    // 🔑 REQ-019（AC-S-037）：初始化 OpenTelemetry。
+    // 🔑 REQ-019（AC-S-037）：**先**初始化 OpenTelemetry，**再**初始化日志
+    // —— 日志的 subscriber 要挂 OTel 的 span 层（顺序不可换）。
     //
     // ⚠️ `guard` 必须活到进程结束 —— 提前 drop 会让批量导出器停止，
     // 最后一批 span 丢失。
@@ -1885,6 +1928,7 @@ async fn run_tenant_policies(check: bool, manifest_root: Option<String>) -> Resu
     let _otel_guard = platform_observability::otel::init_otel(
         &platform_observability::otel::OtelConfig::from_env(),
     );
+    init_tracing(&config.log_level, _otel_guard.provider());
 
     let root = manifest_root.unwrap_or_else(|| config.manifest_root.clone());
     policies::run(&root, &config.database_url, check)
@@ -1895,9 +1939,9 @@ async fn run_tenant_policies(check: bool, manifest_root: Option<String>) -> Resu
 /// 执行迁移子命令。
 async fn run_migrate(action: MigrateAction) -> Result<(), Failure> {
     let config = load_config()?;
-    init_tracing(&config.log_level);
 
-    // 🔑 REQ-019（AC-S-037）：初始化 OpenTelemetry。
+    // 🔑 REQ-019（AC-S-037）：**先**初始化 OpenTelemetry，**再**初始化日志
+    // —— 日志的 subscriber 要挂 OTel 的 span 层（顺序不可换）。
     //
     // ⚠️ `guard` 必须活到进程结束 —— 提前 drop 会让批量导出器停止，
     // 最后一批 span 丢失。
@@ -1907,6 +1951,7 @@ async fn run_migrate(action: MigrateAction) -> Result<(), Failure> {
     let _otel_guard = platform_observability::otel::init_otel(
         &platform_observability::otel::OtelConfig::from_env(),
     );
+    init_tracing(&config.log_level, _otel_guard.provider());
 
     let migrator = load_migrator(&config.migrations_dir).await?;
     let pool = db::migration_pool(&config.database_url)

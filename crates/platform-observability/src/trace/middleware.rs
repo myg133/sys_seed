@@ -65,6 +65,19 @@ pub async fn trace_id(request: Request, next: Next) -> Response {
         path = %request.uri().path(),
     );
 
+    // 🔑 **AC-S-029 步骤 5 的关键一步**：把入站的 `X-Request-Id` 设成
+    // 这个 span 的 **OTel 远端父上下文**。
+    //
+    // ⚠️ 不做这一步的话，`tracing_opentelemetry` 会**自己生成**一个 trace_id
+    // → span 的 trace_id 与响应头的 `X-Request-Id` **必然不等** → 判据红。
+    //
+    // ⚠️ 没有挂 OTel layer 时 `set_parent` 是 **no-op**（不会报错）——
+    // 所以这条调用在「未启用 OTel」的部署里是安全的。
+    if let Some(context) = crate::otel::context_from_trace_id(&resolved) {
+        use tracing_opentelemetry::OpenTelemetrySpanExt;
+        span.set_parent(context);
+    }
+
     use tracing::Instrument;
     let mut response = next.run(request).instrument(span).await;
 
