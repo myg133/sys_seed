@@ -158,7 +158,30 @@ rev 1 的 AC-S-031 步骤 4 断言「`user-b` 打同一端点仍 200」，
 | `default-features = false, features = ["http-proto"]` | **18** | 仍含 `tonic`（`opentelemetry-proto` 默认拉 gRPC） |
 | 再加 `with-serde` | **27** | 额外拉 `proptest`（测试框架，生产不需要） |
 
-→ **最省 18 个**。用户裁定：**接受 18~27 的代价，真接**。
+→ **最省 18 个**（评测时用 `generate-lockfile` 单测）。用户裁定：**接受代价，真接**。
+
+### ⚠️ rev 2 实测修正：真实净增是 **24 个第三方包**，不是 18
+
+**实测**（本分支 vs `develop` @ `0b9697b`）：基线 **329 包** → 本分支 **360 包**，
+净增 **25**，其中第三方 **24**（25 减去 `platform-observability` 自身）。
+
+**净增的 24 个**：`opentelemetry` / `opentelemetry_sdk` / `opentelemetry-otlp` /
+`opentelemetry-proto` / `opentelemetry-http` / `tracing-opentelemetry` /
+`prost` / `prost-derive` / `tonic` / `tonic-prost` / `reqwest` / `tower-http` /
+`ipnet` / `regex` / `itertools` / `pin-project` / `pin-project-internal` /
+`wasip2` / `wasm-bindgen-futures` / `web-sys` / `web-time` / `wit-bindgen`，
+加上 D338 的 `utoipa` / `utoipa-gen`。
+
+**为什么比预测的 18 多 6 个**：
+1. `opentelemetry-proto` 即使只开 `http-proto` **仍然拉 `tonic` + `tonic-prost`**
+   （它的默认 feature 带 gRPC 消息类型）；
+2. `reqwest` 拉入 `tower-http` / `ipnet` / `web-sys` / `wasm-bindgen-futures` /
+   `web-time` / `wasip2` / `wit-bindgen`；
+3. `utoipa-gen` 拉 `regex` + `itertools`。
+
+⚠️ **改 `reqwest-client` ↔ `reqwest-blocking-client` 对包数无影响**（实测都是 360）。
+
+→ **D275 再次应验**：规格里的预览数字只能作量级参考，**必须以实现时实测为准**。
 
 ### 决定
 

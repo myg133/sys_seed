@@ -1348,3 +1348,48 @@ Sprint 3 复盘的第 2 条教训：**修漏洞会制造新漏洞** —— 但�
     `X-Forwarded-For` 的可信边界是另一个问题（不能盲信）。
 - **优先级**: **P1**（未认证端点是攻击面最集中的地方；
   虽然 IAM 有兜底，但覆盖不全）
+
+---
+
+## TD-073: REQ-019 的 OpenAPI **只覆盖部分端点**
+
+- **发现于**: REQ-019 实现阶段
+- **现状**: `cargo xtask openapi` 能生成合法的 OpenAPI 3.1.0 产物，
+  `--check` 逐字节比对（阳性对照已验证：篡改产物 → 退出码 1）。
+  **但产物里只有 1 个端点**：`/api/observability/rate-limit/status`。
+- **原因**: `#[utoipa::path]` 必须挂在**被标注的 handler 所在 crate** 上，
+  且该 crate 要能被 `xtask` 依赖。当前架构约束（D103「平台 crate 不依赖业务模块」）
+  让 `xtask` **不能**依赖 `platform-server`（那会间接依赖 `sandbox`）。
+  → 只有放在 `platform-observability` 里的端点能被标注。
+- **影响**: 产物是**部分**文档，不覆盖 `platform-app` / `rbac` / `audit` / `iam` 等
+  100+ 个端点。AC-S-035 的「paths 含 `/api/rbac/roles`」这类判据**未达成**。
+- **要做需要什么**（两条路）:
+  1. **给各 crate 加 `utoipa` 依赖 + 标注**，然后让 xtask 通过
+     「各 crate 导出的 `openapi_fragment()`」汇总 —— 不引入 server 依赖，
+     但要在 8+ 个 crate 里逐个标注（工作量大，且改已验收 crate 源码）；
+  2. **把 OpenAPI 生成移到一个独立的 bin**（`platform-server/src/bin/openapi.rs`），
+     xtask 用 `cargo run --bin` 调它 —— 绕开依赖约束，但引入进程间调用。
+- **优先级**: **P2**（机制已成立且可回归；覆盖面是渐进的事）
+
+---
+
+## TD-074: REQ-019 的 OTel **span layer 未挂进 subscriber**
+
+- **发现于**: REQ-019 实现阶段
+- **现状**: `init_otel` 能初始化 `SdkTracerProvider`（`is_enabled()` 可测、
+  `OTEL_SDK_DISABLED=true` 时正确关闭）；`remote_span_context` 能把入站
+  `X-Request-Id` 转成 OTel 的远端父上下文（含两个实测踩坑的修正）。
+  **但 `tracing_opentelemetry` 的 layer 没有挂进 subscriber** ——
+  因为 `platform-core::log` **不能依赖 `opentelemetry`**
+  （否则每个 crate 都编译 OTel，D343 明确避免）。
+- **尝试过什么**: 加过 `build_subscriber_with_layer<W, L>(level, writer, Option<L>)`，
+  但泛型约束无法同时满足「`Option<L>` 两个分支返回同一类型」与
+  「`L: Layer<Layered<FmtLayer<W>, Registry>>`」→ 编译不过，已回退。
+- **影响**: **AC-S-037 步骤 1（span 的 trace_id 等于响应头 X-Request-Id）未达成**
+  —— 没有 layer 就不会有 span 被导出。步骤 2/3（失败不崩、可关闭）已达成。
+- **要做需要什么**: 在 `platform-server` 里直接构造 subscriber
+  （它同时依赖 core 与 observability），
+  用 `tracing_subscriber::registry().with(fmt_layer).with(otel_layer).with(env_filter)`，
+  并把 trace 中间件里的 `tracing::info_span!` 换成
+  `tracer.build_with_context(..., &remote_parent)` 的形式。
+- **优先级**: **P1**（这是 AC-S-037 的核心判据；当前「接了一半」）
