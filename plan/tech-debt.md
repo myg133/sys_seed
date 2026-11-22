@@ -1260,3 +1260,40 @@ Sprint 3 复盘的第 2 条教训：**修漏洞会制造新漏洞** —— 但�
   引号未闭合 → `error = "…a quoted field starting at line 3 is never closed"`；
   单行超限 → `error = "…the line 3 exceeds the maximum row size of 40 bytes"`。
 - **状态**: ✅ 关闭（裁决 + 规格 + 决策记录已落盘；无需改代码）
+
+---
+
+## TD-069: REQ-019 的 OTel **真导出无法端到端验证**
+
+- **发现于**: REQ-019 规格阶段
+- **现状**: 接入了 OTLP（HTTP/protobuf）导出，但本机**没有 OTel collector**
+  （`podman ps` 只有 postgres / redis）→ 只能验：
+  ① 配置生效；② span 结构（`trace_id` / `span_id` / 父子层级）；
+  ③ **导出失败不影响业务**；④ `OTEL_SDK_DISABLED=true` 时不初始化。
+  **无法验**「span 真的到了 Jaeger/Tempo 并且能串成完整链路」。
+- **原因**: 无 collector 环境。起一个 collector 需要额外镜像 + 配置文件，
+  且即便起来了，也只是验「本地 collector 收到了」，
+  与真生产的采样率 / 批量 / 重试行为仍有差距。
+- **影响**: AC-S-037 的四条判据都是「可验证的部分」，**不声称**验过真导出。
+  若线上 collector 配置错误（endpoint 写错、协议不匹配），**测试不会红**。
+- **要做需要什么**: 在 CI 或部署环境起一个 `otel/opentelemetry-collector` 容器，
+  配 `debug` exporter，断言它收到了指定 `trace_id` 的 span。
+- **优先级**: **P2**（当前的判据已覆盖「不影响业务」这个最大风险；
+  真导出属于部署验证）
+
+---
+
+## TD-070: REQ-019 的分页契约只做**样板**，其余 crate 未迁移
+
+- **发现于**: REQ-019 规格阶段（D341）
+- **现状**: 统一契约（`items` / `nextCursor` / `total` + `limit` / `cursor`）只在
+  `platform-audit` 对齐 + 新增端点使用。其余 crate 的列表端点仍是各自的老形态：
+  `platform-app`（12 处）、`platform-iam`（23 处）、`platform-notify`（6 处）、
+  `platform-storage`（4 处）；**`platform-rbac` 与 `platform-org` 完全没有分页**。
+- **原因**: 改所有列表端点属**跨需求改动**（D109）—— 会影响已验收的 19 个子需求的
+  响应契约与前端代码。一次改完风险太大，且与本需求「API 治理」的目标不成比例。
+- **影响**: 前端要按端点分别处理分页；`rbac` / `org` 的列表在数据量大时会**全量返回**
+  （性能问题，不是正确性问题）。
+- **要做需要什么**: 逐 crate 迁移，每个 crate 一批（改响应结构 + 改前端 + 改测试）。
+  建议按实际数据量排优先级（`iam` 的用户列表最可能先撑不住）。
+- **优先级**: **P1**（`rbac` / `org` 的「完全没有分页」在大数据量下会直接出问题）
