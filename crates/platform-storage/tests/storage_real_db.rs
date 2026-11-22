@@ -640,7 +640,11 @@ async fn all_five_tables_are_isolated_by_tenant() {
     let fixture = setup().await;
 
     // 两个租户各造 1 个对象 + 1 个任务 + 1 条错误回执（管理员连接绕过 RLS）。
-    for tenant in [TENANT_A, TENANT_B] {
+    // ⚠️ 用**本二进制专属**的租户名（见 `common::tenant_a()`）——
+    // 多个测试文件共享同一个库，硬编码 `tenant-a` 会互相污染。
+    let tenant_a = common::tenant_a();
+    let tenant_b = common::tenant_b();
+    for tenant in [tenant_a.as_str(), tenant_b.as_str()] {
         fixture
             .exec(&format!(
                 "INSERT INTO platform_storage_object \
@@ -691,7 +695,7 @@ async fn all_five_tables_are_isolated_by_tenant() {
         .expect("读对象");
     assert_eq!(objects.len(), 1, "对象表：tenant-a 只应看到 1 行");
     assert!(
-        objects.iter().all(|o| o.tenant_id == TENANT_A),
+        objects.iter().all(|o| o.tenant_id == tenant_a),
         "对象表的 tenantId 必须全是 tenant-a"
     );
 
@@ -702,7 +706,7 @@ async fn all_five_tables_are_isolated_by_tenant() {
         .expect("读任务");
     assert_eq!(jobs.len(), 1, "任务表：只应看到 1 行");
     assert!(
-        jobs.iter().all(|j| j.tenant_id == TENANT_A),
+        jobs.iter().all(|j| j.tenant_id == tenant_a),
         "任务表的 tenantId 必须全是 tenant-a"
     );
 
@@ -714,7 +718,7 @@ async fn all_five_tables_are_isolated_by_tenant() {
         .expect("读回执");
     assert_eq!(errors.len(), 1, "错误回执表：只应看到 1 行");
     assert!(
-        errors.iter().all(|e| e.tenant_id == TENANT_A),
+        errors.iter().all(|e| e.tenant_id == tenant_a),
         "错误回执表的 tenantId 必须全是 tenant-a"
     );
 
@@ -738,7 +742,7 @@ async fn all_five_tables_are_isolated_by_tenant() {
         .expect("读上传会话");
     assert_eq!(uploads.len(), 1, "上传会话表：只应看到 1 行");
     assert!(
-        uploads.iter().all(|u| u.tenant_id == TENANT_A),
+        uploads.iter().all(|u| u.tenant_id == tenant_a),
         "上传会话表的 tenantId 必须全是 tenant-a"
     );
 
@@ -750,11 +754,22 @@ async fn all_five_tables_are_isolated_by_tenant() {
         .list_probe_rows(&fixture.ctx_a(), None)
         .await
         .expect("读目标实体表");
-    assert_eq!(probe_rows.len(), 1, "目标实体表：tenant-a 只应看到 1 行");
-    assert_eq!(
-        probe_rows[0].email,
-        format!("p-{TENANT_A}@example.com"),
-        "目标实体表只应返回 tenant-a 的行（不能看到 tenant-b 的 p-tenant-b@...）"
+    // ⚠️ 判据写成「**看不到 tenant-b 的那一行**」而不是「恰好 1 行」：
+    // 这条测试断言的是**租户隔离**，与「本测试造了几行」无关。
+    // 写成「恰好 1 行」会把判据绑到「此刻表里只有我造的数据」这个
+    // **与本测试无关的前提**上 —— 别的测试二进制并发插一行就会红，
+    // 而那并不代表隔离失败（假失败）。真正的隔离判据是「看不到别人的数据」。
+    assert!(
+        probe_rows
+            .iter()
+            .any(|r| r.email == format!("p-{tenant_a}@example.com")),
+        "目标实体表必须能看到 tenant-a 自己造的行；实际：{probe_rows:?}"
+    );
+    assert!(
+        !probe_rows
+            .iter()
+            .any(|r| r.email == format!("p-{tenant_b}@example.com")),
+        "目标实体表**绝不能**出现 tenant-b 的行（RLS 失效）；实际：{probe_rows:?}"
     );
 }
 
@@ -1088,4 +1103,72 @@ async fn row_numbers_stay_correct_when_the_file_contains_blank_lines() {
         .await
         .expect("数目标表");
     assert_eq!(stored, 2, "2 个合法行入库");
+}
+
+/// **AC-S-177 步骤 7**（复核 F-18）：`abort` 之后 `complete` → **404**（会话已不存在）。
+///
+/// # 为什么这条判据重要
+///
+/// 「中止后还能 complete」意味着**用户以为已经取消的上传，仍可能被补齐并落库** ——
+/// 那是一个可被利用的状态漏洞（攻击者在你 abort 后继续 complete 偷运文件）。
+///
+/// # 判据
+///
+/// abort **204 / Ok**，之后 complete 必须报「会话不存在」，且**不落任何对象**。
+#[tokio::test]
+async fn completing_after_abort_reports_the_session_is_gone() {
+    let fixture = setup().await;
+    let ctx = fixture.ctx_a();
+
+    let session = fixture
+        .service
+        .create_upload(
+            &ctx,
+            &platform_storage::model::CreateUploadBody {
+                object_key: "aborted.bin".to_string(),
+                total_parts: 2,
+                part_size: 512,
+                checksum: None,
+            },
+        )
+        .await
+        .expect("建会话");
+    for n in [1u32, 2] {
+        fixture
+            .service
+            .upload_part(&ctx, &session.upload_id, n, Bytes::from_static(b"x"))
+            .await
+            .expect("传片");
+    }
+
+    // abort 成功（HTTP 层是 204；service 层返回 Ok）。
+    fixture
+        .service
+        .abort_upload(&ctx, &session.upload_id)
+        .await
+        .expect("abort 应当成功");
+
+    // 之后 complete → 会话已不在可用状态 → 报「找不到」。
+    let err = fixture
+        .service
+        .complete_upload(&ctx, &session.upload_id, None)
+        .await
+        .expect_err("abort 之后 complete 必须失败");
+    assert_eq!(
+        err.code(),
+        "STORAGE_OBJECT_NOT_FOUND",
+        "中止后的会话再 complete 必须报「会话不存在」（不是成功）"
+    );
+
+    // ⚠️ **对象绝不落库**（否则 abort 语义就是假的）。
+    let stored = fixture
+        .query_i64("SELECT count(*) FROM platform_storage_object WHERE object_key = 'aborted.bin'")
+        .await;
+    assert_eq!(stored, 0, "abort 之后不得落任何对象");
+
+    // 状态停在 aborted。
+    let status = fixture
+        .query_text("SELECT status FROM platform_storage_upload WHERE object_key = 'aborted.bin'")
+        .await;
+    assert_eq!(status, vec!["aborted".to_string()]);
 }

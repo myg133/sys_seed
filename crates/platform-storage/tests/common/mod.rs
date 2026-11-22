@@ -26,11 +26,51 @@ use platform_storage::store::StorageStore;
 
 /// 主测试租户。
 pub const TENANT_A: &str = "tenant-a";
+
+/// **本测试二进制专属的租户后缀**（防止多个测试文件互相污染）。
+///
+/// # 为什么需要这个
+///
+/// `cargo test -p platform-storage --all-targets` 会让
+/// `contract_c5` / `storage_audit` / `storage_http` / `storage_real_db`
+/// **四个测试二进制并行跑**，它们共享同一个 `base_test` 库。
+///
+/// 若都用 `tenant-a`，那么「A 二进制调 `setup()` 清表」会把
+/// 「B 二进制刚插入的数据」一起清掉 → 症状是「单独跑全绿、一起跑随机红」。
+///
+/// → 每个二进制用自己的租户名（`tenant-a@storage_real_db` 这种），
+/// 数据天然不相交，清表也只清自己的。
+///
+/// ⚠️ 租户名带 `@` 不影响任何逻辑：`tenant_id` 是 `TEXT`，
+/// 且所有查询都走 `TenantQuery` 的 `{tenant}` 绑定（不是字符串拼接）。
+pub fn tenant_suffix() -> &'static str {
+    // `module_path!()` 在集成测试里是 crate 名，即测试文件名。
+    // 例：`storage_real_db` / `storage_http` / `storage_audit` / `contract_c5`。
+    // 用 `concat!` 做不到运行期取，所以用 `std::env!` 的 `CARGO_CRATE_NAME`。
+    env!("CARGO_CRATE_NAME")
+}
+
+/// 本二进制在 `tenant-a` 角色下的**实际**租户名。
+pub fn tenant_a() -> String {
+    format!("{TENANT_A}@{}", tenant_suffix())
+}
+
+/// 本二进制在 `tenant-b` 角色下的**实际**租户名。
+pub fn tenant_b() -> String {
+    format!("{TENANT_B}@{}", tenant_suffix())
+}
 /// 跨租对照租户。
 pub const TENANT_B: &str = "tenant-b";
 
 /// 部署准备用的 advisory lock 键（与其它 crate 不同，避免互相阻塞）。
 pub const SETUP_LOCK: i64 = 6_018_018;
+
+/// **进程内**的「部署已完成」标记。
+///
+/// 迁移与 RLS 策略是**全库**操作（不是按租户的），同进程内重复执行毫无收益，
+/// 却会在并发的 `setup()` 之间互相干扰（一个在重建 policy，另一个正在查询）。
+/// → 每个测试二进制只做一次。
+static DEPLOYED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 
 /// 仓库根目录。
 pub fn repo_root() -> PathBuf {
@@ -211,14 +251,14 @@ pub struct Fixture {
 }
 
 impl Fixture {
-    /// `tenant-a` 的上下文。
+    /// `tenant-a` 的上下文（**本二进制专属**，见 `tenant_a()`）。
     pub fn ctx_a(&self) -> RequestContext {
-        RequestContext::new().with_tenant(TENANT_A)
+        RequestContext::new().with_tenant(tenant_a())
     }
 
-    /// `tenant-b` 的上下文。
+    /// `tenant-b` 的上下文（**本二进制专属**，见 `tenant_b()`）。
     pub fn ctx_b(&self) -> RequestContext {
-        RequestContext::new().with_tenant(TENANT_B)
+        RequestContext::new().with_tenant(tenant_b())
     }
 
     /// 直接执行一条 SQL（造数 / 断言）。
@@ -292,44 +332,59 @@ pub async fn setup() -> Fixture {
         .expect("应当能拿到部署锁");
 
     // 1) 应用角色。
+    //
+    // ⚠️ 从这里到「RLS 策略」都是**全库**操作 → 用 `OnceLock` 保证每个
+    // 测试二进制只做一次（同进程内并发调 `setup()` 时互不干扰）。
+    let already_deployed = DEPLOYED.get().is_some();
     let role_sql = read_file(&root.join("deploy/seed/02-app-role.sql"));
-    sqlx::raw_sql(&role_sql)
-        .execute(&mut *conn)
-        .await
-        .expect("应用角色准备失败");
+    if !already_deployed {
+        sqlx::raw_sql(&role_sql)
+            .execute(&mut *conn)
+            .await
+            .expect("应用角色准备失败");
 
-    // 2) 迁移（含本需求的 3 组）。
-    let mut migrator = sqlx::migrate::Migrator::new(root.join("migrations"))
-        .await
-        .expect("迁移目录应可读");
-    migrator.set_ignore_missing(true);
-    migrator.run(&mut *conn).await.expect("迁移应能应用");
+        // 2) 迁移（含本需求的 4 组）。
+        let mut migrator = sqlx::migrate::Migrator::new(root.join("migrations"))
+            .await
+            .expect("迁移目录应可读");
+        migrator.set_ignore_missing(true);
+        migrator.run(&mut *conn).await.expect("迁移应能应用");
 
-    // 3) RLS 策略（只看本需求的 4 张表）。
-    let admin_db = TenantDb::from_pool(admin_pool.clone(), DbOptions::default());
-    for scope in collect_scopes(&root).expect("作用域收集应成功") {
-        if scope
-            .spec
-            .tables
-            .iter()
-            .any(|t| t.starts_with("platform_storage_"))
-        {
-            apply_policies(&admin_db, &scope.spec)
-                .await
-                .expect("storage 表的 RLS 策略应能应用");
+        // 3) RLS 策略（只看本需求的表）。
+        let admin_db = TenantDb::from_pool(admin_pool.clone(), DbOptions::default());
+        for scope in collect_scopes(&root).expect("作用域收集应成功") {
+            if scope
+                .spec
+                .tables
+                .iter()
+                .any(|t| t.starts_with("platform_storage_"))
+            {
+                apply_policies(&admin_db, &scope.spec)
+                    .await
+                    .expect("storage 表的 RLS 策略应能应用");
+            }
         }
+        let _ = DEPLOYED.set(());
     }
 
-    sqlx::query("SELECT pg_advisory_unlock($1)")
-        .bind(SETUP_LOCK)
-        .execute(&mut *conn)
-        .await
-        .expect("应当能释放部署锁");
-    drop(conn);
+    // ⚠️ **锁必须持有到清表与配置重置之后**（复核发现：原来在解锁后才清表 → 竞态）。
+    //
+    // `cargo test --all-targets` 会让 `contract_c5` / `storage_audit` / `storage_http` /
+    // `storage_real_db` **四个测试二进制并行跑**，它们共享同一个 `base_test` 库。
+    // 锁只护住「迁移 + 策略」而清表在锁外 → 二进制 A 刚解锁、
+    // 二进制 B 就可能在 A 清表前插入数据，然后被 A 的 DELETE 抹掉（或反之），
+    // 症状是「单独跑全绿、一起跑随机红」，且**换一条用例就换一个失败点**。
+    //
+    // → 清表与配置重置都必须在锁内完成。
 
     // 4) 清表（用例之间不得互相污染）。
     // ⚠️ 新增租户表**必须**加进这个清单 —— 漏了会让上一条用例的数据
     // 被下一条用例读到（症状是「单独跑绿、连跑红」这种最难查的假失败）。
+    //
+    // ⚠️ **只清本二进制自己的租户**（`tenant_a()` / `tenant_b()`）。
+    // 无条件 `DELETE FROM {table}` 会把**并行跑的其他测试二进制**的数据一起删掉
+    // （它们共享同一个 `base_test` 库）→ 随机失败。
+    let my_tenants = [tenant_a(), tenant_b()];
     for table in [
         "platform_storage_job_error",
         "platform_storage_job",
@@ -337,10 +392,13 @@ pub async fn setup() -> Fixture {
         "platform_storage_upload",
         "platform_storage_object",
     ] {
-        sqlx::query(&format!("DELETE FROM {table}"))
-            .execute(&admin_pool)
-            .await
-            .expect("清表应能执行");
+        for tenant in &my_tenants {
+            sqlx::query(&format!("DELETE FROM {table} WHERE tenant_id = $1"))
+                .bind(tenant)
+                .execute(&admin_pool)
+                .await
+                .expect("清表应能执行");
+        }
     }
 
     // 4b) 重置 6 个配置键到默认值（防上一条用例改过的值污染）。
@@ -364,7 +422,15 @@ pub async fn setup() -> Fixture {
         .expect("重置配置应能执行");
     }
 
-    // 5) 应用角色连接（**不绕过 RLS**）。
+    // 5) 全部准备与清理都做完了 → 才释放部署锁。
+    sqlx::query("SELECT pg_advisory_unlock($1)")
+        .bind(SETUP_LOCK)
+        .execute(&mut *conn)
+        .await
+        .expect("应当能释放部署锁");
+    drop(conn);
+
+    // 6) 应用角色连接（**不绕过 RLS**）。
     let app_db = TenantDb::connect(&app_role_url(&url), DbOptions::default())
         .await
         .expect("应用角色连接串应可解析");

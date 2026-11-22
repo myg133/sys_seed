@@ -34,7 +34,10 @@ use tower::ServiceExt;
 // 测试替身：令牌 / 权限
 // ---------------------------------------------------------------------------
 
-/// 任何令牌都认成 `tenant-a` 的 `user-018`。
+/// 任何令牌都认成 `user-018`，租户是**本测试二进制专属**的 `tenant-a`。
+///
+/// ⚠️ 不能用裸 `tenant-a`：多个测试文件共享同一个 `base_test` 库，
+/// 租户重名会互相污染（见 `common::tenant_a()`）。
 ///
 /// ⚠️ 这里**刻意不验签** —— 本文件测的是存储域的路由与错误语义，
 /// 令牌验签是 IAM 的职责（那边有 180 条测试）。用真 IAM 只会把失败原因
@@ -47,7 +50,7 @@ impl TokenVerifier for AnyToken {
             return None;
         }
         Some(platform_storage::http::VerifiedUser {
-            tenant_id: "tenant-a".to_string(),
+            tenant_id: common::tenant_a(),
             user_id: "user-018".to_string(),
         })
     }
