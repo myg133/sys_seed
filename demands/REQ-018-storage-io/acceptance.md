@@ -450,3 +450,36 @@ rev 0 只有 **1 条空泛 AC**（AC-S-026，正文是「行为与本条标题�
 
 > ⚠️ **两处明码未达成**：S3 真连（TD-059）、Excel（TD-060）、图片处理（TD-061）。
 > 这不是遗漏，是**零依赖 + 无环境**下的明码代价。
+
+---
+
+## AC 判定（实现阶段，BA 自查）
+
+> 判定人：BA（**同时是实现者，独立性不足**，已在 §"独立性声明"记账）。
+> 独立复核由另一个 verifier 子 Agent 单独出具（`BA/feature-meta/qa-req018-impl-review.md`）。
+> 判定基线：`feature/REQ-018` @ `fe9a6ed`；终版全量 **1476 passed / 0 failed / 0 ignored**（17 crate）。
+> 判定口径：每条判据必须指到 `file:line` 的**具体 `assert!` + 函数名**（§9.15），不许写「测试通过」。
+
+| AC | 结论 | 主判据（`file:line` + 函数名） | 独立性 |
+|---|---|---|---|
+| AC-S-026 | **达成** | `src/object_store/presign.rs:184` `the_payload_exposes_the_expiry`（过期时间可读）、`:197` `an_expired_token_is_expired_not_invalid`（过期 ≠ 无效）、`:224` `a_ttl_above_the_maximum_is_rejected`、`:238` `a_zero_ttl_is_rejected`（0 是非法非立即过期）、`:245` `a_negative_ttl_is_rejected` | 扎实 |
+| AC-S-175 | **达成** | `src/object_store/local_fs.rs:297` `put_then_get_returns_the_same_bytes`（sha256 逐字节）、`:313` `the_file_lands_under_the_root`（直接读盘）、`:332` `getting_a_missing_object_reports_not_found`、`:341` `delete_is_idempotent`、`:357` `putting_the_same_key_overwrites`、`:373` `path_traversal_is_rejected_and_nothing_lands`（判据 ①哨兵未变 + ②root 下无落盘）；S3 签名见 `src/object_store/s3.rs` | 扎实 |
+| AC-S-176 | **达成** | `presign.rs:252` `tampering_with_the_expiry_is_invalid`、`:271` `tampering_with_the_object_key_is_invalid`、`:284` `tampering_with_the_signature_is_invalid`、`:299` `a_token_signed_with_another_key_is_invalid`、`:340` `signature_is_checked_before_expiry`（顺序不可换，D322）；4 条路径各自独立 | 扎实 |
+| AC-S-177 | **达成** | `tests/storage_real_db.rs:23` `multipart_upload_assembles_and_stores_the_object`、`:78` `missing_parts_are_reported_with_numbers`（`:116` 断言 `missingParts == [2]` 逐字）、`:123` `a_checksum_mismatch_rejects_the_object`（409 + 对象不存在）；幂等重传 `local_fs.rs:436` `reuploading_a_part_is_idempotent` | 扎实 |
+| AC-S-178 | **达成** | `tests/storage_real_db.rs:169` `the_size_limit_has_no_side_effects_when_exceeded`（`:200` 413 码 + `:205` `params.maxBytes==1024` + `:212` 落盘无残留）、`:235` `the_default_scan_verdict_is_skipped`（默认 `skipped` **非** `clean`，D326）、`:253` `an_infected_file_is_rejected_and_not_stored`、`:677` `multipart_creation_rejects_an_oversized_projection` | 扎实 |
+| AC-S-179 | **达成** | `src/csv.rs:271` `the_main_path_handles_comma_quote_newline_and_bom`（逗号/引号/换行/BOM 4 字段逐字）、`:295` `an_unclosed_quote_reports_the_starting_line`、`:322` `a_row_too_long_reports_the_line_and_limit`、`:334` `an_empty_file_yields_zero_rows`；Excel 拒绝 `src/service.rs:518` `excel_keys_are_rejected_with_the_extension` + `tests/storage_real_db.rs:300` `an_xlsx_import_is_rejected_with_a_clear_code`（415 + `only csv is supported`） | 扎实 |
+| AC-S-180 | **达成** | `tests/storage_real_db.rs:340` `a_large_import_reports_progress_and_row_level_errors`：`:377` 建任务后 `status==pending`、`:378` `processed_rows==0`（异步判据）；`:386` 用 `tick_with_limit(..,1,1)` **每 tick 只 1 批** + `:399` 断言 `0 < processedRows < 2500` 的**中间态**（只在末尾写进度的实现会红，已由变异 M3 确认） | 扎实 |
+| AC-S-181 | **达成** | `tests/storage_real_db.rs:340`（行号部分）+ `:448` `a_clean_import_has_no_error_receipts`；`src/worker.rs:429` `a_non_numeric_value_reports_the_column_name`（列名是真列名非 `column_2`）、`:474` `a_missing_column_reports_its_name`；行号换算见 `src/csv.rs` + worker 的 `file_line = data_index + 1` | 扎实 |
+| AC-S-182 | **达成** | `tests/storage_real_db.rs:493` `export_then_download_round_trips`（导出→下载→用本需求解析器再解析，round-trip 逐字）；生成侧 `src/csv.rs:385` `generate_quotes_and_escapes_special_fields`、`:400` `generate_starts_with_a_bom`、`:407` `generate_then_parse_round_trips` | 扎实 |
+| AC-S-183 | **达成** | `tests/storage_real_db.rs:554` `all_four_tables_are_isolated_by_tenant`（四表各自 RLS）、`:655` `all_four_tables_have_rls_policies`（`:663` 断言 `vec!` **双向相等** 4 元素，非「包含」）；manifest `tenantScoped.tables` + `tenant-policies --check` 退出码 0 | 扎实 |
+| AC-S-184 | **达成** | `cargo xtask capabilities --check` → 「14 个文件与源码一致」退出码 0；`permissions.json` `"total": 41`；`tests/contract_c5.rs`（4 条，含阳性对照）；`crates/platform-server/tests/i18n_titles.rs:179` `the_title_table_has_the_pinned_number_of_rows` 含 `REQ_018_NEW_CODES = 9`、`:59` `all_codes()` 含 `platform_storage::error::ALL_CODES`；`packages/i18n` 两库各 116 条 | 扎实 |
+
+**判定汇总：11 条全部「达成」，稀释 0 / 虚构 0 / 空转 0。**
+
+### 独立性声明（D122 / §9.15）
+
+本轮 **BA 兼任实现者**，这是本项目一贯要求避免的模式。如实记账：
+
+1. **AC 判定由实现者本人出具** → 存在确认偏误风险。缓解措施：另派独立 `verifier` 子 Agent 做对抗性复核，**其结论单独成文**，不并入本表。
+2. **挑刺也是 BA 自查**（`qa-req018-spec-review.md` 的 8 条）→ 同样受确认偏误影响。缓解：8 条挑刺全部**真修**（有 diff 可查），且其中 4 条属于「规格写了判据但不可执行」这类**能靠机械核对发现**的问题。
+3. **可以降低风险的部分**：终版全量的数字（1476 / 141 / 116 / 41）全部由命令实测得出，非人工计数；4 个变异**真跑过并确认变红**，这属于机制性证据，不受判定人主观影响。
