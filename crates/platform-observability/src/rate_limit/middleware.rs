@@ -128,13 +128,19 @@ pub async fn rate_limit(
         .map(|p| p.as_str().to_string())
         .unwrap_or_else(|| "<unmatched>".to_string());
 
+    // ⑤b 取 HTTP 方法（D337 / AC-S-033：endpoint 键含 METHOD）。
+    //
+    // ⚠️ 同一路径常挂多个方法（`GET /api/rbac/roles` 列表、`POST` 新建），
+    // 只按路径做键会让写请求挤掉读请求的配额（F13）。
+    let method = request.method().as_str().to_string();
+
     // ⑥ 依次判定三个维度。
     for name in dimension::ALL {
         let limit = settings.limit_of(name);
         if !limit.enabled() {
             continue; // 该维度禁用
         }
-        let key = bucket_key(name, &tenant_id, user_id.as_deref(), &endpoint);
+        let key = bucket_key(name, &tenant_id, user_id.as_deref(), &method, &endpoint);
         match limiter.check(&ctx, name, &key, limit).await {
             Ok(()) => {}
             Err(ObservabilityError::RateLimited {

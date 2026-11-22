@@ -118,12 +118,34 @@ impl RateLimitSettings {
 /// `GET /api/rbac/roles?x=1` 与 `?x=2` 必须**共用**一个桶 ——
 /// 否则加个随机 query 就能无限打（AC-S-031 步骤 5 专门测这个）。
 /// 路径模板由 axum 的 `MatchedPath` 提供（已实测：`?x=1` → `/api/rbac/roles`）。
-pub fn bucket_key(dimension: &str, tenant_id: &str, user_id: Option<&str>, endpoint: &str) -> String {
+///
+/// # ⚠️ `endpoint` 维度的键**必须含 HTTP 方法**（D337 / AC-S-033）
+///
+/// D337 规定的形态是 `rl:endpoint:<METHOD>:<路径模板>`，
+/// 例 `rl:endpoint:GET:/api/rbac/roles`。
+///
+/// **为什么方法必须进键**：同一路径常常挂多个方法
+/// （`GET /api/rbac/roles` 列表、`POST /api/rbac/roles` 新建）。
+/// 只按路径做键 → 写请求先到先得会把读请求的配额挤掉，
+/// 与「按接口限流」的语义不符。
+///
+/// # 参数
+///
+/// - `method`：HTTP 方法（大写，如 `GET`）。**只有 `endpoint` 维度用得上**，
+///   另两个维度忽略它（它们的桶与具体接口无关）。
+pub fn bucket_key(
+    dimension: &str,
+    tenant_id: &str,
+    user_id: Option<&str>,
+    method: &str,
+    endpoint: &str,
+) -> String {
     match dimension {
         dimension::TENANT => format!("rl:tenant:{tenant_id}"),
         dimension::USER => format!("rl:user:{tenant_id}:{}", user_id.unwrap_or("(anonymous)")),
         // ⚠️ **不含 user 段** —— endpoint 桶是租户内跨用户共享的（D337）。
-        dimension::ENDPOINT => format!("rl:endpoint:{endpoint}"),
+        // ⚠️ **含 METHOD** —— 同一路径的不同方法必须是不同的桶（F13）。
+        dimension::ENDPOINT => format!("rl:endpoint:{method}:{endpoint}"),
         other => format!("rl:{other}:{tenant_id}:{endpoint}"),
     }
 }
@@ -321,7 +343,15 @@ impl PgRateLimiter {
         }
         platform_db::tenant_row!(CountRow { n: "n" });
         // ⚠️ 显式标注类型 —— `fetch_one` 是泛型，不标注无法推断 `from_row` 的实现者。
-        self.db.fetch_one::<CountRow>(ctx, &query).await.is_ok()
+        //
+        // ⚠️ 只关心「查得通」，`n` 的值本身无所谓 —— 但**不能**让字段变成
+        // `dead_code`（那会产生构建警告，`lib.rs` 声明了 `warn(clippy::pedantic)`）。
+        // → 显式读一次，语义上说明「查到了就是可达」。
+        self.db
+            .fetch_one::<CountRow>(ctx, &query)
+            .await
+            .map(|row| row.n)
+            .is_ok()
     }
 }
 
@@ -364,9 +394,9 @@ mod tests {
     /// 三个维度的键前缀**互不相同**（防串桶）。
     #[test]
     fn the_three_dimensions_use_distinct_prefixes() {
-        let t = bucket_key(dimension::TENANT, "tenant-a", Some("u1"), "/x");
-        let u = bucket_key(dimension::USER, "tenant-a", Some("u1"), "/x");
-        let e = bucket_key(dimension::ENDPOINT, "tenant-a", Some("u1"), "/x");
+        let t = bucket_key(dimension::TENANT, "tenant-a", Some("u1"), "GET", "/x");
+        let u = bucket_key(dimension::USER, "tenant-a", Some("u1"), "GET", "/x");
+        let e = bucket_key(dimension::ENDPOINT, "tenant-a", Some("u1"), "GET", "/x");
         assert!(t.starts_with("rl:tenant:"));
         assert!(u.starts_with("rl:user:"));
         assert!(e.starts_with("rl:endpoint:"));
@@ -380,8 +410,8 @@ mod tests {
     /// 如果实现把 user_id 拼进去，这条会红。
     #[test]
     fn the_endpoint_key_does_not_contain_the_user() {
-        let a = bucket_key(dimension::ENDPOINT, "tenant-a", Some("user-a"), "/x");
-        let b = bucket_key(dimension::ENDPOINT, "tenant-a", Some("user-b"), "/x");
+        let a = bucket_key(dimension::ENDPOINT, "tenant-a", Some("user-a"), "GET", "/x");
+        let b = bucket_key(dimension::ENDPOINT, "tenant-a", Some("user-b"), "GET", "/x");
         assert_eq!(
             a, b,
             "同一个租户的同一端点必须是**同一个桶**（不分用户）；若不同说明键设计错了"
@@ -396,16 +426,52 @@ mod tests {
     #[test]
     fn the_endpoint_key_uses_the_path_template_only() {
         // `MatchedPath` 给的就是不带 query 的模板。
-        let with = bucket_key(dimension::ENDPOINT, "tenant-a", None, "/api/rbac/roles");
-        assert_eq!(with, "rl:endpoint:/api/rbac/roles");
+        let with = bucket_key(
+            dimension::ENDPOINT,
+            "tenant-a",
+            None,
+            "GET",
+            "/api/rbac/roles",
+        );
+        // ⚠️ 形态必须与 D337 逐字一致：`rl:endpoint:<METHOD>:<路径模板>`。
+        assert_eq!(with, "rl:endpoint:GET:/api/rbac/roles");
         assert!(!with.contains('?'), "键里不得含 query string");
+    }
+
+    /// **endpoint 键必须含 HTTP 方法**（D337 / AC-S-033 / F13）。
+    ///
+    /// ⚠️ 这条是 F13 的判据：同一路径挂 `GET` 与 `POST` 时，
+    /// 它们的配额**必须分开** —— 否则写请求会挤掉读请求的配额。
+    /// 若实现退回 `rl:endpoint:<路径>`（不含方法），这条会红。
+    #[test]
+    fn the_endpoint_key_differs_per_http_method() {
+        let get = bucket_key(dimension::ENDPOINT, "tenant-a", None, "GET", "/api/apps");
+        let post = bucket_key(dimension::ENDPOINT, "tenant-a", None, "POST", "/api/apps");
+        let delete = bucket_key(dimension::ENDPOINT, "tenant-a", None, "DELETE", "/api/apps");
+        assert_ne!(get, post, "GET 与 POST 必须是不同的桶（不能共享配额）");
+        assert_ne!(get, delete, "GET 与 DELETE 必须是不同的桶");
+        assert_ne!(post, delete);
+        // 键里逐字含方法名（AC-S-033 步骤 3 要求 `key` 含 `GET`）。
+        assert!(get.contains("GET"), "endpoint 键必须含方法名：{get}");
+        assert_eq!(get, "rl:endpoint:GET:/api/apps");
+    }
+
+    /// 另两个维度的键**不受** method 影响（它们的桶与具体接口无关）。
+    #[test]
+    fn the_tenant_and_user_keys_ignore_the_method() {
+        let t_get = bucket_key(dimension::TENANT, "tenant-a", None, "GET", "/x");
+        let t_post = bucket_key(dimension::TENANT, "tenant-a", None, "POST", "/x");
+        assert_eq!(t_get, t_post, "租户维度的桶与接口无关");
+        let u_get = bucket_key(dimension::USER, "tenant-a", Some("user-a"), "GET", "/x");
+        let u_post = bucket_key(dimension::USER, "tenant-a", Some("user-a"), "POST", "/x");
+        assert_eq!(u_get, u_post, "用户维度的桶与接口无关");
     }
 
     /// user 键**必须**含 user_id（不同用户不同桶）。
     #[test]
     fn the_user_key_differs_per_user() {
-        let a = bucket_key(dimension::USER, "tenant-a", Some("user-a"), "/x");
-        let b = bucket_key(dimension::USER, "tenant-a", Some("user-b"), "/x");
+        let a = bucket_key(dimension::USER, "tenant-a", Some("user-a"), "GET", "/x");
+        let b = bucket_key(dimension::USER, "tenant-a", Some("user-b"), "GET", "/x");
         assert_ne!(a, b, "不同用户必须是不同桶");
         assert!(a.contains("user-a"));
     }
@@ -413,8 +479,8 @@ mod tests {
     /// **跨租户**的桶必须不同（AC-S-031 步骤 4 的基础）。
     #[test]
     fn the_same_endpoint_in_another_tenant_is_another_bucket() {
-        let a = bucket_key(dimension::ENDPOINT, "tenant-a", None, "/x");
-        let b = bucket_key(dimension::ENDPOINT, "tenant-b", None, "/x");
+        let a = bucket_key(dimension::ENDPOINT, "tenant-a", None, "GET", "/x");
+        let b = bucket_key(dimension::ENDPOINT, "tenant-b", None, "GET", "/x");
         // ⚠️ endpoint 键**不含** tenant_id，但表有 tenant_id 列 →
         // 实际隔离靠 RLS 的 WHERE。这里断言的是「键本身相同」，
         // 隔离由 DB 层保证（见 rate_limit_real_db 的跨租户用例）。

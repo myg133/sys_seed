@@ -36,7 +36,7 @@ async fn the_endpoint_dimension_rejects_the_second_request() {
     f.truncate().await;
     let limiter = limiter(f.db.clone());
     let ctx = f.ctx_a();
-    let key = bucket_key(dimension::ENDPOINT, TENANT_A, Some("user-a"), "/api/rbac/roles");
+    let key = bucket_key(dimension::ENDPOINT, TENANT_A, Some("user-a"), "GET", "/api/rbac/roles");
     let cfg = limit(1, 60);
 
     limiter
@@ -70,7 +70,7 @@ async fn the_user_dimension_accumulates_across_endpoints() {
     let cfg = limit(2, 60);
 
     for path in ["/api/rbac/roles", "/api/apps"] {
-        let key = bucket_key(dimension::USER, TENANT_A, Some("user-a"), path);
+        let key = bucket_key(dimension::USER, TENANT_A, Some("user-a"), "GET", path);
         limiter
             .check(&ctx, dimension::USER, &key, cfg)
             .await
@@ -78,7 +78,7 @@ async fn the_user_dimension_accumulates_across_endpoints() {
     }
 
     // 第 3 次（换第 3 个端点）→ 用户维度累计已 2，必须拒。
-    let key = bucket_key(dimension::USER, TENANT_A, Some("user-a"), "/api/audit/events");
+    let key = bucket_key(dimension::USER, TENANT_A, Some("user-a"), "GET", "/api/audit/events");
     let err = limiter
         .check(&ctx, dimension::USER, &key, cfg)
         .await
@@ -99,8 +99,8 @@ async fn two_users_have_separate_buckets() {
     let limiter = limiter(f.db.clone());
     let cfg = limit(1, 60);
 
-    let key_a = bucket_key(dimension::USER, TENANT_A, Some("user-a"), "/x");
-    let key_b = bucket_key(dimension::USER, TENANT_A, Some("user-b"), "/x");
+    let key_a = bucket_key(dimension::USER, TENANT_A, Some("user-a"), "GET", "/x");
+    let key_b = bucket_key(dimension::USER, TENANT_A, Some("user-b"), "GET", "/x");
     assert_ne!(key_a, key_b, "不同用户的键必须不同");
 
     limiter
@@ -127,7 +127,7 @@ async fn another_tenant_is_not_affected_by_a_saturated_bucket() {
     let cfg = limit(1, 60);
 
     // tenant-a 把 endpoint 桶打满。
-    let key_a = bucket_key(dimension::ENDPOINT, TENANT_A, Some("user-a"), "/api/rbac/roles");
+    let key_a = bucket_key(dimension::ENDPOINT, TENANT_A, Some("user-a"), "GET", "/api/rbac/roles");
     limiter
         .check(&f.ctx_a(), dimension::ENDPOINT, &key_a, cfg)
         .await
@@ -138,7 +138,7 @@ async fn another_tenant_is_not_affected_by_a_saturated_bucket() {
         .expect_err("tenant-a 第 2 次必须拒");
 
     // tenant-b 打**同一路径** —— 键字符串相同，但 tenant_id 不同 → 独立桶。
-    let key_b = bucket_key(dimension::ENDPOINT, TENANT_B, Some("user-c"), "/api/rbac/roles");
+    let key_b = bucket_key(dimension::ENDPOINT, TENANT_B, Some("user-c"), "GET", "/api/rbac/roles");
     assert_eq!(key_a, key_b, "endpoint 键不含 tenant_id（隔离靠 RLS 的列）");
     limiter
         .check(&f.ctx_b(), dimension::ENDPOINT, &key_b, cfg)
@@ -157,8 +157,8 @@ async fn the_endpoint_bucket_is_shared_across_users_in_one_tenant() {
     let limiter = limiter(f.db.clone());
     let cfg = limit(1, 60);
 
-    let key = bucket_key(dimension::ENDPOINT, TENANT_A, Some("user-a"), "/api/rbac/roles");
-    let key_other = bucket_key(dimension::ENDPOINT, TENANT_A, Some("user-b"), "/api/rbac/roles");
+    let key = bucket_key(dimension::ENDPOINT, TENANT_A, Some("user-a"), "GET", "/api/rbac/roles");
+    let key_other = bucket_key(dimension::ENDPOINT, TENANT_A, Some("user-b"), "GET", "/api/rbac/roles");
     assert_eq!(key, key_other, "同一租户同端点：键必须相同（不分用户）");
 
     limiter
@@ -180,6 +180,32 @@ async fn the_endpoint_bucket_is_shared_across_users_in_one_tenant() {
 }
 
 /// **TC-019-020**：query string **不**进键（`?x=1` 与 `?x=2` 共用桶）。
+///
+/// # ⚠️ 本用例的**能力边界**（F11 修正）
+///
+/// 原先的写法是：
+///
+/// ```ignore
+/// let key1 = bucket_key(ENDPOINT, TENANT_A, None, "/api/rbac/roles");
+/// let key2 = bucket_key(ENDPOINT, TENANT_A, None, "/api/rbac/roles");
+/// assert_eq!(key1, key2);   // ← 同一函数、同一参数 → 恒真
+/// ```
+///
+/// 那是**循环论证**：它没经过中间件、没经过 `MatchedPath`，
+/// 若实现改成用完整 URI 做键，这条**照样绿**。
+///
+/// # 本用例现在验什么（以及**不**验什么）
+///
+/// - ✅ **验**：`bucket_key` 对「同一个路径模板」永远给同一个键 ——
+///   即**键函数本身不含 query 概念**。这里用两份**字面上不同的输入**
+///   （模拟 `MatchedPath` 对 `?x=1` / `?x=2` 都返回 `/api/rbac/roles`）
+///   来证明「去掉 query 之后是同一条」。
+/// - ❌ **不验**：「中间件真的从 `MatchedPath` 取值而不是从完整 URI 取值」。
+///   那需要让带 query 的请求**穿过中间件** →
+///   由 `middleware_assembly::the_query_string_does_not_bypass_the_rate_limit_bucket`
+///   负责（那条是 F11 的**真判据**，它记录中间件实际传进来的键）。
+///
+/// ⚠️ 两条都要有：本条锁「键函数的形状」，那条锁「中间件的取值来源」。
 #[tokio::test]
 async fn the_query_string_does_not_create_a_new_bucket() {
     let f = setup().await;
@@ -187,10 +213,25 @@ async fn the_query_string_does_not_create_a_new_bucket() {
     let limiter = limiter(f.db.clone());
     let cfg = limit(1, 60);
 
-    // `MatchedPath` 给的是路径模板（不含 query）→ 两次请求的键**相同**。
-    let key1 = bucket_key(dimension::ENDPOINT, TENANT_A, None, "/api/rbac/roles");
-    let key2 = bucket_key(dimension::ENDPOINT, TENANT_A, None, "/api/rbac/roles");
+    // ⚠️ 两份输入**来自不同的原始 URI**（`?x=1` 与 `?x=2`），
+    // 但 `MatchedPath` 对两者都给同一个路径模板 —— 这里把它显式写出来。
+    let from_x1 = "/api/rbac/roles"; // MatchedPath 对 `/api/rbac/roles?x=1` 的结果
+    let from_x2 = "/api/rbac/roles"; // MatchedPath 对 `/api/rbac/roles?x=2` 的结果
+    // ⚠️ 前置自我校验：两份输入确实都不含 query（否则下一条断言毫无意义）。
+    assert!(!from_x1.contains('?') && !from_x2.contains('?'));
+    assert_eq!(
+        from_x1, from_x2,
+        "前提：MatchedPath 对两个不同 query 返回同一模板"
+    );
+
+    let key1 = bucket_key(dimension::ENDPOINT, TENANT_A, None, "GET", from_x1);
+    let key2 = bucket_key(dimension::ENDPOINT, TENANT_A, None, "GET", from_x2);
     assert_eq!(key1, key2);
+    // ⚠️ 键里不得出现 query —— 这是「键函数不认 query」的直接证据。
+    assert!(
+        !key1.contains('?') && !key1.contains("x=1"),
+        "桶键不得含 query：{key1}"
+    );
 
     limiter
         .check(&f.ctx_a(), dimension::ENDPOINT, &key1, cfg)
@@ -199,7 +240,21 @@ async fn the_query_string_does_not_create_a_new_bucket() {
     limiter
         .check(&f.ctx_a(), dimension::ENDPOINT, &key2, cfg)
         .await
-        .expect_err("第 2 次必须拒（query 不绕桶）");
+        .expect_err("第 2 次必须拒（共用桶）");
+}
+
+/// **反向判据**：**不同的路径**必须是**不同的桶**（阴性对照）。
+///
+/// ⚠️ 没有这条，上面那条「相等」断言在「键函数恒返回同一个常量」的实现下也能绿。
+/// 这条证明键**确实**随路径变化 —— 两者合起来才有区分力。
+#[tokio::test]
+async fn different_paths_are_different_buckets() {
+    let roles = bucket_key(dimension::ENDPOINT, TENANT_A, None, "GET", "/api/rbac/roles");
+    let apps = bucket_key(dimension::ENDPOINT, TENANT_A, None, "GET", "/api/apps");
+    assert_ne!(
+        roles, apps,
+        "不同路径必须是不同桶（否则「query 不绕桶」那条断言毫无区分力）"
+    );
 }
 
 /// **TC-019-022**：`requests = 0` 是**禁用**，不查库、不记账。
@@ -208,7 +263,7 @@ async fn a_disabled_dimension_neither_limits_nor_writes() {
     let f = setup().await;
     f.truncate().await;
     let limiter = limiter(f.db.clone());
-    let key = bucket_key(dimension::TENANT, TENANT_A, None, "/x");
+    let key = bucket_key(dimension::TENANT, TENANT_A, None, "GET", "/x");
 
     for _ in 0..5 {
         limiter
@@ -234,7 +289,7 @@ async fn the_retry_after_is_a_positive_bounded_integer() {
     f.truncate().await;
     let limiter = limiter(f.db.clone());
     let ctx = f.ctx_a();
-    let key = bucket_key(dimension::ENDPOINT, TENANT_A, None, "/x");
+    let key = bucket_key(dimension::ENDPOINT, TENANT_A, None, "GET", "/x");
     let window = 2;
     let cfg = limit(1, window);
 
@@ -285,7 +340,7 @@ async fn the_limit_recovers_after_the_window_expires() {
     f.truncate().await;
     let limiter = limiter(f.db.clone());
     let ctx = f.ctx_a();
-    let key = bucket_key(dimension::ENDPOINT, TENANT_A, None, "/x");
+    let key = bucket_key(dimension::ENDPOINT, TENANT_A, None, "GET", "/x");
     // 窗口 1 秒，便于快速验证。
     let cfg = limit(1, 1);
 
@@ -316,17 +371,33 @@ async fn the_limit_recovers_after_the_window_expires() {
 /// ⚠️ rev 2 修正（挑刺 M1）：rev 1 用「`max_connections` 不同」当判据，
 /// 那是**无区分力的代理断言**（同一个池也不能有两个 max_connections）。
 ///
-/// 这里改为：两个 `TenantDb` 能**各自独立地**完成一次读写 ——
-/// 若实现是「clone 同一个池」，两者共享状态，下面 AC-S-033 的第 ③ 步
-/// （DB 里恰好 1 行）就成了唯一的区分点。所以本用例只断言「能建两个」，
-/// **真正的区分力交给 [`an_independent_instance_sees_the_shared_count`]**。
+/// ⚠️ rev 4 修正（复核 F4）：rev 3 的规格原文写
+/// `assert_ne!(pool_a.id(), pool_b.id())` —— **那行代码写不出来**
+/// （`sqlx::PgPool` 没有 `.id()`；`TenantDb.pool` 是 `pub(crate)`）。
+/// 规格已同步改为「并发持连比较 `pg_backend_pid()`」，本用例按新判据实现：
+///
+/// 1. ✅ **两个独立池的后端 pid 必不同**（本用例）；
+/// 2. ✅ 两个 `TenantDb` 能各自独立完成读写；
+/// 3. ⚠️ **真正的区分力**（PG 共享 vs 每进程内存）仍在
+///    [`an_independent_instance_sees_the_shared_count`] 的步骤 3
+///    （DB 里恰好 1 行）—— 本用例只保证「前置条件这件事有断言」。
 #[tokio::test]
 async fn the_fixture_can_build_two_independent_handles() {
     let f = setup().await;
     f.truncate().await;
+
+    // ① **池身份断言**（规格点名的「必须断言两池确实不同」）：
+    // 两个独立新建的池并发持连 → 落在不同后端进程。
+    let (pid_a, pid_b) = f.two_pools_have_distinct_backends().await;
+    assert_ne!(
+        pid_a, pid_b,
+        "两个独立的连接池必须连到**不同的**后端进程（pid 相同说明复用了同一个池）"
+    );
+    assert!(pid_a > 0 && pid_b > 0, "后端 pid 必须是正整数");
+
+    // ② 两个 `TenantDb` 都能独立工作。
     let db_a = f.second_db().await;
     let db_b = f.second_db().await;
-    // 两个句柄都能独立工作（不是同一个被 clone 的句柄）。
     assert!(limiter(db_a).is_reachable(&f.ctx_a()).await);
     assert!(limiter(db_b).is_reachable(&f.ctx_a()).await);
 }
@@ -347,7 +418,7 @@ async fn an_independent_instance_sees_the_shared_count() {
     let limiter_b = limiter(db_b);
 
     let ctx = f.ctx_a();
-    let key = bucket_key(dimension::ENDPOINT, TENANT_A, None, "/api/rbac/roles");
+    let key = bucket_key(dimension::ENDPOINT, TENANT_A, None, "GET", "/api/rbac/roles");
     let cfg = limit(1, 60);
 
     // ① 实例 A 打 1 次 → 放行。
@@ -387,7 +458,7 @@ async fn the_count_and_prune_behave_as_documented() {
     f.truncate().await;
     let limiter = limiter(f.db.clone());
     let ctx = f.ctx_a();
-    let key = bucket_key(dimension::TENANT, TENANT_A, None, "/x");
+    let key = bucket_key(dimension::TENANT, TENANT_A, None, "GET", "/x");
 
     for _ in 0..3 {
         limiter
@@ -451,7 +522,7 @@ async fn row_level_security_hides_other_tenants_rows() {
         .check(
             &f.ctx_a(),
             dimension::TENANT,
-            &bucket_key(dimension::TENANT, TENANT_A, None, "/x"),
+            &bucket_key(dimension::TENANT, TENANT_A, None, "GET", "/x"),
             limit(10, 60),
         )
         .await
@@ -460,7 +531,7 @@ async fn row_level_security_hides_other_tenants_rows() {
         .check(
             &f.ctx_b(),
             dimension::TENANT,
-            &bucket_key(dimension::TENANT, TENANT_B, None, "/x"),
+            &bucket_key(dimension::TENANT, TENANT_B, None, "GET", "/x"),
             limit(10, 60),
         )
         .await
@@ -477,7 +548,7 @@ async fn row_level_security_hides_other_tenants_rows() {
     // ⚠️ 键必须用**完整的租户名**（`TENANT_A` 常量，含 `@` 后缀），
     // 不是短名 —— 用短名会构造出不同的键 → 数到 0（这个坑我踩过）。
     for (ctx, tenant) in [(f.ctx_a(), TENANT_A), (f.ctx_b(), TENANT_B)] {
-        let key = bucket_key(dimension::TENANT, tenant, None, "/x");
+        let key = bucket_key(dimension::TENANT, tenant, None, "GET", "/x");
         let visible = limiter
             .count_in_window(&ctx, dimension::TENANT, &key, 60)
             .await
@@ -605,7 +676,7 @@ async fn each_dimension_limits_independently_when_enabled_alone() {
     f.truncate().await;
     let limiter = limiter(f.db.clone());
     let ctx = f.ctx_a();
-    let tenant_key = bucket_key(dimension::TENANT, TENANT_A, Some("user-a"), "/x");
+    let tenant_key = bucket_key(dimension::TENANT, TENANT_A, Some("user-a"), "GET", "/x");
     let tenant_cfg = limit(2, 60);
 
     for i in 1..=2 {
@@ -626,7 +697,7 @@ async fn each_dimension_limits_independently_when_enabled_alone() {
             .check(
                 &ctx,
                 dimension::USER,
-                &bucket_key(dimension::USER, TENANT_A, Some("user-a"), "/x"),
+                &bucket_key(dimension::USER, TENANT_A, Some("user-a"), "GET", "/x"),
                 disabled,
             )
             .await
@@ -635,7 +706,7 @@ async fn each_dimension_limits_independently_when_enabled_alone() {
             .check(
                 &ctx,
                 dimension::ENDPOINT,
-                &bucket_key(dimension::ENDPOINT, TENANT_A, None, "/x"),
+                &bucket_key(dimension::ENDPOINT, TENANT_A, None, "GET", "/x"),
                 disabled,
             )
             .await
@@ -644,7 +715,7 @@ async fn each_dimension_limits_independently_when_enabled_alone() {
 
     // ② **只启用用户维度**：上限 1。
     f.truncate().await;
-    let user_key = bucket_key(dimension::USER, TENANT_A, Some("user-a"), "/y");
+    let user_key = bucket_key(dimension::USER, TENANT_A, Some("user-a"), "GET", "/y");
     limiter
         .check(&ctx, dimension::USER, &user_key, limit(1, 60))
         .await
@@ -661,7 +732,7 @@ async fn each_dimension_limits_independently_when_enabled_alone() {
 
     // ③ **只启用接口维度**：上限 1。
     f.truncate().await;
-    let ep_key = bucket_key(dimension::ENDPOINT, TENANT_A, None, "/z");
+    let ep_key = bucket_key(dimension::ENDPOINT, TENANT_A, None, "GET", "/z");
     limiter
         .check(&ctx, dimension::ENDPOINT, &ep_key, limit(1, 60))
         .await
@@ -696,7 +767,7 @@ async fn prune_keeps_rows_inside_double_the_window() {
     f.truncate().await;
     let limiter = limiter(f.db.clone());
     let ctx = f.ctx_a();
-    let key = bucket_key(dimension::TENANT, TENANT_A, None, "/prune-test");
+    let key = bucket_key(dimension::TENANT, TENANT_A, None, "GET", "/prune-test");
 
     // 手工插 3 行：年龄 10 秒 / 100 秒 / 400 秒。
     f.exec(&format!(
@@ -742,7 +813,7 @@ async fn prune_with_a_zero_window_does_not_wipe_the_table() {
     f.truncate().await;
     let limiter = limiter(f.db.clone());
     let ctx = f.ctx_a();
-    let key = bucket_key(dimension::TENANT, TENANT_A, None, "/prune-zero");
+    let key = bucket_key(dimension::TENANT, TENANT_A, None, "GET", "/prune-zero");
 
     f.exec(&format!(
         "INSERT INTO platform_rate_limit (tenant_id, dimension, key, occurred_at) \

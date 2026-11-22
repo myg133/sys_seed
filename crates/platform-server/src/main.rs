@@ -256,31 +256,31 @@ fn init_tracing(level: &str, otel_provider: Option<&opentelemetry_sdk::trace::Sd
     use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
 
-    // ⚠️ 过滤器与格式化层**仍然来自 `platform-core`**（挑刺 M4）：
-    // 日志过滤逻辑只有一份，测试与生产共用。
-    let filter = platform_core::log::log_filter(level);
-    let fmt_layer = tracing_subscriber::fmt::layer()
-        .with_ansi(false)
-        .with_writer(std::io::stdout);
-
+    // ⚠️ **过滤器 / 格式化层 / writer 的组装只有一份实现**（复核 F8 的处置）：
+    // 全部来自 `platform-core::log`，测试与生产**走同一份代码**。
+    //
+    // 原先这里是**手工重建** `registry().with(fmt_layer).with(otel_layer).with(filter)`，
+    // 而测试用的是 `build_subscriber`（fmt only）→ 两者共用的只有过滤器，
+    // 不是整个 subscriber。生产路径若把 `trace_id` 字段丢了，测试发现不了。
+    //
+    // ⚠️ 两个分支返回**不同的具体类型**，`impl Trait` 只能对应一个
+    // → 各自 `.init()`（本仓踩过「`Option<L>` 两分支返回类型不同」的坑）。
     match otel_provider {
         Some(provider) => {
             // ⚠️ 这里挂 `tracing_opentelemetry` 的 layer → `tracing` 的 span
             // 会被转成 OTel span 并批量导出（AC-S-037 步骤 1 的前提）。
             let otel_layer = tracing_opentelemetry::layer()
                 .with_tracer(provider.tracer("base"));
-            tracing_subscriber::registry()
-                .with(fmt_layer)
-                .with(otel_layer)
-                .with(filter)
-                .init();
+            platform_core::log::build_subscriber_with_layer(
+                level,
+                std::io::stdout,
+                otel_layer,
+            )
+            .init();
         }
         None => {
-            // 未启用 OTel → 与 `build_subscriber` 等价（不挂 span 层）。
-            tracing_subscriber::registry()
-                .with(fmt_layer)
-                .with(filter)
-                .init();
+            // 未启用 OTel → 走 `build_subscriber`（与测试**同一份代码**）。
+            platform_core::log::build_subscriber(level, std::io::stdout).init();
         }
     }
 }
@@ -1996,7 +1996,12 @@ async fn ready(State(state): State<Arc<AppState>>) -> Response {
     )
     .await;
 
-    if readiness.is_ready() && rate_limit_ok != Some(false) {
+    // ⚠️ 判定逻辑在 `platform_observability`（F5 的处置）：那段原先内联在这里，
+    // 而 bin crate 的函数测试够不着 → 503 分支一行都没被测过。
+    // 现在 main 与测试**调同一个函数**。
+    let rate_limit_outcome = platform_observability::http::readiness_rate_limit_outcome(rate_limit_ok);
+
+    if readiness.is_ready() && rate_limit_outcome.is_ok() {
         let mut body = serde_json::json!({
             "status": "ready",
             "environment": state.environment.as_str(),
@@ -2007,15 +2012,15 @@ async fn ready(State(state): State<Arc<AppState>>) -> Response {
                 "database": "ok",
             },
         });
-        if let Some(ok) = rate_limit_ok {
-            body["checks"]["rate_limit"] = serde_json::Value::from(if ok { "ok" } else { "unavailable" });
+        // `Ok(Some((key, value)))` → 往 checks 里加一项（步骤 1）。
+        if let Ok(Some((key, value))) = rate_limit_outcome {
+            body["checks"][key] = serde_json::Value::from(value);
         }
         return Json(body).into_response();
     }
 
     // 限流存储不可达 → 503，且**明确指出**是限流存储（不是笼统的数据库错误）。
-    if rate_limit_ok == Some(false) {
-        let code = platform_observability::error::code::RATE_LIMIT_UNAVAILABLE;
+    if let Err(code) = rate_limit_outcome {
         tracing::warn!(
             code = code,
             "readiness 未通过：限流存储不可达（面向用户的中文文案由前端按 code 渲染）"

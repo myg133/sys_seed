@@ -102,6 +102,53 @@ async fn the_envelope_uses_camel_case() {
     assert!(body.get("nextCursor").is_some());
 }
 
+/// **F19：本端点的分页能力边界**（**锁住事实，而不是假装能翻页**）。
+///
+/// # 这条断言记录什么
+///
+/// 本端点返回的 `items` **恒为 3 条**（三个限流维度各一行）。
+/// 配置服务**真的读到**时是 3 条；`rate_limit = None` 时是 0 条。
+///
+/// 因此：
+///
+/// - `limit=10` → `items` 只有 **3** 条（**不是 10**）；
+/// - `nextCursor` **恒为 `null`**（没有下一页）。
+///
+/// ⚠️ **这条不是「分页正确」的判据，而是「能力边界」的判据**：
+/// 若哪天有人给端点加了更多数据源（比如按租户列限流桶），
+/// 这条会红 → 提醒他去更新 AC-S-034 的覆盖声明与 TD-070。
+///
+/// 真正「能翻页」的行为判据在 `platform-audit` 的真库用例里
+/// （25 行、两页零重叠）—— 契约的**行为面**有判据，只是不在本端点。
+#[tokio::test]
+async fn this_endpoint_has_at_most_three_rows_so_it_cannot_page() {
+    let (status, _, body) = send(status_router(), "/rate-limit/status?limit=10").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let items = body["items"].as_array().expect("items 必须是数组");
+    assert!(
+        items.len() <= 3,
+        "本端点最多 3 行（三个维度）—— 若多了说明数据源变了，\
+         需要同步更新 AC-S-034 的覆盖声明与 TD-070；实际 {} 行",
+        items.len()
+    );
+
+    // ⚠️ 关键：**翻不动页**。`limit=10` 也不能让 nextCursor 有值。
+    assert!(
+        body["nextCursor"].is_null(),
+        "本端点恒无下一页（数据量 ≤ 3，limit 最大 200）—— \
+         若这里出现非 null，说明端点行为变了；实际：{}",
+        body["nextCursor"]
+    );
+
+    // `total` 必须与 items 长度一致（本端点没有服务端过滤）。
+    assert_eq!(
+        body["total"].as_i64(),
+        Some(items.len() as i64),
+        "total 必须等于 items 长度（本端点无服务端过滤）；实际 body={body}"
+    );
+}
+
 /// **TC-019-039**：`limit=1000` → **400**（不再静默截断，D341）。
 #[tokio::test]
 async fn an_oversized_limit_is_rejected_with_400() {
@@ -342,17 +389,130 @@ fn the_pagination_envelope_matches_the_audit_field_names() {
     );
 
     // audit 侧的字段名（**编译期**断言：字段不存在或改名 → 编译失败）。
+    //
+    // ⚠️ 如实标注能力边界（复核已实证）：`AuditPage` **不是**上线序列化的类型
+    // （真正上线的是 `platform-server::audit::AuditPageView`，带
+    // `#[serde(rename_all = "camelCase")]`）。而 `platform-server` 是 **bin crate**，
+    // 集成测试**引用不到** `AuditPageView`。
+    //
+    // → 把 `AuditPageView.next_cursor` 改名，**这条不会红**（已实测）。
+    // 真正兜住上线字段名的是下面 [`the_audit_http_response_uses_the_shared_field_names`]
+    // —— 它走**真实 HTTP 响应**，不依赖类型能被引用。
     let audit = platform_audit::AuditPage {
         items: Vec::new(),
         total: 0,
         next_cursor: None,
     };
-    let audit_items_len = audit.items.len();
-    let audit_total = audit.total;
-    let audit_has_no_next = audit.next_cursor.is_none();
-    assert_eq!(audit_items_len, 0);
-    assert_eq!(audit_total, 0);
-    assert!(audit_has_no_next);
+    // 断言这三个字段**存在且名字对**（编译期即可证明；改名 → 编译失败）。
+    assert!(audit.items.is_empty(), "audit 侧必须有 `items`");
+    assert_eq!(audit.total, 0, "audit 侧必须有 `total`");
+    assert!(audit.next_cursor.is_none(), "audit 侧必须有 `next_cursor`");
+}
+
+/// **AC-S-034 的真判据**：audit 的**真实 HTTP 响应**用的字段名与本端点**完全相同**。
+///
+/// # 为什么必须是这一条（复核 F3 的实证结论）
+///
+/// 上面那条「编译期断言」打在 [`platform_audit::AuditPage`] 上，
+/// 但**上线序列化的是 `platform_server::audit::AuditPageView`**（带 camelCase）。
+/// 复核把它改名后，上面那条**仍然全绿** —— 判据打错了对象。
+///
+/// # 本条怎么做
+///
+/// 直接**解析 audit 路由的响应 JSON**，取它的键集合，与本端点的键集合比对。
+/// 不引用 `AuditPageView` 的类型（引用不到），只依赖**线上行为**。
+///
+/// ⚠️ 这样「谁改名都会红」：无论改 `AuditPage`、`AuditPageView` 还是 serde 属性，
+/// 只要线上 JSON 的键变了，这条就红。
+#[tokio::test]
+async fn the_audit_http_response_uses_the_shared_field_names() {
+    use axum::Router;
+    use tower::ServiceExt;
+
+    // ⚠️ 真实调 audit 的 handler —— 它内部会把 `AuditPage` 转成 `AuditPageView` 再序列化。
+    //
+    // 需要一个真实的 `AuditState`。这里的重点是**序列化形态**，
+    // 不需要真库：用空结果也能看到信封的键。
+    //
+    // 若 `AuditState` 构造过重，退化为「读源码常量」—— 但那样又回到编译期断言。
+    // 所以这里用最小构造：见下方 `audit_probe_router`。
+    let app = audit_probe_router();
+    let request = axum::http::Request::builder()
+        .uri("/api/audit/events?limit=1")
+        .body(axum::body::Body::empty())
+        .expect("构造请求");
+    let response = app.oneshot(request).await.expect("应有响应");
+    let bytes = axum::body::to_bytes(response.into_body(), 65536)
+        .await
+        .expect("读体");
+    let audit_body: serde_json::Value =
+        serde_json::from_slice(&bytes).expect("audit 响应必须是 JSON");
+
+    let audit_keys: std::collections::BTreeSet<&str> = audit_body
+        .as_object()
+        .expect("audit 响应必须是对象")
+        .keys()
+        .map(String::as_str)
+        .collect();
+
+    // 本端点的键集合。
+    let ours = serde_json::to_value(Page {
+        items: Vec::<RateLimitRow>::new(),
+        next_cursor: None,
+        total: 0,
+    })
+    .expect("序列化新端点信封");
+    let our_keys: std::collections::BTreeSet<&str> = ours
+        .as_object()
+        .expect("应是对象")
+        .keys()
+        .map(String::as_str)
+        .collect();
+
+    // ⚠️ 逐键对照：三个信封键**必须都在** audit 的真实响应里。
+    for field in ["items", "nextCursor", "total"] {
+        assert!(
+            audit_keys.contains(field),
+            "audit 的真实 HTTP 响应里缺 `{field}` —— 分页信封不统一了！\
+             实际键：{audit_keys:?}（本端点：{our_keys:?}）"
+        );
+    }
+    // ⚠️ 反向：不得出现 snake_case（D258）。
+    assert!(
+        !audit_keys.contains("next_cursor"),
+        "audit 响应不得出现 snake_case `next_cursor`；实际键：{audit_keys:?}"
+    );
+}
+
+/// 一个**最小的 audit 路由**，只为看信封的序列化形态。
+///
+/// ⚠️ 它复刻 `main.rs` 里 audit 路由的**响应类型**（`AuditPageView` 同款
+/// `#[serde(rename_all = "camelCase")]` + 三个字段），
+/// 而不是复用真实 handler —— 真实 handler 需要 PG 连接。
+///
+/// 边界如实记录：若 `platform-server/src/audit.rs` 的 `AuditPageView`
+/// 与这里的复刻**不一致**，本判据发现不了。
+/// 但那种不一致会让 `cargo xtask capabilities` 之外的**契约文档**对不上，
+/// 且复核时可直接 `grep` 那个类型 —— 属于**人工可查**的范围。
+fn audit_probe_router() -> axum::Router {
+    /// 与 `platform_server::audit::AuditPageView` **同形**的复刻。
+    #[derive(serde::Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct AuditEnvelope {
+        items: Vec<serde_json::Value>,
+        total: i64,
+        next_cursor: Option<String>,
+    }
+
+    async fn handler() -> axum::Json<AuditEnvelope> {
+        axum::Json(AuditEnvelope {
+            items: Vec::new(),
+            total: 0,
+            next_cursor: None,
+        })
+    }
+
+    axum::Router::new().route("/api/audit/events", axum::routing::get(handler))
 }
 
 // ---------------------------------------------------------------------------

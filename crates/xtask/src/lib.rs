@@ -16,6 +16,7 @@ pub mod cli;
 pub mod deps;
 pub mod modules;
 pub mod notify;
+pub mod observability;
 pub mod rustscan;
 pub mod scaffold;
 pub mod openapi;

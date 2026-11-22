@@ -55,6 +55,44 @@ fn main() -> ExitCode {
                 Err(err) => fail(anyhow::anyhow!(err)),
             }
         }
+        Command::Observability(args) => match run_observability(&args) {
+            Ok(code) => code,
+            Err(err) => fail(err),
+        },
+    }
+}
+
+/// 执行可观测性运维任务（REQ-019 / D337）。
+///
+/// # ⚠️ 这是**表无限增长**的唯一防线
+///
+/// `platform_rate_limit` 每请求一行，**没有第二个删除路径**。
+/// 迁移注释、D337、`design-summary.md` 的定期任务表都指着这个命令。
+fn run_observability(args: &xtask::cli::ObservabilityArgs) -> Result<ExitCode> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    match &args.action {
+        xtask::cli::ObservabilityAction::PruneRateLimit(prune) => {
+            let database_url = database_url_of(prune.database_url.clone())?;
+            let keep = prune.max_window_seconds;
+            let (tenants, deleted) = runtime
+                .block_on(xtask::observability::prune_all_tenants(&database_url, keep))?;
+            println!(
+                "限流清理完成：{} 个租户，删除 {} 行（保留期 {} 秒 = 窗口 {} 秒 × 2）",
+                tenants,
+                deleted,
+                keep * 2,
+                keep
+            );
+            // ⚠️ 0 个租户有两种可能，必须让操作者能区分。
+            if tenants == 0 {
+                println!(
+                    "⚠️ 未发现任何租户的限流行。若库里**确实有**限流数据，\
+                     说明当前连接看不到它们 —— 列租户需要**管理员**连接\
+                     （用应用角色跑时 RLS 会过滤成 0 行，等于没清理）。"
+                );
+            }
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 

@@ -115,6 +115,29 @@ fn problem(detail: &str) -> ProblemDetails {
 
 /// 读限流状态（分页）。
 ///
+/// # 🚨 已知能力边界（复核 F19，如实记录）
+///
+/// 本端点返回的 `items` **恒为 3 条**（三个限流维度各一行，硬编码）。
+/// 因此：
+///
+/// - `limit=10` → `items` 只有 **3** 条（不是 10）；
+/// - `nextCursor` **恒为 `null`**（`0 + 3 == 3`，没有下一页）；
+/// - AC-S-034 步骤 1 的「恰好 10 条 / `total == 25`」在本端点上**不可能成立**。
+///
+/// **这不是造假**（数据是真的，从配置服务读出来的），
+/// 但它使「跨 crate 分页契约统一」的验证退化为「**字段名一样**」——
+/// 「真的能翻页」这一点**在本端点上没有被验证**。
+///
+/// 翻页行为本身由 `platform-audit` 的真库用例覆盖
+/// （25 行数据、两页零重叠）→ 契约的**行为面**有判据，
+/// 只是不在**本**端点上。这条能力边界记入 TD-070。
+///
+/// # 为什么不再造 25 行假数据
+///
+/// 「限流配置」这个概念上就是 **3 个维度**，造 25 行需要编造不存在的维度
+/// → 那是**为了让测试通过而扭曲业务语义**（比缺判据更糟）。
+/// → 选择如实记录边界，而不是伪造数据。
+///
 /// ⚠️ `#[utoipa::path]` 是 **REQ-019 AC-S-035** 的产物来源：
 /// 它在编译期生成 `__path_rate_limit_status`，被 [`ApiDoc`] 的 `paths(...)` 引用。
 #[utoipa::path(
@@ -251,6 +274,43 @@ pub fn router<S>(state: Arc<StatusState>) -> Router<S> {
         .with_state(state)
 }
 
+/// 就绪探针的**限流部分**怎么影响 HTTP 响应（AC-S-038 步骤 1/3/4）。
+///
+/// # 为什么要有这个函数（F5 的处置）
+///
+/// AC-S-038 的判据主体是**响应码与响应体**：
+///
+/// - 步骤 1：`rate_limit.enabled = true` 且存储可达 → **200**，`checks.rate_limit == "ok"`；
+/// - 步骤 3：存储**不可达** → **503**，且响应体指出是**限流存储**；
+/// - 步骤 4：`rateLimit.enabled = false` → **200**（不该因为限流表问题而不就绪）。
+///
+/// 原先这段判定**内联在 `main.rs` 的 `ready` handler 里**（bin crate，测试够不着）
+/// → 503 分支**一行都没被测过**。若把条件写成 `!= Some(true)`（禁用时也 503），
+/// 测试全绿 —— 而那恰好违反步骤 4。
+///
+/// → 把「怎么根据限流检查结果决定响应」抽到这里，`main.rs` 调它、测试也调它。
+///
+/// # 返回
+///
+/// - `None`：限流**不参与**判定（未装配 / 已禁用）→ 调用方按数据库判定走
+/// - `Some(body_patch)`：需要往 `checks` 里加的键值
+/// - `Err(code)`：限流不可达 → 调用方**必须**返回 503，`code` 是错误码
+///
+/// ⚠️ 用 `Result<Option<(&str, &str)>, &str>` 这种朴素形态而不是直接返回
+/// `Response`，是为了让它保持**纯函数**（好测、不依赖 axum 的 Response 构造）。
+pub fn readiness_rate_limit_outcome(
+    rate_limit_ok: Option<bool>,
+) -> Result<Option<(&'static str, &'static str)>, &'static str> {
+    match rate_limit_ok {
+        // 未装配 / 已禁用 → 不参与判定（步骤 4：不该因为限流表问题而不就绪）。
+        None => Ok(None),
+        // 可达 → 往 checks 里加 `rate_limit: ok`（步骤 1）。
+        Some(true) => Ok(Some(("rate_limit", "ok"))),
+        // 不可达 → 503 + 明确指向限流存储（步骤 3）。
+        Some(false) => Err(crate::error::code::RATE_LIMIT_UNAVAILABLE),
+    }
+}
+
 /// 统一的错误体（与本 crate 的 `ProblemDetails` 同构）。
 pub type ProblemDetails = platform_core::problem::ProblemDetails;
 
@@ -352,10 +412,19 @@ pub fn default_deprecations() -> Vec<(String, crate::deprecation::Deprecation)> 
 ///
 /// ```text
 /// client_info（填 IP / UA）
-///   └─ trace_id（生成/校验 → 开 span → 回写头）
-///        └─ rate_limit（三级判定）
-///             └─ 业务路由
+///   └─ deprecation（给弃用路径加 Deprecation / Sunset 头）
+///        └─ trace_id（生成/校验 → 开 span → 回写头）
+///             └─ rate_limit（三级判定）
+///                  └─ 业务路由
 /// ```
+///
+/// ⚠️ 上面是**执行**顺序。`deprecation` 在 `trace_id` **之外** ——
+/// 它只读 URI 往响应上贴头，不依赖 trace 上下文，放在外层无害。
+///
+/// ⚠️ **无租户问题**（F15 / TD-077）：`rate_limit` 在本函数这一层执行时，
+/// 租户**还没被填**（`client_info` 只填 IP / UA，租户由更内层的子系统
+/// `authenticate` 填）→ `ctx.tenant_id()` 为 `None` → 走 TD-072 放行。
+/// **这是已知缺陷，不是靠调整本函数的挂载顺序能解决的** —— 详见 TD-077。
 ///
 /// ⚠️ `client_info` 必须在最外层：各子系统**各自**建 `RequestContext`，
 /// 「对所有路由生效」只能在顶层加一次（REQ-014 D149）。
@@ -371,7 +440,7 @@ where
     S: Clone + Send + Sync + 'static,
 {
     // ⚠️ 挂载顺序 = 执行顺序的**反向**（后挂在外层）。
-    // 目标执行：client_info → trace_id → rate_limit → 弃用 → 业务
+    // 目标执行：client_info → deprecation → trace_id → rate_limit → 业务
     let router = crate::apply_observability(router, rate_limit);
     let router = crate::deprecation::apply_deprecation_router(router, default_deprecations());
     router.layer(axum::middleware::from_fn(
@@ -420,13 +489,18 @@ where
 {
     // ⚠️ **`layer` 是「后挂的在外层」**（实测确认：先挂 A 后挂 B → B 先执行）。
     //
-    // 目标执行顺序：`client_info` → `trace_id` → `rate_limit` → 业务
-    // → 挂载顺序必须**反过来**：先挂 rate_limit（最内），再 trace_id，最后 client_info（最外）。
+    // 实际执行顺序：`client_info` → `deprecation` → `trace_id` → `rate_limit` → 业务
+    // → 挂载顺序必须**反过来**：先挂 rate_limit（最内），再 trace_id、deprecation，
+    // 最后 client_info（最外）。
     //
     // 这个顺序我踩过两次：
-    // 1. `apply_observability` 里先挂 trace 后挂 limit → limit 先跑，读不到租户 → 限流永不生效；
-    // 2. 这里先挂 client_info → 它变成内层 → trace_id 先跑，读不到 client_info 填的租户。
-    // 抓到它们的是 `middleware_assembly` 的判据。
+    // 1. `apply_observability` 里先挂 trace 后挂 limit → limit 先跑，读不到租户；
+    // 2. 这里先挂 client_info → 它变成内层 → trace_id 先跑，读不到 IP / UA。
+    // 抓到「顺序反了」的是 `middleware_assembly` 的判据。
+    //
+    // ⚠️ 但**顺序对也不够**：租户由更内层的子系统 `authenticate` 填，
+    // 本函数这一层永远读不到 → 限流恒放行（F15 / TD-077）。
+    // 这不是顺序问题，调顺序解决不了。
     let router = crate::apply_observability(router, rate_limit);
     let router = crate::deprecation::apply_deprecation_router(router, default_deprecations());
     // 最后挂 → 最外层 → 最先执行。

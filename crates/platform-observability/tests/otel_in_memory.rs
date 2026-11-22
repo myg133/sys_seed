@@ -37,6 +37,109 @@ fn setup_otel() -> (InMemorySpanExporter, SdkTracerProvider) {
     (exporter, provider)
 }
 
+/// **AC-S-037 步骤 1 之「span 至少 2 层」**（F18 的判据）。
+///
+/// # 为什么必须单独一条
+///
+/// AC 原文（`acceptance.md:342`）：「span 层级**至少 2 层**
+/// （HTTP 请求 span 是根，其下有子 span）」。
+///
+/// 而 `the_exported_span_carries_the_incoming_trace_id` 的 handler 是
+/// `|| async { "ok" }` —— **本来就没有子 span**。
+/// 若照 AC 字面执行，那条应当红，但它只验了 trace_id 相等这半句，
+/// 「至少 2 层」这半句**零断言**（F18）。
+///
+/// # 本判据怎么做
+///
+/// handler 里**主动开一个子 span**（模拟真实业务：handler 内部调用服务层时
+/// 会开 span），然后断言：
+///
+/// 1. 导出的 span **≥ 2 个**；
+/// 2. 存在 `http.request`（根）；
+/// 3. 存在一个 span 的 `parent_span_id` **等于** `http.request` 的 `span_id`
+///    —— 这才叫「父子关系成立」，只数个数证明不了层级。
+#[tokio::test(flavor = "current_thread")]
+async fn the_exported_spans_are_at_least_two_levels_deep() {
+    let (exporter, provider) = setup_otel();
+    let tracer = provider.tracer("test");
+
+    // ⚠️ handler 里开一个**子 span** —— 这模拟真实业务的层级
+    // （中间件开 `http.request`，handler 内部再开业务 span）。
+    let app: Router = Router::new()
+        .route(
+            "/probe",
+            get(|| async {
+                // 子 span：名字刻意与根区分。
+                let child = tracing::info_span!("handler.work");
+                let _guard = child.enter();
+                tracing::info!("doing the actual work inside a child span");
+                "ok"
+            }),
+        )
+        .layer(axum::middleware::from_fn(
+            platform_observability::trace::middleware::trace_id,
+        ));
+
+    use tracing_subscriber::layer::SubscriberExt;
+    let subscriber = tracing_subscriber::registry()
+        .with(tracing_opentelemetry::layer().with_tracer(tracer));
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let request = axum::http::Request::builder()
+        .uri("/probe")
+        .header("x-request-id", "0123456789abcdef0123456789abcdef")
+        .body(Body::empty())
+        .expect("构造请求");
+    let response = app.oneshot(request).await.expect("应有响应");
+    assert_eq!(response.status(), 200);
+
+    let spans = exporter.get_finished_spans().expect("应能取到 span");
+
+    // ① 至少 2 个 span（根 + 子）。
+    assert!(
+        spans.len() >= 2,
+        "必须导出**至少 2 个** span（HTTP 根 span + handler 子 span）；\
+         实际只有 {} 个：{:?}",
+        spans.len(),
+        spans.iter().map(|s| &s.name).collect::<Vec<_>>()
+    );
+
+    // ② 根 span 存在。
+    let root = spans
+        .iter()
+        .find(|s| s.name == "http.request")
+        .expect("必须有 http.request 根 span");
+
+    // ③ **父子关系成立** —— 这是「2 层」的实质，不是数个数。
+    //
+    // ⚠️ 光断言「有 2 个 span」不够：两个**并列**的根 span 也满足个数条件。
+    // 必须找到**父 span_id 等于根 span_id** 的那个 span。
+    let child = spans.iter().find(|s| {
+        !std::ptr::eq(*s, root)
+            && s.span_context.trace_id() == root.span_context.trace_id()
+            && s.parent_span_id == root.span_context.span_id()
+    });
+    assert!(
+        child.is_some(),
+        "必须存在一个 span 的 parent_span_id == 根 span 的 span_id \
+         （证明层级真的存在，而不是两个并列 span）；\
+         根的 span_id={:?}，各 span 的 parent：{:?}",
+        root.span_context.span_id(),
+        spans
+            .iter()
+            .map(|s| (&s.name, s.parent_span_id))
+            .collect::<Vec<_>>()
+    );
+
+    // ④ 同一 trace —— 层级必须在**同一条链**上。
+    let child = child.expect("上面已断言存在");
+    assert_eq!(
+        child.span_context.trace_id(),
+        root.span_context.trace_id(),
+        "父子 span 必须在同一条 trace 上"
+    );
+}
+
 /// **AC-S-037 步骤 1**：span 的 `trace_id` **逐字等于** 入站 `X-Request-Id`。
 #[tokio::test(flavor = "current_thread")]
 async fn the_exported_span_carries_the_incoming_trace_id() {
@@ -195,26 +298,82 @@ fn shutdown(provider: SdkTracerProvider) {
 ///
 /// → 必须断言**时延上界**。
 ///
-/// # 机制
+/// # ⚠️ rev 2 修正（F17）：原版判据是**三重失效**的
 ///
-/// 生产用 `with_batch_exporter`（异步 + 有界队列）→ 导出在后台线程，
-/// **不会**阻塞请求。若换成 `with_simple_exporter`（同步导出），
-/// collector 不可达时会等到超时 → 这条红。
+/// 原实现有三个缺陷叠加，使这条测试**在任何实现下都会绿**：
 ///
-/// ⚠️ 用**同步**测试（不是 `#[tokio::test]`）：里面要自建 runtime 给
-/// `with_default` 的同步闭包用 —— 在已有 runtime 里建 runtime 会 panic。
+/// 1. **用 `127.0.0.1:1`** —— 本机对该地址是**立即 ECONNREFUSED（0.000s）**，
+///    永远不慢。真正的「超时」需要**黑洞地址**（丢包不回 RST）。
+/// 2. **provider 在 runtime 之外构造** —— `BatchProcessor` 在**别的线程**上跑，
+///    那里没有 tokio reactor → 导出线程直接 panic（`no reactor running`）→
+///    **导出路径根本没被执行到**。
+/// 3. **只断言单次 < 1 秒** —— 单次 0.0005s 的失败也会被放过，量级太宽。
+///
+/// 修正后：
+///
+/// 1. 用**黑洞地址** `10.255.255.1:4318`（RFC 1918 内不可路由地址，实测 3s 超时）；
+/// 2. **在 runtime 内**构造 provider，让 `BatchProcessor` 有 reactor；
+/// 3. 断言**20 次总耗时** < 2 秒（不是单次），并要求每维度都成功。
+///
+/// # ⚠️ 为什么仍然不用 `#[tokio::test]`
+///
+/// `tracing::subscriber::with_default` 是**线程局部**的 ——
+/// 若在 `async fn` 里用，`await` 换线程后订阅者就失效了。
+///
+/// → 用**同步** `#[test]` + 自建 runtime。
+///
+/// # 🚨 本判据的**已知能力上限**（如实记录，不要当成「已验证」）
+///
+/// 实测发现（F17 修正过程中）：`BatchSpanProcessor` 用的是
+/// `std::thread::Builder::spawn`（**普通 OS 线程**，不是 tokio task），
+/// 而 `opentelemetry-otlp` 的 `reqwest-client` 在该线程上首次导出时会
+/// `panic`（`there is no reactor running`）——
+/// 见 `opentelemetry-otlp-0.31.1/src/exporter/http/mod.rs:169` 的
+/// `reqwest::Client::builder().build()`。
+///
+/// 后果：**「导出超时会不会拖慢请求」这个具体场景，在本技术栈下无法
+/// 端到端复现** —— panic 取代了「等超时」。
+///
+/// 因此本用例**只**证明：
+///
+/// - ✅ 20 次请求在「配置了一个不可达 endpoint」时**总耗时仍 < 2 秒**
+///   （证明**请求路径**没有被导出配置拖住 —— 这是必要条件）；
+/// - ✅ 请求照常成功（导出旁路不影响业务）；
+/// - ❌ **不**证明「导出超时被正确限制在 `timeout_seconds` 内」
+///   —— 那需要 collector 可达但响应慢，本机无 collector → **TD-069**。
+///
+/// ⚠️ 即便如此，本条相对 rev 1 仍是**实质改进**：原版用 `127.0.0.1:1`
+/// （秒拒）+ 单次 < 1 秒（量级太宽）→ 连「请求路径没被拖住」都证明不了。
+/// 现在用黑洞地址 + 总耗时上界，至少排除了「配置期就同步阻塞」这类实现。
 #[test]
 fn an_unreachable_collector_does_not_slow_the_requests_down() {
     use opentelemetry::trace::TracerProvider as _;
     use std::time::{Duration, Instant};
 
-    // ⚠️ 真 OTLP exporter 指向**本机不可达端口**（127.0.0.1:1）。
+    // ⚠️ **黑洞地址**（不是 127.0.0.1:1）：
+    // `10.255.255.1` 在本机所在的网络里不可路由 → 连接**不返回 RST**，
+    // 只能等到超时（实测 `/dev/tcp` 3.002s 超时）。这才模拟「collector 挂了」。
     let config = platform_observability::otel::OtelConfig {
         disabled: false,
-        endpoint: "http://127.0.0.1:1".to_string(),
+        endpoint: "http://10.255.255.1:4318".to_string(),
         timeout_seconds: 1,
     };
-    let guard = platform_observability::otel::init_otel(&config);
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("建 runtime");
+
+    // ⚠️ **关键修正（F17）**：provider 必须在 **runtime 上下文内**构造。
+    //
+    // `SdkTracerProvider::with_batch_exporter` 会启动 `BatchProcessor`，
+    // 它在**自己的线程**上跑；若构造时没有 reactor，那个线程会
+    // panic（`there is no reactor running`）→ 导出路径根本不会跑 →
+    // 「不可达会不会拖慢请求」这件事**没有被测到**。
+    let guard = {
+        let _enter = runtime.enter();
+        platform_observability::otel::init_otel(&config)
+    };
     if !guard.is_enabled() {
         // 某些平台/版本下构造可能直接失败 → 那也算「不影响业务」，
         // 但要如实说明这条用例在本环境只验到「不崩」。
@@ -234,15 +393,13 @@ fn an_unreachable_collector_does_not_slow_the_requests_down() {
             platform_observability::trace::middleware::trace_id,
         ));
 
+    // 20 次请求 —�� 每次开一个 span → 累计 20 个 span 触发批量导出。
+    const REQUESTS: usize = 20;
+
     tracing::subscriber::with_default(subscriber, || {
-        // 同步跑（`with_default` 是线程局部的）。
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("建 runtime");
-        runtime.block_on(async {
-            let mut worst = Duration::ZERO;
-            for index in 0..20 {
+        let total = runtime.block_on(async {
+            let started = Instant::now();
+            for index in 0..REQUESTS {
                 let request = axum::http::Request::builder()
                     .uri("/probe")
                     .header(
@@ -251,21 +408,35 @@ fn an_unreachable_collector_does_not_slow_the_requests_down() {
                     )
                     .body(Body::empty())
                     .expect("构造请求");
-                let start = Instant::now();
                 let response = app.clone().oneshot(request).await.expect("应有响应");
-                let elapsed = start.elapsed();
-                worst = worst.max(elapsed);
-
                 assert!(
                     response.status().is_success(),
                     "第 {index} 次请求必须成功（导出失败不能影响业务）"
                 );
             }
-            // ⚠️ 时延上界：单次 < 1 秒（与导出超时 1 秒同量级，但不该被它拖住）。
-            assert!(
-                worst < Duration::from_secs(1),
-                "collector 不可达时单次请求不得慢于 1 秒；实际最慢：{worst:?}"
-            );
+            started.elapsed()
         });
+
+        // ⚠️ **总耗时**上界（不是单次）：
+        //
+        // 若实现改用 `with_simple_exporter`（同步导出，M3 点名要防的写法），
+        // **第一次**请求就会等满 `timeout_seconds = 1` → 20 次至少 20 秒 → 红。
+        // 用「单次 < 1 秒」的话，20 次 × 恰好 0.9s 也能蒙混过关 —— 量级太宽。
+        //
+        // 批量导出是**异步**的 → 20 次请求的总耗时应当远小于 2 秒。
+        assert!(
+            total < Duration::from_secs(2),
+            "collector 不可达时 {REQUESTS} 次请求的总耗时不得慢于 2 秒；实际：{total:?}"
+        );
+
+        // 附带给出单次平均，便于排障时判断是「某一次卡住」还是「整体变慢」。
+        let average = total / REQUESTS as u32;
+        assert!(
+            average < Duration::from_millis(100),
+            "平均单次耗时不得慢于 100ms；实际平均：{average:?}"
+        );
+        eprintln!(
+            "注：{REQUESTS} 次请求总耗时 {total:?}，平均 {average:?}（黑洞地址 10.255.255.1:4318）"
+        );
     });
 }

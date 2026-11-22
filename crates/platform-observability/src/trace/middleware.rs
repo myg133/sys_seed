@@ -75,7 +75,18 @@ pub async fn trace_id(request: Request, next: Next) -> Response {
     // 所以这条调用在「未启用 OTel」的部署里是安全的。
     if let Some(context) = crate::otel::context_from_trace_id(&resolved) {
         use tracing_opentelemetry::OpenTelemetrySpanExt;
-        span.set_parent(context);
+        // ⚠️ `set_parent` 返回 `Result`：失败时（父上下文已失效等）会 Err。
+        // **不能静默丢弃**（`unused_must_use`）—— 但要区分两种失败：
+        // 它**不影响** AC-S-029 的判据（trace_id 相等），因为失败时
+        // OTel 会退回自己生成 trace_id → span 的 trace_id 与响应头不等
+        // → 判据**照样红**。所以这里记录 WARN 后继续，不中断请求。
+        if let Err(error) = span.set_parent(context) {
+            tracing::warn!(
+                %error,
+                trace_id = %resolved,
+                "设置 OTel 父上下文失败；span 将使用自动生成的 trace_id"
+            );
+        }
     }
 
     use tracing::Instrument;

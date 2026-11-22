@@ -9,6 +9,12 @@
 -- 代价：**每请求一行** → 必须配清理任务（`xtask observability prune-rate-limit`）。
 -- ⚠️ 没有清理会在几周内变成性能瓶颈 —— 这不是可选项。
 --
+-- ✅ 该命令已实现：`crates/xtask/src/observability.rs`。
+--    保留期 = 传入的最大窗口 × 2（默认 60 → 保留 120 秒）。
+--    ⚠️ 部署侧必须挂 cron / systemd timer 定时调它，否则表仍会无限增长。
+--    ⚠️ 列「哪些租户有行」要绕过 RLS → 用**管理员**连接串；
+--       用应用角色跑只会看到 0 个租户（命令会打印提示）。
+--
 -- # ⚠️ RLS policy **不在本迁移里手写**（同 D227）
 --
 -- 策略由 `cargo xtask tenant-policies` 从

@@ -163,10 +163,16 @@ where
     // 所以要实现「`trace_id` 先跑、`rate_limit` 后跑」，
     // 必须**先挂 rate_limit、后挂 trace_id**。
     //
-    // 这个顺序我踩过：反着写时，限流中间件先执行，
-    // 它读到的 `RequestContext` 里**没有租户**（client_info 填的租户还没写进去，
-    // 还没写进去）→ 按 TD-072 的规则直接放行 → 限流**永远不生效**。
-    // 抓到它的是 `middleware_assembly::the_rate_limit_middleware_is_installed`。
+    // 这个顺序我踩过：反着写时，限流中间件先执行，它读到的 `RequestContext`
+    // 里**没有租户** → 按 TD-072 的规则直接放行 → 限流**永远不生效**。
+    //
+    // ⚠️ 租户**不是** `client_info` 填的 —— `client_info` 只填 IP / UA
+    // （见 `platform-server/src/client_info.rs`，全文没有 `with_tenant`）。
+    // 租户由各子系统的 `authenticate` 中间件填，而它在**更内层**
+    // （`nest` 进去的那个 router 上）→ 本函数这一层**永远读不到租户**。
+    // 这个缺陷已实证并记入 F15 / TD-077，不靠调整本函数内的顺序解决。
+    //
+    // 抓到「顺序反了」的是 `middleware_assembly::the_rate_limit_middleware_is_installed`。
 
     // ① 限流（可选；**先挂 → 在内层**）。
     let router = match rate_limit {

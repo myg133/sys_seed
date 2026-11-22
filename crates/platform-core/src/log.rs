@@ -121,6 +121,63 @@ where
         .finish()
 }
 
+/// 与 [`build_subscriber`] **同一份构造路径**，但额外挂**一层**（OTel span 层）。
+///
+/// # ⚠️ 为什么需要这个函数（复核 F8 的处置）
+///
+/// [`build_subscriber`] 返回 `fmt().finish()` 的成品 —— 类型上**无法**
+/// 再 `.with(otel_layer)`。于是生产的 `init_tracing` 曾经**手工重建了一遍**
+/// `registry().with(fmt_layer).with(otel_layer).with(filter)`：
+///
+/// - 测试用 `build_subscriber`（fmt only，**没有** otel layer）；
+/// - 生产用另一条构造路径（fmt + otel layer）。
+///
+/// 两者共用的只有 [`log_filter`]，**不是整个 subscriber** ——
+/// 生产路径若把 `trace_id` 字段丢了，测试发现不了。
+///
+/// → 本函数提供「同一条构造路径 + 一层额外 layer」的版本，
+/// 生产与需要 OTel 的测试**都走这里**。
+///
+/// # ⚠️ 为什么不能做成 `Option<L>` 的单函数
+///
+/// `Some(layer)` 与 `None` 两个分支返回**不同的具体类型**
+/// （`Layered<L, ...>` vs `Layered<Identity, ...>`），
+/// `impl Trait` 只能对应一个具体类型 → **编译不过**。
+/// 本仓已踩过同类坑（「泛型 `Option<L>` 两分支返回类型不同」）。
+///
+/// → 拆成两个函数。`None` 场景用 [`build_subscriber`]（它本来就是 fmt-only）。
+///
+/// # 参数
+///
+/// - `level`：日志级别（`RUST_LOG` 优先）
+/// - `writer`：日志去向
+/// - `layer`：额外要挂的层（**必传**；OTel 的 span 层）
+pub fn build_subscriber_with_layer<W, L>(
+    level: &str,
+    writer: W,
+    layer: L,
+) -> impl tracing::Subscriber + Send + Sync
+where
+    W: for<'a> tracing_subscriber::fmt::MakeWriter<'a> + Send + Sync + 'static,
+    L: tracing_subscriber::Layer<tracing_subscriber::Registry> + Send + Sync + 'static,
+{
+    use tracing_subscriber::layer::SubscriberExt;
+
+    // ⚠️ 过滤器与格式化层**与 `build_subscriber` 完全一致** ——
+    // 这一份是两边共用的「同一份代码」。
+    let filter = log_filter(level);
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .with_writer(writer);
+
+    // ⚠️ 额外层挂在**最内层**（紧贴 `Registry`）→ 约束是
+    // `Layer<Registry>`，与调用方传进来的 `L` 一致。
+    tracing_subscriber::registry()
+        .with(layer)
+        .with(fmt_layer)
+        .with(filter)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

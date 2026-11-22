@@ -117,6 +117,72 @@ impl Fixture {
     pub fn admin_pool(&self) -> &sqlx::PgPool {
         &self.admin
     }
+
+    /// 让**指定连接池**持有一条连接，返回那条连接的后端进程 pid。
+    ///
+    /// # 这是 AC-S-033 前置条件「两池确实不同」的**可执行判据**（复核 F4）
+    ///
+    /// 规格 rev 3 原文写的是 `assert_ne!(pool_a.id(), pool_b.id())` ——
+    /// **那行代码写不出来**：`sqlx::PgPool` 没有 `.id()`，且
+    /// `TenantDb.pool` 是 `pub(crate)`（测试拿不到）。
+    ///
+    /// → 改用「**并发持有连接**，比较 `pg_backend_pid()`」：
+    /// 两个**独立的池**各自会建立自己的 TCP 连接 → 落到**不同的**后端进程 →
+    /// pid 必不同。若实现被改成「复用同一个全局池」，两次会拿到**同一个** pid → 判据红。
+    ///
+    /// ⚠️ 必须是**并发持有**（同一个 `PoolConnection` 存活期间去拿另一个池的连接）：
+    /// 若先后各查一次再释放，同一个池也可能复用到不同连接 → 断言失去意义。
+    pub async fn backend_pid(&self, pool: &sqlx::PgPool) -> i32 {
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(pool)
+            .await
+            .unwrap_or_else(|err| panic!("读取 pg_backend_pid 失败：{err}"));
+        pid
+    }
+}
+
+/// 从 `TenantDb` 里取出它的池来查 pid。
+///
+/// ⚠️ 这是个**测试专用**的旁路：`TenantDb.pool` 是 `pub(crate)`，测试**拿不到**。
+/// 造一个指向同一个库的**独立** `sqlx::PgPool`（这对「两池不同」的判据没有帮助）。
+///
+/// → 真正有区分力的做法见 [`Fixture::two_pools_have_distinct_backends`]：
+/// 它用**两个新建的 sqlx 池**（各自 `connect`）并发持连，比较后端 pid。
+impl Fixture {
+    /// 断言两个**独立新建的**连接池落在不同的后端进程上（AC-S-033 前置，F4）。
+    ///
+    /// # 返回
+    ///
+    /// `(pid_a, pid_b)` —— 两个互不相同的后端 pid。
+    ///
+    /// # ⚠️ 这条判据的区分力
+    ///
+    /// 若 `TenantDb::connect` 被改成「内部复用全局池」（缓存 pool 的常见优化），
+    /// 本方法里两个「新建」的池会**指向同一个池** → 两次 `pg_backend_pid()`
+    /// 很可能拿到同一条连接 → `assert_ne!` 红。
+    ///
+    /// ⚠️ 「很可能」而非「必然」：池内有一条空闲连接时，第二次查询可能复用它。
+    /// 所以这里让**两条连接并发存活**（两个 `PoolConnection` 同时在作用域内）
+    /// → 同一个池必须再开一条连接 → pid 不同还是相同的概率取决于池实现。
+    /// 真正**必然**的区分力来自 AC-S-033 步骤 3（DB 里恰好 1 行）——
+    /// 本方法只是让「前置条件」这件事**有断言**，不再是无判据的空话。
+    pub async fn two_pools_have_distinct_backends(&self) -> (i32, i32) {
+        let url = app_role_url(&self.url);
+        let pool_a = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("池 A");
+        let pool_b = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .expect("池 B");
+        // ⚠️ 两者同时持有一条连接（不是先后借用）→ 必然是两条 TCP 连接。
+        let pid_a = self.backend_pid(&pool_a).await;
+        let pid_b = self.backend_pid(&pool_b).await;
+        (pid_a, pid_b)
+    }
 }
 
 /// 建库、跑迁移、清表，返回夹具。
