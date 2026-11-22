@@ -139,6 +139,42 @@ fn normalize_trace_id(raw: &str) -> Option<String> {
 
 ---
 
+## 4.2 测试怎么捕获日志（AC-S-029 步骤 5 的支撑）
+
+⚠️ **这一步必须写清，否则 AC-S-029 步骤 5 不可执行。**
+
+`platform-server/src/main.rs:1825` **已有**现成机制，直接复用：
+
+```rust
+fn capture_logs(filter: EnvFilter, emit: impl FnOnce()) -> String {
+    let buf = BufWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_ansi(false)
+        .with_writer(buf.clone())
+        .finish();
+    tracing::subscriber::with_default(subscriber, emit);
+    String::from_utf8(buf.0.lock().unwrap().clone()).unwrap()
+}
+```
+
+用法（AC-S-029 步骤 5）：
+```rust
+let logs = capture_logs(log_filter("info"), || {
+    // 在 with_default 的同步闭包里发请求 —— ⚠️ 不能 await
+    // → 用 `tokio::runtime::Handle::current().block_on(...)` 或
+    //   把请求逻辑放进 `std::thread::spawn` + join
+});
+assert!(logs.contains(&format!("trace_id={T}")));
+```
+
+⚠️ **注意点**（实现时容易踩）：
+- `with_default` 是**同步**的，里面不能 `await` → 需要 `block_on` 或另起线程；
+- 断言必须是 `trace_id=<T>` 这种**带等号的具体形态**（`fmt` subscriber 的输出格式），
+  不能只断言 `logs.contains(&T)`（那样「日志里恰好有个 32 hex 串」也会绿）。
+
+---
+
 ## 5. OTel 装配（AC-S-037）
 
 ```rust
@@ -156,6 +192,23 @@ pub fn init_otel(cfg: &OtelConfig) -> Option<OtelGuard> {
     Some(OtelGuard(provider))
 }
 ```
+
+### ⚠️ 测试怎么断言 span 结构（AC-S-037 步骤 1）
+
+用 **`opentelemetry_sdk` 的 `InMemorySpanExporter`**（`opentelemetry_sdk::testing`）：
+
+```rust
+let exporter = InMemorySpanExporter::default();
+let provider = SdkTracerProvider::builder()
+    .with_simple_exporter(exporter.clone())   // 测试用 simple，不是 batch
+    .build();
+let spans = exporter.get_finished_spans().unwrap();
+// 断言：至少 2 个 span；根 span 的 trace_id 是 32 hex；
+//       根 span 的 trace_id == 响应头 X-Request-Id
+```
+
+⚠️ 这是**测试专用**路径（`with_simple_exporter`），生产用 `with_batch_exporter`。
+规格里必须区分这两者，否则实现会拿 simple 上生产（失去有界队列保护）。
 
 ### ⚠️ 三条硬约束
 
