@@ -88,6 +88,12 @@ pub struct ParsedCsv {
     pub header: Record,
     /// 数据行。
     pub rows: Vec<Record>,
+    /// 每个数据行在**文件里的起始行号**（1-based）。
+    ///
+    /// ⚠️ **必须单独记**，不能用 `index + 2` 推 —— 因为解析器会**丢掉空行**
+    /// （只有 CRLF 的行）。文件里夹了空行时，`index + 2` 就不再是真实行号，
+    /// 而 AC-S-181 要求回执里的 `rowNumber` 是**文件行号**（复核 F-10）。
+    pub line_numbers: Vec<usize>,
 }
 
 impl ParsedCsv {
@@ -119,6 +125,10 @@ pub fn parse(bytes: &[u8], max_row_bytes: usize) -> Result<ParsedCsv, CsvError> 
     let text = String::from_utf8_lossy(body);
 
     let mut records: Vec<Record> = Vec::new();
+    // 与 `records` **等长**：每条记录在文件里的起始行号。
+    let mut record_lines: Vec<usize> = Vec::new();
+    // 当前记录从哪一行开始（多行字段会让它早于 `line`）。
+    let mut current_start_line: usize = 1;
     let mut current: Record = Vec::new();
     let mut field = String::new();
     // 当前字段是否已被引号包裹（`"x"` 与 `x` 不同：前者允许内含分隔符）。
@@ -163,21 +173,36 @@ pub fn parse(bytes: &[u8], max_row_bytes: usize) -> Result<ParsedCsv, CsvError> 
                 quote_start_line = Some(line);
             }
             ',' => {
+                // 遇到逗号时，如果这是**新记录的第一次 push**（current 为空），
+                // 那么当前行就是这条记录的起始行。
+                if current.is_empty() {
+                    current_start_line = line;
+                }
                 current.push(std::mem::take(&mut field));
             }
             '\r' => {
                 if chars.peek() == Some(&'\n') {
                     chars.next();
                 }
+                if current.is_empty() {
+                    current_start_line = line;
+                }
                 current.push(std::mem::take(&mut field));
                 records.push(std::mem::take(&mut current));
+                record_lines.push(current_start_line);
                 line += 1;
+                current_start_line = line;
                 row_bytes = 0;
             }
             '\n' => {
+                if current.is_empty() {
+                    current_start_line = line;
+                }
                 current.push(std::mem::take(&mut field));
                 records.push(std::mem::take(&mut current));
+                record_lines.push(current_start_line);
                 line += 1;
+                current_start_line = line;
                 row_bytes = 0;
             }
             other => field.push(other),
@@ -193,21 +218,42 @@ pub fn parse(bytes: &[u8], max_row_bytes: usize) -> Result<ParsedCsv, CsvError> 
 
     // 收尾：文件末尾没有换行时的最后一个字段 / 行。
     if !field.is_empty() || !current.is_empty() {
+        if current.is_empty() {
+            current_start_line = line;
+        }
         current.push(field);
         records.push(current);
+        record_lines.push(current_start_line);
     }
 
     // 去掉完全空的行（只有 CRLF 的行）。
-    records.retain(|r| !(r.len() == 1 && r[0].is_empty()));
+    //
+    // ⚠️ `line_numbers` 必须**同步删**，否则行号与记录会错位
+    // （复核 F-10 的另一半：原来只删记录不删行号）。
+    let mut kept_records: Vec<Record> = Vec::with_capacity(records.len());
+    let mut kept_lines: Vec<usize> = Vec::with_capacity(record_lines.len());
+    for (record, line_no) in records.into_iter().zip(record_lines) {
+        if !(record.len() == 1 && record[0].is_empty()) {
+            kept_records.push(record);
+            kept_lines.push(line_no);
+        }
+    }
+    let mut records = kept_records;
+    let mut record_lines = kept_lines;
 
     if records.is_empty() {
         return Ok(ParsedCsv {
             header: Vec::new(),
             rows: Vec::new(),
+            line_numbers: Vec::new(),
         });
     }
 
     let header = records.remove(0);
+    // 表头也占一行 → 从行号清单里一并移除。
+    if !record_lines.is_empty() {
+        record_lines.remove(0);
+    }
     let expected = header.len();
     for (index, row) in records.iter().enumerate() {
         if row.len() != expected {
@@ -220,9 +266,17 @@ pub fn parse(bytes: &[u8], max_row_bytes: usize) -> Result<ParsedCsv, CsvError> 
         }
     }
 
+    // ⚠️ 行号条数必须与数据行条数一致（否则 worker 取行号会越界/错位）。
+    debug_assert_eq!(
+        record_lines.len(),
+        records.len(),
+        "行号清单必须与数据行一一对应"
+    );
+
     Ok(ParsedCsv {
         header,
         rows: records,
+        line_numbers: record_lines,
     })
 }
 

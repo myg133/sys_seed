@@ -1010,3 +1010,82 @@ async fn a_clean_multipart_upload_records_the_real_scan_verdict() {
         "默认 NoopScanner 必须如实记 skipped（不是 clean，D326）"
     );
 }
+
+/// **复核 F-10**：文件里夹**空行**时，`rowNumber` 仍必须是**真实文件行号**。
+///
+/// # 原来的 bug
+///
+/// `worker` 用 `index + 2` 推算文件行号（表头占第 1 行）。但 `csv::parse`
+/// 会**丢掉空行**（只有 CRLF 的行）→ 一旦文件里有空行，
+/// 数据行的 `index` 就比真实位置小，`index + 2` 会算出**偏小的行号**。
+/// 运维拿着这个行号去文件里定位，会落到**错误的那一行**上。
+///
+/// # 判据
+///
+/// 文件布局（表头 + 空行 + 3 个数据行，第 3 个数据行 `amount` 非法）：
+///
+/// ```text
+/// 第 1 行：表头
+/// 第 2 行：（空行）
+/// 第 3 行：a@example.com,1,x     ← 合法
+/// 第 4 行：b@example.com,2,y     ← 合法
+/// 第 5 行：c@example.com,bad,z   ← 非法 → rowNumber 必须是 **5**（不是 4）
+/// ```
+#[tokio::test]
+async fn row_numbers_stay_correct_when_the_file_contains_blank_lines() {
+    let fixture = setup().await;
+    let ctx = fixture.ctx_a();
+
+    let csv = "email,amount,note\n\na@example.com,1,x\nb@example.com,2,y\nc@example.com,bad,z\n";
+    fixture
+        .service
+        .put_object(
+            &ctx,
+            "blank-lines.csv",
+            Bytes::from_static(csv.as_bytes()),
+            "text/csv",
+        )
+        .await
+        .expect("上传");
+
+    let job = fixture
+        .service
+        .create_import(
+            &ctx,
+            &platform_storage::model::CreateJobBody {
+                entity: "probe_row".to_string(),
+                object_key: Some("blank-lines.csv".to_string()),
+            },
+        )
+        .await
+        .expect("建任务");
+    platform_storage::worker::tick(&fixture.service, &ctx, 1)
+        .await
+        .expect("跑导入");
+
+    let done = fixture.service.find_job(&ctx, &job.id).await.expect("读");
+    assert_eq!(done.status, job_status::COMPLETED);
+    assert_eq!(done.processed_rows, 3, "空行不计数，只有 3 个数据行");
+
+    let errors = fixture
+        .service
+        .list_job_errors(&ctx, &job.id)
+        .await
+        .expect("读回执");
+    assert_eq!(errors.len(), 1, "恰好 1 条回执");
+    // ⚠️ 关键断言：真实文件行号是 **5**（空行占了第 2 行）。
+    assert_eq!(
+        errors[0].row_number, 5,
+        "含空行时 rowNumber 必须是真实文件行号 5（用 index+2 会错算成 4）"
+    );
+    assert_eq!(errors[0].column, "amount");
+
+    // 2 个合法行入库。
+    let stored = fixture
+        .service
+        .store()
+        .count_probe_rows(&ctx, &job.id)
+        .await
+        .expect("数目标表");
+    assert_eq!(stored, 2, "2 个合法行入库");
+}

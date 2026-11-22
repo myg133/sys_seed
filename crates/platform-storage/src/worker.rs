@@ -188,8 +188,16 @@ async fn run_import(
         if index < already_done {
             continue; // 已经处理过（上次 tick 的成果）
         }
-        // ⚠️ **文件行号** = 数据序号 + 2（表头占第 1 行）。
-        let file_line = (index + 2) as i64;
+        // ⚠️ **文件行号取自解析器**，不是 `index + 2` 推算（复核 F-10）。
+        //
+        // 解析器会丢掉空行（只有 CRLF 的行）→ 文件里夹了空行时
+        // `index + 2` 就不再是真实行号，而 AC-S-181 要求回执的 `rowNumber`
+        // 是**文件行号**（运维要能按行号去文件里定位那一行）。
+        let file_line = parsed
+            .line_numbers
+            .get(index)
+            .copied()
+            .unwrap_or(index + 2) as i64;
         let map = parsed.to_map(row);
         match validate_row(&map) {
             Ok(probe) => pending_rows.push(probe),
