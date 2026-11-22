@@ -164,6 +164,11 @@
       ]
     },
     {
+      "manifest": "crates/platform-observability/manifest.json",
+      "module": "observability",
+      "permissions": []
+    },
+    {
       "manifest": "crates/platform-org/manifest.json",
       "module": "org",
       "permissions": [

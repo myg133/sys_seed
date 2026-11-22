@@ -1,0 +1,40 @@
+[package]
+name = "platform-observability"
+description = "可观测性与 API 治理：trace_id 贯穿、OTel 导出、三级限流（PG 滑动窗口）、分页契约、弃用头、OpenAPI 聚合（REQ-019）"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# 平台核心：请求上下文 / 统一错误体 / 标题表
+platform-core.workspace = true
+# 数据访问：租户作用域入口（RLS 兜底）—— 限流计数表是租户表
+platform-db.workspace = true
+# 运行期配置：读 `rateLimit.*` 7 个配置项（D344）
+platform-config.workspace = true
+
+axum.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+time.workspace = true
+
+# ⚠️ 第三次依赖破例（D338）：OpenAPI 聚合。实测净增 2 包。
+utoipa.workspace = true
+# ⚠️ 第四次依赖破例（D339）：OTel 真接 OTLP。实测净增 18 包。
+opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
+opentelemetry-otlp.workspace = true
+tracing-opentelemetry.workspace = true
+
+[dev-dependencies]
+sqlx.workspace = true
+tracing-subscriber.workspace = true
+# 测试要驱动 axum 路由（`ServiceExt::oneshot`），不连网络。
+tower.workspace = true
+http-body-util.workspace = true
