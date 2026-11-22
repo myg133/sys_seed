@@ -15,6 +15,10 @@ platform-db.workspace = true
 # 运行期配置：读 `storage.*` 6 个配置项（D331）
 platform-config.workspace = true
 # HTTP 层：路由与中间件。**multipart 是第二次依赖破例**（D321）
+# 破例的实测代价是**净增 5 个包**：`multer` / `encoding_rs` / `core_detect` /
+# `multiversion_no_op` / `simdutf8`。
+# rev 2 实测修正：上一版注释写「净增 2 个包（`multer` + `encoding_rs`）」漏了传递依赖——
+# `encoding_rs 0.8.44` 自己还拉 3 个（`core_detect` / `multiversion_no_op` / `simdutf8`）。
 axum.workspace = true
 tokio.workspace = true
 serde.workspace = true

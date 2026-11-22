@@ -463,31 +463,14 @@ mod tests {
         );
     }
 
-    /// 规范化请求的**形态**自检（把内部字符串暴露给测试，防拼错分隔符）。
-    ///
-    /// ⚠️ 这条是「签名对但规范化错」的**唯一**防线：
-    /// 若规范化里少一个 `\n`，签名会错但**看不出错在哪**。
-    #[test]
-    fn the_canonical_request_has_the_expected_shape() {
-        // 用同样的输入，手工拼出期望的规范化请求（与 Python 版本对照）。
-        let payload_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
-        let signed_headers = format!(
-            "host:example.amazonaws.com\nx-amz-content-sha256:{payload_hash}\nx-amz-date:20150830T123600Z\n"
-        );
-        let canonical = format!(
-            "GET\n/\n\n{signed_headers}\nhost;host;x-amz-content-sha256;x-amz-date\n{payload_hash}"
-        );
-        // 上面故意用了一个**错的** signed_headers 列表（多了一个 host）——
-        // 这条测试证明：签名的输入是**可组装、可对照**的，不是黑盒。
-        assert!(
-            canonical.contains("\n\n"),
-            "规范化请求必须有空行分隔 query 与 headers"
-        );
-        assert!(
-            canonical.starts_with("GET\n/\n"),
-            "必须以 方法\nURI\nquery 开头"
-        );
-    }
+    // 原 `the_canonical_request_has_the_expected_shape` 已删除（复核 F-21）：
+    // 它在函数体里自己 `format!` 出 canonical 字符串、再断言这个**自拼字面量**，
+    // 从不调用被测代码，把 `sign()` 整段删掉也全绿；且注释自认用了错的
+    // signed_headers 列表 —— 一条断言错误输入正确性的恒真测试。
+    // canonical 形态没有可单测的入口函数（`sign()` 里 130-138 行**内联拼接**），
+    // 故此处不补「断言自拼字面量」的替代假测试；规范化出错的后果会改变签名，
+    // 由端到端向量 `the_signature_matches_an_independent_python_implementation`
+    // 逐字节覆盖（把 `sign()` 改成 `unimplemented!()` 它会变红）。
 
     /// 空内容的 sha256 是已知值（阳性对照 —— 证明 `hex_sha256` 是标准实现）。
     #[test]
