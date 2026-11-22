@@ -63,10 +63,10 @@ mod tests {
         assert!(!VERSION.is_empty());
     }
 
-    /// 错误码**恰好 9 条**（D330：TITLES 107 → 116）。
+    /// 错误码**恰好 10 条**（D330 基线 9 + R-05 的 `UNKNOWN_ENTITY`；TITLES 107 → 117）。
     #[test]
     fn the_error_code_list_is_exported() {
-        assert_eq!(ALL_CODES.len(), 9);
+        assert_eq!(ALL_CODES.len(), 10);
     }
 
     /// 事件码**恰好 4 条**（AC-S-184 步骤 5）。

@@ -229,6 +229,7 @@ describe('语言包与键体系（AC-S-091）', () => {
       'STORAGE_UNSUPPORTED_FORMAT',
       'STORAGE_FILE_INFECTED',
       'STORAGE_TTL_OUT_OF_RANGE',
+      'STORAGE_UNKNOWN_ENTITY',
     ];
     for (const code of codes) {
       expect(catalog[`error.${code}`], `缺少键 error.${code}`).toBeTypeOf('string');

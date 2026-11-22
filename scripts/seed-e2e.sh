@@ -619,6 +619,11 @@ for storage_tenant in tenant-a tenant-b; do
              'aa', 'text/plain', 'skipped', 'available')
      ON CONFLICT (tenant_id, object_key) DO NOTHING;
 
+     INSERT INTO platform_storage_upload
+       (upload_id, tenant_id, object_key, total_parts, part_size, status, expires_at)
+     VALUES (gen_random_uuid(), '$storage_tenant', 'e2e/$storage_tenant.bin', 1, 512,
+             'pending', now() + interval '1 day');
+
      INSERT INTO platform_storage_job
        (id, tenant_id, kind, entity, status, total_rows, processed_rows, failed_rows)
      VALUES ('00000000-0000-4000-8000-00000000${storage_tenant#tenant-}0',
@@ -659,17 +664,23 @@ fi
 # ⚠️ 断言的是**每张表在每个租户下都恰好 1 行** ——
 # 少播一张表，AC-S-183 步骤 3 的「五张表各自只返回本租户的行」就有一张是空断言
 # （空集合 trivially 只包含本租户的行 → 假绿）。
+# ⚠️ **5 张表 × 2 个租户 = 恰好 10 行**（复核 R-04：原来漏播 `platform_storage_upload`）。
+#
+# 用 `-ne 10`（**精确相等**）而不是 `-lt 8`：
+# AC-S-183 步骤 3 要对**每张表每个租户**验隔离，任何一张空表都会让
+# 「只返回本租户的行」在空集合上 trivially 成立 = 假绿。
+# 精确相等还能抓住「多播了」（脚本重复执行导致行数翻倍）。
 storage_fixture="$(printf '%s\n' \
   "SELECT count(*) FROM (
      SELECT 'object' AS t, tenant_id FROM platform_storage_object WHERE object_key LIKE 'e2e/%'
+     UNION ALL SELECT 'upload', tenant_id FROM platform_storage_upload WHERE object_key LIKE 'e2e/%'
      UNION ALL SELECT 'job', tenant_id FROM platform_storage_job WHERE entity = 'probe_row'
      UNION ALL SELECT 'job_error', tenant_id FROM platform_storage_job_error WHERE \"column\" = 'amount'
      UNION ALL SELECT 'probe_row', tenant_id FROM platform_storage_probe_row WHERE note = 'e2e'
    ) x WHERE tenant_id IN ('tenant-a','tenant-b');" \
   | run_sql -tA | tr -d '[:space:]')"
-# 4 张表 × 2 个租户 = 8 行。
-if [ "${storage_fixture:-0}" -lt 8 ]; then
-  echo "✗ 存储夹具核对失败：期望至少 8 行（4 表 × 2 租户），实际 '$storage_fixture'" >&2
+if [ "${storage_fixture:-0}" -ne 10 ]; then
+  echo "✗ 存储夹具核对失败：期望恰好 10 行（5 表 × 2 租户），实际 '$storage_fixture'" >&2
   echo "  （AC-S-183 要对**每张表每个租户**验 RLS；空表会让隔离断言变成假绿。）" >&2
   exit 1
 fi
@@ -704,7 +715,7 @@ fi
 echo "✓ E2E 夹具就绪：u-perm-read / u-perm-write / u-perm-none / u-perm-audit / u-perm-oauth / e2e-user-oauth（tenant-a）+ u-perm-other（tenant-b）"
 echo "  授权：read=4 / write=5 / none=0 / audit=1 / oauth=5 / oauth-user=1 / other=3 个权限点"
 echo "  审计夹具：$audit_fixture 条（object_type = e2e_fixture）"
-echo "  存储夹具：$storage_fixture 行（4 表 × 2 租户，REQ-018 / AC-S-183）"
+echo "  存储夹具：$storage_fixture 行（5 表 × 2 租户，REQ-018 / AC-S-183）"
 echo "  OAuth client：client-A / client-B / public-client（back-channel → $OAUTH_BACKCHANNEL_URI）"
 echo "  OAuth client 明文 secret（只此一次，库里只存摘要）："
 echo "    client-A    = $OAUTH_CLIENT_A_SECRET"

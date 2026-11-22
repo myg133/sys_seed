@@ -51,6 +51,8 @@ pub mod code {
     pub const FILE_INFECTED: &str = "STORAGE_FILE_INFECTED";
     /// 请求的 TTL 超上限或为 0。
     pub const TTL_OUT_OF_RANGE: &str = "STORAGE_TTL_OUT_OF_RANGE";
+    /// `entity` 不在白名单里（复核 R-05）。
+    pub const UNKNOWN_ENTITY: &str = "STORAGE_UNKNOWN_ENTITY";
 }
 
 /// 本 crate 的全部**平台**错误码（**完备性测试的输入**，D113）。
@@ -66,6 +68,7 @@ pub const ALL_CODES: &[&str] = &[
     code::UNSUPPORTED_FORMAT,
     code::FILE_INFECTED,
     code::TTL_OUT_OF_RANGE,
+    code::UNKNOWN_ENTITY,
 ];
 
 /// 文件存储的平台错误。
@@ -110,6 +113,16 @@ pub enum StorageError {
         /// 客户端给的扩展名（**已小写化**，如 `xlsx`）。
         extension: String,
     },
+    /// `entity` 不在白名单里。
+    ///
+    /// ⚠️ **不是** `UnsupportedFormat`：格式是「文件长什么样」，
+    /// 实体是「要写进哪张表」—— 混用会让排障时分不清是文件选错还是目标表选错。
+    UnknownEntity {
+        /// 客户端给的 entity。
+        entity: String,
+        /// 当前支持的 entity（逗号分隔，**回显给调用方**便于自查）。
+        known: String,
+    },
     /// 病毒扫描判定为感染。
     FileInfected {
         /// 命中的签名名（扫描器给的）。
@@ -144,6 +157,7 @@ impl StorageError {
             Self::ChecksumMismatch { .. } => code::CHECKSUM_MISMATCH,
             Self::UploadTooLarge { .. } => code::UPLOAD_TOO_LARGE,
             Self::UnsupportedFormat { .. } => code::UNSUPPORTED_FORMAT,
+            Self::UnknownEntity { .. } => code::UNKNOWN_ENTITY,
             Self::FileInfected { .. } => code::FILE_INFECTED,
             Self::TtlOutOfRange { .. } => code::TTL_OUT_OF_RANGE,
             Self::Internal { .. } => platform_core::problem::CODE_INTERNAL_ERROR,
@@ -159,6 +173,9 @@ impl StorageError {
             Self::ChecksumMismatch { .. } => StatusCode::CONFLICT,
             Self::UploadTooLarge { .. } => StatusCode::PAYLOAD_TOO_LARGE,
             Self::UnsupportedFormat { .. } => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            // ⚠️ 415 是「请求体里的**文件格式**不接受」；
+            // 「目标实体不认识」属于**请求参数非法** → 400（不是 415）。
+            Self::UnknownEntity { .. } => StatusCode::BAD_REQUEST,
             Self::FileInfected { .. } => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Internal { .. } => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -191,6 +208,9 @@ impl StorageError {
             } => format!("the upload is too large: {actual_bytes} bytes exceeds {max_bytes}"),
             Self::UnsupportedFormat { extension } => format!(
                 "the file format is not supported: `{extension}` - only csv is supported in this release"
+            ),
+            Self::UnknownEntity { entity, known } => format!(
+                "the entity is not supported: `{entity}` - known entities are: {known}"
             ),
             Self::FileInfected { signature } => {
                 format!("the uploaded file was rejected by the virus scanner: {signature}")
@@ -249,6 +269,10 @@ impl StorageError {
                     "extension".to_string(),
                     serde_json::Value::from(extension.clone()),
                 );
+            }
+            Self::UnknownEntity { entity, known } => {
+                params.insert("entity".to_string(), serde_json::Value::from(entity.clone()));
+                params.insert("known".to_string(), serde_json::Value::from(known.clone()));
             }
             Self::FileInfected { signature } => {
                 // ⚠️ **必须**带 `signature`（AC-S-178 步骤 4 的判据）
@@ -407,12 +431,16 @@ impl std::error::Error for ServiceError {}
 mod tests {
     use super::*;
 
-    /// `ALL_CODES` **恰好 9 条**且无重复（D330）。
+    /// `ALL_CODES` **恰好 10 条**且无重复（D330 基线 9 + R-05 的 `UNKNOWN_ENTITY`）。
     #[test]
-    fn the_code_list_has_exactly_nine_distinct_codes() {
-        assert_eq!(ALL_CODES.len(), 9, "D330 把基线钉死为 9 个");
+    fn the_code_list_has_exactly_ten_distinct_codes() {
+        assert_eq!(
+            ALL_CODES.len(),
+            10,
+            "D330 基线 9 个 + R-05 新增 `STORAGE_UNKNOWN_ENTITY` = 10"
+        );
         let unique: std::collections::BTreeSet<&str> = ALL_CODES.iter().copied().collect();
-        assert_eq!(unique.len(), 9, "ALL_CODES 不得有重复");
+        assert_eq!(unique.len(), 10, "ALL_CODES 不得有重复");
     }
 
     /// 每个码都以 `STORAGE_` 开头。
@@ -438,13 +466,13 @@ mod tests {
         }
     }
 
-    /// 9 个变体各映射到**互不相同**的码。
+    /// 10 个变体各映射到**互不相同**的码。
     #[test]
     fn each_variant_maps_to_a_distinct_code() {
         let errors = sample_errors();
         let codes: std::collections::BTreeSet<&str> =
             errors.iter().map(StorageError::code).collect();
-        assert_eq!(codes.len(), 9, "9 个变体必须映射到 9 个不同的码");
+        assert_eq!(codes.len(), 10, "10 个变体必须映射到 10 个不同的码");
         assert_eq!(codes.len(), ALL_CODES.len());
     }
 
@@ -621,6 +649,10 @@ mod tests {
             StorageError::TtlOutOfRange {
                 requested: 0,
                 max_seconds: 86400,
+            },
+            StorageError::UnknownEntity {
+                entity: "users".into(),
+                known: "probe_row".into(),
             },
         ]
     }

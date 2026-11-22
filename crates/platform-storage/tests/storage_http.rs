@@ -594,3 +594,94 @@ fn base64_decode_url(input: &str) -> Option<Vec<u8>> {
     }
     Some(out)
 }
+
+// ---------------------------------------------------------------------------
+// 复核 R-05：entity 白名单
+// ---------------------------------------------------------------------------
+
+/// **复核 R-05**：未知 `entity` 必须在**建任务的瞬间**被拒绝（400 + `STORAGE_UNKNOWN_ENTITY`）。
+///
+/// # 为什么这是判据而不是洁癖
+///
+/// 原来 `entity` 是自由字符串且被 `worker` **静默忽略**（恒写 `probe_row`）：
+/// `entity: "users"` / `"orders"` / 拼错成 `"probe_rows"`（规格原文就是复数）
+/// 全都返回 **202 + 任务 completed**，数据被写进探针表，调用方看不出自己写错了。
+///
+/// 「参数存在但被静默忽略」是最难排查的一类问题：接口说成功，数据却在别处。
+#[tokio::test]
+async fn an_unknown_entity_is_rejected_when_the_job_is_created() {
+    let fixture = setup().await;
+    let ctx = fixture.ctx_a();
+    fixture
+        .service
+        .put_object(
+            &ctx,
+            "entity-check.csv",
+            Bytes::from_static(b"email,amount,note\na@example.com,1,x\n"),
+            "text/csv",
+        )
+        .await
+        .expect("放对象");
+
+    // ⚠️ 三个都是**看起来合理**的错误值：真实业务表名、以及规格原文的复数写法。
+    for bad in ["users", "orders", "probe_rows"] {
+        let body_json = format!("{{\"entity\":\"{bad}\",\"objectKey\":\"entity-check.csv\"}}");
+        let (status, _, body) = send(
+            app(&fixture),
+            "POST",
+            "/imports",
+            Some(Bytes::from(body_json.into_bytes())),
+            Some("application/json"),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "entity={bad:?} 必须 400（不是 202 然后静默写进探针表）"
+        );
+        assert_eq!(body_code(&body), "STORAGE_UNKNOWN_ENTITY", "entity={bad:?}");
+        let value: serde_json::Value = serde_json::from_slice(&body).expect("JSON");
+        assert_eq!(
+            value.get("params").and_then(|p| p.get("entity")).and_then(|v| v.as_str()),
+            Some(bad),
+            "params.entity 必须回显调用方给的值（便于自查）"
+        );
+        assert!(
+            value
+                .get("params")
+                .and_then(|p| p.get("known"))
+                .and_then(|v| v.as_str())
+                .is_some_and(|k| k.contains("probe_row")),
+            "params.known 必须列出支持的值"
+        );
+    }
+
+    // 导出同样校验（不是只有导入才管）。
+    let (status, _, body) = send(
+        app(&fixture),
+        "POST",
+        "/exports",
+        Some(Bytes::from_static(br#"{"entity":"users"}"#)),
+        Some("application/json"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "导出也必须拒绝未知 entity");
+    assert_eq!(body_code(&body), "STORAGE_UNKNOWN_ENTITY");
+
+    // 阳性对照：正确的 entity 仍然 202。
+    let (status, _, _) = send(
+        app(&fixture),
+        "POST",
+        "/imports",
+        Some(Bytes::from_static(
+            br#"{"entity":"probe_row","objectKey":"entity-check.csv"}"#,
+        )),
+        Some("application/json"),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "`probe_row` 必须通过（否则上面的 400 可能只是「全部拒绝」）"
+    );
+}

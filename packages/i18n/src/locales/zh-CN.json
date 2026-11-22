@@ -244,5 +244,6 @@
   "error.STORAGE_UPLOAD_TOO_LARGE": "文件超过大小上限",
   "error.STORAGE_UNSUPPORTED_FORMAT": "不支持的文件格式",
   "error.STORAGE_FILE_INFECTED": "文件未通过安全扫描",
-  "error.STORAGE_TTL_OUT_OF_RANGE": "有效期超出允许范围"
+  "error.STORAGE_TTL_OUT_OF_RANGE": "有效期超出允许范围",
+  "error.STORAGE_UNKNOWN_ENTITY": "不支持的目标实体"
 }

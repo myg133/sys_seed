@@ -170,7 +170,8 @@ fn the_server_test_registers_the_storage_error_codes() {
          漏加时 `titles_cover_every_code` **恰好是绿的**（D318）"
     );
     assert!(
-        source.contains("const REQ_018_NEW_CODES: usize = 9;"),
-        "钉死行数必须计入 `REQ_018_NEW_CODES = 9`（107 + 9 = 116）"
+        source.contains("const REQ_018_NEW_CODES: usize = 10;"),
+        "钉死行数必须计入 `REQ_018_NEW_CODES = 10`（107 + 10 = 117；\
+         其中 9 个是 D330 基线，第 10 个是 R-05 的 `STORAGE_UNKNOWN_ENTITY`）"
     );
 }

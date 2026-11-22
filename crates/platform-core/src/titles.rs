@@ -271,6 +271,10 @@ pub const TITLES: &[(&str, &str)] = &[
         "STORAGE_TTL_OUT_OF_RANGE",
         "Storage Ttl Out Of Range",
     ),
+    (
+        "STORAGE_UNKNOWN_ENTITY",
+        "Storage Unknown Entity",
+    ),
     // -- platform-org 的通知标题（事件码，不是 HTTP 错误码）------------------
     ("org.member-added", "Organization Membership Added"),
     ("org.member-removed", "Organization Membership Removed"),

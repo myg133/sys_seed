@@ -120,22 +120,42 @@ pub struct SigV4Input<'a> {
 ///
 /// 步骤严格按 AWS 文档：
 /// ① 规范化请求 → ② 待签字符串 → ③ 派生签名密钥 → ④ HMAC。
-pub fn sign(input: &SigV4Input<'_>, secret_key: &str, access_key: &str) -> String {
-    // ① 规范化请求。
+/// 参与签名的头（**固定三个，顺序不可换**）。
+///
+/// ⚠️ 顺序变化会改变 canonical request → 签名全错。
+const SIGNED_HEADERS_LIST: &str = "host;x-amz-content-sha256;x-amz-date";
+
+/// 构造 **canonical request**（SigV4 步骤 ①）。
+///
+/// # 为什么单独抽成函数
+///
+/// 复核 F-21 删掉了一条**恒真测试**（它自己 `format!` 出 canonical 字符串再断言自己），
+/// 但删掉之后 canonical 形态就**没有任何直接判据**了 —— 只剩端到端签名向量。
+/// 端到端向量虽然有效（改成 `unimplemented!()` 会红），但它失败时**看不出**
+/// 是「哪一段没按 AWS 规范拼」，排障成本高。
+///
+/// → 抽出本函数后可以对**每一段**做断言：
+/// 方法 / URI / 查询 / 头部块 / 头部清单 / 负载哈希，以及它们之间的空行。
+/// 判定力靠「把 `sign()` 换成 `unimplemented!()` 或改坏本函数，测试必红」保证。
+pub fn canonical_request(input: &SigV4Input<'_>) -> String {
     let signed_headers = format!(
         "host:{}\nx-amz-content-sha256:{}\nx-amz-date:{}\n",
         input.host, input.payload_hash, input.amz_date
     );
-    let signed_headers_list = "host;x-amz-content-sha256;x-amz-date";
-    let canonical_request = format!(
+    format!(
         "{}\n{}\n{}\n{}\n{}\n{}",
         input.method,
         input.canonical_uri,
         input.canonical_query,
         signed_headers,
-        signed_headers_list,
+        SIGNED_HEADERS_LIST,
         input.payload_hash
-    );
+    )
+}
+
+pub fn sign(input: &SigV4Input<'_>, secret_key: &str, access_key: &str) -> String {
+    // ① 规范化请求。
+    let canonical_request = canonical_request(input);
 
     // ② 待签字符串。
     let scope = format!(
@@ -463,14 +483,70 @@ mod tests {
         );
     }
 
-    // 原 `the_canonical_request_has_the_expected_shape` 已删除（复核 F-21）：
-    // 它在函数体里自己 `format!` 出 canonical 字符串、再断言这个**自拼字面量**，
-    // 从不调用被测代码，把 `sign()` 整段删掉也全绿；且注释自认用了错的
-    // signed_headers 列表 —— 一条断言错误输入正确性的恒真测试。
-    // canonical 形态没有可单测的入口函数（`sign()` 里 130-138 行**内联拼接**），
-    // 故此处不补「断言自拼字面量」的替代假测试；规范化出错的后果会改变签名，
-    // 由端到端向量 `the_signature_matches_an_independent_python_implementation`
-    // 逐字节覆盖（把 `sign()` 改成 `unimplemented!()` 它会变红）。
+    /// **复核 F-21 的替代判据**：canonical request 的**每一段**都按 AWS 规范拼。
+    ///
+    /// ⚠️ 与已删除的那条恒真测试的**根本区别**：
+    /// 那条在函数体里自己 `format!` 出期望值再断言自己（从不调用被测代码）；
+    /// **本条调用 `canonical_request()`**，断言它的**返回值**逐段正确 ——
+    /// 把 `canonical_request()` 改成返回空串，本条立刻变红。
+    #[test]
+    fn the_canonical_request_is_assembled_in_the_aws_prescribed_shape() {
+        let input = SigV4Input {
+            method: "GET",
+            host: "example.amazonaws.com",
+            canonical_uri: "/test.txt",
+            canonical_query: "x=1&y=2",
+            payload_hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            amz_date: "20150830T123600Z",
+            date_stamp: "20150830",
+            region: "us-east-1",
+            service: "s3",
+        };
+
+        let canonical = canonical_request(&input);
+
+        // ⚠️ 结构：`方法 \n URI \n 查询 \n <头部块> \n <清单> \n <负载哈希>`。
+        // 头部块**自身**以 `\n` 结尾且含 3 个头 → 按 `\n` 切分共得 9 段：
+        // 0 方法 / 1 URI / 2 查询 / 3-5 三个头 / 6 空行 / 7 清单 / 8 负载哈希。
+        let lines: Vec<&str> = canonical.split('\n').collect();
+        assert_eq!(lines.len(), 9, "canonical request 的段数必须固定（实际：{lines:?}）");
+        // ② 逐段核对（顺序不可换）。
+        assert_eq!(lines[0], "GET", "段 0：HTTP 方法");
+        assert_eq!(lines[1], "/test.txt", "段 1：canonical URI");
+        assert_eq!(lines[2], "x=1&y=2", "段 2：canonical query（已排序）");
+        assert_eq!(
+            lines[3], "host:example.amazonaws.com",
+            "段 3：头部块第 1 个（按名字母序，host 第一）"
+        );
+        assert_eq!(
+            lines[4],
+            "x-amz-content-sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "段 4：头部块第 2 个"
+        );
+        assert_eq!(
+            lines[5], "x-amz-date:20150830T123600Z",
+            "段 5：头部块第 3 个"
+        );
+        // ③ 头部块末尾的空行（AWS 规范：signed headers 清单之前必须有空行）。
+        assert_eq!(lines[6], "", "段 6：头部块末尾的空行");
+        assert_eq!(lines[7], SIGNED_HEADERS_LIST, "段 7：signed headers 清单");
+        assert_eq!(lines[8], input.payload_hash, "段 8：负载哈希");
+
+        // ④ signed headers 清单**逐字**等于三个头（顺序固定）。
+        assert!(
+            canonical.contains(SIGNED_HEADERS_LIST),
+            "必须包含 signed headers 清单 `{SIGNED_HEADERS_LIST}`"
+        );
+        assert!(
+            canonical.ends_with(&input.payload_hash),
+            "最后一段必须是负载哈希"
+        );
+        // ⑤ 负面对照：清单里**不得**出现重复的 host（原假测试的错就在这里）。
+        assert!(
+            !canonical.contains("host;host"),
+            "signed headers 清单不得出现重复的 host"
+        );
+    }
 
     /// 空内容的 sha256 是已知值（阳性对照 —— 证明 `hex_sha256` 是标准实现）。
     #[test]

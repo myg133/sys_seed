@@ -193,7 +193,7 @@ fn the_title_table_has_the_pinned_number_of_rows() {
     const REQ_015_NEW_CODES: usize = 8;
     // REQ-018（文件存储与导入导出）再加 **9** 个码（`STORAGE_*`）→ 107 + 9 = **116**。
     // ⚠️ `StorageError::Internal` 不进 `ALL_CODES`（D330）—— 进了就是 117，本条必红。
-    const REQ_018_NEW_CODES: usize = 9;
+    const REQ_018_NEW_CODES: usize = 10;
     assert_eq!(
         TITLES.len(),
         BASELINE_ROWS_BEFORE_REQ_013

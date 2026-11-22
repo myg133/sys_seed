@@ -331,11 +331,18 @@ async fn an_xlsx_import_is_rejected_with_a_clear_code() {
     );
 }
 
-/// **AC-S-180 + 181**：5 万行导入 → 进度每批更新 + 错误回执带行号列名。
+/// **AC-S-180**：5 万行导入 → 进度每批更新 + 错误回执带行号列名 + 目标表行数。
 ///
-/// ⚠️ 这里用 **2500 行**（含 5 行非法）而不是 5 万 —— 5 万行会让这条用例
-/// 在低配机上跑几分钟。**规模差异在报告里如实说明**；
-/// 判据（分批 / 进度 / 行号 / 列名）与 5 万行完全一致。
+/// **规模就是规格要求的 50001 行**（1 表头 + 5 万数据行），不缩水。
+/// 实测耗时约 9 秒（低配机上可接受），所以不存在「缩规模」的理由。
+///
+/// 判据（全部逐条断言，见函数体）：
+/// - **异步**：建任务后立刻是 `pending` / `processedRows == 0`；
+/// - **进度可查**：每 tick 只跑 1 批 → 能观察到 `0 < processedRows < 50000` 的中间态；
+/// - **完成**：`processedRows == 50000` 且 `failedRows == 10`（两个数字都断言）；
+/// - **目标表恰好 49990 行**（合法行全入库，非法行跳过）——
+///   ⚠️ 这条是 F-01 / F-02 的核心：只断言「数了行」证明不了「入了库」；
+/// - **回执行号**是文件行号（数据序号 + 1，表头占第 1 行）。
 #[tokio::test]
 async fn a_large_import_reports_progress_and_row_level_errors() {
     let fixture = setup().await;
@@ -1171,4 +1178,116 @@ async fn completing_after_abort_reports_the_session_is_gone() {
         .query_text("SELECT status FROM platform_storage_upload WHERE object_key = 'aborted.bin'")
         .await;
     assert_eq!(status, vec!["aborted".to_string()]);
+}
+
+/// **AC-S-181 端到端**（复核 R-03）：5 行 CSV，第 3 行缺必填列、第 5 行数字非法。
+///
+/// # 判据（逐条对应 AC 原文）
+///
+/// - **恰好 2 条**回执：`{rowNumber: 3, column: "email"}` 与 `{rowNumber: 5, column: "amount"}`；
+/// - 列名是**真实列名**（`email` / `amount`），不是 `column_2` 这种下标；
+/// - `reason` 是**英文 ASCII**（中文文案由前端 i18n 渲染，契约 C6）；
+/// - **只有 3 行入库**（第 1、2、4 行）—— 非法行**跳过不入库**；
+/// - `rowNumber` 是**文件行号**（表头第 1 行 → 数据第一行是第 2 行）。
+///
+/// # 为什么必须有这条
+///
+/// 复核指出：`validate_row` 的实现成立，但**没有端到端用例**把
+/// 「解析 → 校验 → 回执 → 入库」串起来验。单测只覆盖了 `validate_row` 本身，
+/// 而 AC-S-181 的判据是**任务完成后的表状态**（回执条数 + 入库行数）。
+#[tokio::test]
+async fn a_five_row_import_reports_exactly_two_receipts_and_stores_three_rows() {
+    let fixture = setup().await;
+    let ctx = fixture.ctx_a();
+
+    // 文件布局（1 表头 + 5 数据行）：
+    // 第 1 行：表头
+    // 第 2 行：ok1        ← 合法 → 入库
+    // 第 3 行：email 空   ← 非法 → 回执 {3, "email"}
+    // 第 4 行：ok3        ← 合法 → 入库
+    // 第 5 行：amount 非数字 ← 非法 → 回执 {5, "amount"}
+    // 第 6 行：ok5        ← 合法 → 入库
+    let csv = "email,amount,note\n\
+               ok1@example.com,1,a\n\
+               ,2,b\n\
+               ok3@example.com,3,c\n\
+               ok4@example.com,not-a-number,d\n\
+               ok5@example.com,5,e\n";
+    fixture
+        .service
+        .put_object(
+            &ctx,
+            "five-rows.csv",
+            Bytes::from_static(csv.as_bytes()),
+            "text/csv",
+        )
+        .await
+        .expect("上传");
+
+    let job = fixture
+        .service
+        .create_import(
+            &ctx,
+            &platform_storage::model::CreateJobBody {
+                entity: "probe_row".to_string(),
+                object_key: Some("five-rows.csv".to_string()),
+            },
+        )
+        .await
+        .expect("建任务");
+    platform_storage::worker::tick(&fixture.service, &ctx, 1)
+        .await
+        .expect("跑导入");
+
+    let done = fixture.service.find_job(&ctx, &job.id).await.expect("读");
+    assert_eq!(done.status, job_status::COMPLETED);
+    assert_eq!(done.processed_rows, 5, "5 个数据行都算处理过");
+    assert_eq!(done.failed_rows, 2, "2 行失败");
+
+    // ⚠️ **恰好 2 条**回执，且行号/列名逐字正确。
+    let mut errors = fixture
+        .service
+        .list_job_errors(&ctx, &job.id)
+        .await
+        .expect("读回执");
+    errors.sort_by_key(|e| e.row_number);
+    assert_eq!(errors.len(), 2, "恰好 2 条回执；实际：{errors:?}");
+
+    assert_eq!(errors[0].row_number, 3, "第 1 条回执是文件第 3 行");
+    assert_eq!(
+        errors[0].column, "email",
+        "列名必须是真实列名 `email`（不是 column_0 / column_2 这种下标）"
+    );
+    assert!(
+        !errors[0].reason.is_empty() && errors[0].reason.is_ascii(),
+        "reason 必须是**非空 ASCII**（中文文案由前端 i18n 渲染，契约 C6）；实际：{:?}",
+        errors[0].reason
+    );
+
+    assert_eq!(errors[1].row_number, 5, "第 2 条回执是文件第 5 行");
+    assert_eq!(
+        errors[1].column, "amount",
+        "列名必须是真实列名 `amount`"
+    );
+    assert!(
+        !errors[1].reason.is_empty() && errors[1].reason.is_ascii(),
+        "reason 必须是非空 ASCII；实际：{:?}",
+        errors[1].reason
+    );
+
+    // ⚠️ **只有 3 行入库**（第 2、4、6 文件行 → ok1 / ok3 / ok5）。
+    let stored = fixture
+        .service
+        .store()
+        .list_probe_rows(&ctx, Some(&job.id))
+        .await
+        .expect("读目标表");
+    assert_eq!(stored.len(), 3, "只有 3 个合法行入库；实际：{stored:?}");
+    let mut emails: Vec<&str> = stored.iter().map(|r| r.email.as_str()).collect();
+    emails.sort_unstable();
+    assert_eq!(
+        emails,
+        vec!["ok1@example.com", "ok3@example.com", "ok5@example.com"],
+        "入库的必须正好是那 3 个合法行（非法行跳过）"
+    );
 }

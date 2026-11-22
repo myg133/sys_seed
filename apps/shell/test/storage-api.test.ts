@@ -149,8 +149,9 @@ describe('路径常量', () => {
 });
 
 describe('错误码白名单', () => {
-  it('恰好 9 个且逐字等于后端 ALL_CODES', () => {
-    expect(STORAGE_ERROR_CODES).toHaveLength(9);
+  it('恰好 10 个且逐字等于后端 ALL_CODES', () => {
+    // ⚠️ 10 = D330 基线 9 + R-05 新增的 STORAGE_UNKNOWN_ENTITY。
+    expect(STORAGE_ERROR_CODES).toHaveLength(10);
     expect([...STORAGE_ERROR_CODES]).toEqual([
       'STORAGE_OBJECT_NOT_FOUND',
       'STORAGE_PRESIGN_EXPIRED',
@@ -161,6 +162,7 @@ describe('错误码白名单', () => {
       'STORAGE_UNSUPPORTED_FORMAT',
       'STORAGE_FILE_INFECTED',
       'STORAGE_TTL_OUT_OF_RANGE',
+      'STORAGE_UNKNOWN_ENTITY',
     ]);
   });
 

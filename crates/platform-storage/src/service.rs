@@ -587,6 +587,17 @@ impl StorageService {
         // ⚠️ 格式校验在最前面：非 .csv 立即 415（不等 worker）。
         ensure_csv_key(key)?;
 
+        // ⚠️ **entity 必须白名单校验**（复核 R-05）。
+        //
+        // 原来 `entity` 是**自由字符串且被静默忽略** —— `worker` 恒写
+        // `platform_storage_probe_row`，所以 `entity: "users"` / 拼错成
+        // `"probe_rows"`（规格原文就是复数）都会 202 + 任务 completed，
+        // 数据被写进探针表，调用方**完全看不出自己写错**了。
+        //
+        // 这是「参数存在但被静默忽略」，与本项目「禁止不报错的行为」直接冲突。
+        // → 不在白名单里就 400，让错误在**建任务的瞬间**暴露，而不是等用户发现数据丢了。
+        ensure_known_entity(&body.entity)?;
+
         let new = NewJob {
             id: uuid::Uuid::new_v4().to_string(),
             kind: job_kind::IMPORT.to_string(),
@@ -602,6 +613,9 @@ impl StorageService {
         ctx: &RequestContext,
         body: &CreateJobBody,
     ) -> Result<JobRow, ServiceError> {
+        // ⚠️ 导出也要白名单校验（同 `create_import`，复核 R-05）。
+        ensure_known_entity(&body.entity)?;
+
         let new = NewJob {
             id: uuid::Uuid::new_v4().to_string(),
             kind: job_kind::EXPORT.to_string(),
@@ -656,6 +670,29 @@ pub fn ensure_csv_key(key: &str) -> Result<(), StorageError> {
         .unwrap_or("")
         .to_string();
     Err(StorageError::UnsupportedFormat { extension })
+}
+
+/// `entity` 的**白名单**（复核 R-05）。
+///
+/// # 为什么是白名单而不是「任意字符串」
+///
+/// 导入/导出目前只有**一个**目标实体（`probe_row`，D333）。若接受任意字符串，
+/// 那么 `entity: "users"` / `"orders"` / 拼错成 `"probe_rows"` 都会
+/// **静默写入探针表**并返回 202 + `completed` —— 调用方以为自己导对了表。
+///
+/// ⚠️ 将来接**实体注册表**（TD-064）时，这里改成查注册表即可，
+/// 白名单的位置与语义不变。
+pub const KNOWN_ENTITIES: &[&str] = &["probe_row"];
+
+/// 校验 `entity` 在白名单里。
+pub fn ensure_known_entity(entity: &str) -> Result<(), StorageError> {
+    if KNOWN_ENTITIES.contains(&entity) {
+        return Ok(());
+    }
+    Err(StorageError::UnknownEntity {
+        entity: entity.to_string(),
+        known: KNOWN_ENTITIES.join(", "),
+    })
 }
 
 /// 导入一行的校验结果（worker 用）。
