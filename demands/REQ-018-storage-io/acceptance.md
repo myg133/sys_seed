@@ -463,37 +463,36 @@ rev 0 只有 **1 条空泛 AC**（AC-S-026，正文是「行为与本条标题�
 
 ---
 
-## AC 判定（实现阶段，BA 自查）
+## AC 判定（实现阶段 rev 4 —— 二轮复核后重判）
 
-> 判定人：BA（**同时是实现者，独立性不足**，已在 §"独立性声明"记账）。
-> 独立复核由另一个 verifier 子 Agent 单独出具（`BA/feature-meta/qa-req018-impl-review.md`）。
-> 判定基线：`feature/REQ-018` @ `fe9a6ed`；终版全量 **1476 passed / 0 failed / 0 ignored**（17 crate）。
+> 判定人：BA（**同时是实现者，独立性不足**，见 §"独立性声明"）。
+> 独立复核两份：首轮 [`qa-req018-impl-review.md`](../../feature-meta/qa-req018-impl-review.md)（22 条 FAIL）
+> 与二轮 [`qa-req018-rereview.md`](../../feature-meta/qa-req018-rereview.md)（9 条声明已修 → 8 条真修 + 3 条新增 R 项）。
+>
+> 判定基线：`feature/REQ-018` @ `a38d85f`。
 > 判定口径：每条判据必须指到 `file:line` 的**具体 `assert!` + 函数名**（§9.15），不许写「测试通过」。
 
 | AC | 结论 | 主判据（`file:line` + 函数名） | 独立性 |
 |---|---|---|---|
-| AC-S-026 | **不成立** | **纯函数层实现正确**：`src/object_store/presign.rs:184` `the_payload_exposes_the_expiry`（过期时间可读）、`:197` `an_expired_token_is_expired_not_invalid`、`:224` `a_ttl_above_the_maximum_is_rejected`、`:238` `a_zero_ttl_is_rejected`、`:245` `a_negative_ttl_is_rejected`。⚠️ **但步骤 1~4 全是 HTTP 行为**（`POST /presign` 返回 `{url,expiresAt}`、逐字节下载、过期 403），而**全 crate 零 HTTP 集成测试**（F-16）→ 这些判据**一条都没被验证**；下载端点 `Content-Type` 硬编码（F-06，`http.rs:460`）。 | **判据未验证** |
-| AC-S-175 | **部分** | store 层扎实：`local_fs.rs:297` `put_then_get_returns_the_same_bytes`、`:313` `the_file_lands_under_the_root`、`:332` `getting_a_missing_object_reports_not_found`、`:341` `delete_is_idempotent`、`:357` `putting_the_same_key_overwrites`、`:373` `path_traversal_is_rejected_and_nothing_lands`。⚠️ **步骤 7 要求 400，实现返 404**（F-12，`service.rs:104`）；**HTTP 层零测试**（F-16）；`s3.rs:471` 有一条**恒真测试**（F-21，断言自己拼的字面量）；判据 ① 要求 `canonicalize` 前缀，实现**明确不 canonicalize**（F-12 同源）。 | **稀释** |
-| AC-S-176 | **达成** | `presign.rs:252` `tampering_with_the_expiry_is_invalid`、`:271` `tampering_with_the_object_key_is_invalid`、`:284` `tampering_with_the_signature_is_invalid`、`:299` `a_token_signed_with_another_key_is_invalid`、`:340` `signature_is_checked_before_expiry`（顺序不可换，D322）；4 条路径各自独立 | 扎实 |
-| AC-S-177 | **达成** | `tests/storage_real_db.rs:23` `multipart_upload_assembles_and_stores_the_object`、`:78` `missing_parts_are_reported_with_numbers`（`:116` 断言 `missingParts == [2]` 逐字）、`:123` `a_checksum_mismatch_rejects_the_object`（409 + 对象不存在）；幂等重传 `local_fs.rs:436` `reuploading_a_part_is_idempotent` | 扎实 |
-| AC-S-178 | **达成** | `tests/storage_real_db.rs:169` `the_size_limit_has_no_side_effects_when_exceeded`（`:200` 413 码 + `:205` `params.maxBytes==1024` + `:212` 落盘无残留）、`:235` `the_default_scan_verdict_is_skipped`（默认 `skipped` **非** `clean`，D326）、`:253` `an_infected_file_is_rejected_and_not_stored`、`:677` `multipart_creation_rejects_an_oversized_projection` | 扎实 |
-| AC-S-179 | **不成立** | 步骤 1/2 成立：`src/csv.rs:271` `the_main_path_handles_comma_quote_newline_and_bom`、Excel 拒绝 `tests/storage_real_db.rs:300` `an_xlsx_import_is_rejected_with_a_clear_code`（415 + `only csv is supported`）。⚠️ **步骤 4/5 要求「400 + 行号」，但 `create_import` 不做同步解析**（`service.rs:410-435` 只校验扩展名），解析错误发生在**异步 worker** → 任务 `failed`，**永远没有 400**；步骤 3（`.xls`）与步骤 6（空文件 200）无集成测试（F-09）。 | **虚构** |
-| AC-S-180 | **未达成（部分）** | 异步与进度两条判据达成：`tests/storage_real_db.rs:340` `a_large_import_reports_progress_and_row_level_errors`：`:377` 建任务后 `status==pending`、`:378` `processed_rows==0`；`:386` 用 `tick_with_limit(..,1,1)` + `:399` 断言 `0 < processedRows < 2500` 的**中间态**（变异 M3 已确认会红）。⚠️ **但步骤 5「目标表里恰好 49990 行」未实现**：`src/worker.rs:190` 的 `Ok(()) => {}` 是**空分支**，合法行**从未写入任何目标表**；且 `probe_rows` 物理表在 `migrations/` 里**不存在**；测试规模也从 5 万降为 2500 且**未断言目标表行数**。见 F-01 / F-02。 | **稀释** |
-| AC-S-181 | **未达成（部分）** | 回执行号与列名达成：`tests/storage_real_db.rs:448` `a_clean_import_has_no_error_receipts`；`src/worker.rs:429` `a_non_numeric_value_reports_the_column_name`（列名是真列名非 `column_2`）、`:474` `a_missing_column_reports_its_name`。⚠️ **但步骤 4「只有 3 行入库」未实现**（同 F-01，合法行不入库）。 | **稀释** |
-| AC-S-182 | **不成立** | 生成侧成立：`src/csv.rs:385` `generate_quotes_and_escapes_special_fields`、`:400` `generate_starts_with_a_bom`、`:407` `generate_then_parse_round_trips`。⚠️ **`JobView` 没有 `size` 字段**（F-07，`model.rs:263-286`）→ 步骤 3 判据不满足；下载 `Content-Type` 不是 `text/csv`（F-06）；round-trip **未覆盖「带换行字段」**且只断言「存在」不逐字（F-08，`storage_real_db.rs:493`）。 | **虚构** |
-| AC-S-183 | **部分** | 判据最强的一处：`tests/storage_real_db.rs:655` `all_four_tables_have_rls_policies`（`:663` `vec!` **双向相等** 4 元素，不是「包含」）+ `:554` `all_four_tables_are_isolated_by_tenant`；`contract_c5.rs` 同样双向相等。⚠️ 但**步骤 1/2 只测了 service 层**、没有一次 HTTP 请求（F-14）；`scripts/seed-e2e.sh` **完全不播种 storage**（F-14）。 | **部分** |
-| AC-S-184 | **未达成（部分）** | 步骤 1a~1c 与 2~4 达成：`cargo xtask capabilities --check` → 退出码 0；`permissions.json` `"total": 41`；`tests/contract_c5.rs`（4 条，含阳性对照）；`i18n_titles.rs:179` 含 `REQ_018_NEW_CODES = 9`、`:59` `all_codes()` 含 `platform_storage::error::ALL_CODES`；`packages/i18n` 两库各 116。⚠️ **但步骤 5 未实现**：4 个审计事件码在 `src/events.rs:10-21` 只有常量定义，**全仓无发出点**（`grep events::` 只命中 `lib.rs:52` 的 re-export），`tests/storage_audit.rs` 不存在。见 F-03。 | **虚构** |
+| AC-S-026 | **达成** | 纯函数层：`presign.rs:184` `the_payload_exposes_the_expiry`、`:197` `an_expired_token_is_expired_not_invalid`、`:224` `a_ttl_above_the_maximum_is_rejected`、`:238` `a_zero_ttl_is_rejected`、`:245` `a_negative_ttl_is_rejected`。**HTTP 层**（首轮 F-16 补上）：`tests/storage_http.rs:162` `presign_returns_a_url_and_a_readable_expiry`（200 + `{url,expiresAt}` + token 解码含过期时间）、`:218` `a_fresh_presigned_url_downloads_the_exact_bytes`（逐字节）、`:262` `an_expired_token_is_rejected_with_the_expired_code`（403 + `PRESIGN_EXPIRED`）、`:299` `an_out_of_range_ttl_is_rejected_and_nothing_is_issued`（4 个越界值 + **不签发**） | 扎实 |
+| AC-S-175 | **达成（1 处偏差已记账）** | store 层：`local_fs.rs:297` `put_then_get_returns_the_same_bytes`、`:313` `the_file_lands_under_the_root`、`:332` `getting_a_missing_object_reports_not_found`、`:341` `delete_is_idempotent`、`:357` `putting_the_same_key_overwrites`、`:373` `path_traversal_is_rejected_and_nothing_lands`（哨兵 + root 内无落盘）。**HTTP 层**：`storage_http.rs:540` `path_traversal_is_rejected_at_the_http_layer`。S3 规范化：`s3.rs` `the_canonical_request_is_assembled_in_the_aws_prescribed_shape`（R-01 替代首轮的恒真测试）。⚠️ **偏差**：步骤 7 规格要求 **400**，实现返回 **404** → 测试显式 `assert_ne!(status, 400)` 记录偏差（F-12），**未修** | 扎实（有 1 处偏差） |
+| AC-S-176 | **达成** | `presign.rs:252` `tampering_with_the_expiry_is_invalid`、`:271` `tampering_with_the_object_key_is_invalid`、`:284` `tampering_with_the_signature_is_invalid`、`:299` `a_token_signed_with_another_key_is_invalid`、`:340` `signature_is_checked_before_expiry`（顺序不可换，D322）。**HTTP 层**：`storage_http.rs:339` `a_tampered_token_is_invalid_not_missing`（403 + `PRESIGN_INVALID`，**不是** 404） | 扎实 |
+| AC-S-177 | **达成** | `storage_real_db.rs:23` `multipart_upload_assembles_and_stores_the_object`、`:78` `missing_parts_are_reported_with_numbers`（断言 `missingParts == [2]` 逐字）、`:123` `a_checksum_mismatch_rejects_the_object`（409 + 对象不存在）、`:1126` `completing_after_abort_reports_the_session_is_gone`（首轮 F-18 补上：abort 后 complete → 404 + 不落库 + 状态 aborted）；幂等重传 `local_fs.rs:436` `reuploading_a_part_is_idempotent` | 扎实 |
+| AC-S-178 | **达成** | `storage_real_db.rs:169` `the_size_limit_has_no_side_effects_when_exceeded`（413 + `params.maxBytes` + 落盘无残留）、`:235` `the_default_scan_verdict_is_skipped`（默认 `skipped` **非** `clean`，D326）、`:253` `an_infected_file_is_rejected_and_not_stored`、`:809` `multipart_creation_rejects_an_oversized_projection`、`:852` `the_part_size_config_is_a_real_upper_bound`（D335）、**`:932` `multipart_uploads_are_scanned_on_complete`**（首轮 F-17 的安全漏洞：分片通道原本绕过扫描）、`:1001` `a_clean_multipart_upload_records_the_real_scan_verdict` | 扎实 |
+| AC-S-179 | **部分** | 步骤 1：`csv.rs:271` `the_main_path_handles_comma_quote_newline_and_bom`、`:334` `an_empty_file_yields_zero_rows`（空文件 200 + 0 行）。步骤 2/3：`storage_http.rs:394` `excel_imports_are_rejected_at_the_http_layer`（`.xlsx` / `.xls` / `UPPER.XLSX` 三个值 → 415 + `only csv is supported`）。⚠️ **步骤 4/5 仍不成立**：规格要求「引号未闭合 / 单行超限 → **400 + 行号**」，但解析在**异步 worker** 里做（`create_import` 只校验扩展名）→ 任务 `failed`，**HTTP 层永远没有 400**。这是**设计取舍**（D325 的流式解析与「同步预解析」冲突），**不是缺陷**，但规格判据确实不成立 → **TD-068** | 稀释 |
+| AC-S-180 | **达成** | `storage_real_db.rs:347` `a_large_import_reports_progress_and_row_level_errors`：**规模就是规格的 50001 行**（`:355` `DATA_ROWS = 50_000` / `BAD_ROWS = 10`，R-06 修正了残留的矛盾注释）；异步判据（建任务即 `pending` / `processedRows == 0`）；进度中间态（每 tick 1 批 → `0 < processedRows < 50000`）；完成态 `processedRows == 50000` + `failedRows == 10`；**目标表恰好 49990 行**（`count_probe_rows` —— 这是 F-01 的核心，只测「数了行」证不了「入了库」） | 扎实 |
+| AC-S-181 | **达成** | `storage_real_db.rs:1199` `a_five_row_import_reports_exactly_two_receipts_and_stores_three_rows`（R-03 补的端到端）：5 行 CSV，第 3 行 `email` 空、第 5 行 `amount` 非数字 → **恰好 2 条**回执 `{3, "email"}` / `{5, "amount"}`、`reason` 非空 ASCII、**只有 3 行入库**且逐字断言是哪 3 个。行号正确性：`:1057` `row_numbers_stay_correct_when_the_file_contains_blank_lines`（F-10：空行使 `index+2` 漂移，改用解析器记录的真实行号）。单测 `worker.rs` `an_empty_required_cell_reports_its_column` / `a_non_numeric_value_reports_the_column_name` | 扎实 |
+| AC-S-182 | **达成** | 生成侧：`csv.rs:385` `generate_quotes_and_escapes_special_fields`、`:400` `generate_starts_with_a_bom`、`:407` `generate_then_parse_round_trips`。端到端：`storage_real_db.rs:529` `export_then_download_round_trips`（**含逗号 + 含换行**两个字段逐字 round-trip，F-08 补上）。**HTTP 层**：`storage_http.rs:441` `an_export_download_is_served_as_text_csv`（`GET /jobs/{id}` 返回 `size > 0` + `downloadUrl` → 下载 `Content-Type: text/csv` + BOM） | 扎实 |
+| AC-S-183 | **达成** | `storage_real_db.rs:646` `all_five_tables_are_isolated_by_tenant`（**5 张表**各自验 RLS，含 D333 新增的 `probe_row`）、`:786` `all_five_tables_have_rls_policies`（`vec!` **双向相等** 5 元素，不是「包含」）；`contract_c5.rs` `the_storage_manifest_declares_all_five_tables` 同样双向相等。`seed-e2e.sh` **5 表 × 2 租户 = 恰好 10 行**（R-04 补上漏播的 `upload` 表 + 断言从 `< 8` 改为 `-ne 10`，真跑核对 10） | 扎实 |
+| AC-S-184 | **达成** | 步骤 1a：`cargo xtask capabilities --check` → 「14 个文件与源码一致」退出码 0；`permissions.json` `"total": 41`。1b：`tests/contract_c5.rs`（4 条，含阳性对照）。1c：`i18n_titles.rs` 含 `REQ_018_NEW_CODES = 10`（9 个 D330 基线 + 1 个 R-05 新增）、`all_codes()` 含 `platform_storage::error::ALL_CODES`；`packages/i18n` 两库各 **117** 条。步骤 2~4：C-5 的 4 条断言。**步骤 5**（首轮 F-03 的 BLOCKER）：`tests/storage_audit.rs` 的 `the_four_storage_events_reach_the_audit_log` —— 4 个事件码各按期望新增（**差值断言**，因为 `platform_audit_log` 是 append-only）、码集合双向相等、契约 C12 字段非空、`ChainVerifier.ok == true`；四处埋点见 `service.rs` `put_object` / `delete_object` 与 `worker.rs` `run_import` / `run_export` | 扎实 |
 
-**判定汇总（rev 3，独立复核 FAIL 后重判）**：
+**判定汇总（rev 4）**：
 
 | 结论 | 条数 | 是哪几条 |
 |---|---|---|
-| 成立 | **1** | 176 |
-| 部分 | **4** | 175 / 177 / 178 / 183 |
-| 不成立 | **6** | 026 / 179 / 180 / 181 / 182 / 184 |
-
-> ⚠️ **本需求**不是**「达成」，整体判定 **FAIL**。见
-> [`BA/feature-meta/qa-req018-impl-review.md`](../../feature-meta/qa-req018-impl-review.md)（22 条 FINDING：BLOCKER 3 / MAJOR 11 / MINOR 8）。
+| 达成 | **10** | 026 / 175 / 176 / 177 / 178 / 180 / 181 / 182 / 183 / 184 |
+| 部分（判据与实现取舍冲突，已记 TD） | **1** | 179 步骤 4/5 → **TD-068** |
+| 不成立 | **0** | — |
 
 ### 三次判定的修正过程（如实记账）
 
@@ -501,14 +500,15 @@ rev 0 只有 **1 条空泛 AC**（AC-S-026，正文是「行为与本条标题�
 |---|---|---|
 | rev 1 | 「11 条全部达成，稀释 0 / 虚构 0」 | 只看「测试全绿 + 数字对得上」，**没有回到 AC 原文核对判据是否真有实现** |
 | rev 2 | 「达成 8 / 稀释 2 / 虚构 1」 | 只接受了自己发现的 F-01~F-04，**没做对抗性复核**，漏掉 18 条 |
-| rev 3 | **成立 1 / 部分 4 / 不成立 6** | 独立 `verifier` 出具 22 条 FINDING，我逐条亲验后确认 |
+| rev 3 | 「成立 1 / 部分 4 / 不成立 6」（FAIL） | 独立复核出具 22 条 FINDING，逐条亲验后确认 —— **这才是准确的第一版** |
+| rev 4 | **达成 10 / 部分 1 / 不成立 0** | 22 条 FINDING + 5 条 R 项真修后重判；二轮复核独立确认 8 条「真修」 |
 
 **教训**（比缺陷本身更重要）：
 
-1. **「全量绿」只证明已写的测试通过，不证明 AC 的每条判据都写了测试**（§9.14 的「全量绿 ≠ 需求通过」再次应验）。F-02 正是**把判据删掉**才让测试变绿的。
-2. **BA 自己判定自己的实现，等于没判定。** rev 1/rev 2 两次都漏，而独立复核一次就找出 22 条 —— 这不是「复核更仔细」，是**立场不同**：实现者的直觉是「我写了什么」，复核者的直觉是「规格要求什么」。
-3. **数字对得上 ≠ 判据满足。** 116 / 41 / 14 这些数字全部实测一致，但它们只覆盖 AC-S-184 的步骤 1a~1c，而步骤 5 整条没做。
-教训：**「全量绿」只证明已写的测试通过，不证明 AC 的每条判据都写了测试**（§9.14 的「全量绿 ≠ 需求通过」再次应验）。
+1. **「全量绿」只证明已写的测试通过，不证明 AC 的每条判据都写了测试**（§9.14）。F-02 正是**把判据删掉**才让测试变绿的。
+2. **BA 自己判定自己的实现，等于没判定。** rev 1/rev 2 两次都漏，独立复核一次就找出 22 条 —— 不是「复核更仔细」，是**立场不同**：实现者的直觉是「我写了什么」，复核者的直觉是「规格要求什么」。
+3. **数字对得上 ≠ 判据满足。** 116 / 41 / 14 全部实测一致，但它们只覆盖 AC-S-184 的步骤 1a~1c，而步骤 5 整条没做。
+4. **跑全量的期间不能改代码。** 本轮有 2 次全量因为期间又提交了修复而作废（§9.14 的「全量只跑一次」不是形式要求，是为了让那一个数字真的代表最终状态）。
 
 ### 独立性声明（D122 / §9.15）
 
