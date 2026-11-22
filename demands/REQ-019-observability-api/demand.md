@@ -81,7 +81,7 @@
 
 父需求 AC：**AC-027**（限流三级生效）、**AC-028**（trace_id 全链路贯穿）
 
-本需求自有 AC：**AC-S-029 ~ AC-S-036**（8 条，见 [acceptance.md](acceptance.md)）
+本需求自有 AC：**AC-S-029 ~ AC-S-037**（**9 条**，见 [acceptance.md](acceptance.md)）
 
 ## 完成定义
 

@@ -11,9 +11,9 @@
 | 文件 | 状态 |
 |---|---|
 | [demand.md](demand.md) | ✅ rev 1（含**实测现状基线** 9 项 + 需求来源披露） |
-| [acceptance.md](acceptance.md) | ✅ rev 1（**9 条 AC**：AC-S-029 ~ AC-S-037） |
+| [acceptance.md](acceptance.md) | ✅ rev 1（***9 条 AC**：AC-S-029 ~ AC-S-037） |
 | [decisions.md](decisions.md) | ✅ rev 1（**D337~D344**，8 条） |
-| [design-summary.md](design-summary.md) | ✅ rev 1（2 表 / 4 端点 / 12 交互点） |
+| [design-summary.md](design-summary.md) | ✅ rev 1（**1 表** / 4 端点 / 12 交互点） |
 | `test-cases/` | ⏳ 待挑刺后产出 |
 
 ## 状态历史
