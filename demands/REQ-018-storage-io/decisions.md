@@ -112,7 +112,22 @@ pub trait ObjectStore: Send + Sync {
 | `encoding_rs` | ❌ **需新增** |
 | `httparse` / `log` / `mime` / `spin` / `memchr` / `futures-util` | ✅ 全部已在 |
 
-→ **净新增只有 2 个包**（`multer` + `encoding_rs`）。
+> ⚠️ **rev 2 修正（实测打脸）**：rev 1 由上面这张表得出「净新增只有 **2** 个包」，
+> 这是**只看了一层传递依赖**的错误。实现完成后对 `Cargo.lock` 做实测对比
+> （`develop` 303 包 → `feature/REQ-018` 309 包，用 `name = "..."` 正则求差集）：
+
+| 新增包 | 版本 | 由谁引入 |
+|---|---|---|
+| `multer` | 3.1.0 | `axum`（`multipart` feature） |
+| `encoding_rs` | 0.8.44 | `multer` |
+| `core_detect` | 1.0.0 | `encoding_rs` |
+| `multiversion_no_op` | 1.0.0（proc-macro） | `encoding_rs` |
+| `simdutf8` | 0.1.5 | `encoding_rs` |
+| `platform-storage` | 0.1.0 | **本需求自己的新 crate**（不算第三方） |
+
+→ **第三方包净新增 = 5 个**（`multer` + `encoding_rs` + `core_detect` + `multiversion_no_op` + `simdutf8`），
+**不是 2 个**。`cargo tree -p encoding_rs -e normal` 确认后 3 个是**实际编译依赖**（不是可选 feature）。
+删除包：**0 个**。
 
 ### 决定
 
@@ -121,9 +136,15 @@ pub trait ObjectStore: Send + Sync {
 
 1. 父 AC-025 要求「上传大文件（分片）」——multipart 是**标准做法**，
    自定义协议会让前端与第三方客户端都要特殊适配；
-2. **净新增仅 2 个包**（不是「一个新的生态」，`aws-sdk-s3` 那种才是）；
+2. **第三方净新增 5 个包**（rev 2 实测值；rev 1 曾误记为 2 个）——
+   仍然不是「一个新的生态」（`aws-sdk-s3` 那种才是），5 个都是小工具包：
+   `core_detect` / `multiversion_no_op` 是 CPU 特性探测，`simdutf8` 是 SIMD UTF-8 校验；
 3. 自己实现 multipart 解析（边界扫描 + 流式 body）约 300 行且**比 CSV 解析更容易出安全洞**
    （边界冲突、头部注入、`Content-Length` 欺骗）。
+
+> ⚠️ **破例的边界必须重新明确**：破例范围是「multipart 这一条链路」，
+> **不**包含 `encoding_rs` 继续往下拉任何包之外的东西。若后续 `encoding_rs` 升级带进更多包，
+> 需重新走裁决（不是自动放行）。
 
 ### 同时必须做的事
 
@@ -371,7 +392,7 @@ crates/platform-storage/
 |---|---|---|
 | 1 | S3 **只做协议、不真连** | ✅ 用户 2026-11-22 裁定 → TD-059 |
 | 2 | **只做 CSV**，Excel 显式拒绝 | ✅ 用户 2026-11-22 裁定 → TD-060 |
-| 3 | **启用 axum multipart**（第二次依赖破例，净增 2 包） | ✅ 用户 2026-11-22 裁定 |
+| 3 | **启用 axum multipart**（第二次依赖破例，净增 **5** 包 —— rev 2 实测修正） | ✅ 用户 2026-11-22 裁定 |
 | 4 | 病毒扫描只做钩子（默认 `Skipped`） | BA 提议（D326） |
 | 5 | 图片处理不做 | BA 提议（D327）→ TD-061 |
 | 6 | 异步导入复用 REQ-015 的 worker 形态 | BA 提议（D324） |

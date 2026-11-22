@@ -31,7 +31,7 @@
 |---|---|---|
 | 1 | **本地 FS 真实现 + S3 只做协议**（不真连） | 用户裁定；无 MinIO 环境 + 零依赖 → **TD-059** |
 | 2 | **只做 CSV，Excel 显式拒绝** | `.xlsx` = ZIP + XML，两个库都不在树里 → **TD-060** |
-| 3 | **启用 axum multipart**（**第二次依赖破例**） | 净增 **2 包**（`multer` + `encoding_rs`，其余 6 个传递依赖已在 lock） |
+| 3 | **启用 axum multipart**（**第二次依赖破例**） | 净增 **5 包**（`multer` + `encoding_rs` + `core_detect` + `multiversion_no_op` + `simdutf8`；rev 2 实测修正） |
 
 ## 基线实测（不是推测）
 
