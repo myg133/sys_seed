@@ -273,10 +273,41 @@ rev 0 只有 **1 条空泛 AC**（AC-S-026，正文是「行为与本条标题�
   - 步骤 2/3：**415 + `STORAGE_UNSUPPORTED_FORMAT`**，
     `detail` 里含 `"only csv is supported"`（⚠️ **不是静默当 CSV 解析**，
     也不是 500）；
-  - 步骤 4：**400**，错误指出**行号**（不完整字段在第几行）；
-  - 步骤 5：**400**，错误指出**行号**与上限；
+  - 步骤 4：**202 ACCEPTED**（建任务成功），随后 worker 把任务置为
+    **`status == "failed"`**，且 `job.error` 里**含行号**
+    （不完整字段在第几行）—— 见下方 §"rev 3 的关键裁决"；
+  - 步骤 5：同步骤 4，`job.error` 里**含行号与上限**
+    （形如 `the line 3 exceeds the maximum row size of 40 bytes`）；
   - 步骤 6：**200**，解析出 **0 条**数据行（空文件不是错误）。
 - **类型**: 功能 / 安全
+
+#### ⚠️ rev 3 的关键裁决：步骤 4/5 为什么从「400」改成「202 + 任务 failed」（D336）
+
+**原文写「400，错误指出行号」。这在实现上是做不到的，且与 D325 直接冲突。**
+
+`create_import` 只校验**扩展名**（.csv）就返回 202；真正的解析发生在
+**worker** 里（`worker.rs` 调 `csv::parse`）。要让步骤 4/5 变成「HTTP 400」，必须
+在请求线程里**同步解析整个文件** —— 而：
+
+1. 文件是**先从对象存储读**的（可能几百 MB），同步读会让请求超时；
+2. D325 明确要求「流式 + 分批 + 每批独立事务」，同步全量解析与之直接矛盾；
+3. 只预检文件**头部**（前 N 行）抓不到「引号未闭合」—— 这个错误**恰恰常在文件末尾**，
+   只查头部会给出「看起来没问题」的**假安全**。
+
+→ **改成**：202 建任务 → worker 解析失败 → 任务 `failed` + `error` **带行号**。
+这是异步导入的本质语义，也是用户能定位问题的充分信息。
+
+**实测证据**（2026-11-22，`develop` @ `0b9697b`）：
+
+| 场景 | 实际行为 |
+|---|---|
+| 引号未闭合（第 3 行开始） | 202 `pending` → `failed`，`error = "the source csv is invalid: a quoted field starting at line 3 is never closed"` |
+| 单行超限（第 3 行，上限 40 字节） | 202 `pending` → `failed`，`error = "the source csv is invalid: the line 3 exceeds the maximum row size of 40 bytes"` |
+
+⚠️ **这条裁决不降低信息量**：原来的「400 + 行号」与现在的「202 + 任务 failed + error 含行号」
+给用户的**可定位信息完全相同**（都能知道哪一行错了），只是**暴露时机**从同步变成异步。
+判据仍然是**可断言的**（断言 `status == "failed"` 且 `error` 含 `line N`），
+不是「随便怎样都行」。
 
 ---
 
@@ -479,22 +510,28 @@ rev 0 只有 **1 条空泛 AC**（AC-S-026，正文是「行为与本条标题�
 | AC-S-176 | **达成** | `presign.rs:252` `tampering_with_the_expiry_is_invalid`、`:271` `tampering_with_the_object_key_is_invalid`、`:284` `tampering_with_the_signature_is_invalid`、`:299` `a_token_signed_with_another_key_is_invalid`、`:340` `signature_is_checked_before_expiry`（顺序不可换，D322）。**HTTP 层**：`storage_http.rs:339` `a_tampered_token_is_invalid_not_missing`（403 + `PRESIGN_INVALID`，**不是** 404） | 扎实 |
 | AC-S-177 | **达成** | `storage_real_db.rs:23` `multipart_upload_assembles_and_stores_the_object`、`:78` `missing_parts_are_reported_with_numbers`（断言 `missingParts == [2]` 逐字）、`:123` `a_checksum_mismatch_rejects_the_object`（409 + 对象不存在）、`:1126` `completing_after_abort_reports_the_session_is_gone`（首轮 F-18 补上：abort 后 complete → 404 + 不落库 + 状态 aborted）；幂等重传 `local_fs.rs:436` `reuploading_a_part_is_idempotent` | 扎实 |
 | AC-S-178 | **达成** | `storage_real_db.rs:169` `the_size_limit_has_no_side_effects_when_exceeded`（413 + `params.maxBytes` + 落盘无残留）、`:235` `the_default_scan_verdict_is_skipped`（默认 `skipped` **非** `clean`，D326）、`:253` `an_infected_file_is_rejected_and_not_stored`、`:809` `multipart_creation_rejects_an_oversized_projection`、`:852` `the_part_size_config_is_a_real_upper_bound`（D335）、**`:932` `multipart_uploads_are_scanned_on_complete`**（首轮 F-17 的安全漏洞：分片通道原本绕过扫描）、`:1001` `a_clean_multipart_upload_records_the_real_scan_verdict` | 扎实 |
-| AC-S-179 | **部分** | 步骤 1：`csv.rs:271` `the_main_path_handles_comma_quote_newline_and_bom`、`:334` `an_empty_file_yields_zero_rows`（空文件 200 + 0 行）。步骤 2/3：`storage_http.rs:394` `excel_imports_are_rejected_at_the_http_layer`（`.xlsx` / `.xls` / `UPPER.XLSX` 三个值 → 415 + `only csv is supported`）。⚠️ **步骤 4/5 仍不成立**：规格要求「引号未闭合 / 单行超限 → **400 + 行号**」，但解析在**异步 worker** 里做（`create_import` 只校验扩展名）→ 任务 `failed`，**HTTP 层永远没有 400**。这是**设计取舍**（D325 的流式解析与「同步预解析」冲突），**不是缺陷**，但规格判据确实不成立 → **TD-068** | 稀释 |
+| AC-S-179 | **达成** | 步骤 1：`csv.rs:271` `the_main_path_handles_comma_quote_newline_and_bom`、`:334` `an_empty_file_yields_zero_rows`（空文件 200 + 0 行）。步骤 2/3：`storage_http.rs:394` `excel_imports_are_rejected_at_the_http_layer`（`.xlsx` / `.xls` / `UPPER.XLSX` 三个值 → 415 + `only csv is supported`）。**步骤 4/5**（D336 裁决后）：202 → 任务 `failed` + `error` 含行号 —— 单测 `csv.rs:295` `an_unclosed_quote_reports_the_starting_line`、`:322` `a_row_too_long_reports_the_line_and_limit`；端到端实测 `error` 形如 `"…a quoted field starting at line 3 is never closed"` / `"…the line 3 exceeds the maximum row size of 40 bytes"` | 扎实 |
 | AC-S-180 | **达成** | `storage_real_db.rs:347` `a_large_import_reports_progress_and_row_level_errors`：**规模就是规格的 50001 行**（`:355` `DATA_ROWS = 50_000` / `BAD_ROWS = 10`，R-06 修正了残留的矛盾注释）；异步判据（建任务即 `pending` / `processedRows == 0`）；进度中间态（每 tick 1 批 → `0 < processedRows < 50000`）；完成态 `processedRows == 50000` + `failedRows == 10`；**目标表恰好 49990 行**（`count_probe_rows` —— 这是 F-01 的核心，只测「数了行」证不了「入了库」） | 扎实 |
 | AC-S-181 | **达成** | `storage_real_db.rs:1199` `a_five_row_import_reports_exactly_two_receipts_and_stores_three_rows`（R-03 补的端到端）：5 行 CSV，第 3 行 `email` 空、第 5 行 `amount` 非数字 → **恰好 2 条**回执 `{3, "email"}` / `{5, "amount"}`、`reason` 非空 ASCII、**只有 3 行入库**且逐字断言是哪 3 个。行号正确性：`:1057` `row_numbers_stay_correct_when_the_file_contains_blank_lines`（F-10：空行使 `index+2` 漂移，改用解析器记录的真实行号）。单测 `worker.rs` `an_empty_required_cell_reports_its_column` / `a_non_numeric_value_reports_the_column_name` | 扎实 |
 | AC-S-182 | **达成** | 生成侧：`csv.rs:385` `generate_quotes_and_escapes_special_fields`、`:400` `generate_starts_with_a_bom`、`:407` `generate_then_parse_round_trips`。端到端：`storage_real_db.rs:529` `export_then_download_round_trips`（**含逗号 + 含换行**两个字段逐字 round-trip，F-08 补上）。**HTTP 层**：`storage_http.rs:441` `an_export_download_is_served_as_text_csv`（`GET /jobs/{id}` 返回 `size > 0` + `downloadUrl` → 下载 `Content-Type: text/csv` + BOM） | 扎实 |
 | AC-S-183 | **达成** | `storage_real_db.rs:646` `all_five_tables_are_isolated_by_tenant`（**5 张表**各自验 RLS，含 D333 新增的 `probe_row`）、`:786` `all_five_tables_have_rls_policies`（`vec!` **双向相等** 5 元素，不是「包含」）；`contract_c5.rs` `the_storage_manifest_declares_all_five_tables` 同样双向相等。`seed-e2e.sh` **5 表 × 2 租户 = 恰好 10 行**（R-04 补上漏播的 `upload` 表 + 断言从 `< 8` 改为 `-ne 10`，真跑核对 10） | 扎实 |
 | AC-S-184 | **达成** | 步骤 1a：`cargo xtask capabilities --check` → 「14 个文件与源码一致」退出码 0；`permissions.json` `"total": 41`。1b：`tests/contract_c5.rs`（4 条，含阳性对照）。1c：`i18n_titles.rs` 含 `REQ_018_NEW_CODES = 10`（9 个 D330 基线 + 1 个 R-05 新增）、`all_codes()` 含 `platform_storage::error::ALL_CODES`；`packages/i18n` 两库各 **117** 条。步骤 2~4：C-5 的 4 条断言。**步骤 5**（首轮 F-03 的 BLOCKER）：`tests/storage_audit.rs` 的 `the_four_storage_events_reach_the_audit_log` —— 4 个事件码各按期望新增（**差值断言**，因为 `platform_audit_log` 是 append-only）、码集合双向相等、契约 C12 字段非空、`ChainVerifier.ok == true`；四处埋点见 `service.rs` `put_object` / `delete_object` 与 `worker.rs` `run_import` / `run_export` | 扎实 |
 
-**判定汇总（rev 4）**：
+**判定汇总（rev 5）**：
 
 | 结论 | 条数 | 是哪几条 |
 |---|---|---|
-| 达成 | **10** | 026 / 175 / 176 / 177 / 178 / 180 / 181 / 182 / 183 / 184 |
-| 部分（判据与实现取舍冲突，已记 TD） | **1** | 179 步骤 4/5 → **TD-068** |
+| 达成 | **11** | 026 / 175 / 176 / 177 / 178 / **179** / 180 / 181 / 182 / 183 / 184 |
+| 部分 | **0** | — |
 | 不成立 | **0** | — |
 
-### 三次判定的修正过程（如实记账）
+> ⚠️ **AC-S-179 的「达成」来自一次规格修正，不是实现补完**：
+> 步骤 4/5 原文要求「400 + 行号」，与 D325 的流式异步解析**互斥**。
+> 用户 2026-11-22 裁定**改规格**（**D336**）→ 判据改为「202 → 任务 `failed` + `error` 含行号」，
+> 信息量不变（哪一行、为什么都能拿到），只是暴露时机从同步变异步。
+> **本轮没有为此改一行代码** —— 是判据对齐了现实，而不是现实被弯曲来迎合判据。
+
+### 五次判定的修正过程（如实记账）
 
 | 版本 | 当时结论 | 为什么错 |
 |---|---|---|
@@ -502,6 +539,7 @@ rev 0 只有 **1 条空泛 AC**（AC-S-026，正文是「行为与本条标题�
 | rev 2 | 「达成 8 / 稀释 2 / 虚构 1」 | 只接受了自己发现的 F-01~F-04，**没做对抗性复核**，漏掉 18 条 |
 | rev 3 | 「成立 1 / 部分 4 / 不成立 6」（FAIL） | 独立复核出具 22 条 FINDING，逐条亲验后确认 —— **这才是准确的第一版** |
 | rev 4 | **达成 10 / 部分 1 / 不成立 0** | 22 条 FINDING + 5 条 R 项真修后重判；二轮复核独立确认 8 条「真修」 |
+| rev 5 | **达成 11 / 部分 0 / 不成立 0** | AC-S-179 步骤 4/5 经用户裁定**改规格**（D336）后判据对齐现实；**无代码改动** |
 
 **教训**（比缺陷本身更重要）：
 
