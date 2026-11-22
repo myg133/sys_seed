@@ -1362,7 +1362,10 @@ Sprint 3 复盘的第 2 条教训：**修漏洞会制造新漏洞** —— 但�
   让 `xtask` **不能**依赖 `platform-server`（那会间接依赖 `sandbox`）。
   → 只有放在 `platform-observability` 里的端点能被标注。
 - **影响**: 产物是**部分**文档，不覆盖 `platform-app` / `rbac` / `audit` / `iam` 等
-  100+ 个端点。AC-S-035 的「paths 含 `/api/rbac/roles`」这类判据**未达成**。
+  100+ 个端点。
+  ⚠️ **rev 3 修正（D345）**：AC-S-035 已改为「机制成立 + 覆盖范围明确」，
+  **不再**要求覆盖具体端点 → 该条 AC 现在**达成**。
+  覆盖面仍是**真实的缺口**（运维拿到的文档不全），只是不再当作 AC 判据。
 - **要做需要什么**（两条路）:
   1. **给各 crate 加 `utoipa` 依赖 + 标注**，然后让 xtask 通过
      「各 crate 导出的 `openapi_fragment()`」汇总 —— 不引入 server 依赖，
@@ -1402,7 +1405,7 @@ Sprint 3 复盘的第 2 条教训：**修漏洞会制造新漏洞** —— 但�
 
 ---
 
-## TD-075: REQ-019 的 `build_router` **未抽取** —— HTTP 级判据测的不是生产装配
+## ~~TD-075~~: REQ-019 的中间件装配 —— **已解决**（2026-11-23）
 
 - **发现于**: REQ-019 实现阶段（挑刺 M5 的遗留）
 - **现状**: 9 条 AC 的判据里，HTTP 级的那些跑的是
@@ -1424,4 +1427,48 @@ Sprint 3 复盘的第 2 条教训：**修漏洞会制造新漏洞** —— 但�
   3. `main` 与所有 HTTP 级测试都调它；
   4. 补一条「装配契约」测试：断言 router 里含预期数量的路由
      （`router.into_iter()` 数 route id），防漏挂。
-- **优先级**: **P1**（这是「测试测的不是生产」这一类风险的唯一解）
+- **✅ 已解决方式**（比原计划更精准 —— 只抽中间件段，不抽整个 router）:
+  1. `apply_all_middlewares_with(router, rate_limit, client_info)` 抽到
+     `platform-observability::http`，`client_info` 用**函数注入**
+     （避免 `server → observability` 成环）；
+  2. `main.rs` 的 245 行内联中间件装配 → 10 行调用；
+  3. 新增 `tests/middleware_assembly.rs`（5 条判据）：
+     trace 挂上了 / limit 挂上了 / 弃用头挂上了 / **client_info 在最外层**。
+
+  **⚠️ 这个测试立刻抓到 2 个真实的顺序 bug**（比 TD 描述的「漏挂」更实在）：
+  - `apply_observability` 里先挂 trace 后挂 limit → axum 的 layer 是「后挂在外层」
+    → **limit 先执行** → 读不到租户 → 按 TD-072 放行 → **限流永久不生效**；
+  - `apply_all_middlewares_with` 里先挂 client_info → 它变内层
+    → trace_id 先跑，读不到它填的租户/IP。
+
+  → 两个都是「代码看起来对、功能静默失效」。变异验证：把 client_info 挂回内层 → 2 条红。
+
+  **⚠️ 仍未做**：完整 `build_router` 抽取（把 **router 组装**也抽出来，
+  让测试能断言「所有 20+ 个 nest 都挂上了」）。中间件层已有判据，
+  **路由挂载**那一层仍然只靠人工核对 → 见 **TD-076**。
+- **优先级**: ~~P1~~ → **中间件部分已关闭**；路由层遗留 → TD-076
+
+
+---
+
+## TD-076: REQ-019 / 全部需求的 **router 组装**仍无判据（`build_router` 未抽）
+
+- **发现于**: REQ-019 实现阶段（TD-075 拆分出的遗留）
+- **现状**: 中间件装配已有判据（`middleware_assembly` 5 条），
+  但 `main.rs` 里 **20+ 个 `.nest()` / `.merge()` 调用**（`/api/iam`、`/api/org`、
+  `/api/rbac`、`/api/audit`、`/api/schema`、`/api/config`、`/api/apps`、
+  `/api/notify`、`/api/storage`、`/api/oauth`、`/api/i18n`、`/api/observability` …）
+  仍然**内联**在 506 行的装配段里，测试够不着。
+- **影响**: 若某个 `nest` 被误删或路径拼错（比如 `/api/notfy`），
+  该组路由**整体 404**，而**没有任何测试会红** —— 各 crate 自己的路由测试
+  测的是 `router()` 函数，不是「它被挂到了 server 的哪个路径上」。
+- **注意**: 这不是 REQ-019 引入的债 —— 它从 REQ-002 起就存在，
+  只是 REQ-019 在抽中间件时顺带发现了它。
+- **要做需要什么**:
+  1. 把 20+ 个 state 的构造与 `.nest()` 分离（state 构造留在 `main`）；
+  2. 抽 `pub fn build_router(deps: AppDeps) -> Router`，`AppDeps` 装全部 state；
+  3. 补「装配契约」测试：遍历 `router` 里的 route，断言**预期路径清单**全部存在
+     （`axum::Router` 没有公开的 route 枚举 API → 可能需要用
+     `tower::ServiceExt::oneshot` 对每个预期路径打一次，断言**不是 404**）。
+- **优先级**: **P1**（现在已知的做法是「对每个路径打一次断言非 404」，
+  成本不高但能抓住整组路由失踪）

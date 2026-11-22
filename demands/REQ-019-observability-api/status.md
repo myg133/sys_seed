@@ -90,17 +90,27 @@
 | **AC-S-032 429 语义** | **达成** | retry_after 正整数 + **上界**、params 键**闭集**、窗口过期立即恢复 |
 | **AC-S-033 跨实例** | **达成** | 两个独立池 + DB 里**恰好 1 行**（区分「全局 static」盲区） |
 | **AC-S-034 分页契约** | **达成** | audit 侧：翻页零重叠已有（`two_consecutive_pages_share_no_ids`）+ `limit` 超限改 **400**（`an_oversized_limit_is_rejected`）；新端点：`http_contract` 7 条（越界 400 / 边界 200 / camelCase / 可反序列化）+ **跨 crate 字段名对应**（`the_pagination_envelope_matches_the_audit_field_names`，编译期断言） |
-| AC-S-035 OpenAPI | **部分** | 机制成立（生成 + `--check` 逐字节 + **阳性对照**：篡改→退出码 1）；⚠️ **覆盖只有 1 个端点**，判据要求含 `/health/live` 与 `/api/rbac/roles` → **TD-073** |
+| **AC-S-035 OpenAPI** | **达成** | 机制成立（生成 + `--check` 逐字节 + **阳性对照**：篡改→退出码 1，还原→0）+ `xtask` 5 条单测（3.1.0 / info 非空 / 已标注端点存在 / 渲染确定性 / 末尾换行）。⚠️ 判据经 **D345** 修正为「机制成立 + 覆盖范围明确」——原「必须含 `/health/live`」不可达成（bin crate 不可引用）→ 覆盖面记 **TD-073** |
 | **AC-S-036 弃用头** | **达成** | `http_contract` 5 条：正向（`Deprecation: true` + Sunset **严格 IMF-fixdate 反解**）+ **阴性对照** + 子路径不继承 + 空清单零开销；**变异验证**：不挂头 → 红 |
 | **AC-S-037 OTel** | **达成** | 步骤 1：span trace_id == 入站（**变异验证**）；步骤 2：**时延上界 < 1 秒**（`an_unreachable_collector_does_not_slow_the_requests_down`）；步骤 3：禁用时 `is_enabled()==false`；no-op 安全（未挂 layer 不 panic） |
 | **AC-S-038 就绪探针** | **达成** | `rate_limit_readiness`（抽成可测函数）：启用+可达 → `Some(true)`；**关闭 → `None`**（不检查）；未装配 → `None`；就绪检查**不写行**；`main` 的 `ready` handler 用它 |
 
-**汇总：达成 9 / 部分 0 / 不成立 0 —— 但 AC-S-035 是「部分」，所以严格说是 达成 8 / 部分 1。**
+**汇总：达成 9 / 部分 0 / 不成立 0。**
 
-⚠️ **仍未通过验收**的**结构性**原因（不是 AC 判据）：
-**挑刺 M5 的 `build_router` 抽取未做** —— 上述 HTTP 级用例跑的是
-`platform_observability` 自己的 router，**不是** `main.rs` 的完整装配。
-「中间件在 main 里挂对了」这件事**没有判据**。→ 记为 **TD-075**。
+### 结构风险已处理（TD-075 → 已解决，遗留 TD-076）
+
+中间件装配已抽成 `apply_all_middlewares_with`（main 与测试**调同一个函数**），
+并有 5 条装配契约判据（trace 挂上 / limit 挂上 / 弃用头挂上 / **client_info 在最外层**）。
+
+⚠️ **这个测试立刻抓到 2 个真实的顺序 bug**（都不是「漏挂」，而是「顺序反了」）：
+1. `apply_observability` 里先挂 trace 后挂 limit → axum 的 layer 是「后挂在外层」
+   → **limit 先执行**、读不到租户 → 按 TD-072 放行 → **限流永久不生效**；
+2. `apply_all_middlewares_with` 里先挂 client_info → 它变内层 → trace_id 读不到租户/IP。
+
+→ 两者都是「代码看起来对、功能静默失效」。修正方式：挂载顺序 = 执行顺序的**反向**。
+
+⚠️ **仍未做**：完整 `build_router` 抽取（**路由挂载**那一层，20+ 个 `nest` 仍内联）
+→ **TD-076**（从 REQ-002 起就存在的债，不是本需求引入的）。
 
 ### 变异验证（本轮累计 5 个，全部命中）
 

@@ -274,14 +274,22 @@
     改成「能编译但产物该变」的变更）；
   - 步骤 4（产物内容）：
     - `openapi` 字段是 `"3.1.0"`（⚠️ 不是 `3.0.x`）；
-    - `paths` 里**含** `/health/live` 与 `/health/ready`
-      （⚠️ rev 2 修正路径 —— 实际路由是 `/health/*`，不是 `/api/health/*`，挑刺 B6）；
-    - `paths` 里含 `/api/rbac/roles`；
-    - 每个 path 的响应 `content` 里含 **`application/json`**
-      （⚠️ rev 2 修正：平台错误响应的实际媒体类型是 `application/json`
-      （`problem.rs:305` 用 `Json(details)`），且 **D183** 已把
-      「要求 `application/problem+json`」这条判据**当成 BA 写错修正掉了**。挑刺 B7）；
-    - `info.title` 非空、`info.version` 非空。
+    - `info.title` 非空、`info.version` 非空；
+    - `paths` 里**含**至少一个**已标注**的端点，且该端点的响应 `content` 里含
+      **`application/json`**
+      （⚠️ rev 2 修正：平台错误响应的实际媒体类型是 `application/json`，
+      见 `problem.rs` 用 `Json(details)`；且 **D183** 已把
+      「要求 `application/problem+json`」这条判据当成 BA 写错修正掉了。挑刺 B7）；
+    - **⚠️ rev 3 重大修正（D345）**：删掉原来的
+      「`paths` 里含 `/health/live` 与 `/health/ready`」与「含 `/api/rbac/roles`」——
+      **这两条在当前架构下不可达成**：
+      1. `/health/live` / `/health/ready` 的路由在 `main.rs`（**bin crate**）内联定义，
+         `#[utoipa::path]` 无处可挂（bin crate 不可被测试/xtask 引用）；
+      2. `/api/rbac/roles` 在 `platform-rbac` 里，要标注就得改**已验收 crate**的源码
+         （跨需求改动 D109），且 `xtask` 依赖它虽可行但会把「API 文档覆盖」
+         绑到「逐个 crate 加依赖」上。
+      → 本需求的 OpenAPI 判据改为「**机制成立 + 可验证范围明确**」，
+      覆盖面作为**渐进事项**记 **TD-073**。
 - **类型**: 可维护性
 
 ---

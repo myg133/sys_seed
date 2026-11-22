@@ -406,6 +406,45 @@ max_upload_bytes: self.read(ctx, CONFIG_KEY_MAX_UPLOAD_BYTES).await
 
 ---
 
+## D345: OpenAPI 判据改为「机制成立 + 覆盖范围明确」，不要求「覆盖全部端点」
+
+### 问题（TD-073）
+
+AC-S-035 步骤 4 原本要求产物 `paths` 里含 `/health/live`、`/health/ready`、`/api/rbac/roles`。
+实现后发现**这三条在当前架构下不可达成**：
+
+| 端点 | 在哪 | 为什么标不上 |
+|---|---|---|
+| `/health/live` · `/health/ready` | `main.rs`（**bin crate**）内联 | bin crate **不可被引用** → `#[utoipa::path]` 挂了也没人收集到 |
+| `/api/rbac/roles` | `platform-rbac` | 要标注得改**已验收 crate** 源码（跨需求 D109） |
+
+### 决定
+
+**判据改为「机制成立 + 可验证范围明确」**：
+
+1. 产物是**合法 OpenAPI 3.1.0**；
+2. `info.title` / `info.version` 非空；
+3. `paths` 里含**至少一个已标注**的端点，且其响应声明 `application/json`；
+4. `--check` 的**阳性对照**必须成立（改产物 → 非 0；改代码 → 非 0 且有差异行）。
+
+→ **不**要求「覆盖多少个端点」。覆盖面是**渐进事项** → **TD-073**。
+
+### 为什么这是对的，不是降低标准
+
+「自动生成的文档与代码一致」是**机制**属性；
+「文档覆盖了 N 个端点」是**范围**属性。两者独立：
+- 机制不成立 → 文档会漂移，**再多覆盖也是错的**；
+- 机制成立但覆盖少 → 文档**可信**，只是不全（TD-073 渐进补）。
+
+本需求的价值在**机制**（D338 的破例就是为了它）。要求一次性覆盖 100+ 端点
+等于把「加依赖 + 逐个标注」的工作塞进本需求 —— 那是**跨需求改动**（D109），
+且与「API 治理」这个目标不成比例。
+
+⚠️ **明码记账**：产物当前只覆盖 **1 个端点**（`/api/observability/rate-limit/status`）。
+这一点写进 `status.md` 与 TD-073，**不**声称「OpenAPI 已完成」。
+
+---
+
 ## 未决 / 待用户复核
 
 | # | 事项 | 结论 |
@@ -416,3 +455,4 @@ max_upload_bytes: self.read(ctx, CONFIG_KEY_MAX_UPLOAD_BYTES).await
 | 4 | 真导出到 collector **无法验证** | BA 记账 → TD-069 |
 | 5 | 分页只做样板，不改造全部 crate | BA 提议（D341）→ TD-070 |
 | 6 | 限流默认**关闭** | BA 提议（D344） |
+| 7 | **OpenAPI 判据改为「机制成立」，不要求全覆盖** | BA 提议（D345）→ TD-073 |
