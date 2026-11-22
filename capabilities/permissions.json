@@ -239,7 +239,28 @@
           "type": "button"
         }
       ]
+    },
+    {
+      "manifest": "crates/platform-storage/manifest.json",
+      "module": "storage",
+      "permissions": [
+        {
+          "code": "storage:file:read",
+          "name": "查看与下载文件",
+          "type": "menu"
+        },
+        {
+          "code": "storage:file:write",
+          "name": "上传与删除文件",
+          "type": "button"
+        },
+        {
+          "code": "storage:job:read",
+          "name": "查看导入导出任务",
+          "type": "menu"
+        }
+      ]
     }
   ],
-  "total": 38
+  "total": 41
 }
