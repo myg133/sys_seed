@@ -1613,7 +1613,7 @@ REQ-009 的 AC 明文豁免 `/api/rbac/permissions`（「任何已认证用户�
 
 ---
 
-## TD-081: 审计「归档 + 写入」的并发竞态**没有自动化判据**
+## ~~TD-081~~: 审计「归档 + 写入」的并发竞态 ✅ **已解决（2026-11-23）**
 
 - **发现于**: develop 全量独立 QA（B 片 F4）+ 我修复时实测
 - **现状**: `platform_audit_archive_move` 原先不持 advisory lock，而
@@ -1628,11 +1628,23 @@ REQ-009 的 AC 明文豁免 `/api/rbac/permissions`（「任何已认证用户�
 - **要做需要什么**: 用**两个真实会话按脚本逐句推进**（psql 或裸连接），
   在「archive 已写 tip、append 尚未写回」的时刻精确插入另一步。
   集成测试的 `oneshot`/`join!` 建模做不到。
-- **优先级**: P2（锁本身已加，缺的是判据；风险是「有人删掉锁而无人发现」）
+- **优先级**: ~~P2~~ → ✅ **已解决**
+
+### 处置（2026-11-23）
+
+`tokio::join!` 那条**没有区分力**（实测去掉锁连跑 3 次仍全绿）——
+它的并发窗口在微秒级，调度粒度抓不住。已如实降级为「回归护栏」。
+
+→ 改用**观测锁状态**（确定性，不依赖时序）：
+连接 A 开事务调 `archive_move`（持锁）→ 独立连接 B 用
+`pg_try_advisory_xact_lock(hashtext('audit:' || tenant))` 试锁，必须**失败**；
+A 提交后必须**成功**。
+判据：`audit_real_db::archive_move_holds_the_same_lock_as_append`。
+**变异验证**：跑 down 迁移去掉锁 → 立刻红（B 抢到了锁）。
 
 ---
 
-## TD-082: 租户隔离的 `SET LOCAL` 语义**没有判据**（变异后 38 测试全绿）
+## ~~TD-082~~: 租户隔离的 `SET LOCAL` 语义 ✅ **已解决（2026-11-23）**
 
 - **发现于**: develop 全量独立 QA（B 片 F7，做了变异实证）
 - **证据**: 把 `crates/platform-db/src/tenant.rs` 的
@@ -1650,11 +1662,24 @@ REQ-009 的 AC 明文豁免 `/api/rbac/permissions`（「任何已认证用户�
      断言 B **看不到** A 的行（`false` 变异下会看到）；
   2. 需要能**固定连接**（`PgPool::acquire` 拿同一条，而不是每次新取）——
      `TenantDb` 目前不透出连接句柄，可能需要一个测试专用的旁路入口。
-- **优先级**: **P1**（这是隔离机制的地基，且已有变异实证说明零覆盖）
+- **优先级**: ~~P1~~ → ✅ **已解决**
+
+### 处置（2026-11-23）
+
+新增 `crates/platform-db/tests/tenant_context.rs`：用 `max_connections = 1` 的池
+**强制复用同一条物理连接**，事务内读 `app.tenant_id`（必须是当前租户），
+提交后再读（**必须已清除**）。
+为此给 `TenantDb` 加了 `#[doc(hidden)] test_acquire`（测试旁路）。
+**变异验证**：把 `set_config(..., true)` 改成 `false` → **立刻红**，
+报出残留值 `Some("tenant-a@td082")`。
+
+⚠️ **能力边界**：rollback 那条用例**抓不住**该变异 ——
+PostgreSQL 里显式事务内的 `SET` 也会被 `ROLLBACK` 回滚，
+所以真正能区分 `true`/`false` 的只有 COMMIT 那条。已在注释里写明。
 
 ---
 
-## TD-083: 两张「每操作一行」的表**没有清理路径**
+## ~~TD-083~~: 两张「每操作一行」的表没有清理路径 ✅ **已解决（2026-11-23）**
 
 - **发现于**: develop 全量独立 QA（B 片 F6/F9）
 - **现状**: 同项目的 `platform_rate_limit` 有 `xtask observability prune-rate-limit`，
@@ -1666,11 +1691,21 @@ REQ-009 的 AC 明文豁免 `/api/rbac/permissions`（「任何已认证用户�
 - **要做需要什么**: 按 `observability prune` 的范式各加一个
   `xtask notify prune` / `xtask storage prune`（含 `--older-than` 与保留期配置项），
   并在 `design-summary.md` 的「定期任务」表登记。
-- **优先级**: P2（容量问题，不是正确性问题；但会随时间恶化）
+- **优先级**: ~~P2~~ → ✅ **已解决
+
+### 处置（2026-11-23）
+
+新增 `prune_terminal_deliveries`（notify）与 `prune_terminal_jobs`（storage）
++ `xtask notify prune` / `xtask storage prune` 子命令。
+只删**终态**（`delivered`/`dead_letter`、`completed`/`failed`）；
+`pending`/`delivering`/`running` **永不删**（删了就是丢任务）。
+保留期传 0/负数按 1 天兜底。storage 那条连带清错误明细（不留孤儿）。
+判据：`prune_removes_only_old_terminal_deliveries` /
+`prune_removes_only_old_terminal_jobs_and_their_errors`。
 
 ---
 
-## TD-084: `audit verify` 把整条在线链读进内存
+## ~~TD-084~~: `audit verify` 把整条在线链读进内存 ✅ **已解决（2026-11-23）**
 
 - **发现于**: develop 全量独立 QA（B 片 F5）
 - **现状**: `crates/platform-audit/src/verify.rs:234-242` 一次 `fetch_all` 取全部在线记录，
@@ -1679,4 +1714,18 @@ REQ-009 的 AC 明文豁免 `/api/rbac/permissions`（「任何已认证用户�
   无并发上限 → 几个并发请求就能把内存打满。
 - **要做需要什么**: 改成**流式/分批**校验（按 `created_at, id` 键集分页，每批 N 条，
   在批次间保持 `expected_prev_hash` 连续），或加并发闸门 + 上限。
-- **优先级**: P2（需真实大数据量才暴露；单租户审计量小时无感）
+- **优先级**: ~~P2~~ → ✅ **已解决
+
+### 处置（2026-11-23）
+
+`verify` 改为 **keyset 分批**读取（`VERIFY_BATCH_SIZE = 1000`，
+5 万条 29MB → 每批约 0.6MB），`previous_hash` 跨批延续，
+仍在**同一事务**内读以保证快照一致。
+
+判据两条（缺一不可）：
+- `verification_across_batches_equals_single_batch`：5 条用 `with_batch_size(2)`
+  → 跨 3 批，`checked` 与结论必须与单批一致；
+- `batched_verification_still_detects_a_broken_link`：**阴性对照** ——
+  篡改第 3 条（落在第 2 批）必须被发现。
+
+**变异验证**：游标 `>` 改 `>=`（重读）→ `checked` 对不上，红。
