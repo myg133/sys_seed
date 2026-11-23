@@ -145,7 +145,7 @@ rev 1 让 AC-S-186 与 AC-S-190 共用「实现前」的 `BASE`，
   | ⑤ | `grep -rn "AuditEvent\|AuditSink" modules/leave/backend/src/ \| wc -l` | > 0 | — |
   | ⑥ | `grep -rn "platform_audit_log\|platform_audit_append" modules/leave/backend/src/ \| wc -l` | **== 0** | `crates/platform-audit/src/sink.rs` → **> 0** |
   | ⑦ | `grep -rn "NotificationSender\|NotificationMessage" modules/leave/backend/src/ \| wc -l` | > 0 | — |
-  | ⑧ | `grep -rn "platform-notify" modules/leave/backend/Cargo.toml \| wc -l` | **== 0** | —（这是「不得有」，不需要阳性对照） |
+  | ⑧ | `grep -rn "platform-notify" modules/leave/Cargo.toml \| wc -l` | **== 0** | —（这是「不得有」，不需要阳性对照） |
 
 - **预期结果**: 八条全部满足，且每条「== 0」断言的阳性对照**都 > 0**。
   任何一条阳性对照为 0 → **该断言的结论作废**（不是「通过」）。
@@ -198,6 +198,12 @@ rev 1 让 AC-S-186 与 AC-S-190 共用「实现前」的 `BASE`，
   - 步骤 7 返回 **409**，且 `code == "LEAVE_INVALID_TRANSITION"`
     （⚠️ rev 2 修正 N3：rev 1 只说「409 或 422 + 明确错误码」，
     而契约 C6 要求 `code` 是稳定的大写下划线码 —— 必须写死具体值）。
+  - ⚠️ **rev 2 实现期补充**：该码必须**注册进 `platform-core`**
+    （`titles.rs` 的 `TITLES` + `problem.rs` 的 `ALL_CODES`），否则
+    `title_of_code()` 会落到兜底 `"Error"`（`titles.rs:292-298` 实测）→ 违反契约 C6。
+    这是**平台改动**（D 类，见 design-summary §3 第 7/8 行）。
+    ⚠️ 已有的 `modules/sandbox` **没有**自定义错误码（全用平台码）——
+    说明「业务模块注册自有码」这条路在示例里没走通过，本轮是**首次**。
 - **⚠️ 通知落库的处置（B4 的修正，D354）**
   rev 1 要求「查真实的 `platform_notify_delivery` 表」，但实测：
   - `NotificationSender`（`platform-core/src/extension/notification.rs:81`）
@@ -264,7 +270,7 @@ rev 1 让 AC-S-186 与 AC-S-190 共用「实现前」的 `BASE`，
   | 前端业务代码 | `find modules/leave/frontend -type f \( -name '*.svelte' -o -name '*.ts' \) \| xargs wc -l \| tail -1` |
   | SQL 迁移 | `find modules/leave/migrations -name '*.sql' \| xargs wc -l \| tail -1` |
   | 平台改动（全仓） | `git diff --name-only <BASE_IMPL> \| grep -v '^modules/leave/' \| wc -l` |
-  | 依赖面 | `grep -E '^platform-' modules/leave/backend/Cargo.toml` |
+  | 依赖面 | `grep -E '^platform-' modules/leave/Cargo.toml` |
   | 契约检查 | `cargo xtask check-modules && cargo xtask check-deps && cargo xtask capabilities --check`（三个退出码） |
   | 全量测试 | 见下方固定循环（逐 crate，**必带** `--include-ignored`） |
   | E2E skipped | `npx playwright test e2e/leave.spec.ts --reporter=json \| jq '[..\|.skipped?//empty\|select(.!=0)]\|length'` |
@@ -321,10 +327,10 @@ rev 1 让 AC-S-186 与 AC-S-190 共用「实现前」的 `BASE`，
 
 ### AC-S-193: 消费方的依赖面只有平台公开面
 
-- **前置条件**: `modules/leave/backend/Cargo.toml` 已定稿。
+- **前置条件**: `modules/leave/Cargo.toml` 已定稿。
 - **测试步骤**:
   ```bash
-  grep -E '^platform-' modules/leave/backend/Cargo.toml
+  grep -E '^platform-' modules/leave/Cargo.toml
   cargo xtask check-deps
   ```
 - **预期结果**:

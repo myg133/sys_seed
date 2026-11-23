@@ -163,7 +163,7 @@ crates/platform-core/src/extension/mod.rs:80:  ...       ← re-export
 | 业务代码行数 | `wc -l`（三条命令） |
 | 平台改动文件数 | `git diff --name-only BASE -- crates/ \| wc -l` |
 | 业务目录外改动 | `git diff --name-only BASE -- modules/ \| grep -v '^modules/leave/' \| wc -l` |
-| 依赖面 | `grep -E '^platform-' modules/leave/backend/Cargo.toml` |
+| 依赖面 | `grep -E '^platform-' modules/leave/Cargo.toml` |
 | 契约检查 | `cargo xtask check-deps` / `capabilities --check` 退出码 |
 | 测试通过数 | `test result: ok. N passed` |
 

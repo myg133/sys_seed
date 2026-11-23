@@ -197,7 +197,9 @@ v1 必须进 `default_deprecations()`（`crates/platform-observability/src/http.
 | 4 | **B** | `crates/platform-rbac/src/http.rs` | v2 端点 + v2 路由 | 没有 v2 就验不了升级（D352） |
 | 5 | **B** | `crates/platform-observability/src/http.rs` | `default_deprecations()` 加 v1 路径 | 没有登记就没有弃用头 |
 | 6 | **D** | 通知落库适配器（文件实现时定） | `DbNotificationSender` 实现 `NotificationSender` | 没有它通知落不了库，AC-S-189 判不了（D354） |
-| 7 | **C** | `apps/shell/src/**` | 加一条 `leave` 页面路由 | 不加则 E2E 打不开页面（M7/D356） |
+| 7 | **D** | `crates/platform-core/src/titles.rs` | 注册 `LEAVE_INVALID_TRANSITION` 的标题 | 不注册则 `title_of_code` 落兜底 `"Error"`，违反契约 C6 |
+| 8 | **D** | `crates/platform-core/src/problem.rs` | 该码加入 `ALL_CODES` | 不加则完备性测试红 + 静默走兜底 |
+| 9 | **C** | `apps/shell/src/**` | 加一条 `leave` 页面路由 | 不加则 E2E 打不开页面（M7/D356） |
 | 8 | **C** | `packages/auth` | 兼容 v2 的 `sources` 键（可选） | 若不改也能跑（忽略未知键），则**不该改** → 不改就删掉本行 |
 | ? | — | （实现时按实际补充） | | |
 
@@ -230,7 +232,7 @@ v1 必须进 `default_deprecations()`（`crates/platform-observability/src/http.
 | SQL 迁移 | ? 行 | `find modules/leave/migrations -name '*.sql' \| xargs wc -l \| tail -1` |
 | 平台改动（全仓） | ? 个 | `git diff --name-only <BASE_IMPL> \| grep -v '^modules/leave/' \| wc -l` |
 | 其中 A 类 | ? 个 | 逐条审视清单后计数 |
-| 依赖面 | ? | `grep -E '^platform-' modules/leave/backend/Cargo.toml` |
+| 依赖面 | ? | `grep -E '^platform-' modules/leave/Cargo.toml` |
 | 契约检查 | 退出码 ? | `cargo xtask check-modules && cargo xtask check-deps && cargo xtask capabilities --check` |
 | 全量测试 | ? passed | 逐 crate 循环（见 acceptance AC-S-191） |
 | E2E skipped | ? | `npx playwright test e2e/leave.spec.ts --reporter=json \| jq '...'` |

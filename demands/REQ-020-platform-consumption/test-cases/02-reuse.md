@@ -92,7 +92,7 @@ sandbox 全走 `TenantQuery`，`sqlx::query` 本身就 0，拿它当对照永远
   # ⑦ 用了平台的 trait
   grep -rn "NotificationSender\|NotificationMessage" modules/leave/backend/src/ | wc -l
   # ⑧ 依赖清单里不得有 platform-notify
-  grep -rn "platform-notify" modules/leave/backend/Cargo.toml | wc -l
+  grep -rn "platform-notify" modules/leave/Cargo.toml | wc -l
   ```
 - **期望**: ⑦ **> 0**；⑧ **== 0**。
 - ⚠️ **rev 1 的 ⑦ 是 `grep "NewDelivery\|notify"`，两处错**（M2 实测）：

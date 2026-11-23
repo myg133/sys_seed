@@ -135,7 +135,7 @@
 - **层次**: 静态（grep manifest）
 - **步骤**:
   ```bash
-  grep -E '^platform-' modules/leave/backend/Cargo.toml
+  grep -E '^platform-' modules/leave/Cargo.toml
   ```
 - **期望**: 只出现 `platform-core`、`platform-db`、`platform-contracts`（dev）。
 - **判据形态**: **不含** `platform-server` / `platform-iam` / `platform-notify` /
