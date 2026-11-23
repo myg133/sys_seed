@@ -39,7 +39,10 @@
 
 ---
 
-## 本需求自有 AC（**9 条**：AC-S-029 ~ AC-S-038）
+## 本需求自有 AC（**10 条**：AC-S-029 ~ AC-S-038）
+
+> ⚠️ **rev 4 修正**：原写「9 条」是**数错**（029~038 是闭区间 **10 条**）。
+> `grep -c "^### AC-S-0" acceptance.md` → 10。见 TD-080。
 
 ---
 
@@ -181,8 +184,18 @@
 - **前置条件**:
   - 两个 `RateLimiter`，各自持有**独立的 `sqlx::Pool`**
     （`pool_a` 与 `pool_b` 用 `PgPoolOptions::new().connect(url)` **分别建立**）；
-  - ⚠️ **必须断言两池确实不同**：`assert_ne!(pool_a.id(), pool_b.id())`
-    （挑刺 M1 指出 rev 1 的「`max_connections` 不同」是**无区分力的代理断言**）；
+  - ⚠️ **必须断言两池确实不同**（挑刺 M1 指出 rev 1 的「`max_connections` 不同」是
+    **无区分力的代理断言**）；
+    ⚠️ **rev 4 修正（复核 F4）**：rev 3 原文写的是
+    `assert_ne!(pool_a.id(), pool_b.id())` —— **这行代码写不出来**：
+    1. `sqlx::PgPool` **没有 `.id()` 方法**；
+    2. `TenantDb.pool` 是 `pub(crate)`（`platform-db/src/tenant.rs:88`），
+       测试**拿不到** `PgPool`。
+    → 改为**可执行且仍有区分力**的等价断言：
+    两个池**并发各持有一条连接**，断言它们拿到的
+    `pg_backend_pid()` **不同**（各自连到一条独立的后端进程）。
+    若 `TenantDb::connect` 内部改成复用同一个全局池，两次必然拿到**同一个**后端 pid → 红。
+    ⚠️ 实测确认该写法可行（两个独立池 → 两个不同 pid）。
   - `endpoint.requests = 1`、`windowSeconds = 60`，另两个维度禁用。
 - **测试步骤**:
   1. truncate 后，实例 A 打 1 次 → 期望放行；
@@ -262,8 +275,21 @@
 - **测试步骤**:
   1. 干净树上跑 `cargo xtask openapi --check`；
   2. 手工改 `openapi.json` 的 `info.title` → 再跑 `--check`；
-  3. **改一个 DTO 字段名**（`AppView.display_name` → `displayNameProbe`）
-     → 重新编译 → 跑 `--check` → **改回来**；
+  3. **改一个 DTO 字段名** → 重新编译 → 跑 `--check` → **改回来**；
+     ⚠️ **rev 4 修正（复核 F1）**：rev 3 原文写的是「`AppView.display_name`
+     → `displayNameProbe`」，但**那个 DTO 不在 OpenAPI 产物里**
+     （`openapi.json` 的 `components.schemas` 是**空对象**，schema 全部内联；
+     全产物 **0 处**出现 `AppView` / `display_name`）。
+     `AppView` 是 `platform-app` 的 DTO，**从未**进入 `ApiDoc` 的 `paths(...)`。
+     → 按 rev 3 字面执行，改 `AppView` **不会**改变 `render()` 的输出
+     → `--check` 仍返回 0 → **判据必红**（任何按规格执行的人都得不到预期结果）。
+     **改用产物里真实存在的 DTO**：
+     `RateLimitRow` 的 `window_seconds`（在产物里以 `windowSeconds` **内联出现 2 处**）。
+     改法：给它加 `#[serde(rename = "windowSecondsProbe")]`（**能编译**，
+     符合 rev 2 的「能编译但产物该变」要求），跑完 `--check` 后去掉该属性；
+     ⚠️ 实测确认（`feature/REQ-019` @ `561bb01` + 该属性）：
+     退出码 **1**，输出「第 62 行 / 第 74 行」的差异行，含
+     `windowSeconds` → `windowSecondsProbe`。
   4. 检查产物内容。
 - **预期结果**:
   - 步骤 1：**退出码 0**，输出含「与源码一致」；
@@ -389,7 +415,7 @@
 | 6 | OpenAPI 自动生成 + `--check` 守卫 | **AC-S-035** |
 | 7 | 弃用策略（`Deprecation` / `Sunset`） | **AC-S-036** |
 
-**7 条功能要求 → 9 条 AC**（第 1、4 条各拆成多条），**无遗漏、无虚空引用**。
+**7 条功能要求 → 10 条 AC**（第 1、4 条各拆成多条），**无遗漏、无虚空引用**。
 
 ⚠️ rev 1 曾宣称「9 条功能要求 → 9 条 AC 无遗漏」，那是**数错了**
 （把 AC 条数当成功能要求条数），且**就绪探针真的没有 AC**（挑刺 B9）。
@@ -424,4 +450,4 @@
 
 ⚠️ 现有 IAM 登录已有**自己的** IP 限流（`platform-iam/src/service.rs:837`
 `check_ip_rate_limit`），所以**当前不是裸露的** —— 但那是 IAM 专用，
-不是本需求的通用三级限流。本需求的 9 条 AC 全部只覆盖**已认证**请求。
+不是本需求的通用三级限流。本需求的 10 条 AC 全部只覆盖**已认证**请求。

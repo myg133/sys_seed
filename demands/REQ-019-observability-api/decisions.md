@@ -456,3 +456,85 @@ AC-S-035 步骤 4 原本要求产物 `paths` 里含 `/health/live`、`/health/re
 | 5 | 分页只做样板，不改造全部 crate | BA 提议（D341）→ TD-070 |
 | 6 | 限流默认**关闭** | BA 提议（D344） |
 | 7 | **OpenAPI 判据改为「机制成立」，不要求全覆盖** | BA 提议（D345）→ TD-073 |
+
+---
+
+## D346: 限流在**顶层装配**下拿不到租户 → 用**令牌解析器**注入（用户 2026-11-23 裁定）
+
+### 问题（TD-077 / 复核 F15，已带对照组实证）
+
+限流中间件挂在**顶层**（必须在业务之前），而租户由各子系统**内层**的
+`authenticate` 填。`client_info`（唯一的顶层上下文中间件）**只填 IP / UA**
+（`platform-server/src/client_info.rs`，全文 `with_tenant` 出现 **0 次**）。
+
+→ `rate_limit` 执行时 `ctx.tenant_id()` **恒为 `None`** → 走 TD-072 的
+「无租户 → 放行」→ **limiter 的 `check()` 一次都不被调用**。
+
+**实证**（复核做的，带对照组）：
+
+| 组 | `client_info` | limiter 被调用 | 响应 |
+|---|---|---|---|
+| 实验组 | 只填 IP/UA（**生产等价**） | **0 次** | 200 ×5 |
+| 对照组 | 额外注入租户（**测试夹具做法**） | 3 次 | — |
+
+测试为什么没抓到：`middleware_assembly.rs` 的 `fake_client_info`
+**主动注入租户**（注释自承「不注入租户的话，限流判据恒 200」）——
+夹具做了生产 `client_info` 不做的事。
+
+### 候选方案（用户三选一）
+
+| 方案 | 改动面 | 代价 | 结论 |
+|---|---|---|---|
+| **① 顶层验令牌**（注入租户解析器） | `main.rs` + 装配函数 | 每请求多一次 HMAC 验签（微秒级） | ✅ **用户裁定选它** |
+| ② 下沉到各子系统（`authenticate` 之后各挂一层） | **8+ 个已验收 crate**（D109 跨需求改动） | 回归面大；但无重复验签 | ✗ |
+| ③ 本轮不改，明码记债 | 0 | AC-S-031/032/033 降为「不成立」 | ✗ |
+
+### 决定
+
+新增 `TokenTenantResolver` trait（`platform-observability` 的
+`rate_limit::middleware`），由 `RateLimitState.token_resolver` 注入。
+
+**中间件语义**（`middleware.rs` 第 ④ 步）：
+
+1. `ctx` 里**已有**租户 → **直接用它**，**不**验令牌
+   （避免每请求多一次 HMAC，且避免用错租户 —— 契约 C3 允许请求头租户
+   与令牌租户不同，限流必须按**实际生效的**租户计数）；
+2. `ctx` 里没有 → 用解析器从 `Authorization` 头**验一遍令牌**；
+3. 解析成功 → 用令牌里的租户/用户；
+4. 解析失败 / 没有解析器 → **放行**（TD-072 的语义不变）。
+
+### ⚠️ 安全前提（不可省）
+
+实现**必须**走 `IamService::verify_access_token`（真签名 + 时效校验），
+**不能**只 base64 解 JWT payload 拿租户 —— 那等于让调用方自报租户，
+攻击者可以伪造成任何租户来挤占别人的配额或绕过自己的配额。
+
+`main.rs` 的 `TokenTenantResolverImpl` 走的就是 `verify_access_token`。
+若 `iam` 为 `None`（SSO 未启用），`token_resolver` 为 `None` 并打 WARN
+—— 此时限流退化为「只对 `ctx` 已有租户的请求生效」（即修复前的缺陷形态），
+WARN 会明确提示这一点。
+
+### ⚠️ 失败语义
+
+验不过 → `None` → 放行。**不返回 401** —— 认证失败的响应由各子系统的
+`authenticate` 负责，限流中间件不该抢这个职责（否则错误码会变成限流语义）。
+
+### 判据（`middleware_assembly`，带对照组）
+
+| 组 | 令牌 | `token_resolver` | 期望 |
+|---|---|---|---|
+| **A** | `Bearer tenant-a\|user-a` | 有 | **429** + limiter 被调用 |
+| **B** | 无令牌 | 有 | **200** + limiter **不被调用** |
+| **C** | 有令牌 | **无** | **200** + limiter **不被调用**（= 修复前形态，回归护栏） |
+
+变异验证：把解析器强行置 `None` → **组 A 红**（第 2 次变 200）。
+
+另两条：`an_invalid_token_is_treated_as_unauthenticated`（3 种无效令牌各 3 次都必须 200）、
+`an_existing_tenant_context_skips_the_token_resolver`（用一个「一被调用就 panic」
+的解析器证明 ctx 有租户时**不**验令牌）。
+
+### 遗留（如实记录）
+
+`TokenTenantResolverImpl` 在 `main.rs`（**bin crate**），
+集成测试**引用不到** → 「`main` 真的注入了它」这一层仍无判据
+（同 TD-076 的路由层遗留）。当前的判据覆盖到「中间件 + 装配函数」为止。

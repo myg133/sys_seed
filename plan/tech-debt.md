@@ -1472,3 +1472,116 @@ Sprint 3 复盘的第 2 条教训：**修漏洞会制造新漏洞** —— 但�
      `tower::ServiceExt::oneshot` 对每个预期路径打一次，断言**不是 404**）。
 - **优先级**: **P1**（现在已知的做法是「对每个路径打一次断言非 404」，
   成本不高但能抓住整组路由失踪）
+
+---
+
+## TD-077: REQ-019 三级限流在**生产装配**下恒不生效（已实证）
+
+- **发现于**: REQ-019 实现复核（`qa-req019-impl-review.md` F15）
+- **严重性**: **P0 —— 这是本需求的核心功能在生产路径上完全空转**
+- **现状**:
+  装配顺序是 `client_info`（最外）→ `deprecation` → `trace_id` → `rate_limit`
+  → `nest("/api/rbac", ...)` → 子系统内层的 `authenticate`（**这里才 `with_tenant`**）。
+  而 `client_info` **只填 IP / UA**（`platform-server/src/client_info.rs:53`，
+  全文 `with_tenant` 出现 **0 次**）。
+  → `rate_limit` 执行时 `ctx.tenant_id()` **恒为 `None`**
+  → 走 `middleware.rs:110-115` 的 TD-072「无租户 → 放行」分支
+  → **limiter 的 `check()` 一次都不被调用**。
+- **实证**（复核做的，带对照组）:
+  - 实验组（`client_info` 只填 IP/UA，**生产等价**）：5 次请求全 200，
+    **limiter 被调用 0 次**；
+  - 对照组（额外注入租户，**测试夹具做法**）：limiter 被调用 3 次。
+  - 唯一差异是「是否注入租户」。
+- **为什么测试没抓到**: `tests/middleware_assembly.rs` 的 `fake_client_info`
+  **主动注入租户**（`:58-62`，注释自承「不注入租户的话，限流判据恒 200」）——
+  夹具做了生产 `client_info` 不做的事，掩盖了缺陷。
+- **影响面**: AC-S-031 / 032 / 033 在**生产路径**上**全部空转**。
+  真库测试全绿是真的（它们直接调 `limiter.check()`），但它们验的不是生产链路。
+- **三个候选修法**（**需用户裁定**，各自代价差别很大）:
+  1. **顶层验令牌**：装配函数加一个「租户解析器」注入点，`main` 传 `IamService`
+     验令牌拿租户/用户。改动只碰 `main.rs` + 装配函数；安全（令牌已验证）。
+     代价：每请求多一次令牌验证（HMAC，微秒级）。
+  2. **下沉到各子系统**：在每个 crate 的 `authenticate` 之后各自挂一层限流。
+     语义最准、无重复验证。代价：要改 rbac/org/app/config/iam/notify/storage/audit
+     等 **8+ 个已验收 crate**，属 D109 跨需求改动。
+  3. **本轮不改**：明码记 TD，AC-S-031/032/033 从「达成」改为「不成立」。
+- **优先级**: ~~P0~~ → ✅ **已解决（2026-11-23 用户裁定方案 ①，见 D346）**
+- **修法**: 新增 `TokenTenantResolver` trait + `RateLimitState.token_resolver`；
+  中间件在 `ctx` 无租户时从 `Authorization` 头验令牌拿身份；
+  `main.rs` 注入 `TokenTenantResolverImpl`（走 `IamService::verify_access_token` **真验签**）。
+- **判据**: `middleware_assembly` 新增 3 条，**带对照组**：
+  组 A（有令牌+有解析器 → **429** + limiter 被调用）／
+  组 B（无令牌 → 200 + limiter 不调用）／
+  组 C（有令牌但无解析器 = 修复前 → 200 + 不调用，**回归护栏**）。
+  变异验证：解析器强行置 `None` → **组 A 红**。
+- **遗留**: `TokenTenantResolverImpl` 在 bin crate，测试引用不到 →
+  「main 真的注入了它」这一层无判据（同 TD-076 的路由层遗留）。
+
+---
+
+## TD-078: 「导出超时会不会拖慢请求」在本技术栈下**无法端到端验证**
+
+- **发现于**: REQ-019 实现复核（F17），在修正该判据的过程中发现
+- **现状**: `BatchSpanProcessor` 用 `std::thread::Builder::spawn`
+  （**普通 OS 线程**，不是 tokio task），而 `opentelemetry-otlp` 的
+  `reqwest-client` 在该线程上首次导出时会 panic
+  （`there is no reactor running`；见
+  `opentelemetry-otlp-0.31.1/src/exporter/http/mod.rs:169` 的
+  `reqwest::Client::builder().build()`）。
+- **后果**: 「collector 不可达 → 导出超时 → 请求变慢」这个**具体场景**
+  在本机无法复现 —— panic 取代了「等超时」。
+- **当前判据能证明什么**（如实标注，已写入测试注释）:
+  - ✅ 20 次请求在「配置了不可达 endpoint」时**总耗时仍 < 2 秒**
+    → 证明**请求路径**没有被导出配置拖住（必要条件）；
+  - ✅ 请求照常成功（导出旁路不影响业务）；
+  - ❌ **不**证明「导出超时被正确限制在 `timeout_seconds` 内」。
+- **要做需要什么**:
+  1. 一个**可达但响应慢**的假 collector（本机可起一个只 accept 不回包的 TCP 服务）；
+  2. 或用 `reqwest-blocking-client` 特性（但要评估包数净增与阻塞风险）；
+  3. 或改用 `hyper-client`（opentelemetry-otlp 支持，可能不需要 tokio reactor）。
+- **优先级**: P2（当前判据已覆盖「请求不被拖住」这个业务面；
+  「超时值生效」是 OTel SDK 的行为，风险较低）
+
+---
+
+## TD-079: AC-S-034 的「跨 crate 分页契约统一」只验到**字段名**，没验**行为**
+
+- **发现于**: REQ-019 实现复核（F19 + AC-S-034 的 `AuditPageView` 论证）
+- **现状**（两件事）:
+  1. 新端点 `GET /api/observability/rate-limit/status` 的 `items` **恒为 3 条**
+     （三个限流维度），`nextCursor` **恒为 `null`** → **翻不动页**。
+     AC-S-034 步骤 1 的「恰好 10 条 / total == 25」在本端点**不可能成立**；
+  2. 「跨 crate 字段一致」的判据原先打在 `platform_audit::AuditPage` 上，
+     而**真正上线序列化的是** `platform_server::audit::AuditPageView`。
+     复核把 `AuditPageView.next_cursor` 改名后，那条判据**仍然全绿**（已实测）。
+     `platform-server` 是 **bin crate**，集成测试**引用不到** `AuditPageView`。
+- **已做的补救**:
+  - 新增 `the_audit_http_response_uses_the_shared_field_names`：解析 audit 路由的
+    **真实 HTTP 响应 JSON**，与本端点的键集合对照 —— 不依赖类型能被引用。
+    ⚠️ 但它用的是「同形复刻类型」的路由（真实 handler 需要 PG），
+    所以若 `AuditPageView` 与复刻类型不一致，仍发现不了；
+  - 新增 `this_endpoint_has_at_most_three_rows_so_it_cannot_page`：
+    **锁住能力边界**（若端点多出数据源 → 红，提醒更新覆盖声明）。
+- **仍未做**: 「两个端点都能真的翻页且零重叠」的**跨 crate 行为**判据。
+  目前翻页行为只在 `platform-audit` 的真库用例里验（25 行、两页零重叠）。
+- **要做需要什么**: 把 audit 的 handler 与 `AuditPageView` 移到**库 crate**
+  （`platform-audit` 或新 crate），让集成测试能直接驱动它。
+- **优先级**: P2
+
+---
+
+## TD-080: 规格文档自称「9 条 AC」，实际 **10 条**
+
+- **发现于**: REQ-019 实现复核（F22）
+- **现状**: `grep -c "^### AC-S-0" acceptance.md` → **10**
+  （AC-S-029 ~ AC-S-038 是闭区间 **10 条**）。而：
+  - `acceptance.md:42`：「本需求自有 AC（**9 条**：AC-S-029 ~ AC-S-038）」
+  - `acceptance.md:392`：「**7 条功能要求 → 9 条 AC**」
+  - `acceptance.md:427`：「本需求的 **9 条** AC 全部只覆盖已认证请求」
+  - `status.md:14`：「**9 条 AC**：AC-S-029 ~ AC-S-037」（**把 038 漏了**）
+- **为什么记**: BA 在挑刺 B9 里专门批评过 rev 1「数错了」，
+  现在 rev 2 的修正版**自身又数错**（补了 AC-S-038 却没把「9」改成「10」），
+  且 `status.md:14` 与 `acceptance.md:42` **互相矛盾**（一个到 037，一个到 038）。
+- **影响**: 「达成 N / 10」的**分母本身是错的**，凡引用「9 条」的下游文档都要修正。
+- **本需求已直接改正文**（不留给以后）—— 此条目记录**为什么**发生过这次错。
+- **优先级**: P3（文档一致性；已在 rev 4 修正）
