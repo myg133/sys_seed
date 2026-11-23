@@ -246,5 +246,6 @@
   "error.STORAGE_UNSUPPORTED_FORMAT": "不支持的文件格式",
   "error.STORAGE_FILE_INFECTED": "文件未通过安全扫描",
   "error.STORAGE_TTL_OUT_OF_RANGE": "有效期超出允许范围",
-  "error.STORAGE_UNKNOWN_ENTITY": "不支持的目标实体"
+  "error.STORAGE_UNKNOWN_ENTITY": "不支持的目标实体",
+  "error.LEAVE_INVALID_TRANSITION": "当前请假单状态不允许该操作"
 }

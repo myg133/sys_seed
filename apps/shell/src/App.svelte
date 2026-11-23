@@ -37,6 +37,7 @@
     APPS_ADMIN_ROUTE_PATH,
     AUDIT_ROUTE_PATH,
     createRoutes,
+    LEAVE_ROUTE_PATH,
     SCHEMA_ROUTE_PATH,
     toRoles,
     WORKBENCH_ROUTE_PATH,
@@ -46,7 +47,6 @@
 
   import LanguageSwitcher from './components/LanguageSwitcher.svelte';
   import LocaleInfo from './components/LocaleInfo.svelte';
-
   import AppRegistry from './pages/AppRegistry.svelte';
   import Audit from './pages/Audit.svelte';
   import Forbidden from './pages/Forbidden.svelte';
@@ -60,6 +60,11 @@
   import SchemaPage from './pages/SchemaPage.svelte';
   import SsoCallback from './pages/SsoCallback.svelte';
   import Workbench from './pages/Workbench.svelte';
+
+  // 业务页面来自**模块目录**（REQ-020 / D356 的方案 B）：
+  // shell 只做装配（一条路由 + 一个渲染分支），业务 UI 仍住在 `modules/leave/`，
+  // 这样 AC-S-187 的前端代码量口径（`modules/leave/frontend`）才不会被绕过。
+  import LeavePage from '../../../modules/leave/frontend/pages/LeavePage.svelte';
 
   // 同源：页面由 platform-server 的静态目录托管（本仓没有 CORS 层）。
   // 租户在登录时由用户填（D98），这里不传死值。
@@ -322,6 +327,13 @@
     守卫不放行时页面不渲染 → `GET /api/apps` 的请求计数为 **0**。
   -->
   <AppRegistry {client} initial={apps} />
+{:else if resolution.path === LEAVE_ROUTE_PATH && resolution.allowed}
+  <!--
+    请假审批页（REQ-020 / AC-S-192）：`resolution.allowed` 是**硬要求** ——
+    守卫不放行时页面不渲染（也不会有任何 `/api/leave/*` 请求）。
+    页面在挂载时自己取列表（同一页要能反复刷新），这里不重复取。
+  -->
+  <LeavePage {client} state={authState} />
 {:else if resolution.route?.path === SCHEMA_ROUTE_PATH && resolution.allowed}
   <!-- 通配路由（D104）：模块 / 实体只来自 URL 参数，页面不认识任何具体实体。 -->
   {#key resolution.path}

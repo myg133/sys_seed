@@ -92,6 +92,11 @@ pub const ALL_CODES: &[&str] = &[
     CODE_AUDIT_EVENT_NOT_FOUND,
     CODE_AUDIT_INVALID_FILTER,
     CODE_AUDIT_SINK_UNAVAILABLE,
+    // ⚠️ REQ-020：**业务模块**自有的码（`modules/leave` 的状态机非法流转）。
+    // 本仓惯例是每个 crate 有自己的码空间，业务码用 `LEAVE_` 前缀；
+    // 但码 → 标题的映射是**平台唯一一张表**（`titles::TITLES`），
+    // 不在这里登记 = `titles_cover_every_code` 抓不到它，静默走兜底。
+    "LEAVE_INVALID_TRANSITION",
 ];
 
 /// 统一错误响应体（RFC 9457）。

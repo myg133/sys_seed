@@ -60,6 +60,9 @@
 pub mod authz;
 pub mod channels;
 pub mod config;
+// ⚠️ REQ-020 D354：**落库适配器** —— 把 `NotificationSender` 扩展点接到 `enqueue`。
+// 平台此前只有「通道发送器」（`InAppSender` 存内存 Vec），业务发通知落不了库。
+pub mod db_sender;
 pub mod error;
 pub mod events;
 pub mod http;

@@ -276,6 +276,12 @@ pub const TITLES: &[(&str, &str)] = &[
         "STORAGE_UNKNOWN_ENTITY",
         "Storage Unknown Entity",
     ),
+    // -- 业务模块自有的错误码（REQ-020）--------------------------------------
+    // ⚠️ 平台此前只有「平台自己的码」——`modules/sandbox` 全用平台码，所以
+    // 「业务模块注册自有码」这条路在示例里从没走通过。本轮是首次：
+    // 业务模块的码必须**登记进这张表**，否则 `title_of_code()` 落兜底 `"Error"`
+    // （违反契约 C6：`title` 是稳定的英文摘要，不是兜底占位）。
+    ("LEAVE_INVALID_TRANSITION", "Invalid Leave Transition"),
     // -- platform-org 的通知标题（事件码，不是 HTTP 错误码）------------------
     ("org.member-added", "Organization Membership Added"),
     ("org.member-removed", "Organization Membership Removed"),

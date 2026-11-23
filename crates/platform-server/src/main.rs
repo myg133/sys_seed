@@ -540,6 +540,38 @@ async fn serve() -> Result<(), Failure> {
     let mut app = app.nest("/api/schema", platform_schema::http::router(schema_state));
     tracing::info!("元数据读取已启用：/api/schema/<module>/<entity>");
 
+    // 平台配置服务（REQ-010）：**先于业务模块装配**构造 ——
+    // 通知服务的运行期配置源读它，而通知服务要在业务模块装配前就绪（见下）。
+    let config_service = build_config_service(&config).await?;
+    // 🔑 审计 sink 注入配置服务（REQ-014 D150）：配置写入靠它。
+    if !config_service.with_audit_sink(audit_sink.clone()) {
+        tracing::warn!("审计 sink 已经注入过：保留先装好的实现");
+    }
+
+    // 通知服务（REQ-015）：**先于业务模块装配**构造。
+    //
+    // # 为什么必须提前（REQ-020 D354）
+    //
+    // 业务模块的审批结果要**落进** `platform_notify_delivery`，而唯一写入口是
+    // `NotifyService::enqueue`。业务**不得**依赖 `platform-notify`（AC-S-193）→
+    // 装配层必须在挂载业务模块**之前**把这个服务交给
+    // `platform_notify::db_sender::DbNotificationSender`。
+    //
+    // # ⚠️ 与 `/api/notify/*` **共用同一个实例**
+    //
+    // 两个实例会各自读一次配置（行为分叉的经典来源），且业务的落库记录必须能在
+    // `GET /api/notify/deliveries` 里查到 —— 那两个实例必须看到同一份数据源，
+    // 与其依赖「恰好同库」，不如就一个 `Arc`。
+    //
+    // # ⚠️ 未配置 IAM 时不构造（与 `/api/notify/*` 同款口径）
+    //
+    // 通知模板按租户隔离，没有 IAM 就没有可验的登录会话 → 此时业务模块拿不到
+    // 落库适配器（审批结果**不会**写投递表），`"leave"` 臂会出声告警。
+    let notify_service = match app_iam.as_ref() {
+        Some(_) => Some(build_notify_service(&config, config_service.clone()).await?),
+        None => None,
+    };
+
     // 业务模块装配（REQ-012 D103）：**编译期注册**的模块由 `discover_enabled()` 决定挂哪些，
     // 路由由装配层接到 `/api/<module-id>` 下。
     //
@@ -575,6 +607,57 @@ async fn serve() -> Result<(), Failure> {
                     tracing::warn!("未配置 IAM：/api/sandbox/* 的请求一律 401（fail closed）");
                 }
             }
+            // `leave` 是 REQ-020 的**消费方业务模块**（D348）：
+            // 与 sandbox 一样是「业务模块」，区别只在它不读 manifest
+            // （请假单没有字段级权限，只有 3 个路由级权限点）。
+            //
+            // # ⚠️ 为什么**不用** `leave::mount`
+            //
+            // `leave::mount` 只做「connect + router」，**不透传**两个横切口 →
+            // 用它装配出来的 `/api/leave/*` **不写审计、不发通知**，
+            // AC-S-189 的计数表就判不了（实测：批次 2 的装配正是这个形态）。
+            //
+            // → 这里拆开：`connect`（拿状态）→ 显式注入审计与通知 → `router`。
+            // 两个注入口都是平台的实现，业务侧只认 trait（AC-S-188 ⑤⑥⑦⑧）。
+            "leave" => {
+                let mut leave_state = leave::connect(&config.database_url).await.map_err(|error| {
+                    Failure::Runtime(format!("请假模块装配失败：{error:#}"))
+                })?;
+                // 审计：平台 sink（与 IAM / RBAC / 配置同一个实例）。
+                leave_state = leave_state.with_audit(audit_sink.clone());
+                // 通知：落库适配器（D354）—— 内部走 `NotifyService::enqueue`，
+                // 模板编码由业务模块给出（模板是租户级数据，由业务方自己种）。
+                match &notify_service {
+                    Some(service) => {
+                        leave_state = leave_state.with_notifier(
+                            platform_notify::db_sender::DbNotificationSender::new(
+                                service.clone(),
+                                leave::service::NOTIFICATION_TEMPLATE,
+                            ),
+                        );
+                    }
+                    None => tracing::warn!(
+                        "未配置 IAM：/api/leave/* 不注入通知落库适配器\
+                         （审批结果不会写 platform_notify_delivery）"
+                    ),
+                }
+                let router: Router<Arc<AppState>> =
+                    leave::http::router(Arc::new(leave_state));
+                // 认证层由装配层加（模块不依赖 IAM / RBAC），与 sandbox 同一条中间件。
+                let router = router.layer(axum::middleware::from_fn_with_state(
+                    ModuleAuthState {
+                        iam: module_iam.clone(),
+                        checker: config_checker.clone(),
+                        permissions: config_permissions.clone(),
+                    },
+                    authenticate_module,
+                ));
+                app = app.nest("/api/leave", router);
+                tracing::info!("业务模块已挂载：/api/leave/*（leave，已接入审计与通知）");
+                if module_iam.is_none() {
+                    tracing::warn!("未配置 IAM：/api/leave/* 的请求一律 401（fail closed）");
+                }
+            }
             // `org` 是**平台子系统**：它的路由由 `build_org_state` + `/api/org` 单独装配，
             // 不经过「业务模块装配点」。这里静默跳过是**明确列出**的，
             // 不是「反正不认识就不管」。
@@ -593,11 +676,9 @@ async fn serve() -> Result<(), Failure> {
     // 配置、品牌与 Feature Flag（REQ-010）：`/api/config/*` + `/api/feature-flags/*`。
     //
     // 品牌接口公开（登录页在认证前就要显示 logo）；其余接口需要令牌 + 权限点。
-    let config_service = build_config_service(&config).await?;
-    // 🔑 审计 sink 注入配置服务（REQ-014 D150）：配置写入靠它。
-    if !config_service.with_audit_sink(audit_sink.clone()) {
-        tracing::warn!("审计 sink 已经注入过：保留先装好的实现");
-    }
+    //
+    // ⚠️ `config_service` 已在业务模块装配**之前**构造（通知服务要用它）——
+    //    这里只挂路由，不重复构造。
     let config_state = Arc::new(platform_config::http::ConfigState {
         service: config_service.clone(),
         tokens: config_tokens.clone(),
@@ -669,9 +750,13 @@ async fn serve() -> Result<(), Failure> {
     //
     // ⚠️ **SMTP 凭据走环境变量**（D306）：没配齐 → smtp 通道注册为「未配置」
     //    （投递返回 `NOTIFY_CHANNEL_NOT_CONFIGURED`，**不是静默成功**）。
-    let app = if let Some((iam, checker)) = app_iam.clone() {
-        let notify_state =
-            build_notify_state(&config, iam, config_service.clone(), checker).await?;
+    //
+    // ⚠️ 服务实例在业务模块装配**之前**就已构造（`notify_service`）——
+    //    这里只把它接到 HTTP 上，**不**再建第二个实例。
+    let app = if let (Some((iam, checker)), Some(service)) =
+        (app_iam.clone(), notify_service.clone())
+    {
+        let notify_state = build_notify_state(service, iam, checker);
         let app = app.nest("/api/notify", platform_notify::http::router(notify_state));
         tracing::info!("通知系统已启用：/api/notify/*（模板 / 投递记录 / 订阅偏好）");
         app
@@ -1101,36 +1186,51 @@ impl platform_oauth::config::OAuthConfigSource for PlatformOAuthConfigSource {
 /// | `AuditSink` | 平台 sink | 3 个 `app.*` 审计事件码 |
 /// | `TokenVerifier` | [`AppIamTokenVerifier`] | 验登录令牌 → 租户 + 用户 |
 /// | `PermissionChecker` / `PermissionRefresher` | `RbacChecker` | 3 个 `app:*` 权限点 + 导航过滤 |
-/// 装配通知系统（REQ-015）。
-async fn build_notify_state(
+/// 装配通知**服务**（REQ-015）。
+///
+/// # 为什么服务与状态要分开构造（REQ-020 D354）
+///
+/// `/api/notify/*` 要 `NotifyState`（服务 + 令牌校验 + 判定器），而业务模块
+/// （`modules/leave`）只要**服务**本身（落库适配器 `DbNotificationSender` 内部调
+/// `enqueue`）。业务模块的装配点在 `/api/notify` **之前** → 服务必须先就绪，
+/// 路由后挂。两个入口共用同一个 `Arc<NotifyService>`（一个实例，一份配置）。
+///
+/// ⚠️ 调用方必须保证「未配置 IAM 时不调用」——模板按租户隔离，
+/// 没有 IAM 就没有可验的登录会话。
+async fn build_notify_service(
     config: &DeployConfig,
-    iam: Arc<platform_iam::service::IamService>,
     config_service: Arc<platform_config::ConfigService>,
-    checker: Arc<platform_rbac::RbacChecker>,
-) -> Result<Arc<platform_notify::http::NotifyState>, Failure> {
+) -> Result<Arc<platform_notify::service::NotifyService>, Failure> {
     // 数据访问走 `platform-db` 的租户作用域入口（**不得**直连池）。
     let tenant_db =
         platform_db::TenantDb::connect(&config.database_url, platform_db::DbOptions::default())
             .await
             .map_err(|err| Failure::Runtime(format!("数据库连接串非法：{err}")))?;
 
-    let service = Arc::new(platform_notify::service::NotifyService::new(
+    Ok(Arc::new(platform_notify::service::NotifyService::new(
         platform_notify::store::NotifyStore::new(tenant_db),
         platform_notify::config::NotifyConfig::new(Arc::new(PlatformNotifyConfigSource::new(
             config_service,
         ))),
-    ));
+    )))
+}
 
+/// 把通知**服务**接到 `/api/notify/*` 上（REQ-015）。
+fn build_notify_state(
+    service: Arc<platform_notify::service::NotifyService>,
+    iam: Arc<platform_iam::service::IamService>,
+    checker: Arc<platform_rbac::RbacChecker>,
+) -> Arc<platform_notify::http::NotifyState> {
     // ⚠️ `refresher` 与 `checker` 是**同一个** `RbacChecker`（它同时实现两个 trait）——
     // 少了 `refresher`，用户第一次打受保护的端点必然 403（TD-047）。
     let refresher: Arc<dyn PermissionRefresher> = checker.clone();
 
-    Ok(Arc::new(platform_notify::http::NotifyState {
+    Arc::new(platform_notify::http::NotifyState {
         service,
         tokens: Arc::new(NotifyIamTokenVerifier::new(iam)),
         checker: checker as Arc<dyn PermissionChecker>,
         refresher,
-    }))
+    })
 }
 
 /// 通知系统的令牌校验（复用 IAM 的 access token 验签）。

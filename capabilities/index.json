@@ -36,7 +36,7 @@
       "traits": 5
     },
     "permissions.json": {
-      "total": 41
+      "total": 44
     },
     "schema/entity.schema.json": {},
     "schema/manifest.schema.json": {},
@@ -80,9 +80,10 @@
   },
   "platform": {
     "modules": [
+      "leave",
       "sandbox"
     ],
     "version": "0.1.0"
   },
-  "source_fingerprint": "fnv1a64:fe8e78080309ed2a"
+  "source_fingerprint": "fnv1a64:7670cc7d61fd0863"
 }

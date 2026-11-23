@@ -196,6 +196,12 @@ fn the_title_table_has_the_pinned_number_of_rows() {
     const REQ_018_NEW_CODES: usize = 10;
     /// REQ-019 新增 1 个平台级码（`INVALID_REQUEST`，D341）。
     const REQ_019_NEW_CODES: usize = 1;
+    // REQ-020（业务模块自有错误码）再加 **1** 个码（`LEAVE_INVALID_TRANSITION`）
+    // → 117 + 1 = **118**。
+    // ⚠️ 这是**首次**有业务模块往这张表里加码（`modules/sandbox` 全用平台码）：
+    // 码 → 标题是平台唯一一张表，业务码也必须登记，否则 `title_of_code()` 落兜底
+    // `"Error"`（违反契约 C6）。登记点见 `crates/platform-core/src/titles.rs`。
+    const REQ_020_NEW_CODES: usize = 1;
     assert_eq!(
         TITLES.len(),
         BASELINE_ROWS_BEFORE_REQ_013
@@ -205,7 +211,8 @@ fn the_title_table_has_the_pinned_number_of_rows() {
             + REQ_016_NEW_CODES
             + REQ_015_NEW_CODES
             + REQ_018_NEW_CODES
-            + REQ_019_NEW_CODES,
+            + REQ_019_NEW_CODES
+            + REQ_020_NEW_CODES,
         "TITLES 行数变了：新增错误码必须同时登记标题（D125）"
     );
 }
