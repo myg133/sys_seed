@@ -1729,3 +1729,71 @@ PostgreSQL 里显式事务内的 `SET` 也会被 `ROLLBACK` 回滚，
   篡改第 3 条（落在第 2 批）必须被发现。
 
 **变异验证**：游标 `>` 改 `>=`（重读）→ `checked` 对不上，红。
+
+---
+
+## TD-085: `WorkflowHandler` 是孤儿 trait（REQ-017 取消后遗留）
+
+- **发现于**: REQ-020 规格（D347）+ 独立挑刺 N6
+- **现状**: `crates/platform-core/src/extension/workflow.rs` 定义了
+  `WorkflowHandler` + `TransitionEvent`，但**平台侧零调用点**
+  （`grep -rn "on_transition"` 只命中定义与测试里的 `Demo`）。
+  REQ-017（工作流引擎）已取消（D121），这个 trait 从未被消费。
+- **额外矛盾**（挑刺 N9）: `crates/xtask/src/catalog.rs:79-81` 与
+  `capabilities/index.json:29` 的能力文案写「WorkflowHandler + TransitionEvent
+  提供工作流接入接缝，**勿自建流程引擎**」—— 这与 REQ-020 D347
+  （业务自建三态状态机）**方向相反**。
+- **影响**: 能力索引在**教人用**一个从未被调用的接缝；而 REQ-020 的结论是
+  「不要指望它，业务自己写」。这个矛盾会让后续需求误判。
+- **要做需要什么**: 二选一 —— ① 复活流程引擎（新需求，工作量大）；
+  ② 删掉 trait 并同步清理 `capabilities/` 与 `catalog.rs` 文案（改动小但要动 3 处）。
+  ⚠️ 无论选哪个，都要**先决定**，否则能力索引继续误导。
+- **优先级**: P2（不影响运行，但影响「底座该不该这样做」的判断）
+
+---
+
+## TD-086: **业务模块装配是硬编码 match**，每个新模块都要改平台 3 个文件
+
+- **发现于**: REQ-020 规格（D355）+ 独立挑刺 B1 实测
+- **现状**:
+  ```rust
+  // crates/platform-server/src/main.rs:553-586
+  match *module_id {
+      "sandbox" => { ... app = app.nest("/api/sandbox", router); ... }
+      "org" => {}
+      other => { tracing::warn!("模块已启用但没有 HTTP 装配点"); }
+  }
+  ```
+  → 新模块（如 REQ-020 的 `leave`）**必须**手加一条 match 臂才能挂载，否则全 404。
+  认证层也在臂里加（`:562-572`）。此外根 `Cargo.toml` 的 members、
+  `crates/platform-server/Cargo.toml` 的依赖也要各加一行。
+- **为什么是缺陷**: `discover_enabled()` 已经能**发现**模块（注册宏），
+  但**挂载**仍要手写 → 「注册了却没挂载」只能靠一行 warn 提示，
+  生产上表现为**整组路由静默 404**。
+  这与 REQ-019 的 TD-076（路由组装无判据）是同一类问题的两面。
+- **影响**: 父 AC-029「不修改平台核心任何一行」在**装配**这一步就不成立 ——
+  每个新业务模块都要改 3 个平台文件。
+- **要做需要什么**: 让模块自注册路由（例如 `PlatformModule` 增加
+  `fn routes(&self) -> Router` 方法），装配层遍历 `discover_enabled()` 自动 nest。
+  ⚠️ 认证层怎么注入是难点（现在靠装配臂手工传 `ModuleAuthState`）。
+- **优先级**: **P1**（这是「底座可用性」的核心指标 —— 每加一个模块就改平台，
+  说明扩展点设计有缺口）
+
+---
+
+## TD-087: manifest schema **无行内动作**能力，带审批的业务要写自定义页 + 改 shell
+
+- **发现于**: REQ-020 规格（D356）+ 独立挑刺 M7 实测
+- **现状**:
+  - `apps/shell/src/lib/routes.ts:47`：「`/schema/:moduleId/:entityKey` 是**唯一**的
+    数据页面路由：新增实体只改后端 manifest，`apps/shell/src/**` 一行不改」；
+  - 但通配页的动作列只有编辑/删除（`SchemaTable.svelte:131-148`）；
+  - manifest 的 `api` 只有 4 个键：`list`/`create`/`update`/`delete`
+    （`platform-core/src/extension/schema.rs:138-141`）→ **没有「审批」这类行内动作**。
+- **影响**: 一旦业务有**自定义动作**（审批、驳回、提交、撤回…），
+  「只改 manifest」就不成立 → 必须写自定义页面 + 在 `apps/shell/src/**` 加硬编码路由。
+  而 `.svelte` 页面**没有运行时加载机制**（`grep -rn "modules/" apps/shell/src` 无命中，
+  连 `modules/sandbox/frontend/DemoPage.svelte` 都是孤儿）。
+- **要做需要什么**: 扩展 schema 的 `actions` 能力（每个动作：名称 / 权限点 / 端点 /
+  适用状态），并让 `SchemaTable` 渲染成按钮 —— 这是平台改动，工作量中等。
+- **优先级**: P2（不影响当前需求，但决定了「带流程的业务能不能只写 manifest」）
