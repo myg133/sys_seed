@@ -596,6 +596,7 @@ async fn the_readiness_check_is_conditional_on_the_enabled_flag() {
                 window_seconds: 60,
             },
         })),
+        token_resolver: None,
     };
     assert_eq!(
         rate_limit_readiness(&Some(Arc::new(enabled)), &ctx).await,
@@ -607,6 +608,7 @@ async fn the_readiness_check_is_conditional_on_the_enabled_flag() {
     let disabled = RateLimitState {
         limiter: Some(limiter.clone()),
         config: Arc::new(StaticConfig(RateLimitSettings::disabled())),
+        token_resolver: None,
     };
     assert_eq!(
         rate_limit_readiness(&Some(Arc::new(disabled)), &ctx).await,
@@ -632,7 +634,8 @@ async fn the_readiness_check_is_conditional_on_the_enabled_flag() {
                 window_seconds: 60,
             },
         })),
-    };
+        token_resolver: None,
+};
     assert_eq!(
         rate_limit_readiness(&Some(Arc::new(no_limiter)), &ctx).await,
         None,

@@ -726,7 +726,8 @@ async fn serve() -> Result<(), Failure> {
     //
     // 配置源用 `ConfigService::read_entries` 实现 —— 与 `GET /api/config/entries`
     // **同一套解析**（三层覆盖 + manifest 默认值），不另开读路径。
-    if let Some(service) = sso_iam {
+    // ⚠️ 用 `&` 而不是移动 —— 下面的限流装配还要用 `sso_iam`（TD-077）。
+    if let Some(service) = sso_iam.clone() {
         let source = Arc::new(ConfigServiceSsoSource::new(config_service.clone()));
         if !service.set_sso_config_source(source) {
             tracing::warn!("SSO 配置源已经注入过：保留先装好的实现");
@@ -799,7 +800,11 @@ async fn serve() -> Result<(), Failure> {
     //
     // ⚠️ 限流**默认关闭**（D344）：`rateLimit.enabled` 读不到就是 false →
     // 中间件直接放行（零查库）。这让现有 1496 个测试不受影响。
-    let rate_limit_state = build_rate_limit_state(&config, config_service.clone()).await;
+    // ⚠️ **TD-077 / F15**：限流挂在顶层，此时租户还没被填（子系统内层的
+    // `authenticate` 才填）→ 必须让它能从**令牌**解析身份，否则限流恒不生效。
+    // 用户 2026-11-23 裁定：**顶层验令牌**（改动最小，不动 8+ 个已验收 crate）。
+    let rate_limit_state =
+        build_rate_limit_state(&config, config_service.clone(), sso_iam.clone()).await;
     // 延迟注入给就绪探针（AC-S-038）。
     let _ = rate_limit_slot.set(rate_limit_state.clone());
 
@@ -1251,6 +1256,7 @@ async fn build_storage_state(
 async fn build_rate_limit_state(
     config: &DeployConfig,
     config_service: Arc<platform_config::ConfigService>,
+    iam: Option<Arc<platform_iam::service::IamService>>,
 ) -> Option<Arc<platform_observability::rate_limit::middleware::RateLimitState>> {
     let db = match platform_db::TenantDb::connect(
         &config.database_url,
@@ -1268,14 +1274,68 @@ async fn build_rate_limit_state(
         }
     };
 
+    // ⚠️ **TD-077 / F15**：限流挂在顶层，此时 `ctx` 里没有租户
+    // （`client_info` 只填 IP / UA）。没有解析器 → 无租户 → 放行 → **限流恒不生效**。
+    let token_resolver = iam.map(|service| {
+        Arc::new(TokenTenantResolverImpl { service })
+            as Arc<dyn platform_observability::rate_limit::middleware::TokenTenantResolver>
+    });
+    if token_resolver.is_none() {
+        tracing::warn!(
+            "rate limiting has no token resolver - requests will not be limited \
+             because the tenant is not available at the top-level middleware (TD-072)"
+        );
+    }
+
     Some(Arc::new(
         platform_observability::rate_limit::middleware::RateLimitState {
             limiter: Some(platform_observability::pg_rate_limiter(db)),
             config: Arc::new(PgRateLimitConfig {
                 service: config_service,
             }),
+            token_resolver,
         },
     ))
+}
+
+/// 顶层限流的**令牌 → 租户**解析器（TD-077 / F15 的修法）。
+///
+/// # ⚠️ 它做什么
+///
+/// 限流中间件挂在**顶层**，此时各子系统的 `authenticate` 还没跑
+/// → `RequestContext` 里没有租户。没有本解析器时，限流按 TD-072 的规则
+/// 一律放行 → **三级限流在生产路径上完全空转**（复核已带对照组实证）。
+///
+/// # ⚠️ 安全前提（不可省）
+///
+/// **必须**走 [IamService::verify_access_token]（真正的签名 + 时效校验），
+/// **不能**只把 JWT 的 payload base64 解一遍拿租户 —— 那等于让调用方自报租户，
+/// 攻击者可以伪造成任何租户来挤占别人的配额、或绕过自己的配额。
+///
+/// # ⚠️ 失败语义
+///
+/// 验不过 → `None` → 中间件按「未认证 → 放行」处理（TD-072）。
+/// **不返回 401** —— 认证失败的响应由各子系统的 `authenticate` 负责，
+/// 限流中间件不该抢这个职责（否则错误码会变成限流的语义）。
+struct TokenTenantResolverImpl {
+    /// 平台的认证服务（唯一的令牌验签入口）。
+    service: Arc<platform_iam::service::IamService>,
+}
+
+impl platform_observability::rate_limit::middleware::TokenTenantResolver
+    for TokenTenantResolverImpl
+{
+    fn resolve(&self, authorization: &str) -> Option<(String, String)> {
+        // 剥 `Bearer ` 前缀（大小写不敏感，与各子系统 `authenticate` 的惯例一致）。
+        let token = authorization
+            .strip_prefix("Bearer ")
+            .or_else(|| authorization.strip_prefix("bearer "))
+            .map(str::trim)
+            .filter(|token| !token.is_empty())?;
+        // ⚠️ **真验签**（不是解 payload）。失败 → None。
+        let claims = self.service.verify_access_token(token).ok()?;
+        Some((claims.tenant_id, claims.subject))
+    }
 }
 
 /// 从 `platform-config` 读 `rateLimit.*` 的 7 个键（D344）。

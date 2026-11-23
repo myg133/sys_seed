@@ -63,6 +63,72 @@ async fn fake_client_info(
     next.run(request).await
 }
 
+/// **生产等价**的 `client_info`：**只**填 IP / UA，**绝不**填租户。
+///
+/// # ⚠️ 这个函数是 F15 / TD-077 判据的核心
+///
+/// [`fake_client_info`] **主动注入租户**（`:58-62`），而生产的
+/// `platform_server::client_info::client_info` **不填租户**
+/// （全文 `with_tenant` 出现 0 次）。
+///
+/// 差别就是缺陷本身：限流挂在**顶层**，此时租户还没被任何层填
+/// （子系统内层的 `authenticate` 才填）→ `ctx.tenant_id()` 为 `None`
+/// → 按 TD-072 放行 → **limiter 的 `check()` 一次都不被调用**。
+///
+/// 复刻生产行为的**忠实度**：
+/// - 从 `x-forwarded-for` 取**第一跳**（与生产一致）；
+/// - 从 `user-agent` 取 UA（与生产一致）；
+/// - **不碰租户**（与生产一致 —— 这是关键）。
+async fn production_client_info(
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut ctx = request
+        .extensions()
+        .get::<RequestContext>()
+        .cloned()
+        .unwrap_or_else(RequestContext::new);
+    if let Some(ip) = request
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(str::trim)
+        .filter(|ip| !ip.is_empty())
+    {
+        ctx = ctx.with_client_ip(ip);
+    }
+    if let Some(ua) = request
+        .headers()
+        .get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|ua| !ua.is_empty())
+    {
+        ctx = ctx.with_user_agent(ua);
+    }
+    // ⚠️ **此处刻意不调用 `with_tenant`** —— 生产的 client_info 也不调用。
+    request.extensions_mut().insert(ctx);
+    next.run(request).await
+}
+
+/// 一个**假的**令牌解析器：把任意 `Bearer <tenant>|<user>` 解析成身份。
+///
+/// ⚠️ 只用于测试 —— 生产用 `main.rs` 的 `TokenTenantResolverImpl`
+/// （走 `IamService::verify_access_token` 真验签）。
+struct FakeTokenResolver;
+
+impl platform_observability::rate_limit::middleware::TokenTenantResolver for FakeTokenResolver {
+    fn resolve(&self, authorization: &str) -> Option<(String, String)> {
+        let token = authorization.strip_prefix("Bearer ")?.trim();
+        let (tenant, user) = token.split_once('|')?;
+        if tenant.is_empty() || user.is_empty() {
+            return None;
+        }
+        Some((tenant.to_string(), user.to_string()))
+    }
+}
+
 /// 建一个挂了**全部中间件**的 router。
 fn assembled_router(rate_limit: Option<RateLimitState>) -> axum::Router {
     let router = axum::Router::new()
@@ -143,6 +209,7 @@ async fn the_rate_limit_middleware_is_installed() {
     let state = RateLimitState {
         limiter: Some(Arc::new(CountingLimiter::default())),
         config: Arc::new(StaticConfig(settings)),
+        token_resolver: None,
     };
     let app = assembled_router(Some(state));
 
@@ -199,6 +266,7 @@ async fn the_429_body_only_exposes_the_two_allowed_params() {
     let state = RateLimitState {
         limiter: Some(Arc::new(CountingLimiter::default())),
         config: Arc::new(StaticConfig(settings)),
+        token_resolver: None,
     };
     let app = assembled_router(Some(state));
 
@@ -344,6 +412,7 @@ async fn the_query_string_does_not_bypass_the_rate_limit_bucket() {
     let state = RateLimitState {
         limiter: Some(limiter.clone()),
         config: Arc::new(StaticConfig(settings)),
+        token_resolver: None,
     };
     let app = assembled_router(Some(state));
 
@@ -454,6 +523,275 @@ async fn the_client_info_runs_outermost_so_downstream_sees_the_ip() {
         "业务侧必须能读到 client_info 填的 IP —— \
          若读不到说明 client_info 不在最外层（顺序错了）"
     );
+}
+
+// ---------------------------------------------------------------------------
+// F15 / TD-077：限流在生产装配下**真的**生效吗？（带对照组）
+// ---------------------------------------------------------------------------
+
+/// **F15 / TD-077 的核心判据**：生产等价的 `client_info`（**不填租户**）下，
+/// 限流必须**仍然生效** —— 靠顶层的**令牌解析**拿到租户。
+///
+/// # ⚠️ 这条防的是什么
+///
+/// 复核实证过：限流挂在顶层，而 `client_info` 只填 IP / UA、租户由子系统
+/// **内层**的 `authenticate` 填 → `ctx.tenant_id()` 恒为 `None`
+/// → 按 TD-072 放行 → **limiter 的 `check()` 一次都不被调用**。
+///
+/// 实验数据（复核做的）：实验组 limiter 被调用 **0 次**（5 次全 200）；
+/// 对照组 **3 次**。差别只在「是否注入租户」。
+///
+/// # 本用例的三组对照（同一套生产等价 `client_info`）
+///
+/// | 组 | 令牌 | `token_resolver` | 期望 |
+/// |---|---|---|---|
+/// | **A** | `Bearer tenant-a\|user-a` | 有 | **429**（限流生效）+ limiter 被调用 |
+/// | **B** | 无令牌 | 有 | **200**（TD-072：未认证放行）+ limiter **不被调用** |
+/// | **C** | `Bearer tenant-a\|user-a` | **无** | **200** + limiter **不被调用** |
+///   ← 这正是修复前的状态（F15 的原样缺陷），锁住它以防回退 |
+///
+/// B 与 C 是**阴性对照**：证明 429 不是「反正都会限流」的假象，
+/// 而是**确实**由「令牌 → 租户」这条链路驱动的。
+#[tokio::test]
+async fn the_rate_limit_works_under_the_production_client_info() {
+    let settings = RateLimitSettings {
+        enabled: true,
+        tenant: WindowLimit {
+            requests: 0,
+            window_seconds: 60,
+        },
+        user: WindowLimit {
+            requests: 0,
+            window_seconds: 60,
+        },
+        endpoint: WindowLimit {
+            requests: 1,
+            window_seconds: 60,
+        },
+    };
+
+    // ---- 组 A：有令牌 + 有解析器 → 限流必须生效 ----
+    let limiter_a = Arc::new(CountingLimiter::default());
+    let app_a = axum::Router::new()
+        .route("/probe", axum::routing::get(|| async { "ok" }))
+        .layer(axum::middleware::from_fn(
+            platform_observability::trace::middleware::trace_id,
+        ));
+    let state_a = RateLimitState {
+        limiter: Some(limiter_a.clone()),
+        config: Arc::new(StaticConfig(settings)),
+        token_resolver: Some(Arc::new(FakeTokenResolver)),
+    };
+    let app_a = platform_observability::http::apply_all_middlewares_with(
+        app_a,
+        Some(Arc::new(state_a)),
+        production_client_info,
+    );
+
+    let auth = [("authorization", "Bearer tenant-a|user-a")];
+    let (first, _, b1) = send(app_a.clone(), "/probe", &auth).await;
+    assert_eq!(first, StatusCode::OK, "组 A 第 1 次应 200；body={b1}");
+    let (second, _, b2) = send(app_a, "/probe", &auth).await;
+    assert_eq!(
+        second,
+        StatusCode::TOO_MANY_REQUESTS,
+        "组 A：生产等价 client_info + 有效令牌 → 第 2 次必须 429。\
+         若这里是 200，说明限流在生产装配下**不生效**（TD-077 回退了）；body={b2}"
+    );
+    assert!(
+        !limiter_a.keys_seen().is_empty(),
+        "组 A：限流器必须**被调用过**（证明中间的整条链路真的走了）；\
+         被调用 0 次正是 F15 的原始缺陷"
+    );
+
+    // ---- 组 B：**无令牌** → 放行（TD-072），limiter 不被调用 ----
+    let limiter_b = Arc::new(CountingLimiter::default());
+    let app_b = axum::Router::new()
+        .route("/probe", axum::routing::get(|| async { "ok" }))
+        .layer(axum::middleware::from_fn(
+            platform_observability::trace::middleware::trace_id,
+        ));
+    let state_b = RateLimitState {
+        limiter: Some(limiter_b.clone()),
+        config: Arc::new(StaticConfig(settings)),
+        token_resolver: Some(Arc::new(FakeTokenResolver)),
+    };
+    let app_b = platform_observability::http::apply_all_middlewares_with(
+        app_b,
+        Some(Arc::new(state_b)),
+        production_client_info,
+    );
+    for i in 1..=3 {
+        let (status, _, _) = send(app_b.clone(), "/probe", &[]).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "组 B：无令牌第 {i} 次必须 200（未认证请求不受通用限流，TD-072）"
+        );
+    }
+    assert!(
+        limiter_b.keys_seen().is_empty(),
+        "组 B：无令牌时 limiter **不该**被调用（拿不到租户，RLS 表也写不进）；\
+         实际被调用：{:?}",
+        limiter_b.keys_seen()
+    );
+
+    // ---- 组 C：有令牌但**没有解析器** → 正是修复前的状态，必须**不生效** ----
+    //
+    // ⚠️ 这条是**回归护栏**：它锁住「没有解析器就没限流」这个事实。
+    // 若哪天有人把解析器改成可选且默认走别的路径，这条会红。
+    let limiter_c = Arc::new(CountingLimiter::default());
+    let app_c = axum::Router::new()
+        .route("/probe", axum::routing::get(|| async { "ok" }))
+        .layer(axum::middleware::from_fn(
+            platform_observability::trace::middleware::trace_id,
+        ));
+    let state_c = RateLimitState {
+        limiter: Some(limiter_c.clone()),
+        config: Arc::new(StaticConfig(settings)),
+        // ⚠️ **刻意不传** —— 复刻 F15 修复前的生产状态。
+        token_resolver: None,
+    };
+    let app_c = platform_observability::http::apply_all_middlewares_with(
+        app_c,
+        Some(Arc::new(state_c)),
+        production_client_info,
+    );
+    for i in 1..=3 {
+        let (status, _, _) = send(app_c.clone(), "/probe", &auth).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "组 C（无解析器 = 修复前）：第 {i} 次仍 200 —— 这就是 F15 的原始缺陷形态"
+        );
+    }
+    assert!(
+        limiter_c.keys_seen().is_empty(),
+        "组 C（无解析器）：limiter **一次都不该被调用** —— \
+         若被调用了，说明还有别的路径能拿到租户，F15 的诊断需要重新审视"
+    );
+}
+
+/// **无效令牌 → 放行**（TD-072 的语义不能被绕过）。
+///
+/// # 为什么单独一条
+///
+/// 组 A 证明「有效令牌 → 限流生效」，但反过来必须保证：
+/// **验不过的令牌不能变成 429**。否则攻击者可以拿一个过期/伪造的令牌
+/// 把任意租户的配额打满（或把自己锁死在 429 上）。
+///
+/// 期望：无效令牌 → 拿不到租户 → 走 TD-072 的「未认证 → 放行」。
+#[tokio::test]
+async fn an_invalid_token_is_treated_as_unauthenticated() {
+    let settings = RateLimitSettings {
+        enabled: true,
+        tenant: WindowLimit {
+            requests: 0,
+            window_seconds: 60,
+        },
+        user: WindowLimit {
+            requests: 0,
+            window_seconds: 60,
+        },
+        endpoint: WindowLimit {
+            requests: 1,
+            window_seconds: 60,
+        },
+    };
+    let limiter = Arc::new(CountingLimiter::default());
+    let state = RateLimitState {
+        limiter: Some(limiter.clone()),
+        config: Arc::new(StaticConfig(settings)),
+        token_resolver: Some(Arc::new(FakeTokenResolver)),
+    };
+    let app = axum::Router::new().route("/probe", axum::routing::get(|| async { "ok" }));
+    let app = platform_observability::http::apply_all_middlewares_with(
+        app,
+        Some(Arc::new(state)),
+        production_client_info,
+    );
+
+    // 三种验不过的形态，各打 3 次都必须 200。
+    for bad in [
+        "Bearer garbage",          // 格式不对（没有 `|` 分隔）
+        "Bearer |",                // 两段都是空
+        "Basic dXNlcjpwYXNz",      // 不是 Bearer
+    ] {
+        for i in 1..=3 {
+            let (status, _, body) = send(app.clone(), "/probe", &[("authorization", bad)]).await;
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "无效令牌 `{bad}` 第 {i} 次必须 200（当作未认证，TD-072），\
+                 不得因为验不过就 429；实际 body={body}"
+            );
+        }
+    }
+    assert!(
+        limiter.keys_seen().is_empty(),
+        "无效令牌拿不到租户 → limiter 不该被调用；实际：{:?}",
+        limiter.keys_seen()
+    );
+}
+
+/// **解析器的优先级**：`ctx` 里**已有**租户时，**不**再走令牌解析。
+///
+/// # 为什么这条重要
+///
+/// 若实现每次都先验令牌，会有两个坏后果：
+/// 1. 每请求多一次无谓的 HMAC 验签（子系统已经验过了）；
+/// 2. 令牌里的租户与子系统 `authenticate` 判定的租户**可能不同**
+///    （请求头租户 vs 令牌租户，契约 C3 允许前者）→
+///    限流会按**错的**租户计数。
+#[tokio::test]
+async fn an_existing_tenant_context_skips_the_token_resolver() {
+    /// 一个「一被调用就 panic」的解析器 —— 证明它**没被调用**。
+    struct ExplodingResolver;
+
+    impl platform_observability::rate_limit::middleware::TokenTenantResolver for ExplodingResolver {
+        fn resolve(&self, _authorization: &str) -> Option<(String, String)> {
+            panic!("ctx 里已有租户时**不该**调用令牌解析器（会多一次验签 + 可能用错租户）");
+        }
+    }
+
+    let settings = RateLimitSettings {
+        enabled: true,
+        tenant: WindowLimit {
+            requests: 0,
+            window_seconds: 60,
+        },
+        user: WindowLimit {
+            requests: 0,
+            window_seconds: 60,
+        },
+        endpoint: WindowLimit {
+            requests: 1,
+            window_seconds: 60,
+        },
+    };
+    let limiter = Arc::new(CountingLimiter::default());
+    let state = RateLimitState {
+        limiter: Some(limiter.clone()),
+        config: Arc::new(StaticConfig(settings)),
+        token_resolver: Some(Arc::new(ExplodingResolver)),
+    };
+    let app = axum::Router::new().route("/probe", axum::routing::get(|| async { "ok" }));
+    // ⚠️ 用 `fake_client_info`（它会注入租户）—— 模拟「下游已经填好租户」。
+    let app = platform_observability::http::apply_all_middlewares_with(
+        app,
+        Some(Arc::new(state)),
+        fake_client_info,
+    );
+
+    let (first, _, _) = send(app.clone(), "/probe", &[]).await;
+    assert_eq!(first, StatusCode::OK);
+    let (second, _, body) = send(app, "/probe", &[]).await;
+    assert_eq!(
+        second,
+        StatusCode::TOO_MANY_REQUESTS,
+        "ctx 里已有租户 → 直接用，限流照常生效；body={body}"
+    );
+    assert!(!limiter.keys_seen().is_empty());
 }
 
 /// 一个「内存计数」的限流器替身。

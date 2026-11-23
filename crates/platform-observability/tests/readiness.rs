@@ -173,6 +173,7 @@ fn state_with(settings: RateLimitSettings, reachable: bool) -> (Arc<RateLimitSta
     let state = Arc::new(RateLimitState {
         limiter: Some(limiter.clone()),
         config: Arc::new(StaticConfig(settings)),
+        token_resolver: None,
     });
     (state, limiter)
 }

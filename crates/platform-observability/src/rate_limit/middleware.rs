@@ -57,18 +57,63 @@ impl RateLimitConfigSource for StaticConfig {
     }
 }
 
+/// 从请求里解析**已认证身份**（租户 + 用户）。
+///
+/// # ⚠️ 为什么需要它（TD-077 / F15 的修法）
+///
+/// 限流中间件挂在**顶层**，而 `client_info`（唯一的顶层上下文中间件）
+/// **只填 IP / UA，不填租户** —— 租户是在各子系统**内层**的 `authenticate`
+/// 里才填的。于是 `rate_limit` 执行时 `ctx.tenant_id()` **恒为 `None`**
+/// → 走 TD-072 的「无租户 → 放行」→ **limiter 的 `check()` 一次都不被调用**。
+///
+/// 复核用**计数器 limiter** 实证过：实验组（`client_info` 只填 IP/UA）5 次请求全 200、
+/// limiter 被调用 **0 次**；对照组（额外注入租户）被调用 3 次。
+///
+/// # 修法（用户 2026-11-23 裁定：**顶层验令牌**）
+///
+/// 限流中间件在「`ctx` 里没有租户」时，用本 trait 从 `Authorization` 头
+/// **验一遍令牌**拿租户/用户。改动只碰装配函数与 `main.rs`，
+/// 不动 8+ 个已验收 crate（那会是 D109 跨需求改动）。
+///
+/// # ⚠️ 安全前提
+///
+/// 实现**必须**做真正的签名/时效校验（复用 `IamService::verify_access_token`），
+/// **不能**只从 JWT payload 里 base64 解出租户 —— 那等于让调用方自报租户，
+/// 攻击者可以伪造成任何租户来绕过/挤占别人的配额。
+///
+/// # ⚠️ 返回值语义
+///
+/// - `Some((tenant, user))`：令牌有效
+/// - `None`：**验不过**（没有头 / 格式错 / 签名错 / 过期）→ 调用方按
+///   TD-072 的「无租户 → 放行」处理（未认证请求不受通用限流保护，
+///   IAM 有自己的 IP 限流兜底）
+///
+/// ⚠️ 实现**不得**因为验令牌失败而返回 401 —— 那不是限流中间件的职责，
+/// 各子系统的 `authenticate` 会正确处理认证失败。
+pub trait TokenTenantResolver: Send + Sync {
+    /// 从 `Authorization` 头解析身份。
+    ///
+    /// 参数是**原始头值**（如 `Bearer eyJ...`），实现自己剥前缀。
+    fn resolve(&self, authorization: &str) -> Option<(String, String)>;
+}
+
 /// 中间件共享状态。
 pub struct RateLimitState {
     /// 限流器（`None` = 不限流，直接放行）。
     pub limiter: Option<Arc<dyn RateLimiter>>,
     /// 配置源。
     pub config: Arc<dyn RateLimitConfigSource>,
+    /// 令牌 → 租户解析器（`None` = 不做顶层解析，依赖 `ctx` 里已有的租户）。
+    ///
+    /// ⚠️ 生产**必须**传（见 [`TokenTenantResolver`] 的文档：不传则限流恒不生效）。
+    pub token_resolver: Option<Arc<dyn TokenTenantResolver>>,
 }
 
 impl std::fmt::Debug for RateLimitState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RateLimitState")
             .field("limiter", &self.limiter.is_some())
+            .field("token_resolver", &self.token_resolver.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -103,18 +148,56 @@ pub async fn rate_limit(
         return next.run(request).await;
     }
 
-    // ④ 无租户（未认证）→ 放行（TD-072）。
+    // ④ 取租户 / 用户。
     //
-    // ⚠️ RLS 租户表在无租户时写不进（`TenantDb::begin` 直接 MissingTenant）。
-    // 若这里不放行，**登录端点会 500** —— 比不限流糟得多。
-    let Some(tenant_id) = ctx.tenant_id() else {
-        tracing::debug!(
-            "no tenant context (unauthenticated request) - rate limiting is skipped (TD-072)"
-        );
-        return next.run(request).await;
+    // ⚠️ **TD-077 / F15 的修法（用户 2026-11-23 裁定「顶层验令牌」）**：
+    //
+    // 租户**通常不在** `ctx` 里 —— `client_info`（唯一的顶层上下文中间件）
+    // 只填 IP / UA，租户由各子系统**内层**的 `authenticate` 才填。
+    // 而限流挂在**顶层**（它必须在业务之前，否则超限的请求已经打到业务了）。
+    //
+    // → 若 `ctx` 里没有租户，用注入的 [`TokenTenantResolver`] 从
+    //   `Authorization` 头**验一遍令牌**拿身份。
+    //
+    // ⚠️ 没有解析器（测试 / 未接入）时退回旧行为：无租户 → 放行（TD-072）。
+    //   生产**必须**注入（`main.rs` 传 `IamService`），否则这就是 F15 的原样缺陷。
+    let (tenant_id, user_id) = match ctx.tenant_id() {
+        // `ctx` 里已有（子系统的下游层 / 测试夹具注入了）→ 直接用，不重复验令牌。
+        Some(tenant) => (tenant.to_string(), ctx.user_id().map(str::to_string)),
+        // `ctx` 里没有 → 尝试从令牌解析（顶层验令牌）。
+        None => {
+            let resolved = state
+                .token_resolver
+                .as_ref()
+                .and_then(|resolver| {
+                    request
+                        .headers()
+                        .get(axum::http::header::AUTHORIZATION)
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|raw| resolver.resolve(raw))
+                });
+            match resolved {
+                Some((tenant, user)) => {
+                    tracing::debug!(
+                        tenant = %tenant,
+                        "rate limiting uses the identity resolved from the access token (TD-077)"
+                    );
+                    (tenant, Some(user))
+                }
+                // 无租户（未认证 / 令牌无效）→ 放行（TD-072）。
+                //
+                // ⚠️ RLS 租户表在无租户时写不进（`TenantDb::begin` 直接 MissingTenant）。
+                // 若这里不放行，**登录端点会 500** —— 比不限流糟得多。
+                None => {
+                    tracing::debug!(
+                        "no tenant context and no valid access token - \
+                         rate limiting is skipped (TD-072)"
+                    );
+                    return next.run(request).await;
+                }
+            }
+        }
     };
-    let tenant_id = tenant_id.to_string();
-    let user_id = ctx.user_id().map(str::to_string);
 
     // ⑤ 取路径模板（⚠️ **不是**完整 URI —— 否则加随机 query 就能绕过，AC-S-031 步骤 5）。
     //
