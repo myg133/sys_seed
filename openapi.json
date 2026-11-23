@@ -1,0 +1,108 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "通用项目底座 API",
+    "description": "由 `utoipa` 从路由与 DTO 生成（REQ-019 D338）。                       ⚠️ 当前只覆盖部分端点，见 TD-073。",
+    "license": {
+      "name": "MIT",
+      "identifier": "MIT"
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/observability/rate-limit/status": {
+      "get": {
+        "tags": [
+          "observability"
+        ],
+        "summary": "读限流状态（分页）。",
+        "description": "# 🚨 已知能力边界（复核 F19，如实记录）\n\n本端点返回的 `items` **恒为 3 条**（三个限流维度各一行，硬编码）。\n因此：\n\n- `limit=10` → `items` 只有 **3** 条（不是 10）；\n- `nextCursor` **恒为 `null`**（`0 + 3 == 3`，没有下一页）；\n- AC-S-034 步骤 1 的「恰好 10 条 / `total == 25`」在本端点上**不可能成立**。\n\n**这不是造假**（数据是真的，从配置服务读出来的），\n但它使「跨 crate 分页契约统一」的验证退化为「**字段名一样**」——\n「真的能翻页」这一点**在本端点上没有被验证**。\n\n翻页行为本身由 `platform-audit` 的真库用例覆盖\n（25 行数据、两页零重叠）→ 契约的**行为面**有判据，\n只是不在**本**端点上。这条能力边界记入 TD-070。\n\n# 为什么不再造 25 行假数据\n\n「限流配置」这个概念上就是 **3 个维度**，造 25 行需要编造不存在的维度\n→ 那是**为了让测试通过而扭曲业务语义**（比缺判据更糟）。\n→ 选择如实记录边界，而不是伪造数据。\n\n⚠️ `#[utoipa::path]` 是 **REQ-019 AC-S-035** 的产物来源：\n它在编译期生成 `__path_rate_limit_status`，被 [`ApiDoc`] 的 `paths(...)` 引用。",
+        "operationId": "rate_limit_status",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "每页条数（1..=200，默认 20；越界 400）",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "不透明游标",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "分页的限流配置",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "description": "分页响应（**与 `platform-audit` 同形**）。",
+                  "required": [
+                    "items",
+                    "total"
+                  ],
+                  "properties": {
+                    "items": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "description": "一个限流维度的状态行。",
+                        "required": [
+                          "dimension",
+                          "requests",
+                          "windowSeconds"
+                        ],
+                        "properties": {
+                          "dimension": {
+                            "type": "string",
+                            "description": "维度（`tenant` / `user` / `endpoint`）。"
+                          },
+                          "requests": {
+                            "type": "integer",
+                            "format": "int64",
+                            "description": "窗口内允许的请求数（0 = 禁用）。"
+                          },
+                          "windowSeconds": {
+                            "type": "integer",
+                            "format": "int64",
+                            "description": "窗口长度（秒）。"
+                          }
+                        }
+                      },
+                      "description": "数据。"
+                    },
+                    "nextCursor": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "下一页游标（`null` = 没有下一页）。"
+                    },
+                    "total": {
+                      "type": "integer",
+                      "format": "int64",
+                      "description": "总数。"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "参数非法（INVALID_REQUEST）"
+          }
+        }
+      }
+    }
+  },
+  "components": {}
+}

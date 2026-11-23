@@ -1,10 +1,10 @@
 {
-  "req": "REQ-018",
-  "branch": "feature/REQ-018",
+  "req": "REQ-019",
+  "branch": "feature/REQ-019",
   "agent_id": "myg133-ba-1",
   "session_id": "proc-83964",
   "owner": "myg133-ba-1",
   "base_branch": "develop",
-  "created_at": "2026-11-22T10:09:17+08:00",
-  "demand_dir": "BA/demands/REQ-018-storage-io"
+  "created_at": "2026-11-22T21:50:59+08:00",
+  "demand_dir": "BA/demands/REQ-019-observability-api"
 }

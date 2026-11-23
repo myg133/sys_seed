@@ -101,6 +101,7 @@ describe('语言包与键体系（AC-S-091）', () => {
     // 逐个来自 crates/**/src/**/error.rs 与 problem.rs / health.rs / config.rs 的 `pub const CODE_*`
     const codes = [
       'UNAUTHENTICATED',
+      'INVALID_REQUEST',
       'INSUFFICIENT_PERMISSION',
       'NOT_FOUND',
       'INTERNAL_ERROR',

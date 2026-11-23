@@ -45,6 +45,7 @@ pub const FALLBACK_TITLE: &str = "Error";
 pub const TITLES: &[(&str, &str)] = &[
     // -- platform-core（统一错误体）-----------------------------------------
     ("UNAUTHENTICATED", "Unauthenticated"),
+    ("INVALID_REQUEST", "Invalid Request"),
     ("INSUFFICIENT_PERMISSION", "Insufficient Permission"),
     ("NOT_FOUND", "Not Found"),
     ("INTERNAL_ERROR", "Internal Server Error"),

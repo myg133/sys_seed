@@ -45,6 +45,19 @@ platform-notify.workspace = true
 # 而 `tests/i18n_titles.rs` 的 `all_codes()` 要按 crate 列举 —— 所以是**正式依赖**
 # （不是 dev-only）。
 platform-storage.workspace = true
+# REQ-019 可观测性：trace_id 中间件 + 三级限流 + OTel 装配（D343）。
+# ⚠️ **只有装配层依赖它** —— 其它 crate 通过 `platform-core` 的 trait 解耦（D150）。
+platform-observability.workspace = true
+# ⚠️ REQ-019（D338 第三次依赖破例）：OpenAPI 生成。
+# 装配层直接依赖是因为 `#[utoipa::path]` 要挂在**这里的 handler** 上
+# （派生宏必须与被标注的代码在同一个 crate）。
+utoipa.workspace = true
+# ⚠️ REQ-019 TD-074：装配层要直接挂 `tracing_opentelemetry` 的 span 层
+# （`platform-core` 不能依赖 opentelemetry，见 `init_tracing` 的文档）。
+# 这些包已在 lock 里（经 platform-observability），**不新增**。
+opentelemetry.workspace = true
+opentelemetry_sdk.workspace = true
+tracing-opentelemetry.workspace = true
 # 审计记录的时间戳格式化（UTC、微秒 6 位 —— D142 / D144）
 time.workspace = true
 # 业务模块装配（REQ-012 D103）：编译期注册的模块必须在**装配层**被链接进来，

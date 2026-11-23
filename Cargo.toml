@@ -9,6 +9,7 @@ members = [
     "crates/platform-app",
     "crates/platform-notify",
     "crates/platform-storage",
+    "crates/platform-observability",
     "crates/platform-db",
     "crates/platform-iam",
     "crates/platform-oauth",
@@ -32,6 +33,7 @@ platform-core = { path = "crates/platform-core" }
 platform-app = { path = "crates/platform-app" }
 platform-notify = { path = "crates/platform-notify" }
 platform-storage = { path = "crates/platform-storage" }
+platform-observability = { path = "crates/platform-observability" }
 platform-audit = { path = "crates/platform-audit" }
 platform-config = { path = "crates/platform-config" }
 platform-contracts = { path = "crates/platform-contracts" }
@@ -45,6 +47,25 @@ platform-schema = { path = "crates/platform-schema" }
 platform-server = { path = "crates/platform-server" }
 # REQ-012：业务模块挂进服务（D103）。平台 crate **不**依赖它，只有装配层（platform-server）依赖。
 sandbox = { path = "modules/sandbox" }
+
+# ⚠️ **第三次依赖破例**（D338，前两次是 D123 的 TLS 栈、D321 的 multipart）：
+# OpenAPI 自动生成。实测**净增 2 个包**（`utoipa` + `utoipa-gen`），基线 329 包。
+# 为什么破例：手写 YAML/生成器一定会与代码漂移（没人会记得同步）；
+# 2 个包换「不会漂」很划算，是三次破例里最便宜的一次。
+# ⚠️ 破例边界：**只** utoipa 本体 + utoipa-gen。不含 utoipa-swagger-ui / redoc /
+# scalar（产物是静态 JSON，不需要在线 UI）。加它们需重新裁决。
+utoipa = { version = "5", features = ["axum_extras"] }
+
+# ⚠️ **第四次依赖破例**（D339）：OpenTelemetry 真接 OTLP。
+# 实测代价：全 features 净增 **24** 包 / `http-proto` 净增 **18** 包 /
+# 加 `with-serde` 净增 **27** 包（会拉 proptest）。用户裁定接受，选 http-proto。
+# ⚠️ 必须 `default-features = false` + 只开 `http-proto`：
+# 默认会拉 gRPC（`tonic` + `tonic-prost`）与 `reqwest` 两条链，多 6 个包。
+# ⚠️ 不要 `with-serde`（生产不需要 protobuf 的 serde 支持，会拉 proptest）。
+opentelemetry = { version = "0.31" }
+opentelemetry_sdk = { version = "0.31" }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["http-proto", "reqwest-client"] }
+tracing-opentelemetry = { version = "0.32" }
 
 # ⚠️ **第二次依赖破例**（D321，第一次是 D123 的 TLS 栈）：
 # `multipart` feature → `multer 3.1`，实测**净增 5 个包**

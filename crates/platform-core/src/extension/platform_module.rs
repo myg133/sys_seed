@@ -99,7 +99,13 @@ mod tests {
         assert_eq!(ctx.module_id(), "sandbox");
         assert_eq!(ctx.tenant_id(), Some("tenant-a"));
         assert_eq!(ctx.space_id(), Some("space-1"));
-        assert_eq!(ctx.trace_id().len(), 36);
+        // ⚠️ REQ-019 D340：trace_id 从 36 字符 uuid 改为 32 位小写 hex。
+        assert_eq!(ctx.trace_id().len(), 32, "trace_id 必须是 32 位 hex");
+        assert!(
+            ctx.trace_id().bytes().all(|b| b.is_ascii_hexdigit()),
+            "trace_id 必须全是 hex：{}",
+            ctx.trace_id()
+        );
     }
 
     #[test]

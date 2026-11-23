@@ -1,0 +1,59 @@
+{
+  "id": "observability",
+  "name": "可观测性与 API 治理",
+  "version": "0.1.0",
+  "enabled": true,
+  "permissions": [],
+  "menus": [],
+  "tenantScoped": {
+    "tables": [
+      "platform_rate_limit"
+    ],
+    "column": "tenant_id"
+  },
+  "dependencies": [],
+  "config": {
+    "rateLimit.enabled": {
+      "type": "boolean",
+      "default": false,
+      "scope": "platform",
+      "label": "三级限流总开关（⚠️ 默认关闭 —— 打开会改变所有现有端点的行为，D344）"
+    },
+    "rateLimit.tenant.requests": {
+      "type": "number",
+      "default": 0,
+      "scope": "platform",
+      "label": "租户维度每窗口请求数（⚠️ 0 = 禁用该维度，不是「允许 0 次」，D344）"
+    },
+    "rateLimit.tenant.windowSeconds": {
+      "type": "number",
+      "default": 60,
+      "scope": "platform",
+      "label": "租户维度窗口长度（秒）"
+    },
+    "rateLimit.user.requests": {
+      "type": "number",
+      "default": 0,
+      "scope": "platform",
+      "label": "用户维度每窗口请求数（0 = 禁用）"
+    },
+    "rateLimit.user.windowSeconds": {
+      "type": "number",
+      "default": 60,
+      "scope": "platform",
+      "label": "用户维度窗口长度（秒）"
+    },
+    "rateLimit.endpoint.requests": {
+      "type": "number",
+      "default": 0,
+      "scope": "platform",
+      "label": "接口维度每窗口请求数（0 = 禁用；⚠️ 键用路径模板，不含 query）"
+    },
+    "rateLimit.endpoint.windowSeconds": {
+      "type": "number",
+      "default": 60,
+      "scope": "platform",
+      "label": "接口维度窗口长度（秒）"
+    }
+  }
+}

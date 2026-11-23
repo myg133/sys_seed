@@ -29,6 +29,63 @@ pub enum Command {
     Notify(NotifyArgs),
     /// 导入导出批处理（REQ-018 / D324）。
     Storage(StorageArgs),
+    /// 生成 / 校验 OpenAPI 文档（REQ-019 / D338）。
+    Openapi(OpenapiArgs),
+    /// 可观测性运维任务：清理限流行等（REQ-019 / D337）。
+    Observability(ObservabilityArgs),
+}
+
+/// `observability` 参数。
+///
+/// # ⚠️ 为什么清理必须是**显式命令**（D337 / D296 / D324）
+///
+/// 限流表每请求一行 → 必须定期清理，否则表会无限增长。
+/// 清理**不放在 web 进程内**的后台线程，理由与 `notify worker` / `storage worker` 一致：
+///
+/// 1. web 重启会把定时器弄丢；
+/// 2. 多实例部署时每个实例都跑一遍（重复删除、互相争锁）；
+/// 3. 运维需要看到「跑了几次、删了多少行」；
+/// 4. 测试可以直接调一次，不用 `sleep`。
+///
+/// 部署侧用 cron / systemd timer 定时调（见 `design-summary.md` 的「定期任务」表）。
+#[derive(Debug, Args)]
+pub struct ObservabilityArgs {
+    #[command(subcommand)]
+    pub action: ObservabilityAction,
+}
+
+/// `observability` 的子动作。
+#[derive(Debug, Subcommand)]
+pub enum ObservabilityAction {
+    /// 清理 `platform_rate_limit` 里超出保留期的行。
+    PruneRateLimit(PruneRateLimitArgs),
+}
+
+/// `observability prune-rate-limit` 参数。
+#[derive(Debug, Args)]
+pub struct PruneRateLimitArgs {
+    /// 三个维度里**最大**的窗口长度（秒）。
+    ///
+    /// ⚠️ 必须 ≥ 配置里 `rateLimit.*.windowSeconds` 的最大值。
+    /// 传小了会把**仍在窗口内**的行删掉 → 限流计数变少 → 实际放行超过配额。
+    ///
+    /// 实际保留期 = 本值 **× 2**（由 `PgRateLimiter::prune` 内部计算）。
+    #[arg(long, default_value_t = 60)]
+    pub max_window_seconds: i64,
+    /// 数据库连接串；默认取环境变量 `DATABASE_URL`。
+    ///
+    /// ⚠️ 列「哪些租户有限流行」需要**绕过 RLS** → 这里应当传**管理员**连接。
+    /// 用应用角色也能跑，但只会看到 0 个租户（RLS 会过滤掉）→ 等于没清理。
+    #[arg(long)]
+    pub database_url: Option<String>,
+}
+
+/// `openapi` 参数。
+#[derive(Debug, Args)]
+pub struct OpenapiArgs {
+    /// 只校验不写入：产物与源码不一致时非零退出（CI 用）。
+    #[arg(long)]
+    pub check: bool,
 }
 
 /// `storage` 参数。

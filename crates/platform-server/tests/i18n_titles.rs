@@ -194,6 +194,8 @@ fn the_title_table_has_the_pinned_number_of_rows() {
     // REQ-018（文件存储与导入导出）再加 **9** 个码（`STORAGE_*`）→ 107 + 9 = **116**。
     // ⚠️ `StorageError::Internal` 不进 `ALL_CODES`（D330）—— 进了就是 117，本条必红。
     const REQ_018_NEW_CODES: usize = 10;
+    /// REQ-019 新增 1 个平台级码（`INVALID_REQUEST`，D341）。
+    const REQ_019_NEW_CODES: usize = 1;
     assert_eq!(
         TITLES.len(),
         BASELINE_ROWS_BEFORE_REQ_013
@@ -202,7 +204,8 @@ fn the_title_table_has_the_pinned_number_of_rows() {
             + REQ_022_NEW_CODES
             + REQ_016_NEW_CODES
             + REQ_015_NEW_CODES
-            + REQ_018_NEW_CODES,
+            + REQ_018_NEW_CODES
+            + REQ_019_NEW_CODES,
         "TITLES 行数变了：新增错误码必须同时登记标题（D125）"
     );
 }

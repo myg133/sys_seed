@@ -15,7 +15,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::ExitCode;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode, Uri, header};
@@ -114,6 +114,12 @@ struct AppState {
     migrator: Arc<Migrator>,
     environment: Environment,
     static_root: Option<PathBuf>,
+    /// 限流中间件状态（**延迟注入**：`config_service` 在 `AppState` 之后才构造）。
+    ///
+    /// ⚠️ 用 `OnceLock` 而不是 `Option<Arc<..>>`：
+    /// 就绪探针要读它（AC-S-038），而它依赖配置服务 ——
+    /// 两者构造顺序在本函数里是固定的（`AppState` 先）。
+    rate_limit: Arc<OnceLock<Option<Arc<platform_observability::rate_limit::middleware::RateLimitState>>>>,
 }
 
 /// 统一错误响应体（RFC 9457，见 `api-conventions v1` C6）。
@@ -228,11 +234,55 @@ fn load_config() -> Result<DeployConfig, Failure> {
 /// 形态是「全局默认级别 + 噪音库降级」，**新增 crate 不需要改清单**。
 /// 实现与守护测试见 `crates/platform-core/src/log.rs`。
 ///
-/// 初始化日志。
-fn init_tracing(level: &str) {
-    tracing_subscriber::fmt()
-        .with_env_filter(log_filter(level))
-        .init();
+/// 初始化日志（并在有 OTel provider 时挂上 span 层）。
+///
+/// # ⚠️ 为什么这里能挂 OTel layer 而 `platform-core` 不能（TD-074）
+///
+/// `platform-core` **不依赖** `opentelemetry`（否则每个 crate 都编译它，D343）。
+/// 而泛型的 `Option<L>` 方案编译不过：两个分支要返回**同一类型**，
+/// 但 `Layered<L, Layered<FmtLayer<W>, Registry>>` 与
+/// `Layered<FmtLayer<W>, Registry>` 是不同类型。
+///
+/// → 在**这里**（`platform-server`，它同时依赖 core 与 observability）
+/// 用**两个分支各自 `.init()`** 解决 —— `.init()` 消费 self、返回 `()`，
+/// 所以两条路径不必类型相同。
+///
+/// # 参数
+///
+/// - `level`：日志级别（`RUST_LOG` 优先）
+/// - `otel_provider`：`Some` → 挂 span 层（span 会被导出）；`None` → 只打日志
+fn init_tracing(level: &str, otel_provider: Option<&opentelemetry_sdk::trace::SdkTracerProvider>) {
+    use opentelemetry::trace::TracerProvider as _;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    // ⚠️ **过滤器 / 格式化层 / writer 的组装只有一份实现**（复核 F8 的处置）：
+    // 全部来自 `platform-core::log`，测试与生产**走同一份代码**。
+    //
+    // 原先这里是**手工重建** `registry().with(fmt_layer).with(otel_layer).with(filter)`，
+    // 而测试用的是 `build_subscriber`（fmt only）→ 两者共用的只有过滤器，
+    // 不是整个 subscriber。生产路径若把 `trace_id` 字段丢了，测试发现不了。
+    //
+    // ⚠️ 两个分支返回**不同的具体类型**，`impl Trait` 只能对应一个
+    // → 各自 `.init()`（本仓踩过「`Option<L>` 两分支返回类型不同」的坑）。
+    match otel_provider {
+        Some(provider) => {
+            // ⚠️ 这里挂 `tracing_opentelemetry` 的 layer → `tracing` 的 span
+            // 会被转成 OTel span 并批量导出（AC-S-037 步骤 1 的前提）。
+            let otel_layer = tracing_opentelemetry::layer()
+                .with_tracer(provider.tracer("base"));
+            platform_core::log::build_subscriber_with_layer(
+                level,
+                std::io::stdout,
+                otel_layer,
+            )
+            .init();
+        }
+        None => {
+            // 未启用 OTel → 走 `build_subscriber`（与测试**同一份代码**）。
+            platform_core::log::build_subscriber(level, std::io::stdout).init();
+        }
+    }
 }
 
 /// 加载迁移目录；目录不存在时 fail-fast（readiness 依赖它）。
@@ -245,7 +295,19 @@ async fn load_migrator(dir: &str) -> Result<Migrator, Failure> {
 /// 启动服务。
 async fn serve() -> Result<(), Failure> {
     let config = load_config()?;
-    init_tracing(&config.log_level);
+
+    // 🔑 REQ-019（AC-S-037）：**先**初始化 OpenTelemetry，**再**初始化日志
+    // —— 日志的 subscriber 要挂 OTel 的 span 层（顺序不可换）。
+    //
+    // ⚠️ `guard` 必须活到进程结束 —— 提前 drop 会让批量导出器停止，
+    // 最后一批 span 丢失。
+    //
+    // ⚠️ 失败**不影响启动**：`init_otel` 内部只 warn，返回 disabled guard。
+    // 可观测性是**旁路**，不能成为启动失败的原因（D339）。
+    let _otel_guard = platform_observability::otel::init_otel(
+        &platform_observability::otel::OtelConfig::from_env(),
+    );
+    init_tracing(&config.log_level, _otel_guard.provider());
 
     let migrator = Arc::new(load_migrator(&config.migrations_dir).await?);
     let pool = db::pool(&config.database_url, db::DEFAULT_MAX_CONNECTIONS)
@@ -279,11 +341,13 @@ async fn serve() -> Result<(), Failure> {
     // （QA #30）。
     let schema_registry = load_schema_registry(&config.manifest_root)?;
 
+    let rate_limit_slot = Arc::new(OnceLock::new());
     let state = Arc::new(AppState {
         pool,
         migrator,
         environment: config.environment,
         static_root: config.static_dir.as_ref().map(PathBuf::from),
+        rate_limit: rate_limit_slot.clone(),
     });
 
     let mut app = Router::new()
@@ -662,7 +726,8 @@ async fn serve() -> Result<(), Failure> {
     //
     // 配置源用 `ConfigService::read_entries` 实现 —— 与 `GET /api/config/entries`
     // **同一套解析**（三层覆盖 + manifest 默认值），不另开读路径。
-    if let Some(service) = sso_iam {
+    // ⚠️ 用 `&` 而不是移动 —— 下面的限流装配还要用 `sso_iam`（TD-077）。
+    if let Some(service) = sso_iam.clone() {
         let source = Arc::new(ConfigServiceSsoSource::new(config_service.clone()));
         if !service.set_sso_config_source(source) {
             tracing::warn!("SSO 配置源已经注入过：保留先装好的实现");
@@ -715,7 +780,7 @@ async fn serve() -> Result<(), Failure> {
             .await
             .map_err(|err| Failure::Runtime(format!("数据库连接串非法：{err}")))?;
     let i18n_state = Arc::new(platform_server::i18n::I18nState {
-        settings: config_service,
+        settings: config_service.clone(),
         rates: Arc::new(platform_db::fx::FxRateStore::new(fx_db)),
         tokens: config_tokens,
         locales: Arc::new(i18n_locales),
@@ -723,19 +788,45 @@ async fn serve() -> Result<(), Failure> {
     let app = app.merge(platform_server::i18n::router(i18n_state));
     tracing::info!("国际化已启用：/api/i18n/context、/api/i18n/fx/convert");
 
-    // 🔑 **全局**中间件：把来源 IP 与设备填进 `RequestContext`（REQ-014 D149）。
+    // 🔑 REQ-019（TD-075）：**中间件装配抽到 `platform_observability`** ——
+    // 这样「main 里挂对了没有」终于有判据了（测试能调同一个函数）。
     //
-    // 为什么必须在**顶层**：各子系统**各自**建上下文（`platform-config`、
-    // `platform-rbac`、`platform-i18n`、业务模块的 `authenticate_module`）
-    // → 「对所有路由生效」只能在顶层加一次。
-    // 各子系统的中间件随后 `extensions().get::<RequestContext>().cloned()`
-    // **继承**它。
+    // 顺序（不可换）：`client_info` → `trace_id` → `rate_limit` → 业务。
+    // ⚠️ `client_info` 必须在最外层：各子系统**各自**建 `RequestContext`，
+    // 「对所有路由生效」只能在顶层加一次（REQ-014 D149）。
     //
     // ⚠️ `ip` 是**客户端可控的头**（`x-forwarded-for` 的第一跳）——
     // 用途是**关联与排查**，**不是取证**（D149）。
-    let app = app.layer(axum::middleware::from_fn(
+    //
+    // ⚠️ 限流**默认关闭**（D344）：`rateLimit.enabled` 读不到就是 false →
+    // 中间件直接放行（零查库）。这让现有 1496 个测试不受影响。
+    // ⚠️ **TD-077 / F15**：限流挂在顶层，此时租户还没被填（子系统内层的
+    // `authenticate` 才填）→ 必须让它能从**令牌**解析身份，否则限流恒不生效。
+    // 用户 2026-11-23 裁定：**顶层验令牌**（改动最小，不动 8+ 个已验收 crate）。
+    let rate_limit_state =
+        build_rate_limit_state(&config, config_service.clone(), sso_iam.clone()).await;
+    // 延迟注入给就绪探针（AC-S-038）。
+    let _ = rate_limit_slot.set(rate_limit_state.clone());
+
+    // 🔑 REQ-019（AC-S-034）：新增的分页端点。
+    //
+    // ⚠️ 它存在的理由不只是「有用」—— **AC-S-034 的「跨 crate 一致性」判据
+    // 需要一个新增的分页端点**（否则只能测 audit 一个老端点）。
+    let observability_state = Arc::new(platform_server::observability::StatusState {
+        rate_limit: rate_limit_state.clone(),
+    });
+    let app = app.nest(
+        "/api/observability",
+        platform_server::observability::router(observability_state),
+    );
+    tracing::info!("可观测性已启用：/api/observability/*");
+
+    // 中间件全部在这里挂（**唯一实现**，见 `apply_all_middlewares_with` 的文档）。
+    let app = platform_observability::http::apply_all_middlewares_with(
+        app,
+        rate_limit_state,
         platform_server::client_info::client_info,
-    ));
+    );
 
     let addr = config.socket_addr();
     let listener = tokio::net::TcpListener::bind(addr)
@@ -1147,6 +1238,186 @@ async fn build_storage_state(
         checker: checker as Arc<dyn PermissionChecker>,
         refresher,
     }))
+}
+
+/// REQ-019：构造限流中间件的状态（D337 / D344）。
+///
+/// # ⚠️ 返回 `None` 的语义
+///
+/// 「**连中间件都不挂**」= 永久关闭限流（零开销）。
+/// 只在数据库连不上时发生 —— 而那种情况下服务本身已经起不来，
+/// 所以这条路径实际是防御性的。
+///
+/// # ⚠️ 配置读不到 ≠ 不挂中间件
+///
+/// 配置读不到（键未登记 / 缓存无快照）由 [`PgRateLimitConfig`] 内部
+/// **降级为 `disabled`** → 中间件挂上但直接放行（fail open）。
+/// 两者都要支持：前者省开销，后者让**新建的键**在第一次 refresh 前也能正常工作。
+async fn build_rate_limit_state(
+    config: &DeployConfig,
+    config_service: Arc<platform_config::ConfigService>,
+    iam: Option<Arc<platform_iam::service::IamService>>,
+) -> Option<Arc<platform_observability::rate_limit::middleware::RateLimitState>> {
+    let db = match platform_db::TenantDb::connect(
+        &config.database_url,
+        platform_db::DbOptions::default(),
+    )
+    .await
+    {
+        Ok(db) => db,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "rate limiting is not installed: the database handle could not be built"
+            );
+            return None;
+        }
+    };
+
+    // ⚠️ **TD-077 / F15**：限流挂在顶层，此时 `ctx` 里没有租户
+    // （`client_info` 只填 IP / UA）。没有解析器 → 无租户 → 放行 → **限流恒不生效**。
+    let token_resolver = iam.map(|service| {
+        Arc::new(TokenTenantResolverImpl { service })
+            as Arc<dyn platform_observability::rate_limit::middleware::TokenTenantResolver>
+    });
+    if token_resolver.is_none() {
+        tracing::warn!(
+            "rate limiting has no token resolver - requests will not be limited \
+             because the tenant is not available at the top-level middleware (TD-072)"
+        );
+    }
+
+    Some(Arc::new(
+        platform_observability::rate_limit::middleware::RateLimitState {
+            limiter: Some(platform_observability::pg_rate_limiter(db)),
+            config: Arc::new(PgRateLimitConfig {
+                service: config_service,
+            }),
+            token_resolver,
+        },
+    ))
+}
+
+/// 顶层限流的**令牌 → 租户**解析器（TD-077 / F15 的修法）。
+///
+/// # ⚠️ 它做什么
+///
+/// 限流中间件挂在**顶层**，此时各子系统的 `authenticate` 还没跑
+/// → `RequestContext` 里没有租户。没有本解析器时，限流按 TD-072 的规则
+/// 一律放行 → **三级限流在生产路径上完全空转**（复核已带对照组实证）。
+///
+/// # ⚠️ 安全前提（不可省）
+///
+/// **必须**走 [IamService::verify_access_token]（真正的签名 + 时效校验），
+/// **不能**只把 JWT 的 payload base64 解一遍拿租户 —— 那等于让调用方自报租户，
+/// 攻击者可以伪造成任何租户来挤占别人的配额、或绕过自己的配额。
+///
+/// # ⚠️ 失败语义
+///
+/// 验不过 → `None` → 中间件按「未认证 → 放行」处理（TD-072）。
+/// **不返回 401** —— 认证失败的响应由各子系统的 `authenticate` 负责，
+/// 限流中间件不该抢这个职责（否则错误码会变成限流的语义）。
+struct TokenTenantResolverImpl {
+    /// 平台的认证服务（唯一的令牌验签入口）。
+    service: Arc<platform_iam::service::IamService>,
+}
+
+impl platform_observability::rate_limit::middleware::TokenTenantResolver
+    for TokenTenantResolverImpl
+{
+    fn resolve(&self, authorization: &str) -> Option<(String, String)> {
+        // 剥 `Bearer ` 前缀（大小写不敏感，与各子系统 `authenticate` 的惯例一致）。
+        let token = authorization
+            .strip_prefix("Bearer ")
+            .or_else(|| authorization.strip_prefix("bearer "))
+            .map(str::trim)
+            .filter(|token| !token.is_empty())?;
+        // ⚠️ **真验签**（不是解 payload）。失败 → None。
+        let claims = self.service.verify_access_token(token).ok()?;
+        Some((claims.tenant_id, claims.subject))
+    }
+}
+
+/// 从 `platform-config` 读 `rateLimit.*` 的 7 个键（D344）。
+///
+/// # ⚠️ **fail open** 是硬要求（挑刺 M8）
+///
+/// 三种情况都返回 [`RateLimitSettings::disabled()`]，**绝不返回错误**：
+/// ① 键未登记（新建的键在迁移前）；② 缓存快照未 refresh；③ 读库失败。
+///
+/// ⚠️ 若这里返回 `Err` 或 panic，**现有 1496 个测试会集体变红**
+/// （它们的数据库里没有这些键）—— 这是实现阶段最容易踩的坑。
+struct PgRateLimitConfig {
+    service: Arc<platform_config::ConfigService>,
+}
+
+impl platform_observability::rate_limit::middleware::RateLimitConfigSource for PgRateLimitConfig {
+    fn settings<'a>(
+        &'a self,
+        ctx: &'a platform_core::RequestContext,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = platform_observability::rate_limit::RateLimitSettings> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            use platform_observability::rate_limit::{RateLimitSettings, WindowLimit};
+
+            /// 7 个键（与 `manifest.json` 的 `config` 段逐字一致）。
+            const KEYS: [&str; 7] = [
+                "rateLimit.enabled",
+                "rateLimit.tenant.requests",
+                "rateLimit.tenant.windowSeconds",
+                "rateLimit.user.requests",
+                "rateLimit.user.windowSeconds",
+                "rateLimit.endpoint.requests",
+                "rateLimit.endpoint.windowSeconds",
+            ];
+
+            let keys: Vec<String> = KEYS.iter().map(|k| (*k).to_string()).collect();
+            let entries = match self.service.read_platform_entries(ctx, &keys).await {
+                Ok(entries) => entries,
+                Err(err) => {
+                    // ⚠️ **fail open**：读不到 → 不限流（+ 一条 debug，不是 warn ——
+                    // 这在「新键还没迁移」时是**正常状态**，不该刷屏）。
+                    tracing::debug!(
+                        error = %err,
+                        "rate limiting settings are unavailable - failing open (requests are allowed)"
+                    );
+                    return RateLimitSettings::disabled();
+                }
+            };
+
+            // 逐键取值；缺失/类型不符一律用默认（同样是 fail open 的一部分）。
+            let value_of = |key: &str| -> Option<&serde_json::Value> {
+                entries.iter().find(|e| e.key == key).map(|e| &e.value)
+            };
+            let bool_of = |key: &str, default: bool| -> bool {
+                value_of(key)
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(default)
+            };
+            let i64_of = |key: &str, default: i64| -> i64 {
+                value_of(key)
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(default)
+            };
+
+            RateLimitSettings {
+                enabled: bool_of("rateLimit.enabled", false),
+                tenant: WindowLimit {
+                    requests: i64_of("rateLimit.tenant.requests", 0),
+                    window_seconds: i64_of("rateLimit.tenant.windowSeconds", 60).max(1),
+                },
+                user: WindowLimit {
+                    requests: i64_of("rateLimit.user.requests", 0),
+                    window_seconds: i64_of("rateLimit.user.windowSeconds", 60).max(1),
+                },
+                endpoint: WindowLimit {
+                    requests: i64_of("rateLimit.endpoint.requests", 0),
+                    window_seconds: i64_of("rateLimit.endpoint.windowSeconds", 60).max(1),
+                },
+            }
+        })
+    }
 }
 
 /// 文件存储的令牌校验（复用 IAM 的 access token 验签）。
@@ -1683,7 +1954,19 @@ async fn reconcile_permissions(
 /// 连接串用**迁移（管理员）连接** —— 建策略需要表的属主权限。
 async fn run_tenant_policies(check: bool, manifest_root: Option<String>) -> Result<(), Failure> {
     let config = load_config()?;
-    init_tracing(&config.log_level);
+
+    // 🔑 REQ-019（AC-S-037）：**先**初始化 OpenTelemetry，**再**初始化日志
+    // —— 日志的 subscriber 要挂 OTel 的 span 层（顺序不可换）。
+    //
+    // ⚠️ `guard` 必须活到进程结束 —— 提前 drop 会让批量导出器停止，
+    // 最后一批 span 丢失。
+    //
+    // ⚠️ 失败**不影响启动**：`init_otel` 内部只 warn，返回 disabled guard。
+    // 可观测性是**旁路**，不能成为启动失败的原因（D339）。
+    let _otel_guard = platform_observability::otel::init_otel(
+        &platform_observability::otel::OtelConfig::from_env(),
+    );
+    init_tracing(&config.log_level, _otel_guard.provider());
 
     let root = manifest_root.unwrap_or_else(|| config.manifest_root.clone());
     policies::run(&root, &config.database_url, check)
@@ -1694,7 +1977,19 @@ async fn run_tenant_policies(check: bool, manifest_root: Option<String>) -> Resu
 /// 执行迁移子命令。
 async fn run_migrate(action: MigrateAction) -> Result<(), Failure> {
     let config = load_config()?;
-    init_tracing(&config.log_level);
+
+    // 🔑 REQ-019（AC-S-037）：**先**初始化 OpenTelemetry，**再**初始化日志
+    // —— 日志的 subscriber 要挂 OTel 的 span 层（顺序不可换）。
+    //
+    // ⚠️ `guard` 必须活到进程结束 —— 提前 drop 会让批量导出器停止，
+    // 最后一批 span 丢失。
+    //
+    // ⚠️ 失败**不影响启动**：`init_otel` 内部只 warn，返回 disabled guard。
+    // 可观测性是**旁路**，不能成为启动失败的原因（D339）。
+    let _otel_guard = platform_observability::otel::init_otel(
+        &platform_observability::otel::OtelConfig::from_env(),
+    );
+    init_tracing(&config.log_level, _otel_guard.provider());
 
     let migrator = load_migrator(&config.migrations_dir).await?;
     let pool = db::migration_pool(&config.database_url)
@@ -1743,15 +2038,64 @@ async fn ready(State(state): State<Arc<AppState>>) -> Response {
     let ctx = RequestContext::new();
     let readiness = health::check_readiness(&state.pool, &state.migrator).await;
 
-    if readiness.is_ready() {
-        return Json(serde_json::json!({
+    // 🔑 REQ-019（AC-S-038）：**限流表**也要可达 —— 但**只在限流启用时**。
+    //
+    // ⚠️ 为什么「只在启用时」：关闭限流的部署不该因为限流表问题而不就绪
+    // （否则「没启用」反而更脆弱 —— 这是 AC-S-038 步骤 4 的判据）。
+    //
+    // ⚠️ 用 sentinel 租户（`_probe`）做**只读**查询：
+    // `TenantQuery` 必须有租户，而就绪探针没有真实租户上下文。
+    // 只 SELECT 不 INSERT → 不污染任何真实租户的计数。
+    // ⚠️ 逻辑抽在 `platform_observability::http::rate_limit_readiness`
+    // —— 那样才有测试能覆盖它（bin crate 的函数测不着）。
+    let probe_ctx = RequestContext::new().with_tenant("_probe");
+    let rate_limit_slot: Option<Arc<_>> = state.rate_limit.get().cloned().flatten();
+    let rate_limit_ok: Option<bool> = platform_observability::http::rate_limit_readiness(
+        &rate_limit_slot,
+        &probe_ctx,
+    )
+    .await;
+
+    // ⚠️ 判定逻辑在 `platform_observability`（F5 的处置）：那段原先内联在这里，
+    // 而 bin crate 的函数测试够不着 → 503 分支一行都没被测过。
+    // 现在 main 与测试**调同一个函数**。
+    let rate_limit_outcome = platform_observability::http::readiness_rate_limit_outcome(rate_limit_ok);
+
+    if readiness.is_ready() && rate_limit_outcome.is_ok() {
+        let mut body = serde_json::json!({
             "status": "ready",
             "environment": state.environment.as_str(),
             "version": platform_core::VERSION,
             "appliedMigrations": readiness.applied,
             "traceId": ctx.trace_id(),
-        }))
-        .into_response();
+            "checks": {
+                "database": "ok",
+            },
+        });
+        // `Ok(Some((key, value)))` → 往 checks 里加一项（步骤 1）。
+        if let Ok(Some((key, value))) = rate_limit_outcome {
+            body["checks"][key] = serde_json::Value::from(value);
+        }
+        return Json(body).into_response();
+    }
+
+    // 限流存储不可达 → 503，且**明确指出**是限流存储（不是笼统的数据库错误）。
+    if let Err(code) = rate_limit_outcome {
+        tracing::warn!(
+            code = code,
+            "readiness 未通过：限流存储不可达（面向用户的中文文案由前端按 code 渲染）"
+        );
+        let problem = ProblemDetails {
+            kind: format!("https://errors.base.example/{}", platform_core::problem::kebab_case(code)),
+            title: platform_core::titles::title_of_code(code).to_string(),
+            status: StatusCode::SERVICE_UNAVAILABLE.as_u16(),
+            // ⚠️ detail 不含表名 / SQL（不泄露实现细节）。
+            detail: "the rate limit store is unavailable".to_string(),
+            instance: "/health/ready".to_string(),
+            code: code.to_string(),
+            trace_id: ctx.trace_id().to_string(),
+        };
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(problem)).into_response();
     }
 
     let code = readiness.error_code.unwrap_or(health::CODE_DB_UNAVAILABLE);

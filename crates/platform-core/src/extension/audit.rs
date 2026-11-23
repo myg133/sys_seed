@@ -51,7 +51,8 @@ use time::OffsetDateTime;
 use crate::context::RequestContext;
 use crate::problem::{
     CODE_AUDIT_CHAIN_BROKEN, CODE_AUDIT_EVENT_NOT_FOUND, CODE_AUDIT_INVALID_FILTER,
-    CODE_AUDIT_SENSITIVE_PAYLOAD_REJECTED, CODE_AUDIT_SINK_UNAVAILABLE, ProblemDetails,
+    CODE_AUDIT_SENSITIVE_PAYLOAD_REJECTED, CODE_AUDIT_SINK_UNAVAILABLE, CODE_INVALID_REQUEST,
+    ProblemDetails,
 };
 
 /// 装箱的 future（让 sink trait 保持**可对象化**）。
@@ -248,8 +249,26 @@ pub enum AuditError {
     },
     /// 单条审计记录不存在。
     EventNotFound,
-    /// 过滤 / 分页 / 排序参数非法（D153）。
+    /// 过滤 / 排序参数非法（D153）。
+    ///
+    /// ⚠️ **只用于审计专属的筛选/排序参数**（`filter[...]` / `sort` / `page`）。
+    /// 分页参数（`limit` / `cursor`）非法请用 [`Self::InvalidPagination`]。
     InvalidFilter {
+        /// 面向开发者的英文原因。
+        reason: String,
+    },
+    /// **分页参数**非法（`limit` 越界 / `cursor` 格式错，REQ-019 D341 / AC-S-034）。
+    ///
+    /// # 为什么与 [`Self::InvalidFilter`] 分开
+    ///
+    /// AC-S-034 要求「分页契约**跨 crate 统一**」：同一个错误场景
+    /// （`limit=0` / `limit=1000` / 非法 `cursor`）在**任何**分页端点上
+    /// 都必须返回同一个 `code`。`platform-observability` 的新端点用的是
+    /// 平台通用的 `INVALID_REQUEST`，所以 audit 侧的分页错误也必须用它。
+    ///
+    /// ⚠️ `AUDIT_INVALID_FILTER` **不废弃** —— 它继续服务审计专属的
+    /// 筛选/排序参数（那些错误码是 audit 语义，不需要跨 crate 统一）。
+    InvalidPagination {
         /// 面向开发者的英文原因。
         reason: String,
     },
@@ -278,6 +297,10 @@ impl AuditError {
             Self::ChainBroken { .. } => CODE_AUDIT_CHAIN_BROKEN,
             Self::EventNotFound => CODE_AUDIT_EVENT_NOT_FOUND,
             Self::InvalidFilter { .. } => CODE_AUDIT_INVALID_FILTER,
+            // ⚠️ **REQ-019 D341 / AC-S-034**：分页参数非法改用**平台通用**的
+            // `INVALID_REQUEST`，与 `GET /api/observability/rate-limit/status` 逐字一致。
+            // 这是「分页契约跨 crate 统一」的实质 —— 调用方用一套逻辑处理即可。
+            Self::InvalidPagination { .. } => CODE_INVALID_REQUEST,
             Self::SinkUnavailable { .. } => CODE_AUDIT_SINK_UNAVAILABLE,
             Self::TenantMismatch { .. } => CODE_AUDIT_INVALID_FILTER,
         }
@@ -290,6 +313,7 @@ impl AuditError {
             Self::ChainBroken { .. } => 409,
             Self::EventNotFound => 404,
             Self::InvalidFilter { .. } | Self::TenantMismatch { .. } => 400,
+            Self::InvalidPagination { .. } => 400,
             Self::SinkUnavailable { .. } => 503,
         }
     }
@@ -306,6 +330,9 @@ impl AuditError {
             }
             Self::EventNotFound => "the audit event was not found".to_string(),
             Self::InvalidFilter { reason } => format!("the audit query is invalid: {reason}"),
+            Self::InvalidPagination { reason } => {
+                format!("the pagination parameter is invalid: {reason}")
+            }
             Self::SinkUnavailable { reason } => {
                 format!("the audit sink is unavailable: {reason}")
             }

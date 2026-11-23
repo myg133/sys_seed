@@ -5,15 +5,18 @@
 //! | 参数 | 形态 | 默认 / 上限 |
 //! |------|------|------------|
 //! | `cursor` | 不透明游标（base64url） | 与 `page` **互斥** |
-//! | `limit` | 正整数 | 默认 **20**，上限 **200**（超上限**夹到**上限） |
+//! | `limit` | 正整数 | 默认 **20**，上限 **200**（⚠️ 超上限**拒绝**，REQ-019 D341） |
 //! | `page` / `page_size` | 正整数 | 与 `cursor` **互斥** |
 //! | `sort` | `?sort=-createdAt,actorId` | 白名单：`createdAt` / `actorId` / `action` / `objectType` / `objectId` |
 //! | `filter[field][op]` | `?filter[actorId][eq]=…` | op 白名单：`eq` / `ne` / `in` / `contains` / `range` |
 //!
-//! # 非法值与超上限是**两条不同的路径**（D153）
+//! # 非法值与超上限**都是** 400（⚠️ REQ-019 D341 的破坏性修正）
 //!
-//! - `limit=abc` / `limit=0` → **400** `AUDIT_INVALID_FILTER`；
-//! - `limit=1000` → **不报错**，夹到 **200**。
+//! - `limit=abc` / `limit=0` → **400** `INVALID_REQUEST`（REQ-019 AC-S-034 统一码）；
+//! - `limit=1000` → **400** `INVALID_REQUEST`（原行为是「夹到 200 + 不报错」）。
+//!
+//! ⚠️ 改的理由：静默截断会让调用方以为拿到了 1000 条 → **数据静默丢失**。
+//! 上限**保持 200**（不改 100）以减小破坏面。
 //!
 //! # 为什么参数要**自解析**
 //!
@@ -173,9 +176,21 @@ impl AuditQueryParams {
         }
 
         // -- limit ------------------------------------------------------------
+        //
+        // ⚠️ **REQ-019 D341：超上限从「夹到上限」改为「拒绝」**（契约 C7 升版）。
+        //
+        // 理由：静默截断会让调用方以为拿到了 1000 条 → **数据静默丢失**。
+        // 这是「API 治理」的核心内容，值得一次破坏性修正。
+        //
+        // ⚠️ 上限**保持 200**（不改 100）以减小破坏面。
         if let Some(raw) = params.get("limit") {
             let value = parse_positive(raw, "limit")?;
-            parsed.limit = value.min(MAX_LIMIT);
+            if value > MAX_LIMIT {
+                return Err(invalid(format!(
+                    "the `limit` parameter must not exceed {MAX_LIMIT}; got {value}"
+                )));
+            }
+            parsed.limit = value;
         }
 
         // -- page / page_size -------------------------------------------------
@@ -183,7 +198,13 @@ impl AuditQueryParams {
             parsed.page = Some(parse_positive(raw, "page")?);
         }
         if let Some(raw) = params.get("page_size") {
-            parsed.page_size = parse_positive(raw, "page_size")?.min(MAX_LIMIT);
+            let value = parse_positive(raw, "page_size")?;
+            if value > MAX_LIMIT {
+                return Err(invalid(format!(
+                    "the `page_size` parameter must not exceed {MAX_LIMIT}; got {value}"
+                )));
+            }
+            parsed.page_size = value;
         }
 
         // -- cursor -----------------------------------------------------------
@@ -195,7 +216,7 @@ impl AuditQueryParams {
 
         // 游标与页码**互斥**（契约 C7）。
         if parsed.cursor.is_some() && parsed.page.is_some() {
-            return Err(invalid("cursor and page are mutually exclusive"));
+            return Err(invalid_pagination("cursor and page are mutually exclusive"));
         }
 
         // -- sort -------------------------------------------------------------
@@ -222,13 +243,15 @@ impl AuditQueryParams {
         // 排序方向下成立。换成别的 `sort`（比如 `action`）后，游标与新排序
         // 对不上 → 翻页会**漏行或重复行**。
         //
-        // → 这里**宁可 400**（`AUDIT_INVALID_FILTER`）也不给出一个错的页：
+        // → 这里**宁可 400**（`INVALID_REQUEST`）也不给出一个错的页：
         // 「静默返回错数据」比「明确拒绝」危险得多。
         //
         // ⚠️ 契约 C7 只钉了「`cursor` 与 `page` 互斥」，**没有**写这条
         // 「游标 + 排序互斥」的约束 → 属于本仓的**收紧**（D179 已裁决保留）。
         if parsed.cursor.is_some() && !parsed.sort.is_empty() {
-            return Err(invalid(
+            // ⚠️ 这条同时涉及分页与排序 → 归**分页**语义（调用方要按
+            // 「分页用法错了」来修，不是「筛选条件错了」）。
+            return Err(invalid_pagination(
                 "the cursor is only valid with the default sort order",
             ));
         }
@@ -293,15 +316,30 @@ fn parse_positive(raw: &str, field: &str) -> Result<usize, AuditError> {
     let value: usize = raw
         .trim()
         .parse()
-        .map_err(|_| invalid(format!("`{field}` must be a positive integer")))?;
+        .map_err(|_| invalid_pagination(format!("`{field}` must be a positive integer")))?;
     if value == 0 {
-        return Err(invalid(format!("`{field}` must be greater than zero")));
+        return Err(invalid_pagination(format!(
+            "`{field}` must be greater than zero"
+        )));
     }
     Ok(value)
 }
 
 fn invalid(reason: impl Into<String>) -> AuditError {
     AuditError::InvalidFilter {
+        reason: reason.into(),
+    }
+}
+
+/// 分页参数非法（`limit` / `page` / `page_size` / `cursor`）。
+///
+/// ⚠️ **REQ-019 D341 / AC-S-034**：分页参数用**平台通用**的 `INVALID_REQUEST`，
+/// 与 `platform-observability` 的新分页端点逐字一致 —— 这是「分页契约跨 crate
+/// 统一」的实质，调用方用一套逻辑就能处理两个端点的分页错误。
+///
+/// 审计**专属**的筛选 / 排序参数仍走 [`invalid`]（`AUDIT_INVALID_FILTER`）。
+fn invalid_pagination(reason: impl Into<String>) -> AuditError {
+    AuditError::InvalidPagination {
         reason: reason.into(),
     }
 }
@@ -589,14 +627,14 @@ pub fn encode_cursor(created_at: &OffsetDateTime, id: &str) -> String {
 pub fn decode_cursor(cursor: &str) -> Result<(String, String), AuditError> {
     let raw = URL_SAFE_NO_PAD
         .decode(cursor.as_bytes())
-        .map_err(|_| invalid("the cursor is not a valid cursor token"))?;
+        .map_err(|_| invalid_pagination("the cursor is not a valid cursor token"))?;
     let text =
-        String::from_utf8(raw).map_err(|_| invalid("the cursor is not a valid cursor token"))?;
+        String::from_utf8(raw).map_err(|_| invalid_pagination("the cursor is not a valid cursor token"))?;
     let (created_at, id) = text
         .split_once('|')
-        .ok_or_else(|| invalid("the cursor is not a valid cursor token"))?;
+        .ok_or_else(|| invalid_pagination("the cursor is not a valid cursor token"))?;
     if created_at.is_empty() || id.is_empty() {
-        return Err(invalid("the cursor is not a valid cursor token"));
+        return Err(invalid_pagination("the cursor is not a valid cursor token"));
     }
     Ok((created_at.to_string(), id.to_string()))
 }
@@ -633,22 +671,52 @@ mod tests {
     fn a_non_numeric_limit_is_rejected() {
         let error = AuditQueryParams::parse(&params(&[("limit", "abc")]))
             .expect_err("非数值 limit 必须被拒");
-        assert_eq!(error.code(), "AUDIT_INVALID_FILTER");
+        // ⚠️ REQ-019 AC-S-034：分页参数统一用平台的 `INVALID_REQUEST`。
+        assert_eq!(error.code(), "INVALID_REQUEST");
     }
 
     #[test]
     fn a_zero_limit_is_rejected() {
         let error =
             AuditQueryParams::parse(&params(&[("limit", "0")])).expect_err("零值 limit 必须被拒");
-        assert_eq!(error.code(), "AUDIT_INVALID_FILTER");
+        // ⚠️ REQ-019 AC-S-034：与 observability 新端点返回**同一个 code**。
+        assert_eq!(error.code(), "INVALID_REQUEST");
     }
 
-    /// 超上限**夹到上限**，**不报错**（D153）。
+    /// 超上限**拒绝**（⚠️ **REQ-019 D341 的破坏性修正**，原行为是「夹到上限 + 不报错」）。
+    ///
+    /// # 为什么改
+    ///
+    /// 静默截断会让调用方以为拿到了 1000 条 → **数据静默丢失**。
+    /// 契约 C7 随之升版（`超上限 → 400`），上限**保持 200** 以减小破坏面。
+    ///
+    /// ⚠️ 这条测试原来是 `an_oversized_limit_is_clamped_instead_of_rejected` ——
+    /// 名字与断言都必须反过来，否则「改了行为但测试还是绿的」。
     #[test]
-    fn an_oversized_limit_is_clamped_instead_of_rejected() {
-        let parsed =
-            AuditQueryParams::parse(&params(&[("limit", "1000")])).expect("超上限不该报错");
+    fn an_oversized_limit_is_rejected() {
+        let error = AuditQueryParams::parse(&params(&[("limit", "1000")]))
+            .expect_err("超上限必须拒绝（不再静默截断）");
+        // 错误信息必须点出上限与实际值（运维要能一眼看出差多少）。
+        let rendered = error.to_string();
+        assert!(
+            rendered.contains("200") && rendered.contains("1000"),
+            "错误信息必须含上限与实际值；实际：{rendered}"
+        );
+    }
+
+    /// 正好等于上限 → **通过**（边界包含，不是 `>=`）。
+    #[test]
+    fn a_limit_equal_to_the_maximum_is_accepted() {
+        let parsed = AuditQueryParams::parse(&params(&[("limit", "200")]))
+            .expect("正好 200 应通过（边界包含）");
         assert_eq!(parsed.limit, MAX_LIMIT);
+    }
+
+    /// `page_size` 超上限同样被拒（与 `limit` 同口径）。
+    #[test]
+    fn an_oversized_page_size_is_rejected() {
+        AuditQueryParams::parse(&params(&[("page_size", "1000")]))
+            .expect_err("page_size 超上限必须拒绝");
     }
 
     #[test]
@@ -662,7 +730,8 @@ mod tests {
     fn cursor_and_page_are_mutually_exclusive() {
         let error = AuditQueryParams::parse(&params(&[("cursor", "abc"), ("page", "1")]))
             .expect_err("cursor 与 page 必须互斥");
-        assert_eq!(error.code(), "AUDIT_INVALID_FILTER");
+        // ⚠️ 互斥判定属于分页参数 → `INVALID_REQUEST`。
+        assert_eq!(error.code(), "INVALID_REQUEST");
     }
 
     #[test]

@@ -32,6 +32,16 @@ use crate::titles::title_of_code;
 
 /// 稳定的机器可读错误码：需要认证（缺令牌 / 令牌无效）。
 pub const CODE_UNAUTHENTICATED: &str = "UNAUTHENTICATED";
+/// 稳定的机器可读错误码：**请求参数非法**（REQ-019 D341）。
+///
+/// # 为什么是平台级通用码
+///
+/// 「参数非法」不属于任何业务域 —— 每个 crate 各造一个
+/// （`AUDIT_INVALID_FILTER` / `STORAGE_UNSUPPORTED_FORMAT` …）会让
+/// **前端要为每个端点写一套映射**，这正是 REQ-019「API 治理」要消除的东西。
+///
+/// ⚠️ 已有的域内码**保留**（不破坏已验收行为，D109）；新代码用这个。
+pub const CODE_INVALID_REQUEST: &str = "INVALID_REQUEST";
 /// 稳定的机器可读错误码：权限不足（动作类越权，契约 C5）。
 pub const CODE_INSUFFICIENT_PERMISSION: &str = "INSUFFICIENT_PERMISSION";
 /// 稳定的机器可读错误码：资源不存在（资源类越权，契约 C5；不泄露存在性）。
@@ -70,6 +80,8 @@ pub const PROBLEM_TYPE_BASE: &str = "https://errors.base.example";
 /// 完备性测试在 `platform-server/tests/i18n_titles.rs`。
 pub const ALL_CODES: &[&str] = &[
     CODE_UNAUTHENTICATED,
+    // ⚠️ REQ-019 D341：平台级「参数非法」码（新代码用它，域内码保留以不破坏已验收行为）。
+    CODE_INVALID_REQUEST,
     CODE_INSUFFICIENT_PERMISSION,
     CODE_NOT_FOUND,
     CODE_INTERNAL_ERROR,
