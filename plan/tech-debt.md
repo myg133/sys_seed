@@ -1797,3 +1797,24 @@ PostgreSQL 里显式事务内的 `SET` 也会被 `ROLLBACK` 回滚，
 - **要做需要什么**: 扩展 schema 的 `actions` 能力（每个动作：名称 / 权限点 / 端点 /
   适用状态），并让 `SchemaTable` 渲染成按钮 —— 这是平台改动，工作量中等。
 - **优先级**: P2（不影响当前需求，但决定了「带流程的业务能不能只写 manifest」）
+
+---
+
+## TD-088: 平台**无法按权限点反查用户**，业务发「待办提醒」类通知做不到
+
+- **发现于**: REQ-020 实现期（批次 2）
+- **现状**: `platform_core::extension::permission::PermissionChecker` 只有三个方法
+  （`crates/platform-core/src/extension/permission.rs:169-178`）：
+  - `has(ctx, permission) -> bool`
+  - `scope(ctx, scope) -> ScopeFilter`
+  - `effective_scope(ctx, permission) -> ScopeFilter`
+
+  全是「**某个用户有没有某权限**」的正向查询，**没有**「**谁持有某权限**」的反向查询。
+- **影响**: 业务想发「待办提醒给审批人」时拿不到收件人列表。
+  REQ-020 的 `leave` 模块因此只能通知**自己知道的对象**（申请人，来自 `applicant_id`），
+  提交环节的通知**发不出去**（原 AC-S-189 计数表第 2 行已修正为 0）。
+  `DbNotificationSender` 不猜收件人，如实返回 `delivered: false`（有测试钉住）。
+- **要做需要什么**: 给 `PermissionChecker`（或 RBAC 服务）加一个
+  「列出持有某权限点的用户」（按租户 + 数据范围过滤）的查询。
+  ⚠️ 注意性能与泄露面：这会暴露「谁有管理权限」，需要权限点自身保护。
+- **优先级**: P2（不影响已交付功能；但「审批流类业务」的常见需求缺一块）

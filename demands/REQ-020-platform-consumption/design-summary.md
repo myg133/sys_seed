@@ -195,6 +195,7 @@ v1 必须进 `default_deprecations()`（`crates/platform-observability/src/http.
 | 2 | **C** | `crates/platform-server/Cargo.toml` | 加 `leave.workspace = true` | 不加则 `leave::mount` 调不到 |
 | 3 | **C** | `crates/platform-server/src/main.rs` | `"leave" => {...}` 装配臂 + 认证层 | 不加则 `/api/leave/*` 全 404（B1） |
 | 4 | **B** | `crates/platform-rbac/src/http.rs` | v2 端点 + v2 路由 | 没有 v2 就验不了升级（D352） |
+| 4b | **B** | `crates/platform-rbac/src/service.rs` | `permission_sources`（v2 的 `sources` 要真算角色来源） | ⚠️ **实现期补登记**：`load_graph` / `user_role_ids` 是 `service` 模块私有，http 层拿不到角色图 → 不改这里只能返回占位 `{}`，「升级」就验不出东西 |
 | 5 | **B** | `crates/platform-observability/src/http.rs` | `default_deprecations()` 加 v1 路径 | 没有登记就没有弃用头 |
 | 6 | **D** | 通知落库适配器（文件实现时定） | `DbNotificationSender` 实现 `NotificationSender` | 没有它通知落不了库，AC-S-189 判不了（D354） |
 | 7 | **D** | `crates/platform-core/src/titles.rs` | 注册 `LEAVE_INVALID_TRANSITION` 的标题 | 不注册则 `title_of_code` 落兜底 `"Error"`，违反契约 C6 |
@@ -211,6 +212,27 @@ v1 必须进 `default_deprecations()`（`crates/platform-observability/src/http.
 不是正本」「**不要手改本目录下的文件** —— 下次同步会被覆盖，CI 会因快照与正本不一致而失败」）。
 → 正本在 BA `demand` 分支的 `BA/contracts/`，改它要走
 `scripts/sync-contracts.sh --sync`，且**不计入**平台改动。
+
+---
+
+## 3b. 部署前提（实现期发现，必须写明）
+
+### 通知模板**必须由租户自己种**
+
+实测（批次 3）：`platform_notify_template` 是**租户级表**
+（`tenant_id NOT NULL`，唯一键 `(tenant_id, code, channel, locale)`），
+`resolve_template` 的 SQL 按 `tenant_id = {ctx.tenant}` 过滤。
+
+→ **迁移里没有租户可写**，写 `'*'` 也永远匹配不上。
+REQ-015 本身也**没有任何**模板种子迁移 —— 平台约定是租户通过
+`POST /api/notify/templates` 自建。
+
+**影响**：若部署时租户没建 `leave_decision` 模板（in_app，zh-CN + en-US），
+审批通知会返回 `NOTIFY_TEMPLATE_NOT_FOUND`。
+⚠️ 该失败**只 warn、不回滚流转**（设计如此：通知是旁路）。
+
+→ 部署清单必须包含：「租户初始化时种入 `leave_decision` 模板」。
+→ 测试里用 `create_template` 在真表种了两条（计数仍查真表）。
 
 ---
 
