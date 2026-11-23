@@ -275,8 +275,28 @@ impl PgRateLimiter {
         ctx: &RequestContext,
         max_window_seconds: i64,
     ) -> Result<u64, ObservabilityError> {
-        // ⚠️ 至少保留 2 倍窗口；若传入 0 或负数，用 60 兜底（防误删全表）。
-        let keep = max_window_seconds.max(1) * 2;
+        // ⚠️ 至少保留 2 倍窗口。
+        //
+        // ⚠️ **QA 复查修正（注释与代码不一致）**：原注释写
+        // 「若传入 0 或负数，用 60 兜底（防误删全表）」——
+        // 而代码是 `.max(1) * 2`，传 0 得到的是**保留 2 秒**，不是 60 秒。
+        // QA 实跑 CLI `--max-window-seconds 0` 输出「保留期 0 秒」，与注释矛盾。
+        //
+        // → 现在**代码按注释实现**：0 或负数一律用 60 秒兜底。
+        // 保留期 = 兜底值 × 2 = 120 秒（与「窗口 60 × 2」一致）。
+        //
+        // # 为什么兜底是 60 而不是 1
+        //
+        // 传 0 通常意味着「调用方算错了」，不该静默变成「几乎不保留」——
+        // 那会把**仍在窗口内**的行删掉 → 限流计数凭空变少
+        // → 实际放行量超过配额（比不清理更危险：它是**静默失效**）。
+        const FALLBACK_MAX_WINDOW_SECONDS: i64 = 60;
+        let window = if max_window_seconds <= 0 {
+            FALLBACK_MAX_WINDOW_SECONDS
+        } else {
+            max_window_seconds
+        };
+        let keep = window * 2;
         let query = platform_db::TenantQuery::new(format!(
             "DELETE FROM {table} \
               WHERE tenant_id = {{tenant}} \

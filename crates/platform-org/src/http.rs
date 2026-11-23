@@ -47,6 +47,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use platform_core::RequestContext;
+use platform_core::extension::permission::require_permission;
 use serde::{Deserialize, Serialize};
 
 use crate::entity::{ConflictStatus, NodeType};
@@ -278,24 +279,101 @@ fn authenticated_context(auth: &Authenticated) -> RequestContext {
 ///
 /// 返回类型的状态参数是通用的：调用方（`platform-server`）可以把它
 /// `nest` 进自己的路由里 —— 组织架构的状态由 `Arc<OrgState>` 自带。
+///
+/// # ⚠️ 每个端点**必须**挂鉴权层（QA 复查 F1 的修复）
+///
+/// 本 crate 的 manifest 登记了 9 个 `org:*` 权限点，但**曾经一个调用点都没有** ——
+/// 17 个 handler 只要求 `Authenticated`（只验「你是谁」，不验「你能不能」）。
+/// 后果：任何已认证用户（含最低权限的员工账号）都能改组织架构。
+/// 组织树是 `OWN_ORG` 数据范围的根 → **越权写 ≈ 提权链**。
+///
+/// 根因是契约检查 C-5 只覆盖 `modules/sandbox`（见 F2），四个核心 crate 从未被扫过。
+/// 现在按 rbac 的范式：**按权限点分组 + `route_layer`**。
 pub fn router<S2>(state: Arc<OrgState>) -> Router<S2> {
-    Router::new()
-        .route("/org-node", get(list_org_nodes).post(create_org_node))
-        .route("/org-node/{id}", get(get_org_node).delete(delete_org_node))
+    // ---- 读组织节点 ----
+    let node_read = Router::new()
+        .route("/org-node", get(list_org_nodes))
+        .route("/org-node/{id}", get(get_org_node))
+        .route("/org-node/{id}/subtree", get(get_subtree))
+        .route_layer(require_permission("org:org-node:read",
+        ));
+
+    // ---- 写组织节点（建 / 删 / 移动 / 改名）----
+    let node_write = Router::new()
+        .route("/org-node", post(create_org_node))
+        .route("/org-node/{id}", delete(delete_org_node))
         .route("/org-node/{id}/move", post(move_org_node))
         .route("/org-node/{id}/rename", post(rename_org_node))
-        .route("/org-node/{id}/subtree", get(get_subtree))
-        .route("/user-org", get(list_user_org).post(add_user_org))
+        .route_layer(require_permission("org:org-node:write",
+        ));
+
+    // ---- 读用户归属 ----
+    let user_org_read = Router::new()
+        .route("/user-org", get(list_user_org))
+        .route_layer(require_permission("org:user-org:read",
+        ));
+
+    // ---- 写用户归属（增 / 删 / 设主管）----
+    //
+    // ⚠️ `/user/{id}/manager` 归到 `org:user-org:write`：
+    // 设主管本质是改「用户与组织的关系」，manifest 里没有单独的 manager 权限点。
+    let user_org_write = Router::new()
+        .route("/user-org", post(add_user_org))
         .route("/user-org/{id}", delete(remove_user_org))
-        .route(
-            "/user-position",
-            get(list_user_position).post(add_user_position),
-        )
         .route("/user/{id}/manager", post(set_manager))
+        .route_layer(require_permission("org:user-org:write",
+        ));
+
+    // ---- 读岗位 ----
+    let position_read = Router::new()
+        .route("/user-position", get(list_user_position))
+        .route_layer(require_permission("org:user-position:read",
+        ));
+
+    // ---- 写岗位 ----
+    let position_write = Router::new()
+        .route("/user-position", post(add_user_position))
+        .route_layer(require_permission("org:user-position:write",
+        ));
+
+    // ---- 读同步冲突 ----
+    let conflict_read = Router::new()
         .route("/sync-conflict", get(list_sync_conflict))
+        .route_layer(require_permission("org:sync-conflict:read",
+        ));
+
+    // ---- 解决同步冲突 ----
+    let conflict_resolve = Router::new()
         .route("/sync-conflict/{id}/resolve", post(resolve_sync_conflict))
+        .route_layer(require_permission("org:sync-conflict:resolve",
+        ));
+
+    // ---- 触发全量 SCIM 同步 ----
+    let scim_sync = Router::new()
         .route("/scim/full-sync", post(full_scim_sync))
+        .route_layer(require_permission("org:scim-sync:run",
+        ));
+
+    // ---- 读同步状态 ----
+    //
+    // ⚠️ 归到 `org:sync-conflict:read`：manifest 没有单独的 sync-state 权限点，
+    // 而「同步状态」与「同步冲突」是同一个运维视图的两半 —— 能看冲突就该能看状态。
+    let sync_state = Router::new()
         .route("/sync-state", get(get_sync_state))
+        .route_layer(require_permission("org:sync-conflict:read",
+        ));
+
+    Router::new()
+        .merge(node_read)
+        .merge(node_write)
+        .merge(user_org_read)
+        .merge(user_org_write)
+        .merge(position_read)
+        .merge(position_write)
+        .merge(conflict_read)
+        .merge(conflict_resolve)
+        .merge(scim_sync)
+        .merge(sync_state)
         .with_state(state)
 }
 

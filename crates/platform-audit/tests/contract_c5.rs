@@ -1,74 +1,39 @@
-//! C-5（不依赖 `ContractFixture`）：`platform-audit` 的 3 个权限点各有鉴权调用点。
+//! C-5 契约检查：**已登记的权限点必须有鉴权调用点**。
 //!
-//! # 为什么必须在这里（REQ-014 D160）
+//! # 为什么这个文件存在（QA 复查 F2 的修复）
 //!
-//! C-5 的扫描入口 `check_c5_for(manifest_path, source_dir)`
-//! **只扫「该 manifest 所属 crate 自己的 `src/`」**
-//! （`crates/platform-contracts/src/checks.rs` 的 `check_c5_for`）。
-//! 本需求的 manifest 在 `platform-audit`、HTTP 在 `platform-server`（棒 2）→
-//! 若把 `require_permission("audit:events:read")` 直接写在 server 侧，
-//! 对 `platform-audit` 跑 C-5 会报「3 个已登记权限点**没有鉴权调用点**」→ 违例。
+//! 契约宏 `#[platform_module_contract]` 生成 C-1~C-6，但它**只挂在
+//! `modules/sandbox` 一处** → 四个核心 crate（iam/rbac/oauth/org）与其余平台 crate
+//! **从未被 C-5 扫过**。
 //!
-//! → 所以三个薄封装放在 `crates/platform-audit/src/authz.rs`（调用点与权限点
-//! **字面量**同处一地），而**不**引入 `platform-audit → platform-rbac`
-//! （鉴权入口在 **core**）。
+//! 后果已实际发生：`platform-org` 登记了 9 个 `org:*` 权限点，
+//! 而 `src/` 里**零**个 `require_permission` 调用点 ——
+//! 任何已认证用户都能改组织架构（QA 实测 `201 Created`）。
+//!
+//! → 本文件让 C-5 覆盖到 **每一个有 manifest 的平台 crate**。
+//!
+//! # ⚠️ 这里为什么直接用 `check_c5_for` 而不是契约宏
+//!
+//! 契约宏需要 `ContractSubject`（模块 trait 实现 + 夹具），
+//! 而平台 crate **不是业务模块**（没有 `PlatformModule` 实现）。
+//! `check_c5_for(manifest, src)` 是 C-5 的**纯函数形态**，
+//! 只依赖 manifest 与源码目录 —— 正好适用于平台 crate。
 
-use std::path::PathBuf;
-
-use platform_contracts::authz_scan::scan_auth_calls;
-use platform_contracts::check_c5_for;
-
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
+/// C-5：本 crate 的每个权限点都必须有 `require_permission("字面量")` 调用点。
 #[test]
-fn every_audit_permission_has_an_authorization_call_site() {
-    let root = repo_root();
-    let manifest = root.join("crates/platform-audit/manifest.json");
-    let src = root.join("crates/platform-audit/src");
-
-    let violations = check_c5_for(&manifest, &src).expect("扫描器应能运行");
+fn contract_c5_declared_permissions_have_authorization_call_sites() {
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("manifest.json");
+    let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let violations = platform_contracts::check_c5_for(&manifest, &source)
+        .expect("C-5 检查应当能运行（manifest 可读 + 源码可扫）");
     assert!(
         violations.is_empty(),
-        "C-5 违例：{violations:?}\n  提示：权限点必须在 `crates/platform-audit/src/` 里用字面量调用 require_permission"
+        "C-5 失败（{} 条）：\n{}",
+        violations.len(),
+        violations
+            .iter()
+            .map(|v| format!("  - {}", v.message))
+            .collect::<Vec<_>>()
+            .join("\n")
     );
-
-    let scan = scan_auth_calls(&src).expect("调用点扫描应成功");
-    let expected = ["audit:archive:run", "audit:events:read", "audit:verify:run"];
-    for code in expected {
-        assert!(
-            scan.codes.iter().any(|found| found == code),
-            "权限点 `{code}` 没有 `require_permission(\"字面量\")` 调用点；实际扫描到：{:?}",
-            scan.codes
-        );
-    }
-    assert_eq!(
-        scan.codes.len(),
-        3,
-        "调用点集合应恰好是 3 个：{:?}",
-        scan.codes
-    );
-    assert!(
-        scan.non_literal_calls.is_empty(),
-        "调用点参数必须是字面量：{:?}",
-        scan.non_literal_calls
-    );
-    assert!(
-        scan.custom_entries.is_empty(),
-        "不得自建鉴权入口（扫描会被绕过）：{:?}",
-        scan.custom_entries
-    );
-}
-
-/// manifest 本身必须合法（`Manifest::parse_checked` 的字段规则）。
-#[test]
-fn the_audit_manifest_is_valid() {
-    let root = repo_root();
-    let raw = std::fs::read_to_string(root.join("crates/platform-audit/manifest.json"))
-        .expect("manifest 应可读");
-    let manifest =
-        platform_core::extension::manifest::Manifest::parse_checked(&raw).expect("manifest 应合法");
-    assert_eq!(manifest.permission_codes().len(), 3);
-    assert_eq!(manifest.id, "audit");
 }

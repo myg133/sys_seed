@@ -31,3 +31,5 @@ tower.workspace = true
 http-body-util.workspace = true
 # 夹具的「本轮运行标识」（跨运行也不能撞）。
 uuid.workspace = true
+# C-5 契约检查（权限点必须有鉴权调用点）—— QA 复查 F2 的修复
+platform-contracts.workspace = true

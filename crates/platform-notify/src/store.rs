@@ -453,15 +453,21 @@ impl NotifyStore {
     ) -> DbResult<Vec<ClaimedDelivery>> {
         let mut tx = self.db.begin(ctx).await?;
         let table = format!("{}.{}", tx.schema(), DELIVERY_TABLE);
-        // ⚠️ `{tenant}` **只能出现一次**（`TenantQuery::render` 强制要求恰好一个）——
-        // 外层 `UPDATE` 不再写租户条件：它的 `id IN (子查询)` 已经被子查询限定在本租户内
-        // （子查询的租户条件 + RLS 双重保证），且 `id` 是 UUID 主键，跨租户不会撞。
+        // ⚠️ `{tenant}` **只能出现一次**（`TenantQuery::render` 强制要求恰好一个）。
+        //
+        // # ⚠️ `LIMIT` 为什么用 **CTE + `= ANY(...)`**（QA M3 的修复）
+        //
+        // 原写法是 `UPDATE ... WHERE id IN (SELECT ... LIMIT ? FOR UPDATE SKIP LOCKED)`。
+        // `IN (子查询)` 可能被实现成 semi join → 子查询在**外层每一行**上重跑
+        // （计划里 `loops = N`）→ `LIMIT` 只约束每次子查询，约束不了 UPDATE 总行数。
+        //
+        // **实测**：突发 500 条队列上 `claim_batch(batch = 10)` 认领了 **16 条**（超出 60%）；
+        // 小表 6 条时 `batch = 2` 认领了 **3 条**。
+        //
+        // → 改成 **CTE 物化 + `= ANY(数组)`**：子查询只执行一次，
+        // 认领出的 id 变成数组，外层 UPDATE 精确匹配 —— 行数由 `LIMIT` 严格决定。
         let query = TenantQuery::new(format!(
-            "UPDATE {table} SET \
-               status = ?, \
-               attempt_count = attempt_count + 1, \
-               updated_at = now() \
-             WHERE id IN ( \
+            "WITH picked AS ( \
                SELECT id FROM {table} \
                WHERE tenant_id = {{tenant}} \
                  AND ( \
@@ -472,14 +478,19 @@ impl NotifyStore {
                LIMIT ? \
                FOR UPDATE SKIP LOCKED \
              ) \
+             UPDATE {table} SET \
+               status = ?, \
+               attempt_count = attempt_count + 1, \
+               updated_at = now() \
+             WHERE id = ANY(ARRAY(SELECT id FROM picked)) \
              RETURNING id::text AS id, channel, recipient, rendered_title, rendered_body, payload, attempt_count",
             table = table
         ))
-        .bind(status::DELIVERING.to_string())
         .bind(status::PENDING.to_string())
         .bind(status::DELIVERING.to_string())
         .bind(delivering_timeout_seconds)
-        .bind(batch);
+        .bind(batch)
+        .bind(status::DELIVERING.to_string());
 
         let rows: Vec<ClaimedRow> = tx.fetch_all(&query).await?;
         tx.commit().await?;

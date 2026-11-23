@@ -851,6 +851,8 @@ async fn refresh_rotation_revokes_the_whole_family_on_reuse() {
 // 4. TOTP 防重放与恢复码一次性（AC-S-015）
 // ---------------------------------------------------------------------------
 
+
+
 /// 同一时间步的验证码不能用第二次；恢复码只能用一次。
 #[tokio::test]
 #[ignore = "需要 base_test 库：scripts/test-integration.sh 会用 --include-ignored 跑到"]
@@ -1042,9 +1044,97 @@ fn totp_code(secret_base32: &str) -> String {
     totp.generate(now)
 }
 
+/// 在**指定时间戳**生成 TOTP 码（用于「换一个时间步」的场景）。
+fn totp_code_at(secret_base32: &str, at: i64) -> String {
+    use totp_rs::{Algorithm, Secret, TOTP};
+    let secret = Secret::Encoded(secret_base32.to_string());
+    let totp = TOTP::new(
+        Algorithm::SHA1,
+        6,
+        0,
+        30,
+        secret.to_bytes().expect("secret 应当能解码"),
+        None,
+        String::new(),
+    )
+    .expect("TOTP 应当能构造");
+    totp.generate(at as u64)
+}
+
 // ---------------------------------------------------------------------------
 // 5. 设备会话（AC-S-018）
 // ---------------------------------------------------------------------------
+
+/// **并发防重放**：`set_mfa_last_step` 与 `mark_recovery_code_used`
+/// 在**并发**下只能有一个成功（QA 复查 M4 的判据）。
+///
+/// # ⚠️ 为什么在 **store 层**验，不走 HTTP
+///
+/// IAM 有自己的 **IP 限流**（`check_ip_rate_limit`）——12 路并发来自同一 IP
+/// 会被限流提前拒掉（实测 401），**测不到防重放本身**。
+///
+/// 而缺陷的本质就在 store 层：「校验」与「写入」是两步。
+/// → 直接在 store 层用多个并发任务抢同一行，最能说明问题。
+///
+/// # 判据
+///
+/// 12 个并发任务都拿着**同一个旧值** `previous_step` 去抢同一行 →
+/// **恰好 1 个**返回 `true`，其余 11 个返回 `false`。
+///
+/// 修之前是无条件 UPDATE → 12 个全部成功（QA 实测）。
+#[tokio::test]
+#[ignore = "需要 base_test 库：scripts/test-integration.sh 会用 --include-ignored 跑到"]
+async fn concurrent_mfa_step_update_has_exactly_one_winner() {
+    let db_url = setup().await;
+    let tenant = tenant_id("mfa-step-race");
+    let user = "carol";
+
+    let db = TenantDb::connect(&db_url, DbOptions::default())
+        .await
+        .expect("应用角色连接串应可解析");
+    let store = platform_iam::store::IamStore::new(db);
+    let ctx = platform_core::RequestContext::new().with_tenant(&tenant).with_user(user);
+
+    // 先落一行 mfa secret（`last_used_step` 为 NULL = 从未用过）。
+    store
+        .upsert_mfa_secret(&ctx, user, "probe-cipher")
+        .await
+        .expect("写入 mfa secret");
+
+    // 12 路并发都以为自己读到的是 `None`（旧值），抢着写 step=10。
+    let mut handles = Vec::new();
+    for _ in 0..12 {
+        // ⚠️ 每个任务用自己的连接池（模拟「不同请求各自的连接」）。
+        let url = db_url.clone();
+        let tenant = tenant.clone();
+        let user = user.to_string();
+        handles.push(tokio::spawn(async move {
+            let db = TenantDb::connect(&url, DbOptions::default())
+                .await
+                .expect("连接应当能建");
+            let store = platform_iam::store::IamStore::new(db);
+            let ctx = platform_core::RequestContext::new()
+                .with_tenant(&tenant)
+                .with_user(&user);
+            store
+                .set_mfa_last_step(&ctx, &user, 10, None)
+                .await
+                .expect("更新应当不报错（只是可能影响 0 行）")
+        }));
+    }
+
+    let mut winners = 0;
+    for handle in handles {
+        if handle.await.expect("任务不应 panic") {
+            winners += 1;
+        }
+    }
+    assert_eq!(
+        winners, 1,
+        "12 路并发抢同一行（旧值都是 NULL）必须**恰好 1 个**成功；\
+         实际 winners={winners}。>1 说明条件更新失效 → 同一个 TOTP 码可被并发重用"
+    );
+}
 
 /// 从 A 端下线 B → B 的 refresh 立即失效；登出全端 → 全部 family 作废。
 #[tokio::test]
