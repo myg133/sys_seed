@@ -16,6 +16,91 @@ use platform_notify::store::NewDelivery;
 use platform_notify::worker::{PlatformChannel, tick};
 use std::sync::Arc;
 
+/// **`claim_batch` 必须严格尊重 `batch`**（QA 复查 M3 的判据）。
+///
+/// # ⚠️ 为什么必须有这条
+///
+/// 原实现是 `UPDATE ... WHERE id IN (SELECT ... LIMIT ? FOR UPDATE SKIP LOCKED)`。
+/// `IN (子查询)` 可能被实现成 semi join → 子查询在**外层每一行**上重跑
+/// （计划里 `loops = N`）→ `LIMIT` 只约束每次子查询，约束不了 UPDATE 总行数。
+///
+/// **实测**（修之前）：突发 500 条队列上 `claim_batch(batch = 10)` 认领了 **16 条**
+/// （超出 60%）；小表 6 条时 `batch = 2` 认领了 **3 条**。
+///
+/// # ⚠️ 为什么原先没有任何测试
+///
+/// 我 grep 过：`notify_worker_real_db.rs` 里**没有一条**断言 batch 上限的用例。
+/// 这正是「批量上限」这个不变量长期无声失效的原因。
+///
+/// 修法：改成 **CTE 物化 + `= ANY(ARRAY(...))`**，子查询只执行一次。
+#[tokio::test]
+async fn claim_batch_strictly_respects_the_batch_limit() {
+    let fixture = setup().await;
+    fixture
+        .admin
+        .execute("DELETE FROM platform_notify_delivery")
+        .await;
+
+    // ⚠️ **突发 500 条**（一次性插入，统计信息尚未刷新）——
+    // 这是生产上最容易触发的形态（队列从空突然涌入）。
+    seed_pending(&fixture, 500).await;
+
+    let claimed = fixture
+        .service
+        .store()
+        .claim_batch(&fixture.ctx_a(), 10, 60)
+        .await
+        .expect("认领应当成功");
+
+    assert_eq!(
+        claimed.len(),
+        10,
+        "`claim_batch(batch = 10)` 在突发 500 条队列上必须**恰好**认领 10 条；\
+         实际 {} 条。超过 10 说明 LIMIT 在重扫计划下失效（QA 实测修前是 16 条）",
+        claimed.len()
+    );
+
+    fixture
+        .admin
+        .execute("DELETE FROM platform_notify_delivery")
+        .await;
+}
+
+/// 小表场景同样必须严格（`batch = 2` / 6 条队列）。
+///
+/// ⚠️ 小表更容易走到重扫计划（规划器对小表的估算不同），
+/// 所以这一条与上面那条**不是重复**：QA 实测小表场景 `batch=2` 认领了 3 条。
+#[tokio::test]
+async fn claim_batch_respects_a_small_batch_on_a_small_queue() {
+    let fixture = setup().await;
+    fixture
+        .admin
+        .execute("DELETE FROM platform_notify_delivery")
+        .await;
+
+    seed_pending(&fixture, 6).await;
+
+    let claimed = fixture
+        .service
+        .store()
+        .claim_batch(&fixture.ctx_a(), 2, 60)
+        .await
+        .expect("认领应当成功");
+
+    assert_eq!(
+        claimed.len(),
+        2,
+        "`claim_batch(batch = 2)` 在 6 条队列上必须**恰好**认领 2 条；\
+         实际 {} 条（QA 实测修前是 3 条）",
+        claimed.len()
+    );
+
+    fixture
+        .admin
+        .execute("DELETE FROM platform_notify_delivery")
+        .await;
+}
+
 /// 造 N 条可立即投递的记录。
 async fn seed_pending(fixture: &Fixture, count: usize) {
     for _ in 0..count {

@@ -190,6 +190,23 @@ impl ConfigService {
         let tenant = ctx.tenant_id();
         let space = ctx.space_id();
         let Ok(layers) = self.store.load(tenant, space).await else {
+            // ⚠️ **不要静默吞错**（QA 复查修正）。
+            //
+            // 本函数供**审计 before 值**使用（`with_before`）。读库失败时
+            // 返回空 map 本身是合理的降级（审计不该因为读旧值失败而写不进去），
+            // 但**必须留下日志** —— 否则审计里会出现「before 为空」的记录，
+            // 而运维完全看不出「是本来就没有，还是读失败了」。
+            //
+            // # 为什么这里不能返回 Err
+            //
+            // 调用方（`set_values`）的核心职责是**写配置**。
+            // 若因为「读旧值」失败就整笔写失败，等于把旁路的信息降级成主路径故障。
+            // → 降级 + WARN 是正确取舍，**静默**才是问题。
+            tracing::warn!(
+                tenant = tenant.unwrap_or("<none>"),
+                space = space.unwrap_or("<none>"),
+                "读配置旧值失败，审计的 before 值为空（配置写入本身不受影响）"
+            );
             return out;
         };
         let source = match scope {

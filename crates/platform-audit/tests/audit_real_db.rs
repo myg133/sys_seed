@@ -633,6 +633,81 @@ async fn a_truncated_online_tail_is_detected_after_the_archive() {
     assert_eq!(archived, 1, "归档表里的记录不得被动过");
 }
 
+/// **并发归档 + 写入不得让链基准（`tip_hash`）陈旧**（QA 复查 M1 的判据）。
+///
+/// # 这条防的是什么
+///
+/// `platform_audit_append` 与 `platform_audit_archive_move` **都**读改写
+/// `platform_audit_chain_state` 的 `tip_hash` / `head_hash`。
+///
+/// 原先只有 `append` 持 advisory lock，`archive_move` **不持锁** → 交错如下：
+///
+/// ```text
+/// append   读到旧 tip ──────────────────► 写回自己算的 tip   （丢失 archive 的更新）
+/// archive             更新 tip ──┘
+/// ```
+///
+/// 后果：链的**链接**全部正确，但 `tip_hash` 是陈旧值 →
+/// `ChainVerifier` 报 `tip_ok=false` → **误报「链被截断」**（error 级告警）。
+///
+/// ⚠️ QA 用仓库自己的 `ChainVerifier` 实测 3/3 复现（它的复现靠 SQL 层手工交错）。
+///
+/// # 🚨 本用例的**能力边界**（如实记录，不要当成「已验证并发安全」）
+///
+/// 我**实测过**：把加固迁移 down 掉（`archive_move` 重新不持锁）后，
+/// 本用例连跑 **3 次全绿** —— 即**这条判据抓不住那个竞态**。
+///
+/// 原因是 `tokio::join!` 的时序几乎不可能精确命中
+/// 「archive 写了 tip 之后、append 用旧值覆盖」那个窗口
+/// （两个操作的 SQL 往返在微秒级，而调度粒度更大）。
+///
+/// → 本用例的实际价值是**回归护栏**：它锁住「普通的并发归档 + 写入**不出错**」
+/// 这个基本行为（改动 `archive_move` 如果引入了语法/事务错误，它会红）。
+///
+/// ⚠️ **真正的竞态判据需要 SQL 层手工交错**（两个会话按脚本逐句推进），
+/// 那需要 psql 或裸连接的手工控制，集成测试做不到 —— 记为 **TD-081**。
+///
+/// 锁本身**已经加上**（M1 的修法是确定的，锁键与 `append` 完全一致），
+/// 只是「锁生效」这件事**没有自动化判据** —— 这一点必须明说，不能含糊。
+#[tokio::test]
+async fn concurrent_archive_and_append_keep_the_chain_tip_fresh() {
+    let _guard = common::serial().await;
+    let fixture = common::setup().await;
+
+    // 造一条**足够旧**的记录（归档的搬走对象）。
+    let _old_id = insert_old_row(&fixture, TENANT_A, "demo.old.concurrent").await;
+
+    // ⚠️ **并发**：归档与写入同时跑。
+    //
+    // 两边都用**独立的连接**（同一个 `TenantDb` 内的池可以并发取连接）。
+    let archive_fixture = &fixture;
+    let archive = async {
+        let service = platform_audit::ArchiveService::new(archive_fixture.app_db.clone());
+        let cutoff = OffsetDateTime::now_utc() - time::Duration::days(1);
+        service
+            .archive_before(&archive_fixture.ctx_tenant_a(), cutoff)
+            .await
+    };
+    let append = async {
+        record(&fixture, TENANT_A, "demo.fresh.concurrent").await
+    };
+    let (archive_result, append_result) = tokio::join!(archive, append);
+    archive_result.expect("归档应当成功");
+    append_result.expect("写入应当成功");
+
+    // 链基准必须是**最新**（= 在线表最后一条的 hash）。
+    let verifier = platform_audit::ChainVerifier::new(fixture.app_db.clone());
+    let report = verifier
+        .verify(&fixture.ctx_tenant_a())
+        .await
+        .expect("链校验应当能跑");
+    assert!(
+        report.ok,
+        "并发归档 + 写入后链必须完好（这是**回归护栏**，不是竞态判据 —— 见文档）。\n\
+         报告：{report:?}"
+    );
+}
+
 /// AC-S-129 的扫描口径：Rust 侧 **0 命中** + `migrations/**/*.sql` **恰好 1 处**。
 #[test]
 fn no_rust_source_writes_the_audit_table_directly() {
@@ -648,13 +723,47 @@ fn no_rust_source_writes_the_audit_table_directly() {
         "crates/**/*.rs 里不得出现裸 INSERT：{rust_hits:?}"
     );
 
-    // 2) 迁移里恰好 1 处。
+    // 2) 迁移里**恰好 1 个函数定义**含裸 INSERT。
+    //
+    // ⚠️ **口径修正（QA 复查后）**：原判据是「`migrations/**/*.sql` 里恰好 1 处 INSERT」。
+    // 那条口径假设「审计写入函数只定义一次」—— 而加固迁移
+    // （`20261124000100_audit_hardening`）为了给 `platform_audit_append`
+    // 补租户守卫，必须用 `CREATE OR REPLACE FUNCTION` **重定义**它
+    // （改历史迁移会让 sqlx checksum 失效）。
+    //
+    // → 「SQL 文本恰好 1 处」这条口径被**正确的工程做法**打破了。
+    // 真实意图是「审计写入只有**一个函数入口**」，所以判据改为：
+    // **含裸 INSERT 的函数定义**必须恰好 1 个（重定义同一函数不算新增入口）。
     let migration_hits = scan_dir(&root.join("migrations"), "sql", &needle);
-    assert_eq!(
-        migration_hits.len(),
-        1,
-        "migrations/**/*.sql 里必须恰好 1 处（平台自己的迁移）：{migration_hits:?}"
+    assert!(
+        !migration_hits.is_empty(),
+        "必须至少有一处 INSERT（平台自己的迁移）：{migration_hits:?}"
     );
+    // 逐处确认：每个命中都必须落在 `platform_audit_append` 定义体内。
+    for hit in &migration_hits {
+        // `scan_dir` 返回 `路径:行号` → 拆出真实路径。
+        let path = hit.rsplit_once(':').map(|(p, _)| p).unwrap_or(hit);
+        let source = std::fs::read_to_string(path).expect("读迁移文件");
+        let before = &source[..source.find(&needle).unwrap_or(0)];
+        // 向上找最近的 `CREATE OR REPLACE FUNCTION <name>`
+        let owner = before
+            .rmatch_indices("CREATE OR REPLACE FUNCTION ")
+            .next()
+            .map(|(idx, _)| {
+                before[idx + "CREATE OR REPLACE FUNCTION ".len()..]
+                    .split(['(', '\n'])
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string()
+            });
+        assert_eq!(
+            owner.as_deref(),
+            Some("platform_audit_append"),
+            "裸 INSERT 只允许出现在 `platform_audit_append` 的定义体内；\
+             `{hit}` 里的命中属于别的函数（那是第二个写入入口！）"
+        );
+    }
 
     // 3) 阳性对照：同一个扫描器**必须**能命中（否则「0 命中」不可信，dev-guide §9.2）。
     let sample = format!("{} platform_audit_log (id) VALUES ($1)", needle);

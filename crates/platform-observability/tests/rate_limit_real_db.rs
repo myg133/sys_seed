@@ -809,28 +809,65 @@ async fn prune_keeps_rows_inside_double_the_window() {
     assert_eq!(inside_double, 2, "120 秒内应有 2 行（10 秒 + 100 秒）");
 }
 
-/// `prune` 传入 0 或负数时**不能删全表**（防御性下限）。
+/// `prune` 传入 0 或负数时，**必须按 60 秒兜底**（不是「保留 2 秒」）。
+///
+/// # ⚠️ QA 复查修正了这条用例的语义
+///
+/// 原断言是**为一个缺陷辩护**：
+///
+/// ```ignore
+/// // 实现里 `max_window.max(1) * 2` → 保留期至少 2 秒 → 30 秒的行**会**被删。
+/// let _ = limiter.prune(&ctx, 0).await.expect("prune 不该 panic");
+/// assert_eq!(remaining, 0, "30 秒的行超出 2 秒保留期，应被删除 —— 但要能解释");
+/// ```
+///
+/// 而**同一文件的文档**（`prune` 的文档注释）承诺的是：
+/// 「若传入 0 或负数，用 **60** 兜底（防误删全表）」。
+///
+/// → 注释、代码、测试**三者互相矛盾**，而测试是绿的（它断言了错误行为）。
+/// QA 实跑 CLI `--max-window-seconds 0` 输出「保留期 0 秒」，与注释直接冲突。
+///
+/// # 现在验的是**正确**行为
+///
+/// 传 0 → 兜底 60 秒 → 保留期 120 秒 → **30 秒的行必须保留**（它在窗口内！）。
+///
+/// ⚠️ 这不是「改了测试迁就实现」，而是**实现改对了**，测试跟着改对。
+/// 判断依据是「哪个行为符合文档承诺的安全语义」：误删窗口内的行会让
+/// 限流计数凭空变少 → 实际放行超过配额 → **静默失效**，比不清理更危险。
 #[tokio::test]
-async fn prune_with_a_zero_window_does_not_wipe_the_table() {
+async fn prune_with_a_zero_window_falls_back_sixty_seconds() {
     let f = setup().await;
     f.truncate().await;
     let limiter = limiter(f.db.clone());
     let ctx = f.ctx_a();
     let key = bucket_key(dimension::TENANT, TENANT_A, None, "GET", "/prune-zero");
 
+    // 造一行**30 秒前**的记录 —— 它在 60 秒窗口内，绝不能删。
     f.exec(&format!(
         "INSERT INTO platform_rate_limit (tenant_id, dimension, key, occurred_at) \
          VALUES ('{TENANT_A}', 'tenant', '{key}', now() - interval '30 seconds')"
     ))
     .await;
 
-    // ⚠️ 实现里 `max_window.max(1) * 2` → 保留期至少 2 秒 → 30 秒的行**会**被删。
-    // 这里断言的是「不会因为 ×0 而变成保留期 0 秒后 panic 或删错范围」。
-    let _ = limiter.prune(&ctx, 0).await.expect("prune 不该 panic");
-    // 表里要么剩 0 行（30 秒 > 2 秒保留期，合理），要么报错 —— 不该是「全表静默消失后无法解释」。
+    let deleted = limiter.prune(&ctx, 0).await.expect("prune 不该 panic");
+    assert_eq!(
+        deleted, 0,
+        "传 0 必须按 60 秒兜底（保留期 120 秒）→ 30 秒的行**在窗口内**，不该被删"
+    );
     let remaining = f.query_i64("SELECT count(*) FROM platform_rate_limit").await;
     assert_eq!(
-        remaining, 0,
-        "30 秒的行超出 2 秒保留期（0.max(1)*2），应被删除 —— 但要能解释"
+        remaining, 1,
+        "30 秒的行必须保留 —— 若被删掉，限流计数会凭空变少、实际放行超过配额"
     );
+
+    // 阴性对照：**确实过期**的行必须被删（证明 prune 不是「什么都不做」）。
+    f.exec(&format!(
+        "INSERT INTO platform_rate_limit (tenant_id, dimension, key, occurred_at) \
+         VALUES ('{TENANT_A}', 'tenant', '{key}', now() - interval '10 minutes')"
+    ))
+    .await;
+    let deleted_old = limiter.prune(&ctx, 0).await.expect("prune 不该 panic");
+    assert_eq!(deleted_old, 1, "10 分钟前的行必须被删（阴性对照）");
+    let remaining_after = f.query_i64("SELECT count(*) FROM platform_rate_limit").await;
+    assert_eq!(remaining_after, 1, "只剩那行 30 秒的");
 }

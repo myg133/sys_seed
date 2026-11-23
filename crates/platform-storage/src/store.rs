@@ -331,26 +331,48 @@ impl StorageStore {
     }
 
     /// 认领一批待处理任务（**`FOR UPDATE SKIP LOCKED`**，D324）。
+    ///
+    /// # ⚠️ `LIMIT` 为什么用 **CTE + `= ANY(...)`** 而不是 `IN (SELECT ... LIMIT)`（QA M3）
+    ///
+    /// 原写法是：
+    ///
+    /// ```sql
+    /// UPDATE t SET ... WHERE id IN (
+    ///   SELECT id FROM t WHERE ... ORDER BY created_at LIMIT ? FOR UPDATE SKIP LOCKED
+    /// )
+    /// ```
+    ///
+    /// 问题：`IN (子查询)` 在 PostgreSQL 里可能被实现成 **semi join**，
+    /// 子查询会在**外层每一行**上重跑一次（计划里 `loops = N`）→
+    /// `LIMIT` 只约束**每次**子查询，约束不了外层 UPDATE 的总行数。
+    ///
+    /// **实测**（QA + 我复测）：突发 500 条且统计信息陈旧时，
+    /// `claim_batch(batch=10)` 认领了 **16 条**（超出 60%）；
+    /// 小表 6 条时 `batch=2` 认领了 **3 条**。
+    ///
+    /// → 改成 **CTE 物化 + `= ANY(数组)`**：子查询在 CTE 里**只执行一次**，
+    /// 认领出的 id 变成一个数组，外层 UPDATE 按数组精确匹配 —— 行数由 `LIMIT` 严格决定。
     pub async fn claim_jobs(&self, ctx: &RequestContext, batch: i64) -> DbResult<Vec<JobRow>> {
         let mut tx = self.db.begin(ctx).await?;
         let table = format!("{}.{}", tx.schema(), JOB_TABLE);
         // ⚠️ `{tenant}` **只能出现一次**（`TenantQuery::render` 强制恰好一个）。
         let query = TenantQuery::new(format!(
-            "UPDATE {table} SET status = ?, updated_at = now() \
-             WHERE id IN ( \
+            "WITH picked AS ( \
                SELECT id FROM {table} \
                WHERE tenant_id = {{tenant}} AND status = ? \
                ORDER BY created_at \
                LIMIT ? \
                FOR UPDATE SKIP LOCKED \
              ) \
+             UPDATE {table} SET status = ?, updated_at = now() \
+             WHERE id = ANY(ARRAY(SELECT id FROM picked)) \
              RETURNING {columns}",
             table = table,
             columns = job_select_columns()
         ))
-        .bind(crate::model::job_status::RUNNING.to_string())
         .bind(crate::model::job_status::PENDING.to_string())
-        .bind(batch);
+        .bind(batch)
+        .bind(crate::model::job_status::RUNNING.to_string());
         let rows: Vec<JobRow> = tx.fetch_all(&query).await?;
         tx.commit().await?;
         Ok(rows)

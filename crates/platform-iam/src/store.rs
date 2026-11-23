@@ -836,20 +836,55 @@ impl IamStore {
     }
 
     /// 记录最近一次成功使用的**时间步**（防重放）。
+    ///
+    /// # ⚠️ 这是**条件更新**，返回值表示「是否真的抢到了这次时间步」
+    ///
+    /// # 为什么必须条件化（QA 复查 M4 的修复）
+    ///
+    /// 原实现是**无条件** `UPDATE ... SET last_used_step = ?` —— 调用方先读
+    /// `last_used_step` 校验，再无条件写回 → 经典的 **check-then-act (TOCTOU)**：
+    ///
+    /// ```text
+    /// 请求 A: 读 last_used_step = 5 ──────┐
+    /// 请求 B: 读 last_used_step = 5 ──┐   │   两边都通过校验
+    /// 请求 A: UPDATE ... = 10 ◄───────┼───┘
+    /// 请求 B: UPDATE ... = 10 ◄───────┘       同一个 TOTP 码用了两次
+    /// ```
+    ///
+    /// QA **实测**：同一 TOTP 码 12 路并发 → **12 次全部成功**。
+    /// 而现有测试是**串行**的 → 全绿却测不到这个面。
+    ///
+    /// # 修法
+    ///
+    /// 把「校验」和「写入」合并成**一条**条件 UPDATE：
+    /// 只有 `last_used_step` 仍是我们读到的那个旧值时才更新（乐观锁）。
+    /// 两个并发请求里只有一个能命中条件，另一个影响 0 行 → 调用方据此拒绝。
+    ///
+    /// # 返回
+    ///
+    /// - `Ok(true)`：抢到了（本次时间步被记录）
+    /// - `Ok(false)`：**已被别人抢先**（同一个时间步被并发使用了）
     pub async fn set_mfa_last_step(
         &self,
         ctx: &RequestContext,
         user_id: &str,
         step: i64,
-    ) -> DbResult<()> {
+        previous_step: Option<i64>,
+    ) -> DbResult<bool> {
+        // ⚠️ `last_used_step` 可能是 NULL（从未用过 TOTP）——
+        // `IS NOT DISTINCT FROM` 能正确处理 NULL = NULL 的情形，
+        // 而 `= ?` 在 NULL 上恒为 NULL（永不命中）。
         let query = TenantQuery::new(format!(
-            "UPDATE {table} SET last_used_step = ? WHERE tenant_id = {{tenant}} AND user_id = ?",
+            "UPDATE {table} SET last_used_step = ? \
+              WHERE tenant_id = {{tenant}} AND user_id = ? \
+                AND last_used_step IS NOT DISTINCT FROM ?",
             table = self.table(MFA_SECRET_TABLE)
         ))
         .bind(step)
-        .bind(user_id);
-        self.db.execute(ctx, &query).await?;
-        Ok(())
+        .bind(user_id)
+        .bind(previous_step);
+        let affected = self.db.execute(ctx, &query).await?;
+        Ok(affected > 0)
     }
 
     /// 批量写入恢复码（**只存 hash**）。

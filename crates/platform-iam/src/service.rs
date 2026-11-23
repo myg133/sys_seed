@@ -2006,10 +2006,22 @@ impl IamService {
             let step =
                 totp::verify_code(&raw, code, secret.last_used_step, now, &self.config.totp)?;
             // 记录时间步 → 同一时间步的验证码**不能**用第二次（AC-S-015）。
-            self.store
-                .set_mfa_last_step(ctx, user_id, step)
+            //
+            // ⚠️ **条件更新**（QA 复查 M4 的修复）：只有 `last_used_step` 仍是
+            // 刚才读到的旧值时才能写成功。并发请求里只有一个能抢到，
+            // 另一个影响 0 行 → 必须**拒绝**（否则同一 TOTP 码能用两次）。
+            //
+            // QA 实测：修之前同一 TOTP 码 **12 路并发 → 12 次全部成功**。
+            let won = self
+                .store
+                .set_mfa_last_step(ctx, user_id, step, secret.last_used_step)
                 .await
                 .map_err(internal)?;
+            if !won {
+                // 被别人抢先 = 这个时间步的码刚被用过 → 一律按「无效」处理
+                // （不泄露「是重放还是并发」，两者对调用方是同一件事）。
+                return Err(IamError::MfaInvalid);
+            }
             return Ok(());
         }
 
@@ -2023,10 +2035,23 @@ impl IamService {
         for candidate in candidates {
             let expected = crypto::digest_base64url(normalized.as_bytes());
             if candidate.code_hash == expected {
-                self.store
+                // ⚠️ **必须检查受影响行数**（QA 复查 M4 的修复）。
+                //
+                // `mark_recovery_code_used` 的 SQL 已经是条件更新
+                // （`AND used_at IS NULL`），并发下只有一个能命中 ——
+                // 但原实现把返回值**丢弃**了（`?` 只传播错误），
+                // 于是两个并发请求都 `return Ok(())`。
+                //
+                // QA 实测：同一恢复码 **12 路并发 → 12 次全部成功**。
+                let affected = self
+                    .store
                     .mark_recovery_code_used(ctx, &candidate.id)
                     .await
                     .map_err(internal)?;
+                if affected == 0 {
+                    // 已被并发请求用掉 → 按「无效」处理（同 TOTP 分支的语义）。
+                    return Err(IamError::MfaInvalid);
+                }
                 return Ok(());
             }
         }

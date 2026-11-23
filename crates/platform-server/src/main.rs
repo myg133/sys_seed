@@ -791,7 +791,11 @@ async fn serve() -> Result<(), Failure> {
     // 🔑 REQ-019（TD-075）：**中间件装配抽到 `platform_observability`** ——
     // 这样「main 里挂对了没有」终于有判据了（测试能调同一个函数）。
     //
-    // 顺序（不可换）：`client_info` → `trace_id` → `rate_limit` → 业务。
+    // 顺序（不可换）：`client_info` → `deprecation` → `trace_id` → `rate_limit` → 业务。
+    //
+    // ⚠️ **QA 复查修正**：原注释漏了 `deprecation` 一整层。
+    // 唯一的装配实现在 `platform_observability::http::apply_all_middlewares_with`，
+    // 那里的文档图是完整的四层 —— 以那里为准。
     // ⚠️ `client_info` 必须在最外层：各子系统**各自**建 `RequestContext`，
     // 「对所有路由生效」只能在顶层加一次（REQ-014 D149）。
     //
@@ -815,11 +819,37 @@ async fn serve() -> Result<(), Failure> {
     let observability_state = Arc::new(platform_server::observability::StatusState {
         rate_limit: rate_limit_state.clone(),
     });
-    let app = app.nest(
-        "/api/observability",
-        platform_server::observability::router(observability_state),
-    );
-    tracing::info!("可观测性已启用：/api/observability/*");
+    // ⚠️ **必须认证**（QA 复查 M5 的修复）。
+    //
+    // 原实现直接 nest 裸 router → 匿名请求 200，可读到全局限流配额
+    // （`requests` / `windowSeconds`）→ 攻击者可据此**精确卡配额**、
+    // 避开触发 429。平台惯例是 `/api/*` 全部要认证，这个端点不该例外。
+    //
+    // 复用 `TokenTenantResolverImpl`（走 `IamService::verify_access_token`
+    // **真验签**）—— 与限流的顶层解析是**同一份**验签逻辑，不新开第二条路径。
+    let app = match sso_iam.clone() {
+        Some(service) => {
+            let observability_router =
+                platform_server::observability::router(observability_state).layer(
+                    axum::middleware::from_fn_with_state(
+                        Arc::new(TokenTenantResolverImpl { service }),
+                        require_authenticated,
+                    ),
+                );
+            tracing::info!("可观测性已启用：/api/observability/*（需认证）");
+            app.nest("/api/observability", observability_router)
+        }
+        None => {
+            // ⚠️ 没有 IAM（未配置认证）→ **整个端点不挂**。
+            //
+            // 宁可 404 也不匿名暴露配额：这个端点本就是运维视图，
+            // 没有认证体系时它没有存在意义。
+            tracing::warn!(
+                "可观测性端点**未挂载**：未配置 IAM，无法认证（避免匿名暴露限流配额）"
+            );
+            app
+        }
+    };
 
     // 中间件全部在这里挂（**唯一实现**，见 `apply_all_middlewares_with` 的文档）。
     let app = platform_observability::http::apply_all_middlewares_with(
@@ -1317,6 +1347,73 @@ async fn build_rate_limit_state(
 /// 验不过 → `None` → 中间件按「未认证 → 放行」处理（TD-072）。
 /// **不返回 401** —— 认证失败的响应由各子系统的 `authenticate` 负责，
 /// 限流中间件不该抢这个职责（否则错误码会变成限流的语义）。
+/// 认证中间件：**必须**能验出身份，否则 401（QA 复查 M5 的修复）。
+///
+/// # 用途
+///
+/// `/api/observability/*` 是运维视图（暴露限流配额），平台惯例是 `/api/*` 全部要认证。
+/// 这个端点原先**没有任何认证层**（匿名 200），本中间件补上。
+///
+/// # ⚠️ 为什么复用 `TokenTenantResolverImpl`
+///
+/// 它走的就是 `IamService::verify_access_token`（**真验签**：JWK + exp/nbf/aud/iss），
+/// 与限流的顶层解析是**同一份**验签逻辑 —— 不新开第二条认证路径
+/// （本仓对「认证入口唯一」有硬要求）。
+///
+/// # 拒绝语义
+///
+/// 验不过 → **401** + 统一错误体（`UNAUTHENTICATED`）。
+/// ⚠️ 不返回 403：这是「你没登录」，不是「你没权限」。
+async fn require_authenticated(
+    axum::extract::State(resolver): axum::extract::State<
+        Arc<TokenTenantResolverImpl>,
+    >,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use platform_observability::rate_limit::middleware::TokenTenantResolver as _;
+
+    let resolved = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|raw| resolver.resolve(raw));
+
+    let Some((tenant, user)) = resolved else {
+        let ctx = request
+            .extensions()
+            .get::<RequestContext>()
+            .cloned()
+            .unwrap_or_else(RequestContext::new);
+        let code = platform_core::problem::CODE_UNAUTHENTICATED;
+        let problem = ProblemDetails {
+            kind: format!(
+                "https://errors.base.example/{}",
+                platform_core::problem::kebab_case(code)
+            ),
+            title: platform_core::titles::title_of_code(code).to_string(),
+            status: StatusCode::UNAUTHORIZED.as_u16(),
+            detail: "the request is not authenticated".to_string(),
+            instance: request.uri().path().to_string(),
+            code: code.to_string(),
+            trace_id: ctx.trace_id().to_string(),
+        };
+        return (StatusCode::UNAUTHORIZED, Json(problem)).into_response();
+    };
+
+    // 把已认证的身份放进上下文，供下游（以及 trace / 日志）使用。
+    let mut request = request;
+    let ctx = request
+        .extensions()
+        .get::<RequestContext>()
+        .cloned()
+        .unwrap_or_else(RequestContext::new)
+        .with_tenant(tenant)
+        .with_user(user);
+    request.extensions_mut().insert(ctx);
+    next.run(request).await
+}
+
 struct TokenTenantResolverImpl {
     /// 平台的认证服务（唯一的令牌验签入口）。
     service: Arc<platform_iam::service::IamService>,

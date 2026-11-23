@@ -467,6 +467,16 @@ pub fn router<S2>(state: Arc<RbacState>) -> Router<S2> {
         .route_layer(require_permission("rbac:user-role:write"));
 
     // 权限点注册表 —— **豁免**：任何已认证用户都可读（前端 `can()` 靠它）。
+    //
+    // ⚠️ **为什么豁免**（REQ-009 AC 明文要求，**不改**）
+    //
+    // `BA/demands/REQ-009-rbac/acceptance.md` 的「★ 豁免：权限点注册表查询」：
+    // 「`GET /api/rbac/permissions`（读注册表）**不需要**管理权限点 ——
+    // **任何已认证用户都应能读**。否则前端 `can()` 无从判断」。
+    //
+    // ⚠️ 因此 `rbac:permission:read` 这个权限点**声明了但没有调用点**是
+    // **已知且已接受**的（`BA/plan/tech-debt.md` 的 TD-003 已登记）。
+    // C-5 对它的报错属于**误报** → 见 `tests/contract_c5.rs` 的豁免清单。
     let registry = Router::new().route("/permissions", get(list_permissions));
 
     // 当前用户的有效权限点 —— **豁免**权限点要求（但**要求已认证**）。
