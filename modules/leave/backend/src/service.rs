@@ -472,7 +472,10 @@ impl LeaveService {
         if to_applicant {
             message = message.with_recipient(request.applicant_id.clone());
         } else {
-            // 审批人身份由平台适配器按权限点解析（业务侧不查权限表）。
+            // ⚠️ 平台适配器**当前不解析** `audience`（TD-088：没有「按权限点反查用户」
+            // 的能力，见 `crates/platform-notify/src/db_sender.rs:30` 与 `:107-112`）——
+            // 这里保留 `audience` 只是记录**意图**：等 TD-088 修好后由适配器换成真实收件人。
+            // 在那之前，这条通知会以「没有投递对象」落为**合法失败**，不会静默丢。
             message = message.with_payload("audience", PERMISSION_REQUEST_APPROVE.to_string());
         }
         if let Err(error) = sender.notify(ctx, &message).await {
