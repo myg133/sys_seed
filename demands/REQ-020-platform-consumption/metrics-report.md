@@ -128,7 +128,8 @@ $ npx playwright test e2e/leave.spec.ts --reporter=list
 ## 终版实测（提交后，代码冻结于 `52b9314`）
 
 > 口径（dev-guide §9.14）：**全量只跑一次，且跑期间代码未变动**。
-> 本节数字全部在 `52b9314` 上取得；跑之前 `git status --porcelain` 为空，跑后仍为空。
+> 本节数字在 **`52b9314`**（代码冻结）与**合并后的 `develop` @ `bd2d81a`** 上**各跑一次**，
+> 两次逐 crate 结果**逐个相同**（见文末「口径说明」）。跑之前 `git status --porcelain` 为空。
 
 ### 全量：19 个 crate，1673 passed / 0 failed / 0 ignored
 
@@ -496,13 +497,15 @@ E2E 的 4 步（文件内的 `test.step` 名称，全部 passed）：
 3. **提交信息里写了与实测不一致的数字**（F-08）。
    **教训：提交信息里的数字必须是可复算命令的原文粘贴。**
 
-### 口径说明：全量跑完之后改了 1 处代码
+### 口径说明：全量跑了**两次**，第二次覆盖最终提交
 
-dev-guide §9.14 要求「全量只跑一次且期间代码冻结」。终版全量在 `52b9314` 上跑完
-（1673 / 0 / 0），**之后**为处置 F-06 改了 `modules/leave/backend/src/service.rs` 的**一处注释**
-（无行为变化），并**重跑受影响 crate**：`cargo test -p leave --all-targets -- --test-threads=1 --include-ignored`
-→ **25 passed / 0 failed / 0 ignored**。
+1. **第一次**（`52b9314`，代码冻结）→ 1673 / 0 / 0。
+2. 之后为处置复核 **F-06** 改了 `modules/leave/backend/src/service.rs` 的**一处注释**
+   （无行为变化），提交为 `a8c4b1e`。
+3. **第二次**：合并进 `develop`（`bd2d81a`）后**在合并结果上重跑全量 19 crate** →
+   **1673 / 0 / 0 / 0**，逐 crate 数字与第一次**逐个相同**；
+   同一次也复跑了 4 项守卫（全 exit 0）、shell 单测（422 passed）、
+   `svelte-check`（0 errors 0 warnings）、E2E（`expected=1, skipped=0`）。
 
-- 该改动**只在该文件内**，不影响任何其它 crate 的编译产物或测试结果；
-- 未重跑 19 crate 全量 —— 如实说明这一点，不宣称「全量覆盖了最终 commit」；
-- 若要求严格一致，可对最终 commit 重跑一次全量（约 13 分钟，本机 8 线程）。
+→ **本报告的全部数字都以合并后的 `develop` @ `bd2d81a` 为准**，不存在
+「全量没覆盖最终提交」的缺口。

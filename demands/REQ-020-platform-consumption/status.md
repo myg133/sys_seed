@@ -3,7 +3,8 @@
 - **状态**: **已完成**（规格 rev 2 + 实现 4 批 + 独立复核 15 条全处置）
 - **更新者**: myg133-ba-1
 - **更新时间**: 2026-11-23
-- **代码**: `feature/REQ-020` @ `52b9314`（`fd0d099` = BASE_UPGRADE，`52b9314` = v1→v2 升级）
+- **代码**: `feature/REQ-020` @ `a8c4b1e`（`fd0d099` = BASE_UPGRADE，`52b9314` = v1→v2 升级，`a8c4b1e` = 注释修正）
+- **已合并**: `develop` @ **`bd2d81a`**（`--no-ff`），合并后全量 1673 / 0 / 0 已复跑
 
 ## 文件清单
 
@@ -54,10 +55,12 @@ svelte-check             0 errors / 0 warnings
 E2E                      1 passed / 0 skipped / 0 failed
 ```
 
-> ⚠️ **口径披露**：终版全量跑完后，为处置复核 F-06 改了
-> `modules/leave/backend/src/service.rs` 的**一处注释**（无行为变化），
-> 并重跑受影响 crate：`leave` **25 passed / 0 failed / 0 ignored**。
-> 未重跑 19 crate 全量 —— 不宣称「全量覆盖了最终 commit」。
+> ⚠️ **口径披露**：全量跑了**两次** ——
+> ① `52b9314`（代码冻结）→ 1673 / 0 / 0；
+> ② 处置复核 F-06 改了一处注释（`a8c4b1e`，无行为变化）后，合并进 `develop`（`bd2d81a`）
+> 并**在合并结果上重跑全量 19 crate** → **1673 / 0 / 0**，逐 crate 数字与第一次逐个相同；
+> 同一次复跑 4 项守卫（全 exit 0）、shell 422 passed、`svelte-check` 0/0、E2E 1 passed 0 skipped。
+> **所有数字以合并后的 `develop` @ `bd2d81a` 为准。**
 
 ## 底座缺口清单（本需求的核心产出，8 条）
 
