@@ -23,6 +23,7 @@
 //! | `DELETE /api/rbac/users/{user_id}/roles/{role_id}` | `rbac:user-role:write` |
 //! | `GET /api/rbac/permissions` | **豁免**（任何已认证用户都可读） |
 //! | `GET /api/rbac/me/permissions` | **豁免**（任何已认证用户都可读） |
+//! | `GET /api/rbac/v2/me/permissions` | **豁免**（v2，多一个 `sources`；见 D352） |
 //!
 //! # 为什么注册表查询豁免
 //!
@@ -430,6 +431,26 @@ pub struct MyPermissionsResponse {
     pub permissions: Vec<String>,
 }
 
+/// **v2** 的响应体：`permissions` + 每个权限点的**来源角色**（D352）。
+///
+/// # 这是 v2 的「语义变化」（不是改 v1 的值）
+///
+/// v1 只给**扁平**的权限点数组；v2 多一个 `sources`，说清「这个权限点由哪些角色
+/// 提供」。消费方若把响应**穷举**成严格类型，会因多一个键而需要改代码 ——
+/// 本需求的 AC-S-190 验的正是「按**开放对象**消费的消费方不必改」。
+///
+/// ⚠️ `permissions` 与 `sources` 的键集合**恰好相同**（由
+/// [`crate::service::RbacService::permission_sources`] 与
+/// `effective_permissions` 共用同一份展开规则保证）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MyPermissionsV2Response {
+    /// 权限点编码（**升序、去重**；已展开通配；与 v1 逐项相同）。
+    pub permissions: Vec<String>,
+    /// 权限点编码 → 提供它的**角色 code**（升序去重）。
+    pub sources: std::collections::BTreeMap<String, Vec<String>>,
+}
+
 // ---------------------------------------------------------------------------
 // 路由
 // ---------------------------------------------------------------------------
@@ -490,7 +511,19 @@ pub fn router<S2>(state: Arc<RbacState>) -> Router<S2> {
     // # 不引入新权限点
     //
     // 因此**不需要** `require_permission` 调用点 → 不触发 C-5 扫描与 D27 启动对账。
-    let me = Router::new().route("/me/permissions", get(my_permissions));
+    //
+    // # v1 与 v2 并存（D352：版本化 = **路径前缀**）
+    //
+    // - `GET /api/rbac/me/permissions` —— v1，形状**不变**（`{permissions}`），
+    //   已在 `platform_observability` 登记弃用（带 `Deprecation` / `Sunset`）；
+    // - `GET /api/rbac/v2/me/permissions` —— v2，多一个 `sources`。
+    //
+    // ⚠️ v1 **不删、不改形状**：REQ-011 的 `tc_011_001`（响应体恰好一个键）已 ratified。
+    // 版本化用路径前缀而不是 `Accept` 协商，理由见 D352（弃用中间件按**完整路径**
+    // 精确匹配）。
+    let me = Router::new()
+        .route("/me/permissions", get(my_permissions))
+        .route("/v2/me/permissions", get(my_permissions_v2));
 
     // 认证中间件（**路由级层的外面**）：验令牌 + 刷新判定缓存 + 注入判定器。
     Router::new()
@@ -774,6 +807,36 @@ async fn my_permissions(
             Json(body).into_response()
         }
         Err(error) => rbac_problem_response(&error, &ctx.0, uri.path()),
+    }
+}
+
+/// **v2**：读当前用户的有效权限点 + 每个权限点的来源角色（D352）。
+///
+/// 与 v1 同一个服务、同一份展开规则；差别只在响应多一个 `sources`。
+/// 豁免规则与 v1 相同（任何已认证用户都可读）。
+async fn my_permissions_v2(
+    State(state): State<Arc<RbacState>>,
+    caller: Authenticated,
+    ctx: TenantCtx,
+    uri: OriginalUri,
+) -> Response {
+    let permissions = state
+        .service
+        .effective_permissions(&ctx.0, &caller.user_id)
+        .await;
+    let sources = state
+        .service
+        .permission_sources(&ctx.0, &caller.user_id)
+        .await;
+    match (permissions, sources) {
+        (Ok(permissions), Ok(sources)) => {
+            let body = MyPermissionsV2Response {
+                permissions: permissions.into_iter().collect(),
+                sources,
+            };
+            Json(body).into_response()
+        }
+        (Err(error), _) | (_, Err(error)) => rbac_problem_response(&error, &ctx.0, uri.path()),
     }
 }
 

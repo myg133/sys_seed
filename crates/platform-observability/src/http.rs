@@ -377,22 +377,40 @@ mod tests {
 // 中间件装配（TD-075 的处置）
 // ---------------------------------------------------------------------------
 
-/// 本需求新增的**按路径弃用清单**。
+/// 平台**按路径**的弃用清单（两个端点，各自有理由）。
 ///
-/// ⚠️ 只标 `/api/audit/events` —— 弃用理由是「分页契约升版后它将被 v2 取代」
+/// ⚠️ 第一条只标 `/api/audit/events` —— 弃用理由是「分页契约升版后它将被 v2 取代」
 /// （D341 给了它一个合理的弃用理由，不是随便挑的）。
 ///
 /// ⚠️ 用**按路径**匹配而不是包住 `/api/audit` 整组：
 /// 那组里还有 `verify` / `archive` 等**未**弃用的端点
 /// → 包整组会让「恰好 1 个路由带弃用头」的判据（AC-S-036 步骤 7）红。
+///
+/// # `/api/rbac/me/permissions`（REQ-020 AC-S-190 / D352）
+///
+/// rbac 的「当前用户权限点」升到 v2（`/api/rbac/v2/me/permissions`，多一个
+/// `sources`）→ v1 **保留但弃用**：响应带 `Deprecation: true` + `Sunset`，
+/// 给出迁移窗口而不是直接 410（弃用 ≠ 下线）。
+///
+/// ⚠️ v2 路径**不登记**（新接口没有弃用理由）；按路径精确匹配保证
+/// `/api/rbac/v2/me/permissions` 不会继承 v1 的头。
 pub fn default_deprecations() -> Vec<(String, crate::deprecation::Deprecation)> {
-    vec![(
-        "/api/audit/events".to_string(),
-        crate::deprecation::Deprecation::new(
-            // 2027-06-30（约 19 个月后 —— 客户端有足够时间迁移）。
-            time::macros::datetime!(2027-06-30 00:00:00 UTC),
+    vec![
+        (
+            "/api/audit/events".to_string(),
+            crate::deprecation::Deprecation::new(
+                // 2027-06-30（约 19 个月后 —— 客户端有足够时间迁移）。
+                time::macros::datetime!(2027-06-30 00:00:00 UTC),
+            ),
         ),
-    )]
+        (
+            "/api/rbac/me/permissions".to_string(),
+            crate::deprecation::Deprecation::new(
+                // 2027-06-30：与上一条同一个迁移窗口。
+                time::macros::datetime!(2027-06-30 00:00:00 UTC),
+            ),
+        ),
+    ]
 }
 
 /// **中间件装配的唯一实现**（TD-075）。

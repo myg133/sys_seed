@@ -619,3 +619,113 @@ async fn tc_011_010_without_a_provider_login_still_succeeds_with_an_empty_array(
         "未注入 provider 时权限点必须是空数组：{response:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// REQ-020 AC-S-190 / D352：v2（`permissions` + `sources`）
+// ---------------------------------------------------------------------------
+
+/// v2 的路径（版本化 = **路径前缀**，D352）。
+const ME_PERMISSIONS_V2_PATH: &str = "/api/rbac/v2/me/permissions";
+
+/// 打任意一条权限点路径（v1 / v2 共用）。
+async fn call_path(
+    app: &axum::Router,
+    path: &str,
+    tenant: Option<&str>,
+    token: Option<&str>,
+) -> (StatusCode, Value) {
+    let mut builder = Request::builder().method("GET").uri(path);
+    if let Some(token) = token {
+        builder = builder.header("authorization", format!("Bearer {token}"));
+    }
+    if let Some(tenant) = tenant {
+        builder = builder.header("x-tenant-id", tenant);
+    }
+    let request = builder.body(Body::empty()).expect("请求应当能构造");
+    let response = app.clone().oneshot(request).await.expect("请求应当能完成");
+    finish(response).await
+}
+
+/// **REQ-020 AC-S-190**：v2 多一个 `sources`，而 `permissions` 与 v1 **逐项相同**。
+///
+/// # 三条判据
+///
+/// 1. **v1 不变**：仍是对象、**恰好一个键**（若为了加 v2 改了 v1，这条先红）；
+/// 2. **v2 形状**：`permissions` + `sources` 两个键；
+/// 3. **`sources` 是真的**：键集合**恰好等于** `permissions`，且每个权限点列出的
+///    就是提供它的角色 code（不是占位空对象）。
+#[tokio::test]
+#[ignore = "需要 base_test 库：scripts/test-integration.sh 会用 --include-ignored 跑到"]
+async fn tc_020_v2_lists_permission_sources_and_keeps_v1_intact() {
+    let world = world().await;
+    let user_id = world.register_user("u-perm-v2@example.com").await;
+    world.role_with("role-v2-read", &[PERM_ROLE_READ]).await;
+    world.role_with("role-v2-write", &[PERM_ROLE_WRITE]).await;
+    world.bind(&user_id, "role-v2-read").await;
+    world.bind(&user_id, "role-v2-write").await;
+    let token = world.token_for(&user_id);
+
+    // ① v1 不变：对象 + 恰好一个键。
+    let (status, v1) = call_path(&world.app, ME_PERMISSIONS_PATH, Some(&world.tenant), Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "v1 应当 200：{v1}");
+    let mut v1_keys: Vec<&str> = v1
+        .as_object()
+        .expect("v1 必须是对象")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    v1_keys.sort();
+    assert_eq!(v1_keys, vec!["permissions"], "v1 必须仍恰好一个键：{v1}");
+    let v1_permissions = permissions_of(&v1);
+
+    // ② v2：两个键，permissions 与 v1 逐项相同。
+    let (status, v2) = call_path(&world.app, ME_PERMISSIONS_V2_PATH, Some(&world.tenant), Some(&token)).await;
+    assert_eq!(status, StatusCode::OK, "v2 应当 200：{v2}");
+    assert!(v2.is_object(), "v2 必须是对象：{v2}");
+    let mut v2_keys: Vec<&str> = v2
+        .as_object()
+        .expect("v2 必须是对象")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    v2_keys.sort();
+    assert_eq!(
+        v2_keys,
+        vec!["permissions", "sources"],
+        "v2 必须恰好两个键：{v2}"
+    );
+    assert_eq!(
+        permissions_of(&v2),
+        v1_permissions,
+        "v2 的 permissions 必须与 v1 **逐项相同**（v2 不改既有语义）：{v2}"
+    );
+
+    // ③ sources 是真的（不是占位空对象）。
+    let sources = v2["sources"].as_object().expect("sources 必须是对象");
+    assert!(!sources.is_empty(), "sources 不能是空对象（那是占位，不是实现）");
+    let mut source_keys: Vec<&str> = sources.keys().map(String::as_str).collect();
+    source_keys.sort();
+    assert_eq!(
+        source_keys, v1_permissions,
+        "sources 的键集合必须**恰好等于** permissions：{v2}"
+    );
+    for (permission, roles) in sources {
+        let roles: Vec<&str> = roles
+            .as_array()
+            .unwrap_or_else(|| panic!("`{permission}` 的来源必须是数组：{v2}"))
+            .iter()
+            .map(|role| role.as_str().expect("角色 code 必须是字符串"))
+            .collect();
+        assert!(!roles.is_empty(), "`{permission}` 至少有一个来源角色：{v2}");
+    }
+    assert_eq!(
+        sources[PERM_ROLE_READ],
+        serde_json::json!(["role-v2-read"]),
+        "`rbac:role:read` 的来源必须**恰好**是 role-v2-read：{v2}"
+    );
+    assert_eq!(
+        sources[PERM_ROLE_WRITE],
+        serde_json::json!(["role-v2-write"]),
+        "`rbac:role:write` 的来源必须**恰好**是 role-v2-write：{v2}"
+    );
+}

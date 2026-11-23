@@ -573,3 +573,83 @@ async fn the_error_body_carries_the_same_trace_id_as_the_header() {
         "失败响应体的 trace_id 必须与响应头相同（否则用户拿它查不到日志）；实际：{body}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// REQ-020 AC-S-190：rbac v1 弃用登记（D352 的第二条弃用项）
+// ---------------------------------------------------------------------------
+
+/// 用**真实**的 `default_deprecations()` 装配：v1 带两个头，v2 与未登记路径都不带。
+///
+/// # 判据（AC-S-190 步骤 3 / 4）
+///
+/// - `GET /api/rbac/me/permissions`（v1）→ 200 + `Deprecation: true` + 合法 `Sunset`；
+/// - `GET /api/rbac/v2/me/permissions`（v2）→ 200 且**两个头都不出现**
+///   （按路径精确匹配，v2 不继承 v1 的弃用标记）；
+/// - `GET /api/leave/requests`（**未登记弃用**）→ 200 且**两个头都不出现**（阴性对照）。
+///
+/// # 为什么这三条路径是**平铺**注册的
+///
+/// 生产的弃用中间件挂在**最外层**（`apply_all_middlewares_with`），此时请求路径
+/// 是**完整路径**（`nest` 剥前缀发生在更内层）—— 平铺注册与合并后的顶层 router 同形，
+/// 所以这里不需要真起一个 rbac / leave router（那两个要真库，见各自的集成用例）。
+#[tokio::test]
+async fn the_rbac_v1_permissions_endpoint_is_deprecated_and_v2_is_not() {
+    let router = axum::Router::new()
+        .route(
+            "/api/rbac/me/permissions",
+            axum::routing::get(|| async { axum::Json(serde_json::json!({"permissions": []})) }),
+        )
+        .route(
+            "/api/rbac/v2/me/permissions",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({"permissions": [], "sources": {}}))
+            }),
+        )
+        .route(
+            "/api/leave/requests",
+            axum::routing::get(|| async { axum::Json(serde_json::json!([])) }),
+        );
+    let router = apply_deprecation_router(router, platform_observability::http::default_deprecations());
+
+    // v1：弃用 ≠ 下线（仍然 200）+ 两个头都在。
+    let (status, headers, body) = send(router.clone(), "/api/rbac/me/permissions").await;
+    assert_eq!(status, StatusCode::OK, "弃用端点必须仍然可用：{body}");
+    assert_eq!(
+        headers.get("deprecation").and_then(|v| v.to_str().ok()),
+        Some("true"),
+        "v1 必须带 `Deprecation: true`（D342）"
+    );
+    let sunset = headers
+        .get(SUNSET_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .expect("v1 必须有 Sunset");
+    // 严格 IMF-fixdate（与 AC-S-036 同一个反解判据）。
+    let format = time::format_description::parse(
+        "[weekday repr:short], [day] [month repr:short] [year] [hour]:[minute]:[second] GMT",
+    )
+    .expect("描述串合法");
+    assert!(
+        time::PrimitiveDateTime::parse(sunset, &format).is_ok(),
+        "Sunset 必须是严格 IMF-fixdate（RFC 8594）；实际：{sunset}"
+    );
+
+    // v2：不继承弃用标记。
+    let (status, headers, _) = send(router.clone(), "/api/rbac/v2/me/permissions").await;
+    assert_eq!(status, StatusCode::OK, "v2 必须可用");
+    assert!(
+        headers.get("deprecation").is_none() && headers.get(SUNSET_HEADER).is_none(),
+        "v2 不得带弃用头（按路径精确匹配，不前缀匹配）"
+    );
+
+    // 阴性对照：未登记弃用的路径（`/api/leave/requests`）不带任何弃用头。
+    let (status, headers, _) = send(router, "/api/leave/requests").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        headers.get("deprecation").is_none(),
+        "未登记弃用的路径不得带 Deprecation（阴性对照）"
+    );
+    assert!(
+        headers.get(SUNSET_HEADER).is_none(),
+        "未登记弃用的路径不得带 Sunset（阴性对照）"
+    );
+}
