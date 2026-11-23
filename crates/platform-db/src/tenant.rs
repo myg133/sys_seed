@@ -127,6 +127,29 @@ impl TenantDb {
         qualified_table(&self.schema, name)
     }
 
+    /// **仅供测试**：直接借一条底层连接。
+    ///
+    /// # ⚠️ 为什么需要它（TD-082）
+    ///
+    /// `SET LOCAL` 语义（`set_config(..., true)`）是这个平台租户隔离的地基：
+    /// 事务结束后租户值必须**自动清除**，否则连接归还池后，
+    /// 下一个借到它的请求会带着**上一个租户**的上下文 → RLS 一起失效。
+    ///
+    /// 验证它需要「在**同一条物理连接**上、事务提交**之后**读 `app.tenant_id`」——
+    /// 而本类型的读接口**强制**带租户作用域（那是有意的，业务模块不得绕开）。
+    /// → 留一个显式的测试旁路。
+    ///
+    /// # ⚠️ 生产代码**不得**调用
+    ///
+    /// 它绕开租户作用域，调用方拿到的连接上**没有** `app.tenant_id`
+    /// （RLS 会返回 0 行）。仅用于「验证隔离机制本身」的测试。
+    #[doc(hidden)]
+    pub async fn test_acquire(
+        &self,
+    ) -> DbResult<sqlx::pool::PoolConnection<sqlx::Postgres>> {
+        Ok(self.pool.acquire().await?)
+    }
+
     /// 单次查询：返回全部行。
     pub async fn fetch_all<T>(&self, ctx: &RequestContext, query: &TenantQuery) -> DbResult<Vec<T>>
     where

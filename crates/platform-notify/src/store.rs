@@ -441,6 +441,42 @@ impl NotifyStore {
     /// 两个 worker 同时取：第一个锁住前 N 行，第二个**跳过**已锁的行去取后面的
     /// → 天然支持多实例（AC-S-170 步骤 2）。
     ///
+    /// 清理**终态**的过期投递记录（TD-083）。
+    ///
+    /// # ⚠️ 为什么需要它
+    ///
+    /// `platform_notify_delivery` 每次入队加一行，而**没有任何删除路径** ——
+    /// 长期运行的实例会无限增长。同项目的 `platform_rate_limit` 有
+    /// `xtask observability prune-rate-limit`，本表此前没有对应命令。
+    ///
+    /// # 只删**终态**，且只删**足够旧**的
+    ///
+    /// - `delivered` / `dead_letter` 是终态（D298 的状态机），删了不影响投递；
+    /// - `pending` / `delivering` **绝不删** —— 它们还在队列里（或可能被回收重投）。
+    ///
+    /// 保留期由调用方（`xtask notify prune`）按运维需要传。
+    ///
+    /// # 返回
+    ///
+    /// 删除的行数。
+    pub async fn prune_terminal_deliveries(
+        &self,
+        ctx: &RequestContext,
+        older_than_days: i64,
+    ) -> DbResult<u64> {
+        // ⚠️ 至少保留 1 天：传 0 或负数时不能把刚投递成功的记录立刻删掉
+        // （排障时最需要看的正是最近那批）。与 observability 的 prune 同款纪律。
+        let keep_days = if older_than_days <= 0 { 1 } else { older_than_days };
+        let query = TenantQuery::new(format!(
+            "DELETE FROM {table}               WHERE tenant_id = {{tenant}}                 AND status IN (?, ?)                 AND updated_at < now() - make_interval(days => ?::int)",
+            table = self.db.table(DELIVERY_TABLE)
+        ))
+        .bind(status::DELIVERED.to_string())
+        .bind(status::DEAD_LETTER.to_string())
+        .bind(keep_days);
+        self.db.execute(ctx, &query).await
+    }
+
     /// # ⚠️ 认领在**同一个事务**里完成
     ///
     /// 取 + 置 `delivering` + `attempt_count + 1` 必须原子 ——

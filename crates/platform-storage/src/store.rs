@@ -619,6 +619,73 @@ impl StorageStore {
         Ok(row.n)
     }
 
+    /// 清理**终态**的过期任务及其错误明细（TD-083）。
+    ///
+    /// # ⚠️ 为什么需要它
+    ///
+    /// `platform_storage_job` 与 `platform_storage_job_error` 都是「每任务/每失败行一行」，
+    /// 而**没有任何删除路径** —— 长期运行的实例会无限增长。
+    /// 同项目的 `platform_rate_limit` 有 `xtask observability prune-rate-limit`，
+    /// 本表此前没有对应命令。
+    ///
+    /// # 顺序：先删错误，再删任务
+    ///
+    /// `platform_storage_job_error.job_id` 引用任务（**逻辑引用，无外键**），
+    /// 所以必须先删明细再删主表 —— 反过来会留下孤儿错误行。
+    ///
+    /// # 只删**终态**，且只删**足够旧**的
+    ///
+    /// - `completed` / `failed` 是终态，删了不影响正在跑的导入导出；
+    /// - `pending` / `running` **绝不删**。
+    ///
+    /// # 返回
+    ///
+    /// `(删除的任务数, 删除的错误明细数)`。
+    pub async fn prune_terminal_jobs(
+        &self,
+        ctx: &RequestContext,
+        older_than_days: i64,
+    ) -> DbResult<(u64, u64)> {
+        // ⚠️ 至少保留 1 天（同 notify 的纪律：排障最需要看最近那批）。
+        let keep_days = if older_than_days <= 0 { 1 } else { older_than_days };
+
+        // ① 先删错误明细：只删「属于终态且足够旧的任务」的那些行。
+        //
+        // ⚠️ `{tenant}` **只能出现一次**（`TenantQuery::render` 强制恰好一个）。
+        // 外层 DELETE 不再写租户条件 —— 它的 `job_id IN (子查询)` 已被子查询限定在
+        // 本租户内（子查询的租户条件 + RLS 双重保证），与 `claim_batch` 同款处理。
+        let errors_query = TenantQuery::new(format!(
+            "DELETE FROM {errors} \
+              WHERE job_id IN ( \
+                SELECT id FROM {jobs} \
+                 WHERE tenant_id = {{tenant}} \
+                   AND status IN (?, ?) \
+                   AND updated_at < now() - make_interval(days => ?::int) \
+              )",
+            errors = self.db.table(JOB_ERROR_TABLE),
+            jobs = self.db.table(JOB_TABLE)
+        ))
+        .bind(crate::model::job_status::COMPLETED.to_string())
+        .bind(crate::model::job_status::FAILED.to_string())
+        .bind(keep_days);
+        let errors_deleted = self.db.execute(ctx, &errors_query).await?;
+
+        // ② 再删任务本体。
+        let jobs_query = TenantQuery::new(format!(
+            "DELETE FROM {jobs} \
+              WHERE tenant_id = {{tenant}} \
+                AND status IN (?, ?) \
+                AND updated_at < now() - make_interval(days => ?::int)",
+            jobs = self.db.table(JOB_TABLE)
+        ))
+        .bind(crate::model::job_status::COMPLETED.to_string())
+        .bind(crate::model::job_status::FAILED.to_string())
+        .bind(keep_days);
+        let jobs_deleted = self.db.execute(ctx, &jobs_query).await?;
+
+        Ok((jobs_deleted, errors_deleted))
+    }
+
     /// 读目标实体表里某任务写入的行（导出用）。
     pub async fn list_probe_rows(
         &self,

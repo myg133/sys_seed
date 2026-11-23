@@ -16,6 +16,95 @@ use platform_notify::store::NewDelivery;
 use platform_notify::worker::{PlatformChannel, tick};
 use std::sync::Arc;
 
+/// **`prune_terminal_deliveries` 只删终态且足够旧的**（TD-083 的判据）。
+///
+/// # 防什么
+///
+/// 本表每次入队加一行，原**没有删除路径** → 无限增长。
+/// 但清理**绝不能误删**还在队列里的记录 —— 那会等于丢消息。
+///
+/// # 判据
+///
+/// 造 4 条：`delivered` 旧 / `dead_letter` 旧 / `pending` 旧 / `delivered` 新。
+/// `prune(older_than_days = 7)` 后：
+/// - 两条**旧的终态**被删；
+/// - `pending` **保留**（还在队列，删了就是丢消息）；
+/// - `delivered` 新的**保留**（还在保留期内）。
+#[tokio::test]
+#[ignore = "需要 base_test 库：scripts/test-integration.sh 会用 --include-ignored 跑到"]
+async fn prune_removes_only_old_terminal_deliveries() {
+    let fixture = setup().await;
+    fixture
+        .admin
+        .execute("DELETE FROM platform_notify_delivery")
+        .await;
+
+    // 造 4 条，`updated_at` 手工指定（序列化后由 `insert_delivery` 覆盖，
+    // 所以用 SQL 直改）。
+    seed_pending(&fixture, 4).await;
+    // 按 id 排序取 4 个 id。
+    let ids: Vec<String> = fixture
+        .admin
+        .query_text("SELECT id::text FROM platform_notify_delivery ORDER BY id")
+        .await;
+
+    // [0] delivered + 30 天前 → 该删
+    // [1] dead_letter + 30 天前 → 该删
+    // [2] pending + 30 天前 → **不该删**
+    // [3] delivered + 1 小时前 → **不该删**（保留期内）
+    fixture
+        .admin
+        .execute(&format!(
+            "UPDATE platform_notify_delivery SET status='delivered', updated_at = now() - interval '30 days' WHERE id='{}'",
+            ids[0]
+        ))
+        .await;
+    fixture
+        .admin
+        .execute(&format!(
+            "UPDATE platform_notify_delivery SET status='dead_letter', updated_at = now() - interval '30 days' WHERE id='{}'",
+            ids[1]
+        ))
+        .await;
+    fixture
+        .admin
+        .execute(&format!(
+            "UPDATE platform_notify_delivery SET status='pending', updated_at = now() - interval '30 days' WHERE id='{}'",
+            ids[2]
+        ))
+        .await;
+    fixture
+        .admin
+        .execute(&format!(
+            "UPDATE platform_notify_delivery SET status='delivered', updated_at = now() - interval '1 hour' WHERE id='{}'",
+            ids[3]
+        ))
+        .await;
+
+    let deleted = fixture
+        .service
+        .store()
+        .prune_terminal_deliveries(&fixture.ctx_a(), 7)
+        .await
+        .expect("清理应当成功");
+    assert_eq!(deleted, 2, "应当恰好删 2 条（两条旧的终态）");
+
+    let remaining: Vec<String> = fixture
+        .admin
+        .query_text("SELECT status FROM platform_notify_delivery ORDER BY status")
+        .await;
+    assert_eq!(
+        remaining,
+        vec!["delivered".to_string(), "pending".to_string()],
+        "必须剩下「新增的那条 delivered」与「pending」—— pending 删了就是丢消息"
+    );
+
+    fixture
+        .admin
+        .execute("DELETE FROM platform_notify_delivery")
+        .await;
+}
+
 /// **`claim_batch` 必须严格尊重 `batch`**（QA 复查 M3 的判据）。
 ///
 /// # ⚠️ 为什么必须有这条
