@@ -466,23 +466,18 @@ pub fn router<S2>(state: Arc<RbacState>) -> Router<S2> {
         .route("/users/{user_id}/roles/{role_id}", delete(unbind_user_role))
         .route_layer(require_permission("rbac:user-role:write"));
 
-    // 权限点注册表 —— 声明了 `rbac:permission:read` 就**必须**真的鉴权。
+    // 权限点注册表 —— **豁免**：任何已认证用户都可读（前端 `can()` 靠它）。
     //
-    // ⚠️ **QA 复查修正**：原实现把它当「豁免」（注释写「任何已认证用户都可读」），
-    // 与 manifest 声明矛盾 —— C-5 契约检查因此报
-    // 「`rbac:permission:read` is declared but has no authorization call site」。
+    // ⚠️ **为什么豁免**（REQ-009 AC 明文要求，**不改**）
     //
-    // # 为什么选择「补鉴权」而不是「删权限点」
+    // `BA/demands/REQ-009-rbac/acceptance.md` 的「★ 豁免：权限点注册表查询」：
+    // 「`GET /api/rbac/permissions`（读注册表）**不需要**管理权限点 ——
+    // **任何已认证用户都应能读**。否则前端 `can()` 无从判断」。
     //
-    // 这个端点返回**全平台**的权限点注册表（code / name / kind / condition），
-    // 是**管理视图**，不是前端 `can()` 的依赖 ——
-    // 前端判权限用的是下面那个 `/me/permissions`（只返回**本人**的有效权限点），
-    // 它仍然是豁免的（否则会出现「要先有权限才能问有没有权限」的循环）。
-    //
-    // → 两个端点职责不同：注册表要管理权限，本人的权限点不要。
-    let registry = Router::new()
-        .route("/permissions", get(list_permissions))
-        .route_layer(require_permission("rbac:permission:read"));
+    // ⚠️ 因此 `rbac:permission:read` 这个权限点**声明了但没有调用点**是
+    // **已知且已接受**的（`BA/plan/tech-debt.md` 的 TD-003 已登记）。
+    // C-5 对它的报错属于**误报** → 见 `tests/contract_c5.rs` 的豁免清单。
+    let registry = Router::new().route("/permissions", get(list_permissions));
 
     // 当前用户的有效权限点 —— **豁免**权限点要求（但**要求已认证**）。
     //
