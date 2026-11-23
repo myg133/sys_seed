@@ -186,6 +186,14 @@ v1 必须进 `default_deprecations()`（`crates/platform-observability/src/http.
 
 ## 3. 平台改动清单（AC-S-186 + D353 的判据）
 
+> ⚠️ **权威口径以 `metrics-report.md` 的「平台改动分类」为准（实现期实测 28 项）。**
+> 下表是**设计期的计划集**（9 行）。实现期新增的必需项（权限点种子迁移、
+> i18n 文案、shell tsconfig、测试文件等）已在度量报告里逐项列出并归因，
+> 差异表也写在那里。
+> **AC-S-186 的判据是「实际 diff 集合 == 度量报告的分类表」**，不是「== 本表」——
+> 本表的作用是记录**设计意图**，不是充当 diff 的白名单。
+> 理由：设计期不可能穷举「装一个模块到底要动几个文件」（这正是本需求要量出来的东西）。
+
 > ⚠️ 实现时**逐项填实**。判定：`git diff --name-only BASE_IMPL | grep -v '^modules/leave/'`
 > 的输出必须与**本表逐项相等**（多一个 → A 类不为 0 → AC-S-186 不成立）。
 
@@ -233,6 +241,35 @@ REQ-015 本身也**没有任何**模板种子迁移 —— 平台约定是租户
 
 → 部署清单必须包含：「租户初始化时种入 `leave_decision` 模板」。
 → 测试里用 `create_template` 在真表种了两条（计数仍查真表）。
+
+### 模块建表迁移**必须手工应用**（实现期实测，TD-089）
+
+**这是本需求实测出来的最严重缺口，且是既存问题，不是本需求引入的。**
+
+`base migrate up` **只跑根 `migrations/`**，不跑 `modules/*/migrations/`
+（`crates/platform-server/src/main.rs:312` + `config.rs:295,421` 默认 `./migrations`）。
+而 `cargo xtask tenant-policies` 会按 manifest 的 `tenantScoped` 对模块表执行
+`ALTER TABLE … ENABLE ROW LEVEL SECURITY`（`crates/platform-db/src/rls.rs:139`，**不带 `IF EXISTS`**）。
+
+**干净库实测（2026-11-23）**：
+
+```console
+$ CREATE DATABASE base_test_fresh;
+$ base migrate up                       → exit 0
+$ select to_regclass('public.leave_request')           → false
+$ select to_regclass('public.sandbox_tenant_item')     → false
+$ cargo xtask tenant-policies           → exit 1
+  错误：cannot apply the policies of module `leave`:
+        relation "public.leave_request" does not exist
+```
+
+**`develop`（`1be47f5`）在同一个干净库上同样失败**（报 `sandbox_tenant_item`，exit=1）
+→ 既存缺口。更早的 `feature-meta/req-016-e2e.md:131` 已记录过这个手工 workaround。
+
+→ **部署前提必须包含**：`psql -f modules/*/migrations/*.up.sql`（**在** `tenant-policies` **之前**）。
+→ ⚠️ **连带后果**：`cargo xtask tenant-policies --check` 在 `base_test` 上的绿灯**依赖测试夹具已建表**，
+   属**假绿**。判断这条守卫是否真的过，必须在**干净库**上跑一次。
+→ 根治见 **TD-089**（让 `migrate up` 遍历 `modules/*/migrations/`）。
 
 ---
 

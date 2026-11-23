@@ -141,7 +141,7 @@ rev 1 让 AC-S-186 与 AC-S-190 共用「实现前」的 `BASE`，
   | ① | `grep -rn "TenantDb\|TenantQuery" modules/leave/backend/src/ \| wc -l` | > 0 | — |
   | ② | `grep -rn "sqlx::query\|sqlx::query_as" modules/leave/backend/src/ \| wc -l` | **== 0** | `crates/platform-db/src/` → **10** |
   | ③ | `grep -rn "require_permission(" modules/leave/backend/src/ \| wc -l` | > 0 | — |
-  | ④ | `grep -rniE "jwt\|jsonwebtoken\|argon2" modules/leave/backend/src/ \| wc -l` | **== 0** | `crates/platform-iam/src/` → **159** |
+  | ④ | `grep -rniE "jwt\|jsonwebtoken\|argon2" modules/leave/backend/src/ \| wc -l` | **== 0** | `crates/platform-iam/src/` → **163**（rev 2 曾记 159，实现期实测修正，见独立复核 F-12；两种都 >0，判定不受影响） |
   | ⑤ | `grep -rn "AuditEvent\|AuditSink" modules/leave/backend/src/ \| wc -l` | > 0 | — |
   | ⑥ | `grep -rn "platform_audit_log\|platform_audit_append" modules/leave/backend/src/ \| wc -l` | **== 0** | `crates/platform-audit/src/sink.rs` → **> 0** |
   | ⑦ | `grep -rn "NotificationSender\|NotificationMessage" modules/leave/backend/src/ \| wc -l` | > 0 | — |
@@ -281,7 +281,7 @@ rev 1 让 AC-S-186 与 AC-S-190 共用「实现前」的 `BASE`，
   | 依赖面 | `grep -E '^platform-' modules/leave/Cargo.toml` |
   | 契约检查 | `cargo xtask check-modules && cargo xtask check-deps && cargo xtask capabilities --check`（三个退出码） |
   | 全量测试 | 见下方固定循环（逐 crate，**必带** `--include-ignored`） |
-  | E2E skipped | `npx playwright test e2e/leave.spec.ts --reporter=json \| jq '[..\|.skipped?//empty\|select(.!=0)]\|length'` |
+  | E2E skipped | `npx playwright test e2e/leave.spec.ts --reporter=json \| jq '.stats.skipped'`（实测输出 `0`）<br>⚠️ 原写法 `[..\|.skipped?//empty\|select(.!=0)]\|length` 在 **jq 1.8.2 上是语法错误**（`?//` 被解析成解构备选运算符）——实现期实测修正 |
 
   全量测试的固定循环（**逐 crate 跑，本仓 `cargo test --workspace` 必然失败**）：
   ```bash

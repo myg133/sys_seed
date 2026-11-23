@@ -198,8 +198,12 @@ AC-029 说「不修改平台核心任何一行」，D349 又要造一次平台�
 
 `design-summary.md` 的「平台改动清单」必须：
 1. 逐文件列出（路径 + 改了什么 + 为什么是 AC-S-190 必需的）；
-2. 与 `git diff BASE -- crates/` 的实际输出**逐项对应**
+2. 与**全仓 diff 减去 `modules/leave/`** 的实际输出**逐项对应**
    （多一个文件 → AC-S-186 不成立）；
+   > ⚠️ rev 2 原文写的是 `git diff BASE -- crates/`，**射程太小**：实现期的 30 项里
+   > 有 `apps/`、`packages/`、`migrations/`、`scripts/`、根 `Cargo.toml` 等，
+   > 只盯 `crates/` 会全部漏判。已改为与 AC-S-186 一致的口径（独立复核 F-13）。
+   > 确切命令：`git diff --name-only 9bcfbcb 52b9314 | grep -v '^modules/leave/' | grep -v '^feature-meta/'`
 3. 每个文件都要能回答：「不删它，AC-S-190 还能验吗？」答案是「不能」才算必需。
 
 ### ⚠️ 为什么必须这么严

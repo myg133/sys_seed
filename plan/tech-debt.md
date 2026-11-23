@@ -1818,3 +1818,115 @@ PostgreSQL 里显式事务内的 `SET` 也会被 `ROLLBACK` 回滚，
   「列出持有某权限点的用户」（按租户 + 数据范围过滤）的查询。
   ⚠️ 注意性能与泄露面：这会暴露「谁有管理权限」，需要权限点自身保护。
 - **优先级**: P2（不影响已交付功能；但「审批流类业务」的常见需求缺一块）
+
+---
+
+## TD-089: 模块建表迁移**没有任何部署/启动路径会应用**，全新环境部署会硬失败
+
+- **发现于**: REQ-020 实现阶段的独立复核（F-01）+ 我在干净库上的实测复现
+- **现状**:
+  - `base migrate up` 只加载**一个**目录：`crates/platform-server/src/main.rs:312`
+    `load_migrator(&config.migrations_dir)`，该值来自 `BASE_MIGRATIONS_DIR`，
+    默认 `./migrations`（`crates/platform-server/src/config.rs:295,421`）；
+  - `deploy/compose.prod.yaml:94` 只跑 `migrate up`、`:115` 只跑 `tenant-policies`；
+    helm 同理（`deploy/helm/base-platform/templates/policies-job.yaml:44`）；
+  - E2E 链（`scripts/e2e-server.sh:96,132`）同样只跑根 `migrations/`；
+  - **唯一**应用 `modules/*/migrations/` 的地方是**测试夹具**：
+    `crates/platform-server/tests/leave_real_db.rs:300-329`；
+    `modules/sandbox/tests/*`、`platform-rbac/tests/common` 等也各自手抄了一遍。
+- **实测（干净库，2026-11-23）**:
+  ```
+  CREATE DATABASE base_test_fresh;
+  base migrate up                                   → exit 0
+  to_regclass('public.leave_request')               → false
+  to_regclass('public.sandbox_tenant_item')         → false
+  cargo xtask tenant-policies                       → exit 1
+    错误：relation "public.leave_request" does not exist
+  ```
+  根因链：`crates/platform-db/src/rls.rs:139` 生成 `ALTER TABLE {qualified} ENABLE ROW LEVEL SECURITY`
+  **不带 `IF EXISTS`**，`apply_policies` 用 `?` 冒泡（`rls.rs:171-182`）→ 缺表即硬失败。
+- **⚠️ 这是既存缺口，不是 REQ-020 引入的**：用 `develop`（`1be47f5`）的 xtask 在同一个干净库上
+  跑同一条命令 → **同样 exit=1**，报 `sandbox_tenant_item does not exist`
+  （更早的 `feature-meta/req-016-e2e.md:131` 已记录过这个手工 workaround）。
+- **影响**:
+  1. 全新环境部署**必须手工** `psql < modules/*/migrations/*.up.sql`，否则在 `tenant-policies` 步停住；
+  2. 手工步骤意味着「模块迁移有没有跑」没有记账，漏跑的表在运行期表现为 500；
+  3. 连带使 `cargo xtask tenant-policies --check` 在 `base_test` 上的绿灯**依赖测试夹具建过表**
+     —— 这是**假绿**，新环境上立刻暴露。
+- **要做需要什么**: 让 `migrate up` 遍历 `modules/*/migrations/`（按模块名排序、统一版本表，
+  或每模块一张 `_sqlx_migrations_<module>`），并把模块迁移纳入 `tenant-policies` 的前置校验
+  （表不存在时给可诊断错误而不是裸 SQL 失败）。
+- **优先级**: **P1**（这是部署正确性问题，且直接决定「加一个模块到底要动几步」）
+
+---
+
+## TD-090: `NotificationSender::send` 返回 `impl Future` → trait 不可 dyn，每个消费方自写装箱 wrapper
+
+- **发现于**: REQ-020 实现阶段的独立复核（F-03）
+- **现状**: `crates/platform-core/src/extension/notification.rs:81-91` 的 `send()` 返回
+  `impl Future`（RPITIT）→ `Arc<dyn NotificationSender>` 编译不过（E0038）。
+  于是每个消费方必须自造一层 `Notifier` + blanket impl 才能把它存进状态：
+  `modules/leave/backend/src/service.rs:112-143`（约 18 行）。
+  对比同目录 `AuditSink` 是**可以** `Arc<dyn>` 的（`leave` 直接持有），两者不一致。
+- **影响**: 这 18 行/模块会持续摊薄「加一个模块要写多少样板」这个指标；
+  也说明扩展点的 trait 设计没有按「可注入」的同一标准审过。
+- **要做需要什么**: 把 `send` 改成返回平台已有的 `BoxFuture`（`leave` 已在用），
+  或提供 `Arc<dyn NotificationSender>` 的适配器由平台出。
+- **优先级**: P2（不阻塞，但每个新模块都要还这笔债）
+
+---
+
+## TD-091: 列表接口**无 cursor 分页**，响应信封与平台其余列表不一致
+
+- **发现于**: REQ-020 实现阶段的独立复核（F-05）
+- **现状**: `design-summary.md` §1.3 设计为「列表（cursor 分页）」、§1.4 把
+  「分页 = 平台 cursor 契约」列为复用项；实际实现返回**裸 JSON 数组** + `limit`
+  （`modules/leave/backend/src/http.rs:218-232`），
+  `modules/leave/backend/src/repository.rs:42-52` 的注释自认
+  「cursor 的编码形态平台侧还没有统一编解码器」。AC-S-189 的测试直接 `listed.as_array()`。
+- **影响**: 每个消费方各自发明列表形状，前端无法共用分页组件；
+  「平台有 cursor 契约」这个复用假设**不成立**（该缺口此前只写在代码注释里，未登记）。
+- **要做需要什么**: 平台提供 `List` 信封（`items` + `next_cursor`）与 cursor 编解码器。
+- **优先级**: P2
+
+---
+
+## TD-092: 业务写库与审计**非原子**，审计故障会「数据已生效但返回 500」
+
+- **发现于**: REQ-020 实现阶段的独立复核（F-04）
+- **现状**: `modules/leave/backend/src/service.rs:296-301`（先 `repository.insert` 再 `record`）、
+  `:413-423`（先 `repository.transition` 再 `record`）；`record` 失败映射为
+  `LeaveError::Audit` → 500（`service.rs:172-174`）。两者不在同一事务里。
+- **影响**: 审计 sink 故障时客户端收到 500 但状态已推进/单据已建；
+  重试会得到 409（重复提交）或重复建单（建单无幂等键）。AC-S-189 的计数表不覆盖该路径。
+- **要做需要什么**: 「写库 + 写审计」同事务，或 500 的 detail 区分「已生效但审计失败」，
+  并给建单加幂等键。平台侧应给出「业务事务 + 审计」的组合原语，否则每个模块都要自己处理。
+- **优先级**: P2
+
+---
+
+## TD-093: 平台审计测试夹具**全表 DELETE**，使「查真表」类判据无法事后复核
+
+- **发现于**: REQ-020 实现阶段的独立复核（F-11）
+- **现状**: `crates/platform-audit/tests/common/mod.rs:169-182` 的 `reset_audit()` 执行
+  **无租户条件**的 `DELETE FROM platform_audit_log` / `platform_audit_archive` /
+  `platform_audit_chain_state`。
+- **实测后果**: `base_test` 里 `leave_request` 有 46 行（4 种状态齐全）、
+  `platform_audit_chain_state` 只剩 `tenant-a` / `tenant-req018-audit`，
+  `platform_audit_log` 中 `object_type like 'leave%'` 行数为 **0** —— 被别的 crate 的夹具抹掉。
+- **影响**: AC-S-189 声称「查真表」，但事后任何人都查不到，削弱证据链可复核性。
+  ⚠️ **这不是 REQ-020 的实现缺陷**（正是靠这条才排除了「装配没写审计」的误判）。
+- **要做需要什么**: 改成按租户/按 id 清理，或每个 crate 用独立的 schema/库。
+- **优先级**: P2（测试卫生；但它会让未来的「真库判据」持续可疑）
+
+---
+
+## TD-094: 请假审批**允许自批**（申请人 == 审批人）
+
+- **发现于**: REQ-020 实现阶段的独立复核（F-14）
+- **现状**: `modules/leave/backend/src/service.rs:352-386` 只校验状态机与权限点；
+  若同一用户同时持有 `leave:request:approve`，可以批准自己的单。
+- **影响**: 违反常见的「职责分离 / 四眼原则」。规格未要求，故不判缺陷。
+- **要做需要什么**: `decide` 增加 `applicant_id != decided_by` 校验（可配置开关），
+  并补一条反例测试。
+- **优先级**: P3（规格未要求；加它会改变 AC-S-189 的计数表预期）
