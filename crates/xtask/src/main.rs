@@ -127,6 +127,26 @@ fn run_storage(args: &xtask::cli::StorageArgs) -> Result<ExitCode> {
             );
             Ok(ExitCode::SUCCESS)
         }
+        xtask::cli::StorageAction::Prune(prune) => {
+            let database_url = database_url_of(prune.database_url.clone())?;
+            let db = runtime.block_on(async {
+                platform_db::TenantDb::connect(&database_url, platform_db::DbOptions::default())
+                    .await
+            })?;
+            let store = platform_storage::store::StorageStore::new(db);
+            let ctx = platform_core::RequestContext::new().with_tenant(prune.tenant.clone());
+            let (jobs, errors) = runtime.block_on(async {
+                store
+                    .prune_terminal_jobs(&ctx, prune.older_than_days)
+                    .await
+            })?;
+            println!(
+                "存储任务清理完成：删除 {} 个任务、{} 条错误明细（保留期 {} 天；\
+                 只删 completed/failed）",
+                jobs, errors, prune.older_than_days.max(1)
+            );
+            Ok(ExitCode::SUCCESS)
+        }
     }
 }
 
@@ -159,6 +179,26 @@ fn run_notify(args: &xtask::cli::NotifyArgs) -> Result<ExitCode> {
                 } else {
                     ""
                 }
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        xtask::cli::NotifyAction::Prune(prune) => {
+            let database_url = database_url_of(prune.database_url.clone())?;
+            let db = runtime.block_on(async {
+                platform_db::TenantDb::connect(&database_url, platform_db::DbOptions::default())
+                    .await
+            })?;
+            let store = platform_notify::store::NotifyStore::new(db);
+            let ctx = platform_core::RequestContext::new().with_tenant(prune.tenant.clone());
+            let deleted = runtime.block_on(async {
+                store
+                    .prune_terminal_deliveries(&ctx, prune.older_than_days)
+                    .await
+            })?;
+            println!(
+                "通知清理完成：删除 {} 条投递记录（保留期 {} 天；只删 delivered/dead_letter）",
+                deleted,
+                prune.older_than_days.max(1)
             );
             Ok(ExitCode::SUCCESS)
         }

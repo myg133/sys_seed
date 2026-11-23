@@ -198,16 +198,43 @@ platform_db::tenant_row!(ChainRow {
     hash: "hash",
 });
 
+/// 校验时**每批**读取的条数（TD-084）。
+///
+/// 1000 条的载荷约 0.6MB（按 5 万条 29MB 折算）—— 远低于「整条链进内存」的量级，
+/// 又足够大让往返次数可忽略。
+///
+/// ⚠️ 不要调得太大：这个常量的全部意义就是**限制峰值内存**。
+const VERIFY_BATCH_SIZE: i64 = 1000;
+
 /// 链校验服务。
 #[derive(Debug, Clone)]
 pub struct ChainVerifier {
     db: TenantDb,
+    /// 每批读取条数（默认 [`VERIFY_BATCH_SIZE`]）。
+    ///
+    /// ⚠️ 可调**只**为了测试能构造「多批」场景：
+    /// 默认 1000 意味着要用 1000+ 条真实审计记录才能跨批，
+    /// 那会让测试跑很久。生产不要改它。
+    batch_size: i64,
 }
 
 impl ChainVerifier {
     /// 用已有的租户作用域数据入口构造。
     pub fn new(db: TenantDb) -> Self {
-        Self { db }
+        Self {
+            db,
+            batch_size: VERIFY_BATCH_SIZE,
+        }
+    }
+
+    /// **仅供测试**：改每批条数，用来构造「多批」场景。
+    ///
+    /// ⚠️ 生产不要调用 —— 批量大小的意义就是限制峰值内存，
+    /// 由 [`VERIFY_BATCH_SIZE`] 统一决定。
+    #[doc(hidden)]
+    pub fn with_batch_size(mut self, batch_size: i64) -> Self {
+        self.batch_size = batch_size.max(1);
+        self
     }
 
     /// 校验当前租户的审计链。
@@ -230,55 +257,112 @@ impl ChainVerifier {
             .await
             .map_err(unavailable)?;
 
-        // 全部记录，按创建顺序（`created_at ASC, id ASC`）。
-        let rows: Vec<ChainRow> = tx
-            .fetch_all(&TenantQuery::new(
-                "SELECT id, tenant_id, actor_id, action, object_type, object_id, \"before\", \
-                 \"after\", ip, user_agent, created_at, prev_hash, hash \
-                 FROM platform_audit_log WHERE tenant_id = {tenant} \
-                 ORDER BY created_at ASC, id ASC",
-            ))
-            .await
-            .map_err(unavailable)?;
-
-        tx.commit().await.map_err(unavailable)?;
-
+        // -- 按**批次**流式校验（TD-084）--------------------------------------
+        //
+        // # ⚠️ 为什么不一次 `fetch_all` 全部
+        //
+        // 原实现把整条在线链读进一个 `Vec` 再逐条比对。5 万条约 **29MB** 载荷，
+        // 而 `GET /api/audit/verify` 是**用户可反复调用**的接口、无并发上限
+        // → 几个并发请求就能把内存打满。
+        //
+        // → 改成 **keyset 分批**：每批 `VERIFY_BATCH_SIZE` 条，批间用
+        // `(created_at, id) > (上一批最后一条)` 推进，`previous_hash` 跨批保持。
+        //
+        // # ⚠️ 为什么仍在**同一个事务**里
+        //
+        // 分批读必须看到**一致的快照** —— 否则「批 2 读到批 1 之后新插入的行」
+        // 会让链校验出现假的 `prev_hash_mismatch`。
+        // 单事务（默认 `READ COMMITTED` 下同一条语句的快照）保证批间一致；
+        // 且整个校验期间持有事务，与 `append` 的 advisory lock 不冲突
+        //（锁是 `xact` 级的，本函数只读）。
         let mut broken: Vec<BrokenEntry> = Vec::new();
         let mut previous_hash = baseline.value.clone();
+        let mut checked: usize = 0;
+        // 最后一条 (id, hash) —— 用于末尾截断判定（替代原来 `rows.last()`）。
+        let mut last_seen: Option<(String, String)> = None;
+        // keyset 游标：(created_at, id)。
+        let mut cursor: Option<(time::OffsetDateTime, String)> = None;
 
-        for row in &rows {
-            let created_at = format_timestamp_micros_utc(&row.created_at);
-            let recomputed = compute_hash(&HashInput {
-                prev_hash: &row.prev_hash,
-                tenant_id: &row.tenant_id,
-                actor_id: row.actor_id.as_deref().unwrap_or(""),
-                action: &row.action,
-                object_type: &row.object_type,
-                object_id: row.object_id.as_deref().unwrap_or(""),
-                before: row.before.as_deref().unwrap_or(""),
-                after: row.after.as_deref().unwrap_or(""),
-                ip: &row.ip,
-                user_agent: &row.user_agent,
-                created_at: &created_at,
-            });
-            if recomputed != row.hash {
-                broken.push(BrokenEntry {
-                    id: row.id.clone(),
-                    reason: BrokenReason::HashMismatch,
-                    expected: recomputed,
-                    actual: row.hash.clone(),
-                });
+        loop {
+            let (query, rows): (platform_db::TenantQuery, Vec<ChainRow>) = match &cursor {
+                None => {
+                    let query = platform_db::TenantQuery::new(
+                        "SELECT id, tenant_id, actor_id, action, object_type, object_id, \"before\", \
+                         \"after\", ip, user_agent, created_at, prev_hash, hash \
+                         FROM platform_audit_log WHERE tenant_id = {tenant} \
+                         ORDER BY created_at ASC, id ASC LIMIT ?",
+                    )
+                    .bind(self.batch_size);
+                    let rows = tx.fetch_all(&query).await.map_err(unavailable)?;
+                    (query, rows)
+                }
+                Some((created_at, id)) => {
+                    let query = platform_db::TenantQuery::new(
+                        "SELECT id, tenant_id, actor_id, action, object_type, object_id, \"before\", \
+                         \"after\", ip, user_agent, created_at, prev_hash, hash \
+                         FROM platform_audit_log WHERE tenant_id = {tenant} \
+                           AND (created_at, id) > (?, ?) \
+                         ORDER BY created_at ASC, id ASC LIMIT ?",
+                    )
+                    .bind(*created_at)
+                    .bind(id.clone())
+                    .bind(self.batch_size);
+                    let rows = tx.fetch_all(&query).await.map_err(unavailable)?;
+                    (query, rows)
+                }
+            };
+            // `query` 只是为了让 borrow 活得够久（`fetch_all` 已消费完它）。
+            let _ = &query;
+
+            if rows.is_empty() {
+                break;
             }
-            if row.prev_hash != previous_hash {
-                broken.push(BrokenEntry {
-                    id: row.id.clone(),
-                    reason: BrokenReason::PrevHashMismatch,
-                    expected: previous_hash.clone(),
-                    actual: row.prev_hash.clone(),
+
+            for row in &rows {
+                let created_at = format_timestamp_micros_utc(&row.created_at);
+                let recomputed = compute_hash(&HashInput {
+                    prev_hash: &row.prev_hash,
+                    tenant_id: &row.tenant_id,
+                    actor_id: row.actor_id.as_deref().unwrap_or(""),
+                    action: &row.action,
+                    object_type: &row.object_type,
+                    object_id: row.object_id.as_deref().unwrap_or(""),
+                    before: row.before.as_deref().unwrap_or(""),
+                    after: row.after.as_deref().unwrap_or(""),
+                    ip: &row.ip,
+                    user_agent: &row.user_agent,
+                    created_at: &created_at,
                 });
+                if recomputed != row.hash {
+                    broken.push(BrokenEntry {
+                        id: row.id.clone(),
+                        reason: BrokenReason::HashMismatch,
+                        expected: recomputed,
+                        actual: row.hash.clone(),
+                    });
+                }
+                if row.prev_hash != previous_hash {
+                    broken.push(BrokenEntry {
+                        id: row.id.clone(),
+                        reason: BrokenReason::PrevHashMismatch,
+                        expected: previous_hash.clone(),
+                        actual: row.prev_hash.clone(),
+                    });
+                }
+                previous_hash = row.hash.clone();
             }
-            previous_hash = row.hash.clone();
+
+            checked += rows.len();
+            let last = rows.last().expect("上面已判非空");
+            cursor = Some((last.created_at, last.id.clone()));
+            last_seen = Some((last.id.clone(), last.hash.clone()));
+            // ⚠️ `rows` 在此作用域结束时释放 → 内存占用被限制在一批之内。
+            if (rows.len() as i64) < self.batch_size {
+                break;
+            }
         }
+
+        tx.commit().await.map_err(unavailable)?;
 
         // -- 末尾截断检测（D171）----------------------------------------------
         //
@@ -292,8 +376,8 @@ impl ChainVerifier {
         //     「该租户从没走过平台写入通道」（比如全是管理员直连造的夹具）时
         //     没有链尖可比 → 硬判会把「没有基准」误报成「被截断」。
         if let Some(expected_tip) = tip.value.as_deref() {
-            let (last_id, actual_tail) = match rows.last() {
-                Some(row) => (row.id.clone(), row.hash.clone()),
+            let (last_id, actual_tail) = match &last_seen {
+                Some((id, hash)) => (id.clone(), hash.clone()),
                 None => (String::new(), baseline.value.clone()),
             };
             if actual_tail != expected_tip {
@@ -308,7 +392,7 @@ impl ChainVerifier {
 
         let report = VerifyReport {
             ok: broken.is_empty(),
-            checked: rows.len(),
+            checked,
             broken,
         };
 

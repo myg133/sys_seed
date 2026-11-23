@@ -102,6 +102,30 @@ pub struct StorageArgs {
 pub enum StorageAction {
     /// 跑一轮导入导出批处理。
     Worker(StorageWorkerArgs),
+    /// 清理**终态**的过期导入导出任务及其错误明细（TD-083）。
+    Prune(StoragePruneArgs),
+}
+
+/// `storage prune` 参数。
+///
+/// # ⚠️ 为什么需要它（TD-083）
+///
+/// `platform_storage_job` 与 `platform_storage_job_error` 都是「每任务/每失败行一行」，
+/// 原**没有任何删除路径**。部署侧用 cron / systemd timer 定时调。
+#[derive(Debug, Args)]
+pub struct StoragePruneArgs {
+    /// 只删**已完成 / 失败**且 `updated_at` 早于这么多天的任务。
+    ///
+    /// ⚠️ `pending` / `running` **永不删**（还在跑）。
+    /// 传 0 或负数 → 按 **1 天**兜底。
+    #[arg(long, default_value_t = 30)]
+    pub older_than_days: i64,
+    /// 租户 ID（**必填** —— 任务表是租户级的，D324）。
+    #[arg(long)]
+    pub tenant: String,
+    /// 数据库连接串；默认取环境变量 `DATABASE_URL`。
+    #[arg(long)]
+    pub database_url: Option<String>,
 }
 
 /// `storage worker` 参数。
@@ -139,6 +163,31 @@ pub struct NotifyArgs {
 pub enum NotifyAction {
     /// 跑**一轮**投递批处理（认领一批 → 逐个投递 → 写回结果）。
     Worker(NotifyWorkerArgs),
+    /// 清理**终态**的过期投递记录（TD-083）。
+    Prune(NotifyPruneArgs),
+}
+
+/// `notify prune` 参数。
+///
+/// # ⚠️ 为什么需要它（TD-083）
+///
+/// `platform_notify_delivery` 每次入队加一行，原**没有任何删除路径** ——
+/// 长期运行的实例会无限增长。同项目的限流表有 `observability prune-rate-limit`，
+/// 本表此前没有对应命令。部署侧用 cron / systemd timer 定时调。
+#[derive(Debug, Args)]
+pub struct NotifyPruneArgs {
+    /// 只删**投递成功 / 死信**且 `updated_at` 早于这么多天的记录。
+    ///
+    /// ⚠️ `pending` / `delivering` **永不删**（还在队列里）。
+    /// 传 0 或负数 → 按 **1 天**兜底（防止把刚投递的记录立刻删掉）。
+    #[arg(long, default_value_t = 30)]
+    pub older_than_days: i64,
+    /// 租户 ID（**必填** —— 投递记录是租户级的，D299）。
+    #[arg(long)]
+    pub tenant: String,
+    /// 数据库连接串；默认取环境变量 `DATABASE_URL`。
+    #[arg(long)]
+    pub database_url: Option<String>,
 }
 
 /// `notify worker` 参数。

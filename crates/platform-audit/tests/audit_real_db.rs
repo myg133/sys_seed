@@ -1161,3 +1161,236 @@ fn scan_dir(root: &std::path::Path, extension: &str, needle: &str) -> Vec<String
 fn scan_text(text: &str, needle: &str) -> usize {
     text.matches(needle).count()
 }
+
+// ---------------------------------------------------------------------------
+// TD-084：分批校验（内存上限）
+// ---------------------------------------------------------------------------
+
+/// **跨批次的链校验必须与单批等价**（TD-084 的判据）。
+///
+/// # 为什么必须有这条
+///
+/// 为限制峰值内存，`verify` 改成了 **keyset 分批**读取
+/// （每批 `VERIFY_BATCH_SIZE`，默认 1000）。
+/// 但若测试里的链都短于一批，**分批逻辑（批间游标 + `previous_hash` 延续）
+/// 一次都不会被执行** —— 那等于这段代码没有判据。
+///
+/// # 做法
+///
+/// 用 `with_batch_size(2)` 把批量调小，造 **5 条**记录 →
+/// 必然跨 **3 批**（2 + 2 + 1）。断言：
+/// 1. `checked == 5`（没漏也没重）；
+/// 2. `ok == true`（批间 `prev_hash` 正确延续，没有假断链）。
+///
+/// ⚠️ 若批间游标写错（比如漏了 `(created_at, id) >`），会出现：
+/// - 重复读同一批 → `checked > 5`；
+/// - 或漏读 → `checked < 5`；
+/// - 或 `previous_hash` 错位 → 假的 `prev_hash_mismatch`。
+/// 三种都会让这条红。
+#[tokio::test]
+async fn verification_across_batches_equals_single_batch() {
+    let _guard = common::serial().await;
+    let fixture = common::setup().await;
+
+    // 造 5 条（每条都走真实写入通道 → 链是完整的）。
+    for index in 0..5 {
+        record(&fixture, TENANT_A, &format!("demo.batch.{index}"))
+            .await
+            .expect("写入应当成功");
+    }
+
+    // ① 一次读全（批量足够大）→ 基准结果。
+    let one_shot = ChainVerifier::new(fixture.app_db.clone())
+        .with_batch_size(1000)
+        .verify(&fixture.ctx_tenant_a())
+        .await
+        .expect("单批校验");
+
+    // ② 分成 3 批（2 + 2 + 1）→ 必须等价。
+    let batched = ChainVerifier::new(fixture.app_db.clone())
+        .with_batch_size(2)
+        .verify(&fixture.ctx_tenant_a())
+        .await
+        .expect("分批校验");
+
+    assert_eq!(
+        batched.checked, one_shot.checked,
+        "分批与单批的 `checked` 必须相同 —— 不同说明批间游标漏读或重读"
+    );
+    assert_eq!(
+        batched.checked, 5,
+        "必须恰好校验 5 条；实际 {}",
+        batched.checked
+    );
+    assert_eq!(
+        batched.ok, one_shot.ok,
+        "分批与单批的结论必须一致"
+    );
+    assert!(
+        batched.ok,
+        "5 条连续的链必须完好；`ok=false` 说明批间 `previous_hash` 没正确延续。\
+         报告：{batched:?}"
+    );
+    assert!(
+        batched.broken.is_empty(),
+        "不该有任何断链条目：{:?}",
+        batched.broken
+    );
+}
+
+/// **跨批次也必须能发现真实断裂**（阴性对照）。
+///
+/// ⚠️ 上一条证明「分批不出假错」，这条证明「分批也不会漏掉真错」——
+/// 两条合起来才算判据完整（否则「分批恒返回 ok」也能让上一条绿）。
+#[tokio::test]
+async fn batched_verification_still_detects_a_broken_link() {
+    let _guard = common::serial().await;
+    let fixture = common::setup().await;
+
+    for index in 0..5 {
+        record(&fixture, TENANT_A, &format!("demo.batchbreak.{index}"))
+            .await
+            .expect("写入");
+    }
+
+    // 篡改**第 3 条**（跨第 2 批的第一条）的 `hash` → 链必断。
+    //
+    // ⚠️ 用管理员连接直接改（应用角色不该能改审计表）。
+    let ids: Vec<String> = {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT id::text FROM platform_audit_log WHERE tenant_id = $1 \
+             ORDER BY created_at ASC, id ASC",
+        )
+        .bind(TENANT_A)
+        .fetch_all(&fixture.admin_pool)
+        .await
+        .expect("读 id");
+        rows.into_iter().map(|(id,)| id).collect()
+    };
+    assert!(ids.len() >= 3, "至少要 3 条才能篡改第 3 条");
+    sqlx::query("UPDATE platform_audit_log SET hash = $1 WHERE id = $2")
+        .bind("0".repeat(64))
+        .bind(&ids[2])
+        .execute(&fixture.admin_pool)
+        .await
+        .expect("篡改应当成功（管理员绕过 append-only）");
+
+    // 分批读（批量 2 → 第 3 条在第 2 批）→ 必须报断链。
+    let report = ChainVerifier::new(fixture.app_db.clone())
+        .with_batch_size(2)
+        .verify(&fixture.ctx_tenant_a())
+        .await
+        .expect("校验应当能跑");
+
+    assert!(
+        !report.ok,
+        "第 3 条的 hash 被篡改，分批校验**必须**发现（否则分批漏读/漏判）"
+    );
+    assert!(
+        report.broken.iter().any(|entry| entry.id == ids[2]),
+        "断链条目必须点名被篡改的那一条（{}）；实际：{:?}",
+        ids[2],
+        report.broken
+    );
+}
+
+// ---------------------------------------------------------------------------
+// TD-081：归档与写入的**同租户串行化**（用锁观测，确定性判据）
+// ---------------------------------------------------------------------------
+
+/// **`archive_move` 与 `append` 抢的是同一把锁**（TD-081 的判据）。
+///
+/// # 为什么用「观测锁」而不是「并发跑再比对结果」
+///
+/// 我先试过 `tokio::join!` 同时跑归档与写入 —— **没有区分力**：
+/// 两个操作的 SQL 往返在微秒级，调度粒度抓不住那个覆盖窗口，
+/// 把锁去掉后连跑 3 次仍然全绿。那条测试已如实降级为「回归护栏」。
+///
+/// → 改成**直接观测锁状态**：这是确定性的，不依赖时序。
+///
+/// # 做法
+///
+/// 1. 连接 A：`BEGIN` + 调 `platform_audit_archive_move(...)` → 它在事务内持锁；
+/// 2. 连接 B（**独立会话**）：`pg_try_advisory_xact_lock(<同一把锁>)` → 必须 **false**；
+/// 3. 连接 A `COMMIT` 后，连接 B 再试 → 必须 **true**。
+///
+/// 锁键与两个函数里用的表达式**逐字一致**：`hashtext('audit:' || tenant_id)`。
+///
+/// ⚠️ 若有人删掉 `archive_move` 里的 `PERFORM pg_advisory_xact_lock(...)`，
+/// 第 2 步会变成 `true` → 这条红。
+#[tokio::test]
+async fn archive_move_holds_the_same_lock_as_append() {
+    let _guard = common::serial().await;
+    let fixture = common::setup().await;
+
+    // 造一条**足够旧**的记录（归档的搬走对象）——没有它 `archive_move` 直接返回 0，
+    // 那样它**根本不会走到持锁那一步**（锁在函数开头，但保险起见先有数据）。
+    let _old = insert_old_row(&fixture, TENANT_A, "demo.lockprobe").await;
+
+    // ---- 连接 A：开事务并调 archive_move（持锁） ----
+    let mut conn_a = fixture.app_pool.acquire().await.expect("连接 A");
+    sqlx::query("BEGIN").execute(&mut *conn_a).await.expect("A BEGIN");
+    // 设置租户上下文（archive_move 的租户守卫要求）。
+    sqlx::query("SELECT set_config('app.tenant_id', $1, true)")
+        .bind(TENANT_A)
+        .execute(&mut *conn_a)
+        .await
+        .expect("A 设租户");
+    let cutoff = OffsetDateTime::now_utc() - time::Duration::days(1);
+    let moved: (i64,) = sqlx::query_as("SELECT platform_audit_archive_move($1, $2)")
+        .bind(TENANT_A)
+        .bind(cutoff)
+        .fetch_one(&mut *conn_a)
+        .await
+        .expect("A 归档");
+    assert!(moved.0 >= 1, "归档应当搬走至少 1 行（否则没走到持锁路径）");
+
+    // ---- 连接 B（独立会话）：抢同一把锁必须失败 ----
+    let mut conn_b = fixture.app_pool.acquire().await.expect("连接 B");
+    // ⚠️ 先确认 B 确实是**另一条**连接（否则测的是自己）。
+    let pid_a: (i32,) = sqlx::query_as("SELECT pg_backend_pid()")
+        .fetch_one(&mut *conn_a)
+        .await
+        .expect("A 的 pid");
+    let pid_b: (i32,) = sqlx::query_as("SELECT pg_backend_pid()")
+        .fetch_one(&mut *conn_b)
+        .await
+        .expect("B 的 pid");
+    assert_ne!(
+        pid_a.0, pid_b.0,
+        "A 与 B 必须是**不同的后端进程**，否则锁观测没有意义"
+    );
+
+    let got_while_held: (bool,) = sqlx::query_as(
+        "SELECT pg_try_advisory_xact_lock(hashtext('audit:' || $1))",
+    )
+    .bind(TENANT_A)
+    .fetch_one(&mut *conn_b)
+    .await
+    .expect("B 试锁");
+    assert!(
+        !got_while_held.0,
+        "`archive_move` 执行期间必须**持着** `audit:<tenant>` 这把锁；\
+         但连接 B 抢到了 → 说明 `archive_move` 里的 `pg_advisory_xact_lock` 被删了。\n\
+         后果：并发归档 + 写入会互相覆盖 `tip_hash` → `ChainVerifier` 误报「链被截断」。"
+    );
+
+    // ---- A 提交后，锁释放，B 能抢到 ----
+    sqlx::query("COMMIT").execute(&mut *conn_a).await.expect("A COMMIT");
+    let got_after: (bool,) = sqlx::query_as(
+        "SELECT pg_try_advisory_xact_lock(hashtext('audit:' || $1))",
+    )
+    .bind(TENANT_A)
+    .fetch_one(&mut *conn_b)
+    .await
+    .expect("B 再试锁");
+    assert!(
+        got_after.0,
+        "A 提交后锁必须释放（`pg_advisory_xact_lock` 是事务级）"
+    );
+    // 收尾：释放 B 持有的锁。
+    sqlx::query("SELECT pg_advisory_unlock_all()")
+        .execute(&mut *conn_b)
+        .await
+        .expect("B 释放锁");
+}

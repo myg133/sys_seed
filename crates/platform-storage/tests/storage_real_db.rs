@@ -1291,3 +1291,100 @@ async fn a_five_row_import_reports_exactly_two_receipts_and_stores_three_rows() 
         "入库的必须正好是那 3 个合法行（非法行跳过）"
     );
 }
+
+// ---------------------------------------------------------------------------
+// TD-083：终态任务的清理路径
+// ---------------------------------------------------------------------------
+
+/// **`prune_terminal_jobs` 只删终态且足够旧的，并连带清掉错误明细**（TD-083 的判据）。
+///
+/// # 防什么
+///
+/// `platform_storage_job` 与 `platform_storage_job_error` 都是「每任务/每失败行一行」，
+/// 原**没有删除路径** → 无限增长。
+/// 但清理**绝不能误删**还在跑的任务（那会丢用户正在等的导入导出）。
+///
+/// # 判据
+///
+/// 造 3 个任务：
+/// - `completed` + 30 天前（含 1 条错误明细）→ **该删**（连明细一起）
+/// - `failed` + 30 天前 → **该删**
+/// - `running` + 30 天前 → **不该删**（还在跑）
+///
+/// `prune(older_than_days = 7)` 后：删 2 个任务、1 条明细，剩 1 个 `running`。
+#[tokio::test]
+#[ignore = "需要 base_test 库：scripts/test-integration.sh 会用 --include-ignored 跑到"]
+async fn prune_removes_only_old_terminal_jobs_and_their_errors() {
+    let fixture = setup().await;
+    let tenant = tenant_a();
+
+    // 清干净本租户的旧数据。
+    fixture
+        .exec(&format!(
+            "DELETE FROM platform_storage_job_error WHERE tenant_id = '{tenant}'"
+        ))
+        .await;
+    fixture
+        .exec(&format!(
+            "DELETE FROM platform_storage_job WHERE tenant_id = '{tenant}'"
+        ))
+        .await;
+
+    // 三个任务：completed / failed / running。
+    for (status, days, with_error) in [("completed", 30, true), ("failed", 30, false), ("running", 30, false)] {
+        fixture
+            .exec(&format!(
+                "INSERT INTO platform_storage_job \
+                   (id, tenant_id, kind, entity, status, total_rows, processed_rows, failed_rows, \
+                    created_at, updated_at) \
+                 VALUES (gen_random_uuid(), '{tenant}', 'import', 'probe', '{status}', 1, 1, 0, \
+                         now() - interval '{days} days', now() - interval '{days} days')"
+            ))
+            .await;
+        if with_error {
+            fixture
+                .exec(&format!(
+                    "INSERT INTO platform_storage_job_error (job_id, tenant_id, row_number, \"column\", reason) \
+                     SELECT id, '{tenant}', 1, 'amount', 'bad' FROM platform_storage_job \
+                     WHERE tenant_id = '{tenant}' AND status = 'completed' LIMIT 1"
+                ))
+                .await;
+        }
+    }
+
+    let (jobs, errors) = fixture
+        .service
+        .store()
+        .prune_terminal_jobs(&fixture.ctx_a(), 7)
+        .await
+        .expect("清理应当成功");
+    assert_eq!(jobs, 2, "应当恰好删 2 个终态任务（completed + failed）");
+    assert_eq!(errors, 1, "应当恰好删 1 条错误明细（只属于被删的 completed 任务）");
+
+    // 剩下的必须是那一个 running。
+    let remaining = fixture
+        .query_text(&format!(
+            "SELECT status FROM platform_storage_job WHERE tenant_id = '{tenant}' ORDER BY status"
+        ))
+        .await;
+    assert_eq!(
+        remaining,
+        vec!["running".to_string()],
+        "只剩 running —— 删了 running 会丢掉用户正在等的导入导出"
+    );
+
+    // 错误明细也被连带清掉（不能留孤儿）。
+    let orphan_errors = fixture
+        .query_i64(&format!(
+            "SELECT count(*) FROM platform_storage_job_error WHERE tenant_id = '{tenant}'"
+        ))
+        .await;
+    assert_eq!(orphan_errors, 0, "被删任务的错误明细必须一起删掉（否则留孤儿）");
+
+    // 收尾。
+    fixture
+        .exec(&format!(
+            "DELETE FROM platform_storage_job WHERE tenant_id = '{tenant}'"
+        ))
+        .await;
+}
