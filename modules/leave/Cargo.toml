@@ -1,0 +1,43 @@
+# 业务模块的 crate 清单（REQ-020 D348）。
+#
+# 依赖方向恒为（平台代码永不反向依赖业务模块）：
+#   platform-core (定义 trait) ← platform-contracts ← modules/leave
+#
+# `platform-core` / `platform-db` 是后端依赖，`platform-contracts` 只出现在
+# `[dev-dependencies]`（AC-S-193）。
+[package]
+name = "leave"
+description = "业务消费方：请假审批（REQ-020 底座可用性验证）"
+# 业务模块版本独立于平台版本：manifest.json 必须与本版本一致（契约检查 C-1）
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+# 业务模块的后端实现放在 backend/ 下（与 `cargo xtask create-module` 的骨架一致）
+name = "leave"
+path = "backend/src/mod.rs"
+
+[dependencies]
+anyhow.workspace = true
+# 路由层要用 axum（它不是平台内部模块）。
+axum.workspace = true
+serde.workspace = true
+# 审计事件的 before / after 是任意 JSON（平台 `AuditEvent` 的字段类型）。
+serde_json.workspace = true
+# 请求上下文里的追踪 ID 要进日志。
+tracing.workspace = true
+# 起止日期（DATE）与审批时间（TIMESTAMPTZ）。
+time.workspace = true
+# 主键生成（uuid v4，存 TEXT 列）。
+uuid.workspace = true
+# 业务模块只依赖平台核心（扩展点 trait），不依赖平台内部模块。
+platform-core.workspace = true
+# 数据访问走 platform-db 的租户作用域入口（拿不到裸连接）。
+platform-db.workspace = true
+
+[dev-dependencies]
+# 契约测试套件随平台分发：业务模块只依赖 platform-contracts 即可获得 C-1~C-6。
+platform-contracts.workspace = true

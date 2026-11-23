@@ -18,6 +18,8 @@
     "src/**/*.svelte",
     "test/**/*.ts",
     "vite.config.ts",
-    "svelte.config.js"
+    "svelte.config.js",
+    "../../modules/leave/frontend/**/*.ts",
+    "../../modules/leave/frontend/**/*.svelte"
   ]
 }

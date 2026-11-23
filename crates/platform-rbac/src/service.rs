@@ -928,6 +928,54 @@ impl RbacService {
         Ok(expand_user_permissions(&graph, user_id, &registry))
     }
 
+    /// 用户的有效权限点 **+ 每个权限点由哪些角色提供**（v2 的 `sources`，D352）。
+    ///
+    /// # 语义
+    ///
+    /// 返回「权限点编码 → 提供它的**角色 code** 列表（升序去重）」。
+    ///
+    /// - 角色用 **code** 不用 ID：消费方拿到 code 就能直接比对（ID 还得再查一次），
+    ///   而 code 在租户内稳定；
+    /// - 与 [`Self::effective_permissions`] **同一份展开规则**（通配展开 + 继承 +
+    ///   内置管理员 = 注册表全集）—— 两套规则分叉就会「说有的角色没列出来」；
+    /// - 因此 `sources` 的键集合**恰好等于** `permissions`（下面的用例钉住这一点）。
+    pub async fn permission_sources(
+        &self,
+        ctx: &RequestContext,
+        user_id: &str,
+    ) -> Result<BTreeMap<String, Vec<String>>, RbacError> {
+        let graph = self.load_graph(ctx).await?;
+        let registry = self.registry_codes().await?;
+
+        let mut sources: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for role_id in user_role_ids(&graph, user_id) {
+            let Some(role) = graph.roles.get(&role_id) else {
+                continue;
+            };
+            // 本角色（含继承）提供的权限点集合。
+            let mut provided: BTreeSet<String> = BTreeSet::new();
+            for grant in graph.grants_of(&role_id) {
+                let Ok(pattern) = PermissionPattern::parse(&grant.permission_code) else {
+                    continue;
+                };
+                for code in pattern.expand(&registry) {
+                    provided.insert(code);
+                }
+            }
+            if role.builtin && role.code == BUILTIN_ADMIN {
+                provided.extend(registry.iter().cloned());
+            }
+            for code in provided {
+                sources.entry(code).or_default().insert(role.code.clone());
+            }
+        }
+
+        Ok(sources
+            .into_iter()
+            .map(|(code, roles)| (code, roles.into_iter().collect()))
+            .collect())
+    }
+
     /// 用户对某个权限点的有效数据范围（**多角色取最宽松**）。
     pub async fn effective_scope(
         &self,

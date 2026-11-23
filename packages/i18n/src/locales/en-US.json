@@ -246,5 +246,6 @@
   "error.STORAGE_UNSUPPORTED_FORMAT": "Unsupported file format",
   "error.STORAGE_FILE_INFECTED": "The file failed the security scan",
   "error.STORAGE_TTL_OUT_OF_RANGE": "The time to live is outside the allowed range",
-  "error.STORAGE_UNKNOWN_ENTITY": "The target entity is not supported"
+  "error.STORAGE_UNKNOWN_ENTITY": "The target entity is not supported",
+  "error.LEAVE_INVALID_TRANSITION": "This action is not allowed in the current leave request status"
 }

@@ -367,7 +367,11 @@ impl AdminConn {
 /// 测试夹具。
 pub struct Fixture {
     /// 业务服务（走**应用角色**连接，RLS 生效）。
-    pub service: NotifyService,
+    ///
+    /// ⚠️ 是 `Arc` 而不是裸值：REQ-020 的落库适配器
+    /// （`platform_notify::db_sender::DbNotificationSender`）按装配层的真实形态
+    /// 持有 `Arc<NotifyService>` —— 夹具与生产同一形状，测试才测得到真实用法。
+    pub service: Arc<NotifyService>,
     /// 配置源（可改退避参数）。
     pub config: StaticConfigSource,
     /// 权限表（可临时加减权限点）。
@@ -485,10 +489,10 @@ pub async fn setup() -> Fixture {
         .expect("应用角色连接串应可解析");
 
     let config = StaticConfigSource::new();
-    let service = NotifyService::new(
+    let service = Arc::new(NotifyService::new(
         NotifyStore::new(app_db),
         NotifyConfig::new(Arc::new(config.clone())),
-    );
+    ));
 
     Fixture {
         service,

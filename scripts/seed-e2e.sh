@@ -150,6 +150,8 @@ OAUTH_BACKCHANNEL_URI="http://127.0.0.1:${MOCK_PORT}/logout"
 # | u-perm-app@example.com   | app:registry:read/write/delete      | **应用管理员**（REQ-016 / AC-S-156 前置） |
 # | u-perm-oauth@example.com | oauth:client:read/write/delete + oauth:grant:read/revoke | **OAuth 管理员**（REQ-022 / D236） |
 # | e2e-user-oauth@example.com | rbac:role:read                   | **OAuth 普通用户**（REQ-022 / D236）：授权流程的主体 |
+# | u-leave-applicant@example.com | leave:request:read + leave:request:write | **请假申请人**（REQ-020 / AC-S-192）：建单 + 提交 |
+# | u-leave-approver@example.com  | leave:request:read + leave:request:approve | **请假审批人**（REQ-020 / AC-S-192）：通过 / 驳回 |
 # | u-perm-other@example.com（**tenant-b**） | rbac:role:read + oauth:grant:read + oauth:grant:revoke | **跨租户对照**（REQ-022 / D236 / TC-022-088） |
 #
 # `sandbox:demo:*` 是 REQ-012 的权限点（`sandbox` 模块的两个实体共用）。
@@ -184,6 +186,10 @@ VALUES
     ('e2e-user-app',         'tenant-a', 'u-perm-app@example.com',     'u-perm-app@example.com',     :'phc', 'active'),
     ('e2e-user-oauth',       'tenant-a', 'u-perm-oauth@example.com',   'u-perm-oauth@example.com',   :'phc', 'active'),
     ('e2e-user-oauth-plain', 'tenant-a', 'e2e-user-oauth@example.com', 'e2e-user-oauth@example.com', :'phc', 'active'),
+    -- REQ-020（AC-S-192）：请假申请人 + 审批人**两个账号** ——
+    -- 「切审批人账号」是 AC 的显式步骤，所以不能一个人干两件事。
+    ('e2e-user-leave-applicant', 'tenant-a', 'u-leave-applicant@example.com', 'u-leave-applicant@example.com', :'phc', 'active'),
+    ('e2e-user-leave-approver',  'tenant-a', 'u-leave-approver@example.com',  'u-leave-approver@example.com',  :'phc', 'active'),
     ('e2e-user-other',       'tenant-b', 'u-perm-other@example.com',   'u-perm-other@example.com',   :'phc', 'active')
 ON CONFLICT (tenant_id, username) DO UPDATE SET
     email            = EXCLUDED.email,
@@ -204,6 +210,10 @@ VALUES
     -- REQ-022（D236）。
     ('tenant-a', 'e2e-role-oauth',      'e2e-role-oauth',      'E2E OAuth 管理员角色',   'ALL', FALSE),
     ('tenant-a', 'e2e-role-oauth-user', 'e2e-role-oauth-user', 'E2E OAuth 普通用户角色', 'ALL', FALSE),
+    -- REQ-020（AC-S-192）：申请人与审批人**分开两个角色** —— 权限点不同，
+    -- 且审批人**不**能建单（反过来也一样），免得「两个账号」名不副实。
+    ('tenant-a', 'e2e-role-leave-applicant', 'e2e-role-leave-applicant', 'E2E 请假申请人角色', 'ALL', FALSE),
+    ('tenant-a', 'e2e-role-leave-approver',  'e2e-role-leave-approver',  'E2E 请假审批人角色', 'ALL', FALSE),
     ('tenant-b', 'e2e-role-other',      'e2e-role-other',      'E2E 跨租户对照角色',     'ALL', FALSE)
 ON CONFLICT (tenant_id, id) DO UPDATE SET
     code       = EXCLUDED.code,
@@ -218,7 +228,8 @@ ON CONFLICT (tenant_id, id) DO UPDATE SET
 DELETE FROM platform_role_permission
  WHERE tenant_id = 'tenant-a'
    AND role_id IN ('e2e-role-read', 'e2e-role-write', 'e2e-role-audit',
-                   'e2e-role-oauth', 'e2e-role-oauth-user', 'e2e-role-app');
+                   'e2e-role-oauth', 'e2e-role-oauth-user', 'e2e-role-app',
+                   'e2e-role-leave-applicant', 'e2e-role-leave-approver');
 
 DELETE FROM platform_role_permission
  WHERE tenant_id = 'tenant-b'
@@ -249,6 +260,12 @@ VALUES
     ('tenant-a', 'e2e-role-oauth',      'oauth:grant:read',    NULL),
     ('tenant-a', 'e2e-role-oauth',      'oauth:grant:revoke',  NULL),
     ('tenant-a', 'e2e-role-oauth-user', 'rbac:role:read',      NULL),
+    -- REQ-020（AC-S-192）：申请人 read+write；审批人 read+approve。
+    -- 权限点定义由迁移 `20261123000200_leave_permission_seed` 写进 `platform_permission`。
+    ('tenant-a', 'e2e-role-leave-applicant', 'leave:request:read',    NULL),
+    ('tenant-a', 'e2e-role-leave-applicant', 'leave:request:write',   NULL),
+    ('tenant-a', 'e2e-role-leave-approver',  'leave:request:read',    NULL),
+    ('tenant-a', 'e2e-role-leave-approver',  'leave:request:approve', NULL),
     -- 跨租户对照（tenant-b）：能读 / 撤**自己**的授权记录 → 但**看不到** tenant-a 的。
     ('tenant-b', 'e2e-role-other',      'rbac:role:read',      NULL),
     ('tenant-b', 'e2e-role-other',      'oauth:grant:read',    NULL),
@@ -264,7 +281,8 @@ DELETE FROM platform_user_role
        SELECT id FROM platform_iam_user
         WHERE tenant_id = 'tenant-a'
           AND username IN ('u-perm-read@example.com', 'u-perm-write@example.com', 'u-perm-none@example.com', 'u-perm-audit@example.com',
-                           'u-perm-app@example.com', 'u-perm-oauth@example.com', 'e2e-user-oauth@example.com')
+                           'u-perm-app@example.com', 'u-perm-oauth@example.com', 'e2e-user-oauth@example.com',
+                           'u-leave-applicant@example.com', 'u-leave-approver@example.com')
    );
 
 DELETE FROM platform_user_role
@@ -283,7 +301,9 @@ SELECT 'tenant-a', u.id, r.role_id
         ('u-perm-audit@example.com', 'e2e-role-audit'),
         ('u-perm-app@example.com',   'e2e-role-app'),
         ('u-perm-oauth@example.com', 'e2e-role-oauth'),
-        ('e2e-user-oauth@example.com', 'e2e-role-oauth-user')
+        ('e2e-user-oauth@example.com', 'e2e-role-oauth-user'),
+        ('u-leave-applicant@example.com', 'e2e-role-leave-applicant'),
+        ('u-leave-approver@example.com',  'e2e-role-leave-approver')
        ) AS r(username, role_id) ON r.username = u.username
  WHERE u.tenant_id = 'tenant-a'
 ON CONFLICT (tenant_id, user_id, role_id) DO NOTHING;
@@ -552,7 +572,7 @@ SQL
 
 # 强断言：四个用户各 **恰好 1 行**（不翻倍），权限点数目符合清单。
 bad="$(printf '%s\n' \
-  "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username IN ('u-perm-read@example.com', 'u-perm-write@example.com', 'u-perm-none@example.com', 'u-perm-audit@example.com', 'u-perm-app@example.com', 'u-perm-oauth@example.com', 'e2e-user-oauth@example.com');" \
+  "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username IN ('u-perm-read@example.com', 'u-perm-write@example.com', 'u-perm-none@example.com', 'u-perm-audit@example.com', 'u-perm-app@example.com', 'u-perm-oauth@example.com', 'e2e-user-oauth@example.com', 'u-leave-applicant@example.com', 'u-leave-approver@example.com');" \
   "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username = 'u-perm-read@example.com';" \
   "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username = 'u-perm-write@example.com';" \
   "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username = 'u-perm-none@example.com';" \
@@ -560,10 +580,12 @@ bad="$(printf '%s\n' \
   "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username = 'u-perm-app@example.com';" \
   "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username = 'u-perm-oauth@example.com';" \
   "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username = 'e2e-user-oauth@example.com';" \
+  "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username = 'u-leave-applicant@example.com';" \
+  "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-a' AND username = 'u-leave-approver@example.com';" \
   "SELECT count(*) FROM platform_iam_user WHERE tenant_id = 'tenant-b' AND username = 'u-perm-other@example.com';" \
   | run_sql -tA | tr '\n' ' ')"
-if [ "$bad" != '7 1 1 1 1 1 1 1 1 ' ]; then
-  echo "✗ 夹具核对失败：期望 '7 1 1 1 1 1 1 1 1'，实际 '$bad'" >&2
+if [ "$bad" != '9 1 1 1 1 1 1 1 1 1 1 ' ]; then
+  echo "✗ 夹具核对失败：期望 '9 1 1 1 1 1 1 1 1 1 1'，实际 '$bad'" >&2
   exit 1
 fi
 
@@ -586,10 +608,12 @@ grants="$(printf '%s\n' \
   "SELECT count(*) FROM platform_role_permission p JOIN platform_user_role r ON r.tenant_id = p.tenant_id AND r.role_id = p.role_id JOIN platform_iam_user u ON u.tenant_id = r.tenant_id AND u.id = r.user_id WHERE u.tenant_id = 'tenant-a' AND u.username = 'u-perm-oauth@example.com';" \
   "SELECT count(*) FROM platform_role_permission p JOIN platform_user_role r ON r.tenant_id = p.tenant_id AND r.role_id = p.role_id JOIN platform_iam_user u ON u.tenant_id = r.tenant_id AND u.id = r.user_id WHERE u.tenant_id = 'tenant-a' AND u.username = 'e2e-user-oauth@example.com';" \
   "SELECT count(*) FROM platform_role_permission p JOIN platform_user_role r ON r.tenant_id = p.tenant_id AND r.role_id = p.role_id JOIN platform_iam_user u ON u.tenant_id = r.tenant_id AND u.id = r.user_id WHERE u.tenant_id = 'tenant-b' AND u.username = 'u-perm-other@example.com';" \
+  "SELECT count(*) FROM platform_role_permission p JOIN platform_user_role r ON r.tenant_id = p.tenant_id AND r.role_id = p.role_id JOIN platform_iam_user u ON u.tenant_id = r.tenant_id AND u.id = r.user_id WHERE u.tenant_id = 'tenant-a' AND u.username = 'u-leave-applicant@example.com';" \
+  "SELECT count(*) FROM platform_role_permission p JOIN platform_user_role r ON r.tenant_id = p.tenant_id AND r.role_id = p.role_id JOIN platform_iam_user u ON u.tenant_id = r.tenant_id AND u.id = r.user_id WHERE u.tenant_id = 'tenant-a' AND u.username = 'u-leave-approver@example.com';" \
   | run_sql -tA | tr '\n' ' ')"
-if [ "$grants" != '4 5 0 1 3 5 1 3 ' ]; then
-  echo "✗ 夹具授权核对失败：期望 read=4 / write=5 / none=0 / audit=1 / app=3 / oauth=5 / oauth-user=1 / other=3，实际 '$grants'" >&2
-  echo "  （REQ-012 的 E2E 需要 sandbox:demo:read/write/secret；REQ-014 的需要 audit:events:read；漏授会让用例 403。）" >&2
+if [ "$grants" != '4 5 0 1 3 5 1 3 2 2 ' ]; then
+  echo "✗ 夹具授权核对失败：期望 read=4 / write=5 / none=0 / audit=1 / app=3 / oauth=5 / oauth-user=1 / other=3 / leave-applicant=2 / leave-approver=2，实际 '$grants'" >&2
+  echo "  （REQ-012 的 E2E 需要 sandbox:demo:read/write/secret；REQ-014 的需要 audit:events:read；REQ-020 的需要 leave:request:read/write/approve；漏授会让用例 403。）" >&2
   exit 1
 fi
 
@@ -611,6 +635,22 @@ fi
 #
 # ⚠️ `platform_storage_probe_row` 也要播：它是 D333 新增的导入真实落点，
 # 存的是**业务数据**（不是元数据），漏隔离最严重。
+# ⚠️ `platform_storage_upload` / `platform_storage_job` 没有可用作 upsert 的自然键
+# （`upload_id` / `id` 是随机 / 合成的）→ 先按**夹具特征**清掉上一轮的行，
+# 否则每次重跑都会多出一份，下面的「恰好 10 行」断言在**第二次**运行才红
+# （首次成功会掩盖它）。清理范围只限 `e2e/` 对象键与 `probe_row` 实体。
+for storage_tenant in tenant-a tenant-b; do
+  printf '%s\n' \
+    "DELETE FROM platform_storage_probe_row WHERE tenant_id = '$storage_tenant' AND note = 'e2e';
+     DELETE FROM platform_storage_job_error
+      WHERE tenant_id = '$storage_tenant'
+        AND job_id IN (SELECT id FROM platform_storage_job WHERE tenant_id = '$storage_tenant' AND entity = 'probe_row');
+     DELETE FROM platform_storage_job WHERE tenant_id = '$storage_tenant' AND entity = 'probe_row';
+     DELETE FROM platform_storage_upload WHERE tenant_id = '$storage_tenant' AND object_key LIKE 'e2e/%';
+     DELETE FROM platform_storage_object WHERE tenant_id = '$storage_tenant' AND object_key LIKE 'e2e/%';" \
+    | run_sql >/dev/null
+done
+
 for storage_tenant in tenant-a tenant-b; do
   printf '%s\n' \
     "INSERT INTO platform_storage_object
@@ -626,7 +666,10 @@ for storage_tenant in tenant-a tenant-b; do
 
      INSERT INTO platform_storage_job
        (id, tenant_id, kind, entity, status, total_rows, processed_rows, failed_rows)
-     VALUES ('00000000-0000-4000-8000-00000000${storage_tenant#tenant-}0',
+     -- ⚠️ 顺带修复（REQ-020 批次四实测）：原值最后一段只有 10 位十六进制
+     -- （8 个 0 + 租户后缀 + 1 个 0），PostgreSQL 判 invalid input syntax
+     -- for type uuid → 播种脚本 exit 1 → E2E 的 webServer 起不来。这里补足 12 位。
+     VALUES ('00000000-0000-4000-8000-0000000000${storage_tenant#tenant-}0',
              '$storage_tenant', 'import', 'probe_row', 'completed', 1, 1, 0)
      ON CONFLICT (id) DO NOTHING;
 

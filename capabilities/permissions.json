@@ -2,6 +2,27 @@
   "generated_by": "cargo xtask capabilities",
   "modules": [
     {
+      "manifest": "modules/leave/manifest.json",
+      "module": "leave",
+      "permissions": [
+        {
+          "code": "leave:request:read",
+          "name": "查看请假单",
+          "type": "menu"
+        },
+        {
+          "code": "leave:request:write",
+          "name": "建单与提交请假单",
+          "type": "button"
+        },
+        {
+          "code": "leave:request:approve",
+          "name": "审批请假单",
+          "type": "button"
+        }
+      ]
+    },
+    {
       "manifest": "modules/sandbox/manifest.json",
       "module": "sandbox",
       "permissions": [
@@ -267,5 +288,5 @@
       ]
     }
   ],
-  "total": 41
+  "total": 44
 }

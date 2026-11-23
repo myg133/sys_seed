@@ -50,6 +50,9 @@ const REQUIRED_MOUNTS: &[(&str, &str)] = &[
     ("审计", r#".nest("/api/audit""#),
     ("元数据 schema", r#".nest("/api/schema""#),
     ("沙箱模块", r#".nest("/api/sandbox""#),
+    // REQ-020 的消费方业务模块（D348）：装配臂在 `main.rs` 的 `"leave"` 分支。
+    // 删掉那条臂 → 模块已启用但没有挂载点 → 全 404（启动只有一行 warn）。
+    ("请假模块", r#".nest("/api/leave""#),
     ("配置（merge）", "platform_config::http::router("),
     ("应用注册表", r#".nest("/api/apps""#),
     ("通知", r#".nest("/api/notify""#),

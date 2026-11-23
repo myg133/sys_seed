@@ -19,6 +19,7 @@ members = [
     "crates/platform-server",
     "crates/xtask",
     "modules/sandbox",
+    "modules/leave",
 ]
 
 [workspace.package]
@@ -47,6 +48,8 @@ platform-schema = { path = "crates/platform-schema" }
 platform-server = { path = "crates/platform-server" }
 # REQ-012：业务模块挂进服务（D103）。平台 crate **不**依赖它，只有装配层（platform-server）依赖。
 sandbox = { path = "modules/sandbox" }
+# REQ-020：消费方业务模块（D348）。同上 —— 只有装配层依赖它。
+leave = { path = "modules/leave" }
 
 # ⚠️ **第三次依赖破例**（D338，前两次是 D123 的 TLS 栈、D321 的 multipart）：
 # OpenAPI 自动生成。实测**净增 2 个包**（`utoipa` + `utoipa-gen`），基线 329 包。

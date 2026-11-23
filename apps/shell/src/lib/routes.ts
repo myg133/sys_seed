@@ -54,6 +54,10 @@
 
 import type { ApiClient } from '@base/sdk';
 
+import {
+  LEAVE_ROUTE_PATH,
+  LEAVE_ROUTE_PERMISSION,
+} from '../../../../modules/leave/frontend/routes';
 import { APP_REGISTRY_READ_PERMISSION, listApps, type AppView } from './app-api';
 import { AUDIT_EVENTS_PERMISSION, loadAuditFirstPage, type AuditLoadResult } from './audit-api';
 import {
@@ -84,6 +88,18 @@ export const WORKBENCH_ROUTE_PATH = '/workbench';
 
 /** 应用注册表管理页的路由（REQ-016 / AC-S-156；权限点 `app:registry:read`）。 */
 export const APPS_ADMIN_ROUTE_PATH = '/admin/apps';
+
+/**
+ * 请假审批页的路由（REQ-020 / AC-S-192；权限点 `leave:request:read`）。
+ *
+ * ⚠️ **路径常量来自模块**（`modules/leave/frontend/routes.ts`）——
+ * shell 只负责装配，不复制字面量。这是 D356 选定的 C 类改动的落点：
+ * 通配页没有行内审批动作 → 必须有一条硬编码路由 + 一个自定义页面。
+ *
+ * 守卫不放行时路由的 `load` 不被调用、页面也不渲染
+ * （`load` 这里不挂取数：列表由页面自己在挂载时取，见 `LeavePage.svelte`）。
+ */
+export { LEAVE_ROUTE_PATH };
 
 /** 应用注册表首屏的加载结果（路由 `load` 的产物 + 失败原因）。 */
 export interface AppsLoadResult {
@@ -207,6 +223,15 @@ export function createRoutes(
         const result = await loadAppsFirstPage(client);
         onApps?.(result);
       },
+    },
+    {
+      // 请假审批页（REQ-020 / AC-S-192）：权限点 `leave:request:read`。
+      //
+      // 与 `/admin/audit` 同一套守卫：未登录 → 登录页；已登录无权限 → 403 页。
+      // ⚠️ 这里**不挂** `load` —— 列表由页面挂载时自己取（同一页要能反复刷新）。
+      path: LEAVE_ROUTE_PATH,
+      title: '请假',
+      permission: LEAVE_ROUTE_PERMISSION,
     },
     {
       // 一条通配路由服务**所有**实体（D104）：新增实体不改这里。

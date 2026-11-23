@@ -1288,6 +1288,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "leave"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "platform-contracts",
+ "platform-core",
+ "platform-db",
+ "serde",
+ "serde_json",
+ "time",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2040,6 +2056,7 @@ dependencies = [
  "clap",
  "http-body-util",
  "jsonwebtoken",
+ "leave",
  "opentelemetry",
  "opentelemetry_sdk",
  "platform-app",

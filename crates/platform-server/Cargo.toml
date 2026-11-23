@@ -63,6 +63,9 @@ time.workspace = true
 # 业务模块装配（REQ-012 D103）：编译期注册的模块必须在**装配层**被链接进来，
 # 否则 inventory 里没有它 —— 只在测试里存在 = 服务里 404。
 sandbox.workspace = true
+# REQ-020：消费方业务模块也必须在这里被链接进来（同款理由）——
+# `discover_enabled()` 靠 inventory 注册，crate 没被链接 = 服务里 404。
+leave.workspace = true
 # 部署期数据库客户端：迁移 + 健康检查；不承担业务数据访问
 sqlx.workspace = true
 

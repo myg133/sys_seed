@@ -1,0 +1,19 @@
+{
+  "id": "leave",
+  "name": "请假审批",
+  "version": "0.1.0",
+  "enabled": true,
+  "permissions": [
+    { "code": "leave:request:read", "name": "查看请假单", "type": "menu" },
+    { "code": "leave:request:write", "name": "建单与提交请假单", "type": "button" },
+    { "code": "leave:request:approve", "name": "审批请假单", "type": "button" }
+  ],
+  "menus": [
+    { "label": "请假", "icon": "calendar", "route": "/leave", "perm": "leave:request:read" }
+  ],
+  "dependencies": [],
+  "tenantScoped": {
+    "tables": ["leave_request"],
+    "column": "tenant_id"
+  }
+}
