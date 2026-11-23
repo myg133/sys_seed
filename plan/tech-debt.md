@@ -58,19 +58,44 @@ Sprint 3 复盘的第 2 条教训：**修漏洞会制造新漏洞** —— 但�
 
 ---
 
-## TD-003: `platform-org` 的 9 个权限点无 `require_permission` 调用点（C-5 缺口）
+## ~~TD-003~~: `platform-org` 的 9 个权限点无 `require_permission` 调用点（C-5 缺口）
 
 - **发现于**: REQ-009（已登记，见 D58）
 - **证据**: `crates/platform-org/src/http.rs` 的 9 个已登记权限点，
   `require_permission` 调用点为 **0**；`rbac:permission:read` 同样为 **0**
 - **现状**: C-5 扫描**只扫业务模块**（`modules/`），不扫平台 crate ——
   所以这个缺口**不会被 CI 发现**
-- **为什么本期不修**: REQ-009 已把「基线 = 0」如实登记；
-  扩围到平台 crate 需要先给 C-5 造一个**不依赖 `ContractFixture`** 的入口
-  （D58 已为 REQ-010 造过类似的扫描入口，可复用思路）
-- **什么时候修**: 与 TD-001/TD-002 的「平台 crate 一致性」专项一起
 - **风险**: 平台 org 接口**实际无鉴权**（只验令牌，不验权限点）——
   任何已认证用户都能调 org 写接口。**这是安全问题，不只是可维护性问题**
+
+### ✅ 已解决（2026-11-23，develop 全量独立 QA 后）
+
+**触发**：独立 QA 的 A 片（安全核心）实测复现了这条债的**实际危害** ——
+只持 `app:registry:read`、无任何 `org:*` 权限的只读用户，
+`POST /api/org/org-node` 拿到 **201 Created**，组织节点真的被写入。
+
+**修法**（两项一起）：
+1. **org 的 9 个权限点全部落地**：按语义分 10 组 + `route_layer(require_permission(...))`
+   （`crates/platform-org/src/http.rs`）。权限点与 manifest 的差集为空。
+   注意 `require_permission` 必须**直接调用**（不能写全路径
+   `platform_core::...::require_permission`）—— 扫描器会跳过前一个字符是 `:` 的调用。
+2. **C-5 扩到 8 个有 manifest 的平台 crate**：各加 `tests/contract_c5.rs`，
+   直接用 `check_c5_for(manifest, src)`（纯函数形态，不需要 `ContractFixture`）。
+   → 正是这一步让「扩围到平台 crate」这件被推迟的事真正完成。
+
+**额外补的判据**（比 C-5 更严）：`every_route_group_has_a_permission_layer` ——
+按 `let x = Router::new()` 切组，断言每个挂了 `.route()` 的组都有权限层。
+C-5 只验「权限点有没有调用点」，**抓不住「新端点了但忘了挂」**；
+而 QA-A 指出 `/api/org` **零 HTTP 层测试**，正是这个盲区。
+变异验证：去掉 org 的 scim-sync 鉴权层 → 立刻红并点名 `scim_sync` 组。
+
+**⚠️ `rbac:permission:read` 的 0 调用点不是缺陷**（这条要单独记住）：
+REQ-009 的 AC 明文豁免 `/api/rbac/permissions`（「任何已认证用户都应能读，
+否则前端 `can()` 无从判断」）。我一度按 C-5 的报错给它加了鉴权，
+被现有测试 `a_plain_user_cannot_reach_the_management_api` 打红后撤回 ——
+**C-5 报错 ≠ 代码错，必须先查验收标准**。
+现由 `crates/platform-rbac/tests/contract_c5.rs` 的 `EXEMPT` 清单承载，
+每条豁免必须写清依据文件 + 行号，且有「依据不得少于 40 字符」的自检。
 
 ---
 
@@ -1585,3 +1610,73 @@ Sprint 3 复盘的第 2 条教训：**修漏洞会制造新漏洞** —— 但�
 - **影响**: 「达成 N / 10」的**分母本身是错的**，凡引用「9 条」的下游文档都要修正。
 - **本需求已直接改正文**（不留给以后）—— 此条目记录**为什么**发生过这次错。
 - **优先级**: P3（文档一致性；已在 rev 4 修正）
+
+---
+
+## TD-081: 审计「归档 + 写入」的并发竞态**没有自动化判据**
+
+- **发现于**: develop 全量独立 QA（B 片 F4）+ 我修复时实测
+- **现状**: `platform_audit_archive_move` 原先不持 advisory lock，而
+  `platform_audit_append` 持锁 → 并发时 `tip_hash` 会被陈旧值覆盖 →
+  `ChainVerifier` 误报「链被截断」。
+  **锁已加上**（迁移 `20261124000100_audit_hardening`，键与 `append` 完全一致）。
+- **⚠️ 缺口**: 「锁生效」这件事**没有自动化判据**。
+  我写了一版 `tokio::join!` 的并发用例（`concurrent_archive_and_append_keep_the_chain_tip_fresh`），
+  但**实测把锁去掉后连跑 3 次仍然全绿** —— 两个操作的 SQL 往返在微秒级，
+  `join!` 的调度粒度抓不住那个窗口。
+  → 那条测试已如实改标注为「**回归护栏**，不是竞态判据」。
+- **要做需要什么**: 用**两个真实会话按脚本逐句推进**（psql 或裸连接），
+  在「archive 已写 tip、append 尚未写回」的时刻精确插入另一步。
+  集成测试的 `oneshot`/`join!` 建模做不到。
+- **优先级**: P2（锁本身已加，缺的是判据；风险是「有人删掉锁而无人发现」）
+
+---
+
+## TD-082: 租户隔离的 `SET LOCAL` 语义**没有判据**（变异后 38 测试全绿）
+
+- **发现于**: develop 全量独立 QA（B 片 F7，做了变异实证）
+- **证据**: 把 `crates/platform-db/src/tenant.rs` 的
+  `set_config('app.tenant_id', $1, true)` 改成 `false`（`false` = 会话级，
+  提交后**残留** → 下一个请求借到这条连接时看到**上一个租户**的数据）
+  → `platform-db` 的 **38 个测试全绿**。
+- **为什么严重**: `SET LOCAL`（事务级自动清除）是这个平台
+  **租户隔离的第一道防线**（`tenant.rs` 开头的文档专门讲了
+  「`SET` 与 `SET LOCAL` 的区别是串租户的根源」）。
+  它被改坏 → RLS 的 `current_setting('app.tenant_id')` 会读到上一个租户的值 →
+  **RLS 这道最后防线也失效**。而**没有任何测试会红**。
+- **要做需要什么**:
+  1. 一个「同一连接先后服务两个租户」的用例：
+     租户 A 的请求结束后，用**同一条物理连接**跑租户 B 的查询，
+     断言 B **看不到** A 的行（`false` 变异下会看到）；
+  2. 需要能**固定连接**（`PgPool::acquire` 拿同一条，而不是每次新取）——
+     `TenantDb` 目前不透出连接句柄，可能需要一个测试专用的旁路入口。
+- **优先级**: **P1**（这是隔离机制的地基，且已有变异实证说明零覆盖）
+
+---
+
+## TD-083: 两张「每操作一行」的表**没有清理路径**
+
+- **发现于**: develop 全量独立 QA（B 片 F6/F9）
+- **现状**: 同项目的 `platform_rate_limit` 有 `xtask observability prune-rate-limit`，
+  但这两张表只增不删：
+  - `platform_notify_delivery`（每次入队一行）
+  - `platform_storage_job` + `platform_storage_job_error`（每次导入导出任务一行）
+- **影响**: 长期运行的实例会无限增长。REQ-019 刚为限流表补过同类问题（F2/TD-077 的兄弟问题），
+  说明这是**系统性遗漏**而不是个别疏忽。
+- **要做需要什么**: 按 `observability prune` 的范式各加一个
+  `xtask notify prune` / `xtask storage prune`（含 `--older-than` 与保留期配置项），
+  并在 `design-summary.md` 的「定期任务」表登记。
+- **优先级**: P2（容量问题，不是正确性问题；但会随时间恶化）
+
+---
+
+## TD-084: `audit verify` 把整条在线链读进内存
+
+- **发现于**: develop 全量独立 QA（B 片 F5）
+- **现状**: `crates/platform-audit/src/verify.rs:234-242` 一次 `fetch_all` 取全部在线记录，
+  **无 LIMIT**。QA 实测：5 万条约 **29MB** 载荷。
+  而这是一条**用户可反复调用**的 GET 接口（`GET /api/audit/verify`），
+  无并发上限 → 几个并发请求就能把内存打满。
+- **要做需要什么**: 改成**流式/分批**校验（按 `created_at, id` 键集分页，每批 N 条，
+  在批次间保持 `expected_prev_hash` 连续），或加并发闸门 + 上限。
+- **优先级**: P2（需真实大数据量才暴露；单租户审计量小时无感）
