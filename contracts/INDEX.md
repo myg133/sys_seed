@@ -20,7 +20,7 @@
 | api-conventions | **v3** | ratified（当前） | **C1** 增加 `/api/oauth` 前缀 + C1.1 授权服务器元数据端点；**C14**（新增）OAuth 协议端点的错误体**不用** Problem Details（用 RFC 的 `{"error": …}`）。**C2~C13 一字未改**；对既有消费方**零影响**（纯新增） |
 | extension-points | v1 | **deprecated**（保留一个 Sprint） | 5 个 trait + C-1~C-4。**已知缺口**：C-2 只验权限点声明完整性，不验服务端是否真的执行鉴权 |
 | extension-points | **v2** | ratified（当前） | 新增 **C-5：已登记权限点必须有鉴权调用点**（关闭 v1 缺口）；manifest 新增可选 `permissions[].condition`。C-1~C-4 与 5 个 trait 签名**不变** |
-| external-module-integration | **v1** | **draft**（评审中） | 首版。定义平台与外部模块的**进程边界**：签名上下文、路由级权限映射、outbox 审计、**能力可选（manifest/config 必选，其余按需）、配置托管（平台唯一持久化、四层合并、TTL 缓存）、平台→模块事件通道**、**契约注册（Pull/Push/导入）**、**公网前提下的两种可达性与降级**、**配置查询接口 + 平台侧可配 TTL（默认 120s）缓存语义**、**管理面描述渲染（app/profile 双页面、对象平铺）**、契约分发与准入。含接入流程、分发机制、准入检查表与 4 个接入 prompt。不改 extension-points 既有字段语义 |
+| external-module-integration | **v1** | **draft**（评审中） | 首版。定义平台与外部模块的**进程边界**：签名上下文、路由级权限映射、outbox 审计、**能力可选（manifest/config 必选，其余按需）、配置托管（平台唯一持久化、四层合并、TTL 缓存）、平台→模块事件通道**、**契约注册（Pull/Push/导入）**、**公网前提下的两种可达性与降级**、**配置查询接口 + 平台侧可配 TTL（默认 120s）缓存语义**、**管理面描述渲染（app/profile 双页面、对象平铺）**、契约分发与准入。含接入流程、分发机制、准入检查表、4 个接入 prompt、JSON Schema、两份 OpenAPI 与示例校验。不改 extension-points 既有字段语义 |
 
 > ⚠️ **extension-points v2 对消费方是破坏性变更**：新增的 C-5 是**失败级**检查。
 > `modules/sandbox` 在 v1 下 C-2 全绿但从不鉴权，v2 下会失败 —— 这是预期效果（REQ-009 内已修）。

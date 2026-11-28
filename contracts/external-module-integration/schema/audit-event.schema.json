@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.base.example/external-module/v1/audit-event.schema.json",
+  "title": "Audit Event",
+  "type": "object",
+  "required": ["eventId", "occurredAt", "module", "tenantId", "actor", "action", "resource", "result", "traceId"],
+  "additionalProperties": false,
+  "properties": {
+    "eventId": { "type": "string", "minLength": 20 },
+    "occurredAt": { "type": "string", "format": "date-time" },
+    "module": { "type": "string" },
+    "tenantId": { "type": "string", "minLength": 1 },
+    "actor": {
+      "type": "object",
+      "required": ["type", "userId"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "enum": ["user", "system"] },
+        "userId": { "type": "string" }
+      }
+    },
+    "action": { "type": "string", "pattern": "^[a-z][a-z0-9.]*$" },
+    "resource": {
+      "type": "object",
+      "required": ["type", "id"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "type": "string" },
+        "id": { "type": "string" }
+      }
+    },
+    "result": { "enum": ["success", "failure"] },
+    "errorCode": { "type": ["string", "null"] },
+    "traceId": { "type": "string" },
+    "sourceIp": { "type": "string" },
+    "changedKeys": { "type": "array", "items": { "type": "string" }, "maxItems": 200 },
+    "before": { "type": ["object", "null"] },
+    "after": { "type": ["object", "null"] },
+    "revision": { "type": "string" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "result": { "const": "failure" } }, "required": ["result"] },
+      "then": { "required": ["errorCode"] }
+    }
+  ]
+}

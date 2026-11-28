@@ -1,0 +1,112 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.base.example/external-module/v1/manifest.schema.json",
+  "title": "External Module Manifest",
+  "type": "object",
+  "required": ["id", "name", "version", "capabilities", "permissions", "menus", "runtime"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+    "name": { "type": "string", "minLength": 1 },
+    "version": { "type": "string", "pattern": "^\\d+\\.\\d+\\.\\d+$" },
+    "enabled": { "type": "boolean", "default": true },
+    "capabilities": {
+      "type": "array",
+      "minItems": 2,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "manifest", "config", "admin-ui", "events",
+          "audit.management", "audit.business", "identity",
+          "authorization", "proxy.http", "observability"
+        ]
+      },
+      "allOf": [
+        { "contains": { "const": "manifest" } },
+        { "contains": { "const": "config" } }
+      ]
+    },
+    "permissions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "name", "type"],
+        "additionalProperties": false,
+        "properties": {
+          "code": { "type": "string", "pattern": "^[a-z][a-z0-9-]*:[a-z][a-z0-9-]*:[a-z][a-z0-9-]*$" },
+          "name": { "type": "string", "minLength": 1 },
+          "type": { "enum": ["menu", "button", "field"] },
+          "condition": { "type": "string" }
+        }
+      }
+    },
+    "menus": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["label", "route"],
+        "additionalProperties": false,
+        "properties": {
+          "label": { "type": "string" },
+          "icon": { "type": "string" },
+          "route": { "type": "string", "pattern": "^/" },
+          "perm": { "type": "string" }
+        }
+      }
+    },
+    "dependencies": { "type": "array", "items": { "type": "string" } },
+    "config": { "$ref": "./config.schema.json" },
+    "tenantScoped": {
+      "type": "object",
+      "required": ["tables", "column"],
+      "additionalProperties": false,
+      "properties": {
+        "tables": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "column": { "type": "string", "default": "tenant_id" }
+      }
+    },
+    "schema": { "type": "object" },
+    "runtime": {
+      "type": "object",
+      "required": ["kind", "contract", "reachability"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "enum": ["remote", "in-process"] },
+        "baseUrl": { "type": "string", "format": "uri" },
+        "healthPath": { "type": "string", "default": "/healthz" },
+        "readyPath": { "type": "string", "default": "/readyz" },
+        "contract": { "type": "string", "pattern": "^\\d+\\.\\d+$" },
+        "reachability": { "enum": ["bidirectional", "outbound-only"] },
+        "eventDelivery": { "enum": ["webhook", "long-poll"] },
+        "businessPath": { "enum": ["gateway", "none"] },
+        "routes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path", "methods", "permission"],
+            "additionalProperties": false,
+            "properties": {
+              "path": { "type": "string", "pattern": "^/api/" },
+              "methods": { "type": "array", "items": { "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"] }, "minItems": 1 },
+              "permission": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
+    "admin": { "$ref": "./admin.schema.json" },
+    "errorCodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "httpStatus", "messageKey"],
+        "additionalProperties": false,
+        "properties": {
+          "code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]*$" },
+          "httpStatus": { "type": "integer", "minimum": 400, "maximum": 599 },
+          "messageKey": { "type": "string" }
+        }
+      }
+    }
+  }
+}

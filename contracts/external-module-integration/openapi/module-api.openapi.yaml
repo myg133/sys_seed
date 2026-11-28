@@ -1,0 +1,119 @@
+openapi: 3.1.0
+info:
+  title: Module API for Platform
+  version: 1.0.0
+  description: |
+    外部模块必须实现的接口：健康检查、事件接收（webhook）、manifest 拉取（Pull）。
+    所有业务路由必须校验平台签名头（X-Base-*），见契约 §4。
+servers:
+  - url: https://module.example.com
+tags:
+  - name: health
+  - name: events
+  - name: manifest
+paths:
+  /healthz:
+    get:
+      tags: [health]
+      summary: 存活检查（不查依赖）
+      operationId: healthz
+      responses:
+        '200':
+          description: alive
+          content:
+            text/plain:
+              schema: { type: string, example: ok }
+  /readyz:
+    get:
+      tags: [health]
+      summary: 就绪检查（依赖不可用时 503）
+      operationId: readyz
+      responses:
+        '200':
+          description: ready
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, checks]
+                properties:
+                  status: { const: ready }
+                  checks:
+                    type: object
+                    additionalProperties: { type: string }
+        '503': { description: not ready }
+  /internal/events:
+    post:
+      tags: [events]
+      summary: 接收平台事件（webhook）
+      operationId: receiveEvent
+      parameters:
+        - name: X-Base-Event-Id
+          in: header
+          required: true
+          schema: { type: string }
+        - name: X-Base-Event-Type
+          in: header
+          required: true
+          schema: { type: string }
+        - name: X-Base-Timestamp
+          in: header
+          required: true
+          schema: { type: integer }
+        - name: X-Base-Nonce
+          in: header
+          required: true
+          schema: { type: string }
+        - name: X-Base-Key-Id
+          in: header
+          required: true
+          schema: { type: string }
+        - name: X-Base-Signature
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id, type, occurredAt, appId]
+              properties:
+                id: { type: string }
+                type: { type: string }
+                scope: { enum: [platform, tenant, user] }
+                occurredAt: { type: string, format: date-time }
+                appId: { type: string }
+                tenantId: { type: [string, 'null'] }
+                userId: { type: string }
+                revision: { type: string }
+                changedKeys: { type: array, items: { type: string } }
+                traceId: { type: string }
+      responses:
+        '202': { description: 已接受 }
+        '400': { description: 签名或事件非法（不重试） }
+        '401': { description: 上下文校验失败 }
+        '500': { description: 临时失败（平台重试） }
+  /internal/manifest:
+    get:
+      tags: [manifest]
+      summary: 返回当前 manifest bundle（Pull 模式）
+      operationId: getManifest
+      responses:
+        '200':
+          description: manifest bundle
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [appId, version, contract, contentHash, manifest]
+                properties:
+                  appId: { type: string }
+                  version: { type: string }
+                  contract: { type: string }
+                  contentHash: { type: string }
+                  manifest: { type: object }
+                  publishedAt: { type: string, format: date-time }
+                  signature: { type: string }
+        '503': { description: 尚未就绪 }

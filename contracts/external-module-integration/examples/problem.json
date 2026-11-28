@@ -1,0 +1,10 @@
+{
+  "type": "https://errors.base.example/insufficient-permission",
+  "title": "Insufficient permission",
+  "status": 403,
+  "detail": "the caller lacks aibridge:config:write",
+  "instance": "/api/config/apps/aibridge",
+  "code": "INSUFFICIENT_PERMISSION",
+  "trace_id": "01J9B7N5M3Q1S9U7W5Y3A1C9E7",
+  "params": { "required": "aibridge:config:write" }
+}

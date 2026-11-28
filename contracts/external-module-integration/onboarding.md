@@ -58,7 +58,7 @@
 - **动作**：
   - 定义 descriptor：每个 key 的类型、`scopes`、`userEditable`、默认值、i18n key、分组与顺序。
   - 对象配置写 schema 子集（深度 ≤4、属性 ≤100、不用 oneOf/$ref）。
-  - 定义权限点（优先复用 `app:<id>:view/config:read/config:write`，再追加模块级）。
+  - 定义权限点（优先复用 `<module>:view` / `<module>:config:read` / `<module>:config:write`，再追加模块级）。
   - 与平台确认该应用的配置缓存 TTL（默认 120s，上限 300s，下限待定，平台侧配置）。
   - 写 `admin` 描述：`placement: app` 与 `placement: profile` 两种页面、区块、组件、字段、动作。
   - 声明 `runtime.routes`（路径 → 权限点）。

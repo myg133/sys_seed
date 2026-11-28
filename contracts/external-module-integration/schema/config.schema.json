@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://contracts.base.example/external-module/v1/config.schema.json",
+  "title": "Config Descriptors",
+  "type": "object",
+  "propertyNames": { "pattern": "^app\\.[a-z][a-z0-9-]*\\.[a-zA-Z][a-zA-Z0-9]*(\\.[a-zA-Z][a-zA-Z0-9]*)*$" },
+  "additionalProperties": { "$ref": "#/$defs/descriptor" },
+  "$defs": {
+    "descriptor": {
+      "type": "object",
+      "required": ["type", "labelKey", "default", "scopes"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "enum": ["string", "number", "integer", "boolean", "enum", "stringList", "json", "secretRef", "object", "array"] },
+        "scopes": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": { "enum": ["platform", "tenant", "user"] }
+        },
+        "userEditable": { "type": "boolean", "default": false },
+        "labelKey": { "type": "string", "minLength": 1 },
+        "descriptionKey": { "type": "string" },
+        "default": {},
+        "options": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["value", "labelKey"],
+            "additionalProperties": false,
+            "properties": {
+              "value": {},
+              "labelKey": { "type": "string" }
+            }
+          }
+        },
+        "group": { "type": "string" },
+        "order": { "type": "integer" },
+        "advanced": { "type": "boolean", "default": false },
+        "unit": { "type": "string" },
+        "schema": { "$ref": "#/$defs/objectSchema" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "type": { "const": "enum" } }, "required": ["type"] },
+          "then": { "required": ["options"] }
+        },
+        {
+          "if": { "properties": { "type": { "const": "secretRef" } }, "required": ["type"] },
+          "then": { "not": { "properties": { "scopes": { "contains": { "const": "user" } } }, "required": ["scopes"] } }
+        },
+        {
+          "if": { "properties": { "type": { "enum": ["object", "array"] } }, "required": ["type"] },
+          "then": { "required": ["schema"] }
+        }
+      ]
+    },
+    "objectSchema": {
+      "type": "object",
+      "required": ["type"],
+      "additionalProperties": false,
+      "properties": {
+        "type": { "enum": ["object", "array", "string", "number", "integer", "boolean", "enum", "secretRef"] },
+        "properties": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/objectSchema" }
+        },
+        "items": { "$ref": "#/$defs/objectSchema" },
+        "required": { "type": "array", "items": { "type": "string" } },
+        "enum": { "type": "array" },
+        "minimum": { "type": "number" },
+        "maximum": { "type": "number" },
+        "maxLength": { "type": "integer", "minimum": 0 },
+        "x-base": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "group": { "type": "string" },
+            "order": { "type": "integer" },
+            "labelKey": { "type": "string" },
+            "descriptionKey": { "type": "string" },
+            "widget": { "enum": ["input", "textarea", "select", "radio", "switch", "slider", "date", "datetime"] },
+            "unit": { "type": "string" },
+            "advanced": { "type": "boolean" },
+            "userEditable": { "type": "boolean" },
+            "placeholderKey": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "eventId": "01J9C7M2K4P6R8T0V2W4Y6Z8A1",
+  "occurredAt": "2026-11-28T06:20:11Z",
+  "module": "aibridge",
+  "tenantId": "qingchuan",
+  "actor": { "type": "user", "userId": "u_123" },
+  "action": "config.update",
+  "resource": { "type": "app", "id": "aibridge" },
+  "result": "success",
+  "errorCode": null,
+  "traceId": "01J9B7N5M3Q1S9U7W5Y3A1C9E7",
+  "sourceIp": "10.8.2.31",
+  "changedKeys": ["app.aibridge.maxTrustLevel"],
+  "before": { "app.aibridge.maxTrustLevel": "assist" },
+  "after": { "app.aibridge.maxTrustLevel": "guide" },
+  "revision": "t:43"
+}

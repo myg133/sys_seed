@@ -1,0 +1,100 @@
+{
+  "id": "aibridge",
+  "name": "AI-Bridge",
+  "version": "1.4.0",
+  "enabled": true,
+  "capabilities": ["manifest", "config", "admin-ui", "events", "audit.management"],
+  "permissions": [
+    { "code": "aibridge:config:read", "name": "查看 AI 助手设置", "type": "menu" },
+    { "code": "aibridge:config:write", "name": "修改 AI 助手设置", "type": "button" }
+  ],
+  "menus": [
+    { "label": "AI 助手设置", "icon": "sparkle", "route": "/admin/apps/aibridge/settings", "perm": "aibridge:config:read" }
+  ],
+  "dependencies": [],
+  "config": {
+    "app.aibridge.maxTrustLevel": {
+      "type": "enum",
+      "scopes": ["platform", "tenant"],
+      "userEditable": false,
+      "labelKey": "aibridge.config.maxTrustLevel.label",
+      "descriptionKey": "aibridge.config.maxTrustLevel.desc",
+      "default": "assist",
+      "options": [
+        { "value": "guide", "labelKey": "aibridge.trust.guide" },
+        { "value": "assist", "labelKey": "aibridge.trust.assist" },
+        { "value": "act", "labelKey": "aibridge.trust.act" }
+      ],
+      "group": "trust",
+      "order": 10
+    },
+    "app.aibridge.defaultTrustLevel": {
+      "type": "enum",
+      "scopes": ["platform", "tenant"],
+      "userEditable": false,
+      "labelKey": "aibridge.config.defaultTrustLevel.label",
+      "default": "assist",
+      "options": [
+        { "value": "guide", "labelKey": "aibridge.trust.guide" },
+        { "value": "assist", "labelKey": "aibridge.trust.assist" }
+      ],
+      "group": "trust",
+      "order": 20
+    },
+    "app.aibridge.allowedOrigins": {
+      "type": "stringList",
+      "scopes": ["platform", "tenant"],
+      "userEditable": false,
+      "labelKey": "aibridge.config.allowedOrigins.label",
+      "descriptionKey": "aibridge.config.allowedOrigins.desc",
+      "default": [],
+      "group": "security",
+      "order": 10
+    }
+  },
+  "runtime": {
+    "kind": "remote",
+    "baseUrl": "https://aibridge.example.com",
+    "healthPath": "/healthz",
+    "readyPath": "/readyz",
+    "contract": "1.0",
+    "reachability": "bidirectional",
+    "eventDelivery": "webhook",
+    "businessPath": "none",
+    "routes": []
+  },
+  "admin": {
+    "version": "1.1",
+    "pages": [
+      {
+        "id": "settings",
+        "placement": "app",
+        "title": "AI 助手设置",
+        "icon": "sparkle",
+        "permission": "aibridge:config:read",
+        "sections": [
+          {
+            "component": "form",
+            "title": "信任策略",
+            "source": { "type": "config", "scope": "tenant" },
+            "fields": [
+              { "key": "app.aibridge.maxTrustLevel", "label": "最高信任度", "type": "select", "options": ["guide", "assist", "act"] },
+              { "key": "app.aibridge.defaultTrustLevel", "label": "默认信任度", "type": "select", "options": ["guide", "assist"] }
+            ]
+          },
+          {
+            "component": "form",
+            "title": "来源白名单",
+            "source": { "type": "config", "scope": "tenant" },
+            "fields": [
+              { "key": "app.aibridge.allowedOrigins", "label": "允许的来源", "type": "stringList" }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "errorCodes": [
+    { "code": "AIBRIDGE_ORIGIN_NOT_ALLOWED", "httpStatus": 403, "messageKey": "aibridge.error.originNotAllowed" }
+  ]
+}

@@ -8,25 +8,31 @@
 
 ```text
 external-module-v1.0.0/
-├── CONTRACT.md                 # 契约正文（本目录 v1.md）
+├── CONTRACT.md                 # 契约正文
 ├── ONBOARDING.md               # 接入流程
 ├── CHECKLIST.md                # 准入检查表
 ├── CHANGELOG.md                # 本版本变更
-├── VERSION                     # 1.0.0
-├── SHA256SUMS                  # 所有文件的校验和
+├── VERSION                     # 发布时生成
+├── SHA256SUMS                  # 发布时生成
 ├── schema/
-│   ├── manifest.schema.json    # manifest（含 runtime/admin）
+│   ├── manifest.schema.json    # manifest（含 capabilities/runtime/admin）
 │   ├── admin.schema.json       # 管理面描述
+│   ├── config.schema.json      # descriptor + 对象 schema 子集
 │   ├── audit-event.schema.json # 审计事件
 │   └── problem.schema.json     # ProblemDetails
 ├── openapi/
-│   └── module-min.openapi.yaml # 模块侧必须实现的最小 API 骨架
-├── conformance/
-│   ├── docker-compose.yaml     # 平台 mock + 模块 + 测试
-│   ├── cases/                  # 按能力分组的契约测试
-│   └── run.sh                  # 一条命令出报告
+│   ├── platform-api.openapi.yaml  # 应用 → 平台（配置/审计/契约/事件）
+│   └── module-api.openapi.yaml    # 平台 → 模块（健康检查/事件/manifest）
 ├── examples/
-│   └── go-hello-module/        # 可运行的最小 Go 实现
+│   ├── manifest.aibridge.json  # 完整 manifest 示例
+│   ├── audit-event.json
+│   └── problem.json
+├── scripts/
+│   └── check-examples.py       # 零依赖示例校验
+├── conformance/                # 待补（P0-7/P0-8）
+│   ├── docker-compose.yaml
+│   ├── cases/
+│   └── run.sh
 └── prompts/
     ├── 01-design-review.md
     ├── 02-implement.md
@@ -34,7 +40,13 @@ external-module-v1.0.0/
     └── 04-troubleshoot.md
 ```
 
-**包的边界**：正文 + 可执行验证 + 示例 + AI 提示词。只给 markdown 不算发布。
+**包的边界**：正文 + 可执行验证 + 机器可读 schema + 示例 + AI 提示词。只给 markdown 不算发布。
+
+机器可读部分：
+
+- JSON Schema 用 draft 2020-12，`manifest.schema.json` 通过相对 `$ref` 引用 `admin` / `config`。
+- 两份 OpenAPI 3.1 **方向相反**，不要混用：`platform-api` 是应用调平台，`module-api` 是平台调模块。
+- `scripts/check-examples.py` 只做关键约束检查，不是完整 validator；正式校验由 conformance 套件负责。
 
 ## 2. 命名与打包
 

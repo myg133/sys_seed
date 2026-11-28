@@ -1,0 +1,306 @@
+openapi: 3.1.0
+info:
+  title: Platform API for External Modules
+  version: 1.0.0
+  description: |
+    应用（外部模块）调用平台的接口：配置查询、审计上报、契约注册、事件长轮询。
+    认证方式：服务令牌（Bearer）或 mTLS；不使用用户 JWT。
+servers:
+  - url: https://platform.example.com
+    description: 生产（公网）
+security:
+  - serviceToken: []
+tags:
+  - name: config
+  - name: audit
+  - name: manifest
+  - name: events
+  - name: authorization
+paths:
+  /api/config/apps/{appId}:
+    get:
+      tags: [config]
+      summary: 读取租户级有效配置（platform + tenant 合并）
+      operationId: getEffectiveConfig
+      parameters:
+        - $ref: '#/components/parameters/AppId'
+        - name: tenantId
+          in: query
+          required: true
+          schema: { type: string }
+        - name: scope
+          in: query
+          required: true
+          schema: { const: effective }
+        - name: If-None-Match
+          in: header
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: 有效配置
+          headers:
+            ETag: { schema: { type: string } }
+            Cache-Control: { schema: { type: string, example: 'private, max-age=120' } }
+            X-Base-Config-TTL: { schema: { type: integer, example: 120 } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConfigResponse' }
+        '304': { description: 未变更 }
+        '404': { $ref: '#/components/responses/Problem' }
+  /api/config/apps/{appId}/users/{userId}:
+    get:
+      tags: [config]
+      summary: 读取用户级有效配置（四层合并）
+      operationId: getUserEffectiveConfig
+      parameters:
+        - $ref: '#/components/parameters/AppId'
+        - $ref: '#/components/parameters/UserId'
+        - name: tenantId
+          in: query
+          required: true
+          schema: { type: string }
+        - name: If-None-Match
+          in: header
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: 用户有效配置
+          headers:
+            ETag: { schema: { type: string } }
+            Cache-Control: { schema: { type: string, example: 'private, max-age=120' } }
+            X-Base-Config-TTL: { schema: { type: integer, example: 120 } }
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConfigResponse' }
+        '304': { description: 未变更 }
+        '404': { $ref: '#/components/responses/Problem' }
+  /api/audit/ingest:
+    post:
+      tags: [audit]
+      summary: 批量上报审计事件（幂等）
+      operationId: ingestAuditEvents
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [events]
+              properties:
+                events:
+                  type: array
+                  maxItems: 100
+                  items: { $ref: '#/components/schemas/AuditEvent' }
+      responses:
+        '200':
+          description: 接受结果
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accepted, duplicates, rejected]
+                properties:
+                  accepted: { type: array, items: { type: string } }
+                  duplicates: { type: array, items: { type: string } }
+                  rejected:
+                    type: array
+                    items:
+                      type: object
+                      required: [eventId, code]
+                      properties:
+                        eventId: { type: string }
+                        code: { type: string }
+        '400': { $ref: '#/components/responses/Problem' }
+  /api/apps/{appId}/manifest:
+    put:
+      tags: [manifest]
+      summary: 推送 manifest（仅出站模式）
+      operationId: pushManifest
+      parameters:
+        - $ref: '#/components/parameters/AppId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ManifestBundle' }
+      responses:
+        '200':
+          description: 已接收（幂等）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ManifestResult' }
+        '422': { $ref: '#/components/responses/Problem' }
+  /api/apps/{appId}/manifest/published:
+    post:
+      tags: [manifest]
+      summary: 通知平台有新版本（仅信号，平台随后 Pull）
+      operationId: notifyManifestPublished
+      parameters:
+        - $ref: '#/components/parameters/AppId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version, contentHash]
+              properties:
+                version: { type: string }
+                contentHash: { type: string }
+      responses:
+        '202': { description: 已接受，平台将异步拉取 }
+        '400': { $ref: '#/components/responses/Problem' }
+  /api/apps/{appId}/events:
+    get:
+      tags: [events]
+      summary: 长轮询获取平台事件（仅出站模式）
+      operationId: pollEvents
+      parameters:
+        - $ref: '#/components/parameters/AppId'
+        - name: wait
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 30, default: 25 }
+        - name: since
+          in: query
+          required: false
+          schema: { type: string }
+      responses:
+        '200':
+          description: 有事件
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Event' }
+        '204': { description: 超时无事件 }
+  /api/rbac/evaluate:
+    post:
+      tags: [authorization]
+      summary: 服务间权限判定（声明 authorization 时使用）
+      operationId: evaluatePermission
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tenantId, userId, permission]
+              properties:
+                tenantId: { type: string }
+                userId: { type: string }
+                permission: { type: string }
+                resource: { type: object }
+      responses:
+        '200':
+          description: 判定结果
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [allow]
+                properties:
+                  allow: { type: boolean }
+                  scope: { type: string }
+                  condition: { type: string }
+components:
+  securitySchemes:
+    serviceToken:
+      type: http
+      scheme: bearer
+      description: 应用级服务令牌；不得使用用户 JWT
+  parameters:
+    AppId:
+      name: appId
+      in: path
+      required: true
+      schema: { type: string, pattern: '^[a-z][a-z0-9-]*$' }
+    UserId:
+      name: userId
+      in: path
+      required: true
+      schema: { type: string }
+  responses:
+    Problem:
+      description: Problem Details
+      content:
+        application/problem+json:
+          schema: { $ref: './schemas/problem.schema.json' }
+  schemas:
+    ConfigResponse:
+      type: object
+      required: [revision, items]
+      properties:
+        revision: { type: string, example: 't:42' }
+        items:
+          type: array
+          items:
+            type: object
+            required: [key, value, source]
+            properties:
+              key: { type: string }
+              value: {}
+              source: { enum: [default, platform, tenant, user] }
+              version: { type: integer }
+    AuditEvent:
+      type: object
+      required: [eventId, occurredAt, module, tenantId, actor, action, resource, result, traceId]
+      properties:
+        eventId: { type: string }
+        occurredAt: { type: string, format: date-time }
+        module: { type: string }
+        tenantId: { type: string }
+        actor:
+          type: object
+          required: [type, userId]
+          properties:
+            type: { enum: [user, system] }
+            userId: { type: string }
+        action: { type: string }
+        resource:
+          type: object
+          required: [type, id]
+          properties:
+            type: { type: string }
+            id: { type: string }
+        result: { enum: [success, failure] }
+        errorCode: { type: [string, 'null'] }
+        traceId: { type: string }
+        sourceIp: { type: string }
+        changedKeys: { type: array, items: { type: string } }
+        before: { type: [object, 'null'] }
+        after: { type: [object, 'null'] }
+        revision: { type: string }
+    ManifestBundle:
+      type: object
+      required: [appId, version, contract, contentHash, manifest]
+      properties:
+        appId: { type: string }
+        version: { type: string }
+        contract: { type: string }
+        contentHash: { type: string }
+        manifest: { type: object }
+        publishedAt: { type: string, format: date-time }
+        signature: { type: string }
+    ManifestResult:
+      type: object
+      required: [version, status]
+      properties:
+        version: { type: string }
+        status: { enum: [draft, active, rejected] }
+        issues:
+          type: array
+          items: { type: string }
+    Event:
+      type: object
+      required: [id, type, occurredAt, appId]
+      properties:
+        id: { type: string }
+        type: { enum: [config.changed, config.user.changed, app.disabled, app.enabled, key.rotated, user.disabled, permission.changed] }
+        scope: { enum: [platform, tenant, user] }
+        occurredAt: { type: string, format: date-time }
+        appId: { type: string }
+        tenantId: { type: [string, 'null'] }
+        userId: { type: string }
+        revision: { type: string }
+        changedKeys: { type: array, items: { type: string } }
+        traceId: { type: string }
