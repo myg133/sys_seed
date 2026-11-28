@@ -1,5 +1,8 @@
 # 契约索引
 
+> **唯一入口**：所有契约以本索引为准。
+> `code/docs/contracts/` 是按 pin 生成的只读快照；未 ratified 的 draft 契约**只在本目录**。
+>
 > 契约正文进 `BA/contracts/`，消息只做通知与回执。
 > 已 `ratified` 的 `vN.md` **不可修改** —— 破坏性变更升大版本，旧版保留一个 Sprint。
 
